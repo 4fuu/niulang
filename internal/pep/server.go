@@ -11,24 +11,28 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apernet/quic-go"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/session"
-	"github.com/quic-go/quic-go"
 )
 
 type ServerConfig struct {
-	ListenAddr        string
-	Certificate       tls.Certificate
-	Secret            []byte
-	MaxPayload        uint32
-	ChunkSize         int
-	HandshakeTimeout  time.Duration
-	MaxSessions       int
-	DestinationPolicy DestinationPolicy
-	EnableTCP         bool
-	EnableQUIC        bool
-	MaxLanes          int
-	Logger            *slog.Logger
+	ListenAddr          string
+	Certificate         tls.Certificate
+	Secret              []byte
+	MaxPayload          uint32
+	ChunkSize           int
+	HandshakeTimeout    time.Duration
+	MaxSessions         int
+	DestinationPolicy   DestinationPolicy
+	EnableTCP           bool
+	EnableQUIC          bool
+	Congestion          CongestionControlKind
+	BrutalBytesPerSec   uint64
+	AdaptiveMinBytesSec uint64
+	AdaptiveMaxBytesSec uint64
+	MaxLanes            int
+	Logger              *slog.Logger
 }
 
 type Server struct {
@@ -87,6 +91,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.MaxLanes > 8 {
 		return nil, errors.New("maximum lane count must not exceed 8")
+	}
+	if cfg.Congestion == "" {
+		cfg.Congestion = CongestionReno
+	}
+	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
+		return nil, fmt.Errorf("unsupported QUIC congestion controller %q", cfg.Congestion)
+	}
+	if cfg.Congestion == CongestionBrutal && cfg.BrutalBytesPerSec == 0 {
+		return nil, errors.New("brutal congestion requires a positive per-lane byte rate")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -237,6 +250,10 @@ func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn)
 
 func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	defer conn.CloseWithError(0, "wanopt session complete")
+	configureQUICController(conn, congestionConfig{
+		kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
+		adaptiveMinBytesPerSec: s.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: s.cfg.AdaptiveMaxBytesSec,
+	})
 	if conn.ConnectionState().TLS.NegotiatedProtocol != defaultALPN {
 		return
 	}

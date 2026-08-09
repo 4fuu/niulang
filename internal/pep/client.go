@@ -30,6 +30,10 @@ type ClientConfig struct {
 	HandshakeTimeout    time.Duration
 	MaxSessions         int
 	Transport           TransportKind
+	Congestion          CongestionControlKind
+	BrutalBytesPerSec   uint64
+	AdaptiveMinBytesSec uint64
+	AdaptiveMaxBytesSec uint64
 	FallbackDelay       time.Duration
 	UDPFailureThreshold int
 	UDPCooldown         time.Duration
@@ -75,6 +79,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	if cfg.Transport != TransportAuto && cfg.Transport != TransportQUIC && cfg.Transport != TransportTCP {
 		return nil, fmt.Errorf("unsupported client transport %q", cfg.Transport)
+	}
+	if cfg.Congestion == "" {
+		cfg.Congestion = CongestionReno
+	}
+	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
+		return nil, fmt.Errorf("unsupported QUIC congestion controller %q", cfg.Congestion)
+	}
+	if cfg.Congestion == CongestionBrutal && cfg.BrutalBytesPerSec == 0 {
+		return nil, errors.New("brutal congestion requires a positive per-lane byte rate")
 	}
 	if cfg.FallbackDelay <= 0 {
 		cfg.FallbackDelay = 300 * time.Millisecond
@@ -274,7 +287,10 @@ func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16
 	case TransportTCP:
 		outer, err = dialTCP(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
 	case TransportQUIC:
-		outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
+		outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, congestionConfig{
+			kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
+			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
+		})
 	default:
 		return nil, fmt.Errorf("cannot dial transport %q", kind)
 	}

@@ -1,0 +1,5 @@
+The rate-based QUIC controller code in this directory is original wanopt code.
+The pacing design and Brutal controller behavior are informed by the MIT-
+licensed Hysteria 2 project (https://github.com/apernet/hysteria), whose
+copyright notices are retained here for attribution. wanopt does not import
+Hysteria's internal packages.

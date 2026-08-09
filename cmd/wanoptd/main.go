@@ -41,6 +41,10 @@ type options struct {
 	dialTimeout         time.Duration
 	handshakeTimeout    time.Duration
 	transport           string
+	congestion          string
+	brutalBytesPerSec   uint64
+	adaptiveMinBytesSec uint64
+	adaptiveMaxBytesSec uint64
 	fallbackDelay       time.Duration
 	udpFailureThreshold int
 	udpCooldown         time.Duration
@@ -92,6 +96,8 @@ func run(args []string) error {
 			Secret:       secret, RootCAs: roots, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
 			DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
 			MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
+			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
+			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			FallbackDelay: opts.fallbackDelay, UDPFailureThreshold: opts.udpFailureThreshold,
 			UDPCooldown: opts.udpCooldown, InitialLanes: opts.initialLanes,
 			MaxLanes: opts.maxLanes, BulkStartLanes: opts.bulkStartLanes, Logger: logger,
@@ -112,8 +118,10 @@ func run(args []string) error {
 			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: opts.allowPrivate, DialTimeout: opts.dialTimeout},
 			EnableTCP:         opts.transport == string(pep.TransportTCP) || opts.transport == string(pep.TransportAuto),
 			EnableQUIC:        opts.transport == string(pep.TransportQUIC) || opts.transport == string(pep.TransportAuto),
-			MaxLanes:          opts.maxLanes,
-			Logger:            logger,
+			Congestion:        pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
+			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
+			MaxLanes: opts.maxLanes,
+			Logger:   logger,
 		})
 		if err != nil {
 			return err
@@ -143,6 +151,10 @@ func parseOptions(args []string) (options, error) {
 	fs.DurationVar(&opts.dialTimeout, "dial-timeout", 10*time.Second, "destination or remote dial timeout")
 	fs.DurationVar(&opts.handshakeTimeout, "handshake-timeout", 10*time.Second, "SOCKS, TLS, and session handshake timeout")
 	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
+	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionReno), "QUIC congestion controller: reno, adaptive, or brutal")
+	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "fixed per-lane Brutal target in bytes/s (required with --congestion brutal)")
+	fs.Uint64Var(&opts.adaptiveMinBytesSec, "adaptive-min-bytes-per-sec", 64*1024, "Adaptive controller minimum rate in bytes/s")
+	fs.Uint64Var(&opts.adaptiveMaxBytesSec, "adaptive-max-bytes-per-sec", 200*1024*1024, "Adaptive controller maximum rate in bytes/s")
 	fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before starting TCP fallback in auto mode")
 	fs.IntVar(&opts.udpFailureThreshold, "udp-failure-threshold", 3, "consecutive UDP failures before temporary TCP-only mode")
 	fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "how long to suppress UDP after repeated failures")
@@ -182,6 +194,15 @@ func parseOptions(args []string) (options, error) {
 	}
 	if opts.transport != string(pep.TransportAuto) && opts.transport != string(pep.TransportQUIC) && opts.transport != string(pep.TransportTCP) {
 		return opts, errors.New("--transport must be auto, quic, or tcp")
+	}
+	if opts.congestion != string(pep.CongestionReno) && opts.congestion != string(pep.CongestionAdaptive) && opts.congestion != string(pep.CongestionBrutal) {
+		return opts, errors.New("--congestion must be reno, adaptive, or brutal")
+	}
+	if opts.congestion == string(pep.CongestionBrutal) && opts.brutalBytesPerSec == 0 {
+		return opts, errors.New("--brutal-bytes-per-sec is required with --congestion brutal")
+	}
+	if opts.adaptiveMinBytesSec == 0 || opts.adaptiveMaxBytesSec < opts.adaptiveMinBytesSec {
+		return opts, errors.New("invalid adaptive byte-rate bounds")
 	}
 	if opts.fallbackDelay < 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0 {
 		return opts, errors.New("invalid UDP fallback settings")

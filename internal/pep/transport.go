@@ -12,7 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/quic-go/quic-go"
+	"github.com/apernet/quic-go"
+	wancongestion "github.com/icourses-dev/wanopt/internal/congestion"
 )
 
 type TransportKind string
@@ -24,6 +25,25 @@ const (
 )
 
 const defaultALPN = "wanopt/1"
+
+// CongestionControlKind selects the QUIC sender. Reno leaves the apNet
+// quic-go default untouched and is the safe control. Adaptive is a
+// rate-estimating controller for unknown paths. Brutal is a fixed-rate mode
+// for controlled experiments where the operator knows the per-lane budget.
+type CongestionControlKind string
+
+const (
+	CongestionReno     CongestionControlKind = "reno"
+	CongestionAdaptive CongestionControlKind = "adaptive"
+	CongestionBrutal   CongestionControlKind = "brutal"
+)
+
+type congestionConfig struct {
+	kind                   CongestionControlKind
+	brutalBytesPerSecond   uint64
+	adaptiveMinBytesPerSec uint64
+	adaptiveMaxBytesPerSec uint64
+}
 
 type udpHealth struct {
 	mu        sync.Mutex
@@ -151,7 +171,7 @@ func quicConfig() *quic.Config {
 	}
 }
 
-func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string) (streamConn, error) {
+func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string, ccfg congestionConfig) (streamConn, error) {
 	dialCtx := ctx
 	var cancel context.CancelFunc
 	if dialTimeout > 0 {
@@ -177,6 +197,7 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 			_ = packetConn.Close()
 			return nil, dialErr
 		}
+		configureQUICController(conn, ccfg)
 		stream, streamErr := conn.OpenStreamSync(dialCtx)
 		if streamErr != nil {
 			_ = conn.CloseWithError(0, "unable to open wanopt stream")
@@ -189,12 +210,32 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 	if err != nil {
 		return nil, err
 	}
+	configureQUICController(conn, ccfg)
 	stream, err := conn.OpenStreamSync(dialCtx)
 	if err != nil {
 		_ = conn.CloseWithError(0, "unable to open wanopt stream")
 		return nil, err
 	}
 	return &quicStreamConn{stream: stream, conn: conn}, nil
+}
+
+func configureQUICController(conn *quic.Conn, cfg congestionConfig) {
+	if conn == nil {
+		return
+	}
+	switch cfg.kind {
+	case CongestionAdaptive:
+		conn.SetCongestionControl(wancongestion.NewAdaptiveSender(conn.InitialPacketSize(), cfg.adaptiveMinBytesPerSec, cfg.adaptiveMaxBytesPerSec))
+	case CongestionBrutal:
+		if cfg.brutalBytesPerSecond > 0 {
+			conn.SetCongestionControl(wancongestion.NewBrutalSender(cfg.brutalBytesPerSecond, false))
+		}
+	case CongestionReno, "":
+		// Keep the controller selected by the QUIC implementation.
+	default:
+		// Configuration is validated before dialing. Fail-safe to the stock
+		// controller if a future caller constructs an invalid config directly.
+	}
 }
 
 func quicServerTLSConfig(certificate tls.Certificate) *tls.Config {
