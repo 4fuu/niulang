@@ -340,6 +340,13 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 	if f.finished.Load() {
 		return
 	}
+	// Once both FIN directions are observed, a peer closing an outer lane is
+	// the normal final-ACK/stream-close race, not a transport degradation.
+	// The tombstone path retains the final sequence for any late replacement;
+	// do not pollute lane-health metrics with this expected close.
+	if f.finSent.Load() && f.remoteFinSeen.Load() {
+		return
+	}
 	select {
 	case <-f.done:
 		return
