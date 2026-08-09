@@ -28,6 +28,14 @@ not frames. A receiver acknowledges contiguous bytes plus selective ranges.
 Frame types are `HELLO`, `HELLO_OK`, `OPEN`, `OPEN_OK`, `DATA`, `ACK`,
 `WINDOW`, `CLOSE`, `RESET`, `PING`, and `PONG`.
 
+`CLOSE` with `FlagFin` is a directional half-close. A sender may later send
+the same final sequence with `FlagCloseAbort` when its application socket has
+fully closed and the peer should release an otherwise idle keep-alive
+destination. The receiver acknowledges the abort sequence before closing its
+inner connection. This escalation is deliberately delayed after the normal
+final ACK so legitimate half-closed uploads and interactive sessions can
+continue to receive response bytes.
+
 ## Backpressure
 
 `WINDOW` advertises the highest byte sequence the receiver is prepared to
@@ -56,4 +64,3 @@ uses the same frame protocol so higher layers do not depend on the transport.
 - Error messages do not disclose whether arbitrary destinations are reachable.
 - Handshake, frame, flow, buffer, and reconnect limits are configurable.
 - Version negotiation must fail closed for unsupported versions.
-

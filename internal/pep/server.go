@@ -393,7 +393,6 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 	_ = conn.SetDeadline(time.Time{})
 	s.metrics.FlowStarted()
 	stats, err := flow.run(ctx)
-	s.metrics.FlowFinished(stats.BytesRead, stats.BytesSent, err != nil && !errors.Is(err, context.Canceled))
 	// A peer may close the transport immediately after receiving the final
 	// bytes, racing the server's final-ACK bookkeeping. If both directions
 	// have observed FIN sequences, the logical flow is complete even when the
@@ -401,6 +400,10 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 	// tombstone so a replacement lane can replay the final ACK. Do not retain
 	// one-sided or context-canceled flows.
 	flowComplete := err == nil || (ctx.Err() == nil && serverSession.flow.finSent.Load() && serverSession.flow.remoteFinSeen.Load())
+	if !flowComplete && ctx.Err() == nil && serverSession.flow.remoteFinSeen.Load() && expectedDestinationCloseError(err) {
+		flowComplete = true
+	}
+	s.metrics.FlowFinished(stats.BytesRead, stats.BytesSent, !flowComplete && err != nil && !errors.Is(err, context.Canceled))
 	if flowComplete {
 		// Keep a bounded tombstone long enough for a client that lost the
 		// final cumulative ACK to authenticate a replacement lane and finish

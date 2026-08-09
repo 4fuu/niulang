@@ -245,6 +245,14 @@ func expectedHalfCloseError(err error) bool {
 	return errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ENOTCONN) || errors.Is(err, syscall.EPIPE)
 }
 
+// expectedDestinationCloseError covers the peer-side destination reset that
+// can follow a client's full SOCKS close immediately after its response. The
+// server has already observed the client's FIN in this case, so no logical
+// application bytes remain to deliver.
+func expectedDestinationCloseError(err error) bool {
+	return errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ENOTCONN)
+}
+
 func writeFull(w io.Writer, p []byte) error {
 	for len(p) > 0 {
 		n, err := w.Write(p)

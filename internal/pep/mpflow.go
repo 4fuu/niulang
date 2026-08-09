@@ -35,6 +35,12 @@ const (
 	// can be delivered. This grace lets a healthy final ACK arrive, but bounds
 	// retention when the peer closes its last lane at exactly that point.
 	flowCompletionGrace = 5 * time.Second
+	// A local EOF is ambiguous between TCP half-close and full application
+	// close. Wait for the final ACK, then escalate only after an idle grace;
+	// interactive sessions get more time for legitimate quiet periods.
+	flowAbortGrace        = 5 * time.Second
+	interactiveAbortGrace = 30 * time.Second
+	remoteFinDrainGrace   = 500 * time.Millisecond
 )
 
 type mpLane struct {
@@ -93,6 +99,9 @@ type multipathFlow struct {
 	remoteFinSequence atomic.Uint64
 	finSent           atomic.Bool
 	remoteFinSeen     atomic.Bool
+	localClosed       atomic.Bool
+	remoteAbort       atomic.Bool
+	localAbortSent    atomic.Bool
 	lastPayload       atomic.Int64
 	closeOnce         sync.Once
 	doneOnce          sync.Once
@@ -201,6 +210,13 @@ func (f *multipathFlow) snapshot() flowSnapshot {
 		Bytes: f.bytesUp.Load() + f.bytesDown.Load(), Elapsed: time.Since(f.started),
 		BaselineRTT: time.Duration(f.baselineRTTNS.Load()), CurrentRTT: time.Duration(f.currentRTTNS.Load()),
 	}
+}
+
+func (f *multipathFlow) localAbortGrace() time.Duration {
+	if classifier.Class(f.class.Load()) == classifier.ClassInteractive {
+		return interactiveAbortGrace
+	}
+	return flowAbortGrace
 }
 
 func (f *multipathFlow) observeTransport(lanes []*mpLane) {
@@ -420,12 +436,41 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 		case err := <-results:
 			completed++
 			if err != nil {
-				f.closeAll()
-				stats.Ended = time.Now()
-				stats.BytesSent = f.bytesUp.Load()
-				stats.BytesRead = f.bytesDown.Load()
-				stats.LaneBytes = f.laneStats()
-				return stats, err
+				// A destination can reset immediately after the client has
+				// sent its FIN. Give the receive worker a short bounded window
+				// to consume that in-flight FIN and emit the final ACK before
+				// closing the lanes; otherwise a correct close is misclassified
+				// as a failed flow and the client loses its completion signal.
+				if expectedDestinationCloseError(err) {
+					remoteFIN := f.remoteFinSeen.Load() || f.waitForRemoteFIN(ctx, remoteFinDrainGrace)
+					if remoteFIN {
+						// Keep the lane alive briefly after the final ACK write so
+						// a 200 ms-class cross-Pacific RTT can deliver it before
+						// the destination-reset cleanup closes the physical stream.
+						drain := time.NewTimer(remoteFinDrainGrace)
+						select {
+						case <-drain.C:
+						case <-ctx.Done():
+							if !drain.Stop() {
+								<-drain.C
+							}
+						}
+						f.closeAll()
+						stats.Ended = time.Now()
+						stats.BytesSent = f.bytesUp.Load()
+						stats.BytesRead = f.bytesDown.Load()
+						stats.LaneBytes = f.laneStats()
+						return stats, nil
+					}
+				}
+				if err != nil {
+					f.closeAll()
+					stats.Ended = time.Now()
+					stats.BytesSent = f.bytesUp.Load()
+					stats.BytesRead = f.bytesDown.Load()
+					stats.LaneBytes = f.laneStats()
+					return stats, err
+				}
 			}
 		case failure := <-f.laneErr:
 			err := failure.err
@@ -449,6 +494,14 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				if waitErr := f.waitForHealthyLane(ctx, laneReplacementWait); waitErr != nil {
 					err = fmt.Errorf("last lane failed (%v): %w", err, waitErr)
 				}
+			}
+			if f.localAbortSent.Load() {
+				f.closeAll()
+				stats.Ended = time.Now()
+				stats.BytesSent = f.bytesUp.Load()
+				stats.BytesRead = f.bytesDown.Load()
+				stats.LaneBytes = f.laneStats()
+				return stats, nil
 			}
 			if len(f.healthyLanes()) > 0 {
 				if replayErr := f.replayPending(ctx); replayErr == nil {
@@ -478,6 +531,27 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	stats.BytesRead = f.bytesDown.Load()
 	stats.LaneBytes = f.laneStats()
 	return stats, nil
+}
+
+func (f *multipathFlow) waitForRemoteFIN(ctx context.Context, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if f.remoteFinSeen.Load() {
+			return true
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			return f.remoteFinSeen.Load()
+		case <-ctx.Done():
+			return false
+		case <-f.done:
+			return f.remoteFinSeen.Load()
+		}
+	}
 }
 
 // completionWatchdog handles the one remaining shutdown race that transport
@@ -586,18 +660,29 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 			sequence += uint64(n)
 			f.bytesUp.Add(uint64(n))
 		}
+		if f.remoteAbort.Load() {
+			// The peer explicitly closed its full application socket. Any
+			// concurrent inner read error is an expected consequence of the
+			// destination close, not a transport failure.
+			return nil
+		}
 		// HTTP clients often close a fully-consumed SOCKS socket without a
 		// TCP half-close. Treat that local close as EOF while the logical flow
 		// is still live, so the peer receives a normal FIN and can release its
 		// destination connection. Context cancellation remains fatal via the
 		// check above.
 		if readErr != nil && expectedHalfCloseError(readErr) {
+			f.localClosed.Store(true)
 			readErr = io.EOF
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
 				return readErr
 			}
+			// EOF is intentionally treated as a local-close hint. It may be a
+			// half-close, so receiveInner keeps waiting for the peer FIN and
+			// escalates only after its post-ACK idle grace.
+			f.localClosed.Store(true)
 			f.sendSequence(sequence)
 			fin := protocol.Frame{Header: protocol.Header{
 				Version: protocol.Version, Type: protocol.TypeClose, Flags: protocol.FlagFin,
@@ -849,6 +934,27 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 	reassembler := multipath.NewReassembler(multipath.Config{MaxBufferedBytes: maxReassemblyBytes, MaxBufferedFrames: maxReassemblyFrames})
 	remoteFin := false
 	var lastAckSequence uint64
+	var abortTimer *time.Timer
+	var abortTimerC <-chan time.Time
+	resetAbortTimer := func() {
+		if abortTimer == nil {
+			abortTimer = time.NewTimer(f.localAbortGrace())
+		} else {
+			if !abortTimer.Stop() {
+				select {
+				case <-abortTimer.C:
+				default:
+				}
+			}
+			abortTimer.Reset(f.localAbortGrace())
+		}
+		abortTimerC = abortTimer.C
+	}
+	defer func() {
+		if abortTimer != nil {
+			abortTimer.Stop()
+		}
+	}()
 	for {
 		select {
 		case event := <-f.events:
@@ -882,9 +988,10 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					return errors.New("reassembler closed without FIN frame")
 				}
 			case protocol.TypeClose:
-				if frame.Header.Flags&protocol.FlagFin == 0 || len(frame.Payload) != 0 {
+				if frame.Header.Flags&protocol.FlagFin == 0 || len(frame.Payload) != 0 || frame.Header.Flags&protocol.FlagAckFinal != 0 || frame.Header.Flags&(protocol.FlagAckUp|protocol.FlagAckDown) != 0 {
 					return errors.New("invalid flow close frame")
 				}
+				abort := frame.Header.Flags&protocol.FlagCloseAbort != 0
 				out, closed, err := reassembler.Insert(multipath.Segment{Sequence: frame.Header.Sequence, Final: true})
 				if err != nil {
 					return err
@@ -895,6 +1002,9 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 					f.observe(len(out), false)
 					f.bytesDown.Add(uint64(len(out)))
+					if abortTimer != nil {
+						resetAbortTimer()
+					}
 				}
 				if closed {
 					f.remoteFinSequence.Store(reassembler.NextSequence())
@@ -906,6 +1016,15 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 					if err := f.writeACK(ctx, reassembler.NextSequence(), f.recvAckFlag, true); err != nil {
 						return err
+					}
+					if abort {
+						f.remoteAbort.Store(true)
+						// The application has explicitly closed its full socket;
+						// no response bytes are still useful. Closing the inner
+						// connection releases a keep-alive destination and unblocks
+						// sendInner, which observes remoteAbort and exits cleanly.
+						_ = f.inner.Close()
+						return nil
 					}
 					remoteFin = true
 					select {
@@ -934,6 +1053,9 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 					if remoteFin {
 						return nil
+					}
+					if f.localClosed.Load() {
+						resetAbortTimer()
 					}
 				} else {
 					return errors.New("final acknowledgement sequence mismatch")
@@ -964,6 +1086,29 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				return nil
 			}
 			return errors.New("flow closed")
+		case <-abortTimerC:
+			if f.localAbortSent.CompareAndSwap(false, true) {
+				if len(f.healthyLanes()) == 0 {
+					// The peer has already closed its transport after ACKing our
+					// FIN. There is no lane on which to carry the escalation, and
+					// the application has no remaining reader; release locally.
+					f.closeAll()
+					return nil
+				}
+				if err := f.writeControl(ctx, protocol.Frame{Header: protocol.Header{
+					Version: protocol.Version, Type: protocol.TypeClose,
+					Flags:     protocol.FlagFin | protocol.FlagCloseAbort,
+					SessionID: f.sessionID, FlowID: f.flowID, Sequence: f.finSequence.Load(),
+					Class: protocol.Class(f.class.Load()),
+				}}, nil); err != nil {
+					if f.localClosed.Load() {
+						f.closeAll()
+						return nil
+					}
+					return err
+				}
+			}
+			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}

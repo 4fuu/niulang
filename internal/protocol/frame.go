@@ -24,7 +24,11 @@ const (
 	// They are needed because one framed lane carries both directions.
 	FlagAckUp   uint16 = 1 << 2
 	FlagAckDown uint16 = 1 << 3
-	knownFlags         = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown
+	// FlagCloseAbort marks a FIN as a full application-side close rather than
+	// a half-close. It lets the peer release a keep-alive destination when the
+	// local socket was already closed after consuming its response.
+	FlagCloseAbort uint16 = 1 << 4
+	knownFlags            = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort
 )
 
 type Type byte

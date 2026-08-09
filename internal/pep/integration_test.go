@@ -694,6 +694,86 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	}
 }
 
+func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
+	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destinationListener.Close()
+	response := bytes.Repeat([]byte("fixed-response-"), 4096)
+	go holdResponseDestination(destinationListener, response)
+
+	certificate, roots := testCertificate(t)
+	secret := []byte("integration-test-secret-value-32bytes")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverMetrics := metrics.New()
+	server, err := NewServer(ServerConfig{
+		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
+		Logger: logger, Metrics: serverMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientMetrics := metrics.New()
+	client, err := NewClient(ClientConfig{
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "wanopt.test",
+		Secret: secret, RootCAs: roots, Transport: TransportTCP, Logger: logger, Metrics: clientMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errorsCh := make(chan error, 2)
+	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
+	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
+
+	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(response))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, response) {
+		t.Fatalf("response mismatch: got %d bytes, want %d", len(got), len(response))
+	}
+	// Deliberately close the application socket fully. There is no TCP
+	// CloseWrite here; the tunnel must carry the explicit full-close marker.
+	_ = conn.Close()
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if serverMetrics.Snapshot().ActiveFlows == 0 && clientMetrics.Snapshot().ActiveFlows == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := serverMetrics.Snapshot(); got.ActiveFlows != 0 || got.FlowsCompleted != 1 || got.FlowsFailed != 0 {
+		t.Fatalf("server did not close keep-alive flow cleanly: active=%d completed=%d failed=%d", got.ActiveFlows, got.FlowsCompleted, got.FlowsFailed)
+	}
+	if got := clientMetrics.Snapshot(); got.ActiveFlows != 0 || got.FlowsCompleted != 1 || got.FlowsFailed != 0 {
+		t.Fatalf("client did not close full application flow cleanly: active=%d completed=%d failed=%d", got.ActiveFlows, got.FlowsCompleted, got.FlowsFailed)
+	}
+
+	cancel()
+	for range 2 {
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("service shutdown: %v", err)
+		}
+	}
+}
+
 func dialTestSOCKS(t *testing.T, proxyAddr, destinationAddr string) net.Conn {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
@@ -772,6 +852,24 @@ func echoDestination(listener net.Listener) {
 		go func() {
 			defer conn.Close()
 			_, _ = io.Copy(conn, conn)
+		}()
+	}
+}
+
+func holdResponseDestination(listener net.Listener, response []byte) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer conn.Close()
+			if err := writeFull(conn, response); err != nil {
+				return
+			}
+			// Keep the destination socket alive until the proxy receives the
+			// application's full-close marker and closes this connection.
+			_, _ = conn.Read(make([]byte, 1))
 		}()
 	}
 }
