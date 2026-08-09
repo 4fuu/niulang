@@ -26,35 +26,37 @@ var (
 )
 
 type options struct {
-	mode                string
-	listen              string
-	remote              string
-	localAddress        string
-	serverName          string
-	secretFile          string
-	certFile            string
-	keyFile             string
-	rootCAFile          string
-	maxSessions         int
-	maxPayload          uint
-	chunkSize           int
-	dialTimeout         time.Duration
-	handshakeTimeout    time.Duration
-	transport           string
-	congestion          string
-	brutalBytesPerSec   uint64
-	adaptiveMinBytesSec uint64
-	adaptiveMaxBytesSec uint64
-	fallbackDelay       time.Duration
-	udpFailureThreshold int
-	udpCooldown         time.Duration
-	initialLanes        int
-	maxLanes            int
-	bulkStartLanes      int
-	allowPrivate        bool
-	logLevel            string
-	jsonLogs            bool
-	showVersion         bool
+	mode                          string
+	listen                        string
+	remote                        string
+	localAddress                  string
+	serverName                    string
+	secretFile                    string
+	certFile                      string
+	keyFile                       string
+	rootCAFile                    string
+	maxSessions                   int
+	maxPayload                    uint
+	chunkSize                     int
+	dialTimeout                   time.Duration
+	handshakeTimeout              time.Duration
+	transport                     string
+	congestion                    string
+	brutalBytesPerSec             uint64
+	adaptiveMinBytesSec           uint64
+	adaptiveMaxBytesSec           uint64
+	aggregateBytesPerSec          uint64
+	interactiveReserveBytesPerSec uint64
+	fallbackDelay                 time.Duration
+	udpFailureThreshold           int
+	udpCooldown                   time.Duration
+	initialLanes                  int
+	maxLanes                      int
+	bulkStartLanes                int
+	allowPrivate                  bool
+	logLevel                      string
+	jsonLogs                      bool
+	showVersion                   bool
 }
 
 func main() {
@@ -98,6 +100,7 @@ func run(args []string) error {
 			MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
 			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
+			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
 			FallbackDelay: opts.fallbackDelay, UDPFailureThreshold: opts.udpFailureThreshold,
 			UDPCooldown: opts.udpCooldown, InitialLanes: opts.initialLanes,
 			MaxLanes: opts.maxLanes, BulkStartLanes: opts.bulkStartLanes, Logger: logger,
@@ -120,6 +123,7 @@ func run(args []string) error {
 			EnableQUIC:        opts.transport == string(pep.TransportQUIC) || opts.transport == string(pep.TransportAuto),
 			Congestion:        pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
+			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
 			MaxLanes: opts.maxLanes,
 			Logger:   logger,
 		})
@@ -155,6 +159,8 @@ func parseOptions(args []string) (options, error) {
 	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "fixed per-lane Brutal target in bytes/s (required with --congestion brutal)")
 	fs.Uint64Var(&opts.adaptiveMinBytesSec, "adaptive-min-bytes-per-sec", 64*1024, "Adaptive controller minimum rate in bytes/s")
 	fs.Uint64Var(&opts.adaptiveMaxBytesSec, "adaptive-max-bytes-per-sec", 200*1024*1024, "Adaptive controller maximum rate in bytes/s")
+	fs.Uint64Var(&opts.aggregateBytesPerSec, "aggregate-bytes-per-sec", 0, "optional aggregate byte budget shared by all lanes and flows (0 disables)")
+	fs.Uint64Var(&opts.interactiveReserveBytesPerSec, "interactive-reserve-bytes-per-sec", 0, "reserved aggregate budget for new/interactive traffic")
 	fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before starting TCP fallback in auto mode")
 	fs.IntVar(&opts.udpFailureThreshold, "udp-failure-threshold", 3, "consecutive UDP failures before temporary TCP-only mode")
 	fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "how long to suppress UDP after repeated failures")
@@ -203,6 +209,12 @@ func parseOptions(args []string) (options, error) {
 	}
 	if opts.adaptiveMinBytesSec == 0 || opts.adaptiveMaxBytesSec < opts.adaptiveMinBytesSec {
 		return opts, errors.New("invalid adaptive byte-rate bounds")
+	}
+	if opts.aggregateBytesPerSec == 0 && opts.interactiveReserveBytesPerSec != 0 {
+		return opts, errors.New("interactive reserve requires an aggregate byte budget")
+	}
+	if opts.interactiveReserveBytesPerSec > opts.aggregateBytesPerSec {
+		return opts, errors.New("interactive reserve cannot exceed aggregate byte budget")
 	}
 	if opts.fallbackDelay < 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0 {
 		return opts, errors.New("invalid UDP fallback settings")
