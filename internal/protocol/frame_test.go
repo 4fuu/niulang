@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"testing"
@@ -83,5 +84,20 @@ func TestDecodeRejectsReservedBits(t *testing.T) {
 	raw[43] = 1
 	if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err == nil {
 		t.Fatal("expected reserved-bit error")
+	}
+}
+
+func TestDecodeRejectsUnknownFlags(t *testing.T) {
+	var raw [HeaderSize]byte
+	h := Header{Version: Version, Type: TypeData, Flags: 1 << 15, FlowID: 1, Class: ClassNew}
+	if err := h.Encode(raw[:]); err == nil {
+		t.Fatal("Encode unexpectedly accepted unknown flags")
+	}
+	// Exercise the decoder independently of Encode's validation.
+	raw[0], raw[1], raw[2], raw[3] = Magic0, Magic1, Version, byte(TypeData)
+	binary.BigEndian.PutUint16(raw[4:6], 1<<15)
+	binary.BigEndian.PutUint64(raw[22:30], 1)
+	if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err == nil {
+		t.Fatal("DecodeHeader accepted unknown flags")
 	}
 }

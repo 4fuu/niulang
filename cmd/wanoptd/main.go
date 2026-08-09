@@ -209,8 +209,8 @@ func parseOptions(args []string) (options, error) {
 	if opts.chunkSize <= 0 || uint(opts.chunkSize) > opts.maxPayload {
 		return opts, errors.New("--chunk-size must be positive and no larger than --max-payload")
 	}
-	if opts.maxSessions < 1 {
-		return opts, errors.New("--max-sessions must be positive")
+	if opts.maxSessions < 1 || opts.maxSessions > 1<<16 {
+		return opts, errors.New("--max-sessions must be between 1 and 65536")
 	}
 	if opts.transport != string(pep.TransportAuto) && opts.transport != string(pep.TransportQUIC) && opts.transport != string(pep.TransportTCP) {
 		return opts, errors.New("--transport must be auto, quic, or tcp")

@@ -44,3 +44,20 @@ func TestDisabledBudgetAndCancellation(t *testing.T) {
 		t.Fatal("canceled wait succeeded")
 	}
 }
+
+func TestRequestLargerThanBurstFailsImmediately(t *testing.T) {
+	b := New(Config{TotalBytesPerSec: 1024, ReserveBytesPerSec: 512, Burst: time.Millisecond})
+	if b == nil {
+		t.Fatal("expected enabled budget")
+	}
+	started := time.Now()
+	if err := b.Wait(context.Background(), int(b.bulkCap+b.intCap)+1, true); err != ErrInvalidRequest {
+		t.Fatalf("large interactive request error = %v, want %v", err, ErrInvalidRequest)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("impossible request took too long: %s", elapsed)
+	}
+	if err := b.Wait(context.Background(), int(b.bulkCap)+1, false); err != ErrInvalidRequest {
+		t.Fatalf("large bulk request error = %v, want %v", err, ErrInvalidRequest)
+	}
+}

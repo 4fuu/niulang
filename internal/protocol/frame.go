@@ -24,6 +24,7 @@ const (
 	// They are needed because one framed lane carries both directions.
 	FlagAckUp   uint16 = 1 << 2
 	FlagAckDown uint16 = 1 << 3
+	knownFlags         = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown
 )
 
 type Type byte
@@ -72,7 +73,7 @@ func (h Header) Encode(dst []byte) error {
 	if len(dst) < HeaderSize {
 		return io.ErrShortBuffer
 	}
-	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk {
+	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk || h.Flags&^knownFlags != 0 {
 		return errors.New("invalid frame header")
 	}
 	if uint64(h.PayloadLen) > DefaultMaxPayload {
@@ -95,6 +96,9 @@ func (h Header) Encode(dst []byte) error {
 func (h Header) Validate(maxPayload uint32) error {
 	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk {
 		return errors.New("invalid frame header")
+	}
+	if h.Flags&^knownFlags != 0 {
+		return errors.New("unknown frame flags")
 	}
 	if maxPayload == 0 || maxPayload > DefaultMaxPayload {
 		maxPayload = DefaultMaxPayload

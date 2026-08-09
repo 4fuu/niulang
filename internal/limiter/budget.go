@@ -80,6 +80,18 @@ func (b *Budget) Wait(ctx context.Context, n int, interactive bool) error {
 	if b == nil || n <= 0 {
 		return nil
 	}
+	// A token bucket cannot ever satisfy a request larger than its burst
+	// capacity.  Returning explicitly is important: otherwise a malformed
+	// configuration (for example a 1 MiB frame on a 10 KiB/s budget) would
+	// sleep and retry forever, retaining application and replay buffers until
+	// the caller's much longer timeout expires.
+	maxCapacity := b.bulkCap
+	if interactive {
+		maxCapacity += b.intCap
+	}
+	if float64(n) > maxCapacity {
+		return ErrInvalidRequest
+	}
 	for {
 		b.mu.Lock()
 		now := time.Now()

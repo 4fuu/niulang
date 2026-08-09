@@ -78,6 +78,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = 1024
 	}
+	if cfg.MaxSessions > maxConfiguredSessions {
+		return nil, fmt.Errorf("maximum sessions must not exceed %d", maxConfiguredSessions)
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -98,6 +101,21 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	if cfg.Congestion == CongestionBrutal && cfg.BrutalBytesPerSec == 0 {
 		return nil, errors.New("brutal congestion requires a positive per-lane byte rate")
+	}
+	if cfg.AdaptiveMinBytesSec == 0 {
+		cfg.AdaptiveMinBytesSec = defaultAdaptiveMinBytesPerSec
+	}
+	if cfg.AdaptiveMaxBytesSec == 0 {
+		cfg.AdaptiveMaxBytesSec = defaultAdaptiveMaxBytesPerSec
+	}
+	if cfg.AdaptiveMaxBytesSec < cfg.AdaptiveMinBytesSec {
+		return nil, errors.New("adaptive maximum byte rate cannot be below its minimum")
+	}
+	if cfg.AggregateBytesPerSec == 0 && cfg.InteractiveReserveBytesPerSec != 0 {
+		return nil, errors.New("interactive reserve requires an aggregate byte budget")
+	}
+	if cfg.InteractiveReserveBytesPerSec > cfg.AggregateBytesPerSec {
+		return nil, errors.New("interactive reserve cannot exceed aggregate byte budget")
 	}
 	if cfg.FallbackDelay <= 0 {
 		cfg.FallbackDelay = 300 * time.Millisecond
@@ -465,8 +483,15 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			previous = goodput
 			decision := planner.Decide(snapshot.Class, scheduler.Metrics{
 				CurrentLanes: snapshot.CurrentLanes, HealthyLanes: snapshot.HealthyLanes,
-				AvailableLanes: c.cfg.MaxLanes, MarginalGain: gain, UDPHealthy: c.udpHealth.allow(time.Now()),
+				AvailableLanes: c.cfg.MaxLanes, MarginalGain: gain,
+				BaselineRTT: snapshot.BaselineRTT, CurrentRTT: snapshot.CurrentRTT,
+				UDPHealthy: c.udpHealth.allow(time.Now()),
 			})
+			for flow.laneCount() > decision.TargetLanes && flow.laneCount() > 1 {
+				if !flow.retireLeastProductiveLane() {
+					break
+				}
+			}
 			for flow.laneCount() < decision.TargetLanes {
 				laneID, err := flow.allocateJoinID()
 				if err != nil {

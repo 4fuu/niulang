@@ -100,6 +100,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = 4096
 	}
+	if cfg.MaxSessions > maxConfiguredSessions {
+		return nil, fmt.Errorf("maximum sessions must not exceed %d", maxConfiguredSessions)
+	}
 	if cfg.MaxLanes <= 0 {
 		cfg.MaxLanes = 8
 	}
@@ -114,6 +117,21 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.Congestion == CongestionBrutal && cfg.BrutalBytesPerSec == 0 {
 		return nil, errors.New("brutal congestion requires a positive per-lane byte rate")
+	}
+	if cfg.AdaptiveMinBytesSec == 0 {
+		cfg.AdaptiveMinBytesSec = defaultAdaptiveMinBytesPerSec
+	}
+	if cfg.AdaptiveMaxBytesSec == 0 {
+		cfg.AdaptiveMaxBytesSec = defaultAdaptiveMaxBytesPerSec
+	}
+	if cfg.AdaptiveMaxBytesSec < cfg.AdaptiveMinBytesSec {
+		return nil, errors.New("adaptive maximum byte rate cannot be below its minimum")
+	}
+	if cfg.AggregateBytesPerSec == 0 && cfg.InteractiveReserveBytesPerSec != 0 {
+		return nil, errors.New("interactive reserve requires an aggregate byte budget")
+	}
+	if cfg.InteractiveReserveBytesPerSec > cfg.AggregateBytesPerSec {
+		return nil, errors.New("interactive reserve cannot exceed aggregate byte budget")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
