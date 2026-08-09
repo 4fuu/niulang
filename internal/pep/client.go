@@ -485,6 +485,13 @@ func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, s
 		}
 		lane, err := c.openJoinLane(ctx, TransportQUIC, sessionID, flowID, laneID)
 		if err != nil {
+			// A flow can finish while a speculative join is in the handshake.
+			// That is an expected shutdown race, not evidence that the UDP path
+			// is unhealthy; feeding it into the global cooldown causes unrelated
+			// new flows to fall back to TCP unnecessarily.
+			if ctx.Err() != nil || flow.doneChanClosed() {
+				return
+			}
 			c.udpHealth.failure(time.Now())
 			c.cfg.Logger.Warn("additional lane unavailable", "lane", laneID, "error", err)
 			// Keep the already-authenticated lane usable. Retrying the same
@@ -597,6 +604,9 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				}
 				lane, err := c.openJoinLane(manageCtx, TransportQUIC, sessionID, flowID, laneID)
 				if err != nil {
+					if manageCtx.Err() != nil || flow.doneChanClosed() {
+						return
+					}
 					c.udpHealth.failure(time.Now())
 					c.cfg.Logger.Warn("adaptive lane unavailable", "lane", laneID, "error", err)
 					break
@@ -637,6 +647,9 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 	}
 	lane, err := c.openJoinLane(recoveryCtx, kind, sessionID, flowID, laneID)
 	if err != nil {
+		if recoveryCtx.Err() != nil || flow.doneChanClosed() {
+			return context.Canceled
+		}
 		return err
 	}
 	if kind == TransportQUIC {

@@ -505,6 +505,15 @@ func (f *multipathFlow) laneStats() map[uint64]LaneStats {
 
 func (f *multipathFlow) doneChan() <-chan struct{} { return f.done }
 
+func (f *multipathFlow) doneChanClosed() bool {
+	select {
+	case <-f.done:
+		return true
+	default:
+		return false
+	}
+}
+
 func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 	defer close(f.sendDone)
 	buf := make([]byte, f.chunkSize)
