@@ -36,6 +36,25 @@ func TestCompletionWatchdogReleasesProvenCompleteFlow(t *testing.T) {
 	}
 }
 
+func TestFlowIdleTimeoutReleasesResources(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer peer.Close()
+	registry := metrics.New()
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 1, 1024, protocol.FlagAckUp, protocol.FlagAckDown, nil, registry)
+	flow.idleTimeout = 20 * time.Millisecond
+	flow.maxLifetime = time.Second
+	stats, err := flow.run(context.Background())
+	if !errors.Is(err, errFlowIdleTimeout) {
+		t.Fatalf("flow error = %v, want idle timeout", err)
+	}
+	if stats.Ended.IsZero() {
+		t.Fatal("timed-out flow did not record an end time")
+	}
+	if got := registry.Snapshot(); got.FlowTimeouts != 1 || got.ActiveFlows != 0 {
+		t.Fatalf("timeout metrics = %+v, want one timeout and no active flows", got)
+	}
+}
+
 func TestLaneWriterStopsWhenFlowCompletes(t *testing.T) {
 	flow := &multipathFlow{ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1)}
 	lane := &mpLane{

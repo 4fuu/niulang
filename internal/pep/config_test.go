@@ -2,6 +2,7 @@ package pep
 
 import (
 	"testing"
+	"time"
 )
 
 func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
@@ -15,6 +16,10 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 		"reserve above budget": func(c *ClientConfig) {
 			c.AggregateBytesPerSec = 1
 			c.InteractiveReserveBytesPerSec = 2
+		},
+		"idle exceeds lifetime": func(c *ClientConfig) {
+			c.FlowIdleTimeout = 2 * time.Second
+			c.FlowMaxLifetime = time.Second
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -39,6 +44,10 @@ func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 		"reserve above budget": func(c *ServerConfig) {
 			c.AggregateBytesPerSec = 1
 			c.InteractiveReserveBytesPerSec = 2
+		},
+		"idle exceeds lifetime": func(c *ServerConfig) {
+			c.FlowIdleTimeout = 2 * time.Second
+			c.FlowMaxLifetime = time.Second
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

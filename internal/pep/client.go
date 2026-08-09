@@ -31,6 +31,8 @@ type ClientConfig struct {
 	ChunkSize        int
 	DialTimeout      time.Duration
 	HandshakeTimeout time.Duration
+	FlowIdleTimeout  time.Duration
+	FlowMaxLifetime  time.Duration
 	MaxSessions      int
 	Transport        TransportKind
 	// EnableQUICPool enables a persistent multiplexed QUIC connection for
@@ -89,6 +91,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = 10 * time.Second
+	}
+	if cfg.FlowIdleTimeout <= 0 {
+		cfg.FlowIdleTimeout = defaultFlowIdleTimeout
+	}
+	if cfg.FlowMaxLifetime <= 0 {
+		cfg.FlowMaxLifetime = defaultFlowMaxLifetime
+	}
+	if cfg.FlowIdleTimeout > cfg.FlowMaxLifetime {
+		return nil, errors.New("flow idle timeout cannot exceed maximum lifetime")
 	}
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = 1024
@@ -253,6 +264,8 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		return
 	}
 	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics)
+	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
+	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
 	if err := flowSession.addLane(&mpLane{id: flow.laneID, kind: flow.kind, fc: flow.fc}); err != nil {
 		_ = flow.fc.Close()
 		flowSession.closeAll()

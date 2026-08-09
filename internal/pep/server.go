@@ -31,6 +31,8 @@ type ServerConfig struct {
 	MaxPayload                    uint32
 	ChunkSize                     int
 	HandshakeTimeout              time.Duration
+	FlowIdleTimeout               time.Duration
+	FlowMaxLifetime               time.Duration
 	MaxSessions                   int
 	DestinationPolicy             DestinationPolicy
 	EnableTCP                     bool
@@ -101,6 +103,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = 10 * time.Second
+	}
+	if cfg.FlowIdleTimeout <= 0 {
+		cfg.FlowIdleTimeout = defaultFlowIdleTimeout
+	}
+	if cfg.FlowMaxLifetime <= 0 {
+		cfg.FlowMaxLifetime = defaultFlowMaxLifetime
+	}
+	if cfg.FlowIdleTimeout > cfg.FlowMaxLifetime {
+		return nil, errors.New("flow idle timeout cannot exceed maximum lifetime")
 	}
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = 4096
@@ -372,6 +383,8 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 	}
 	defer destinationConn.Close()
 	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics)
+	flow.idleTimeout = s.cfg.FlowIdleTimeout
+	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	serverSession := &serverFlow{flow: flow, maxLanes: s.cfg.MaxLanes}
 	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
 		flow.closeAll()

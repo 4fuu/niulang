@@ -231,7 +231,9 @@ The unbounded adaptive-join and tombstone FIN bugs are fixed and covered by
 integration tests. The project remains a development release: SOCKS5 ingress
 is still TCP CONNECT only (no UDP ASSOCIATE, destination UDP, TUN, or VLESS),
 HTTP/3 preservation is not implemented, BBR is unsafe on the measured path,
-and controlled loss/reordering/MTU, resource-limit, prolonged-soak, and
-dedicated upload campaigns remain release gates. The existing
+and controlled loss/reordering/MTU, prolonged-soak, and dedicated upload
+campaigns remain release gates. Flow-idle/lifetime limits and timeout metrics
+are now implemented, but their resource-pressure behavior still needs a
+dedicated soak campaign. The existing
 `wanoptd-dev.service` on `:12443` was not changed by the isolated controller
 tests and remains the rollback path.

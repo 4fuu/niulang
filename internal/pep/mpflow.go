@@ -41,6 +41,16 @@ const (
 	flowAbortGrace        = 5 * time.Second
 	interactiveAbortGrace = 30 * time.Second
 	remoteFinDrainGrace   = 500 * time.Millisecond
+	// These limits are deliberately long enough for quiet SSH and remote
+	// desktop sessions, while preventing an abandoned authenticated flow from
+	// retaining a destination socket and replay window forever.
+	defaultFlowIdleTimeout = 30 * time.Minute
+	defaultFlowMaxLifetime = 24 * time.Hour
+)
+
+var (
+	errFlowIdleTimeout = errors.New("flow idle timeout")
+	errFlowLifetime    = errors.New("flow lifetime exceeded")
 )
 
 type mpLane struct {
@@ -103,6 +113,7 @@ type multipathFlow struct {
 	remoteAbort       atomic.Bool
 	localAbortSent    atomic.Bool
 	lastPayload       atomic.Int64
+	lastActivity      atomic.Int64
 	closeOnce         sync.Once
 	doneOnce          sync.Once
 	finished          atomic.Bool
@@ -110,6 +121,8 @@ type multipathFlow struct {
 	telemetryID       uint64
 	baselineRTTNS     atomic.Int64
 	currentRTTNS      atomic.Int64
+	idleTimeout       time.Duration
+	maxLifetime       time.Duration
 
 	replayMu     sync.Mutex
 	replay       map[uint64]protocol.Frame
@@ -132,6 +145,9 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
 		replay: make(map[uint64]protocol.Frame), replayNotify: make(chan struct{}, 1),
 	}
+	f.idleTimeout = defaultFlowIdleTimeout
+	f.maxLifetime = defaultFlowMaxLifetime
+	f.lastActivity.Store(f.started.UnixNano())
 	f.telemetryID = nextTelemetryID.Add(1)
 	f.class.Store(uint32(protocol.ClassNew))
 	return f
@@ -417,8 +433,12 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	go f.telemetryLoop(telemetryStop)
 	completionStop := make(chan struct{})
 	go f.completionWatchdog(completionStop)
+	limitsStop := make(chan struct{})
+	limitErr := make(chan error, 1)
+	go f.watchLimits(limitsStop, limitErr)
 	defer f.signalDone()
 	defer func() {
+		close(limitsStop)
 		close(completionStop)
 		close(telemetryStop)
 		if f.metrics != nil {
@@ -472,6 +492,19 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 					return stats, err
 				}
 			}
+		case err := <-limitErr:
+			if err == nil {
+				continue
+			}
+			if f.metrics != nil {
+				f.metrics.FlowTimeout()
+			}
+			f.closeAll()
+			stats.Ended = time.Now()
+			stats.BytesSent = f.bytesUp.Load()
+			stats.BytesRead = f.bytesDown.Load()
+			stats.LaneBytes = f.laneStats()
+			return stats, err
 		case failure := <-f.laneErr:
 			err := failure.err
 			// Both FIN directions have already been observed. The application
@@ -531,6 +564,58 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	stats.BytesRead = f.bytesDown.Load()
 	stats.LaneBytes = f.laneStats()
 	return stats, nil
+}
+
+// watchLimits turns silent or unbounded flows into explicit, observable
+// failures.  It never closes the flow itself: run owns teardown so the
+// timeout has the same bounded worker/lane cleanup path as any other error.
+func (f *multipathFlow) watchLimits(stop <-chan struct{}, out chan<- error) {
+	idle := f.idleTimeout
+	lifetime := f.maxLifetime
+	if idle <= 0 && lifetime <= 0 {
+		return
+	}
+	interval := time.Second
+	if idle > 0 && idle/4 < interval {
+		interval = idle / 4
+		if interval < 10*time.Millisecond {
+			interval = 10 * time.Millisecond
+		}
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var lifetimeTimer *time.Timer
+	var lifetimeC <-chan time.Time
+	if lifetime > 0 {
+		lifetimeTimer = time.NewTimer(lifetime)
+		lifetimeC = lifetimeTimer.C
+		defer lifetimeTimer.Stop()
+	}
+	for {
+		select {
+		case <-ticker.C:
+			if idle > 0 {
+				last := f.lastActivity.Load()
+				if last == 0 || time.Since(time.Unix(0, last)) >= idle {
+					select {
+					case out <- errFlowIdleTimeout:
+					case <-stop:
+					}
+					return
+				}
+			}
+		case <-lifetimeC:
+			select {
+			case out <- errFlowLifetime:
+			case <-stop:
+			}
+			return
+		case <-stop:
+			return
+		case <-f.ctx.Done():
+			return
+		}
+	}
 }
 
 func (f *multipathFlow) waitForRemoteFIN(ctx context.Context, timeout time.Duration) bool {
@@ -1151,6 +1236,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 
 func (f *multipathFlow) observe(n int, up bool) bool {
 	now := time.Now()
+	f.lastActivity.Store(now.UnixNano())
 	previousPayload := f.lastPayload.Swap(now.UnixNano())
 	age := now.Sub(f.started)
 	if age <= 0 {

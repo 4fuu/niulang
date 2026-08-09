@@ -188,7 +188,7 @@ detail, not a reason to use the fake DNS address as the PEP socket endpoint.
 - Destination allow/deny policy, including private-address rejection by
   default.
 - Per-user/session/flow limits for handshakes, lanes, frames, reassembly
-  bytes, and reconnect rate.
+  bytes, reconnect rate, and application-idle/maximum-lifetime duration.
 - Metrics and structured logs that never contain the shared secret or
   application plaintext.
 - A systemd unit isolated from Xray, sing-box, Cloudflare, Nginx, and the

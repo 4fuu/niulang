@@ -42,6 +42,8 @@ type options struct {
 	chunkSize                     int
 	dialTimeout                   time.Duration
 	handshakeTimeout              time.Duration
+	flowIdleTimeout               time.Duration
+	flowMaxLifetime               time.Duration
 	transport                     string
 	quicPool                      bool
 	congestion                    string
@@ -101,6 +103,7 @@ func run(args []string) error {
 			LocalAddress: opts.localAddress,
 			Secret:       secret, RootCAs: roots, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
 			DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
+			FlowIdleTimeout: opts.flowIdleTimeout, FlowMaxLifetime: opts.flowMaxLifetime,
 			MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
 			EnableQUICPool: opts.quicPool,
 			Congestion:     pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
@@ -127,7 +130,8 @@ func run(args []string) error {
 		server, err := pep.NewServer(pep.ServerConfig{
 			ListenAddr: opts.listen, Certificate: certificate, Secret: secret,
 			MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
-			HandshakeTimeout: opts.handshakeTimeout, MaxSessions: opts.maxSessions,
+			HandshakeTimeout: opts.handshakeTimeout, FlowIdleTimeout: opts.flowIdleTimeout,
+			FlowMaxLifetime: opts.flowMaxLifetime, MaxSessions: opts.maxSessions,
 			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: opts.allowPrivate, DialTimeout: opts.dialTimeout},
 			EnableTCP:         opts.transport == string(pep.TransportTCP) || opts.transport == string(pep.TransportAuto),
 			EnableQUIC:        opts.transport == string(pep.TransportQUIC) || opts.transport == string(pep.TransportAuto),
@@ -169,6 +173,8 @@ func parseOptions(args []string) (options, error) {
 	fs.IntVar(&opts.chunkSize, "chunk-size", 32*1024, "stream data frame size in bytes")
 	fs.DurationVar(&opts.dialTimeout, "dial-timeout", 10*time.Second, "destination or remote dial timeout")
 	fs.DurationVar(&opts.handshakeTimeout, "handshake-timeout", 10*time.Second, "SOCKS, TLS, and session handshake timeout")
+	fs.DurationVar(&opts.flowIdleTimeout, "flow-idle-timeout", 30*time.Minute, "maximum application-idle period before a flow is reset")
+	fs.DurationVar(&opts.flowMaxLifetime, "flow-max-lifetime", 24*time.Hour, "maximum lifetime of one logical flow")
 	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
 	fs.BoolVar(&opts.quicPool, "quic-pool", false, "share one persistent QUIC connection for initial/control streams (opt-in)")
 	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionReno), "QUIC congestion controller: reno, bbr, adaptive, or brutal")
@@ -235,6 +241,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if opts.fallbackDelay < 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0 {
 		return opts, errors.New("invalid UDP fallback settings")
+	}
+	if opts.flowIdleTimeout <= 0 || opts.flowMaxLifetime <= 0 || opts.flowIdleTimeout > opts.flowMaxLifetime {
+		return opts, errors.New("flow idle timeout must be positive and no longer than flow max lifetime")
 	}
 	if opts.initialLanes < 1 || opts.initialLanes > 8 {
 		return opts, errors.New("--initial-lanes must be between 1 and 8")

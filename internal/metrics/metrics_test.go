@@ -16,6 +16,7 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	r.LaneFailure()
 	r.LaneReplacement()
 	r.Fallback()
+	r.FlowTimeout()
 	r.ObserveQUIC(1, QUICObservation{
 		Lanes: 2, LatestRTT: 250 * time.Millisecond, SmoothedRTT: 200 * time.Millisecond,
 		BytesSent: 100, BytesReceived: 200, BytesLost: 3, PacketsLost: 1,
@@ -29,7 +30,7 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "wanopt_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "wanopt_quic_smoothed_rtt_seconds 0.200000000") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "wanopt_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "wanopt_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "wanopt_quic_smoothed_rtt_seconds 0.200000000") {
 		t.Fatalf("unexpected exposition: %s", rec.Body.String())
 	}
 }

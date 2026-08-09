@@ -49,7 +49,8 @@ loss/resource release gates in
 - One aggregate token bucket with an interactive reserve above all lanes.
 - Optional localhost `/metrics` counters for flow completion, bytes, fallback,
   lane failure/replacement, PIAS class transitions, and active QUIC RTT/loss
-  telemetry. The endpoint is loopback-only in the development service.
+  telemetry, plus explicit flow-idle/lifetime timeouts. The endpoint is
+  loopback-only in the development service.
 - Reproducible measurements for latency, throughput, loss, queueing, and
   application-visible failures.
 
@@ -127,6 +128,12 @@ the public listener:
 ```text
 --metrics-listen 127.0.0.1:19090
 ```
+
+Flows are bounded by default at 30 minutes without application payload and
+24 hours total lifetime. These limits protect session and destination-socket
+resources while still allowing quiet interactive sessions; tune them only
+with an explicit operational policy using `--flow-idle-timeout` and
+`--flow-max-lifetime`.
 
 ## Security model
 
