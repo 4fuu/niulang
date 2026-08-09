@@ -685,6 +685,13 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	if ack.Header.Type != protocol.TypeAck || ack.Header.Flags&protocol.FlagAckFinal == 0 || ack.Header.Sequence != finalSequence {
 		t.Fatalf("unexpected tombstone ACK: type=%d flags=%x sequence=%d want=%d", ack.Header.Type, ack.Header.Flags, ack.Header.Sequence, finalSequence)
 	}
+	fin, err := lane.fc.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fin.Header.Type != protocol.TypeClose || fin.Header.Flags&protocol.FlagFin == 0 {
+		t.Fatalf("unexpected tombstone FIN: type=%d flags=%x", fin.Header.Type, fin.Header.Flags)
+	}
 
 	cancel()
 	for range 2 {

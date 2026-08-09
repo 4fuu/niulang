@@ -610,7 +610,15 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					break
 				}
 			}
-			for flow.laneCount() < decision.TargetLanes {
+			// Open at most one speculative lane per scheduler tick.  A flow can
+			// finish while a join is in flight; if the peer has already started
+			// tearing down the session, repeatedly filling the target in one tick
+			// creates an unbounded stream of authenticated joins (and can leave
+			// dozens of zero-byte lanes behind).  One bounded probe per tick keeps
+			// growth observable, gives the completion watcher a chance to stop the
+			// manager, and makes the configured lane cap a real resource bound.
+			if flow.laneCount() < decision.TargetLanes && !flow.doneChanClosed() &&
+				!(flow.finSent.Load() && flow.remoteFinSeen.Load()) {
 				laneID, err := flow.allocateJoinID()
 				if err != nil {
 					return
@@ -622,9 +630,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					}
 					c.udpHealth.failure(time.Now())
 					c.cfg.Logger.Warn("adaptive lane unavailable", "lane", laneID, "error", err)
-					break
-				}
-				if err := flow.addLane(lane); err != nil {
+				} else if err := flow.addLane(lane); err != nil {
 					_ = lane.fc.Close()
 					return
 				}

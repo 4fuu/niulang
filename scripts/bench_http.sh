@@ -45,8 +45,24 @@ done
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 127; }
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/wanopt-bench.XXXXXX")
-cleanup() { rm -rf "$tmp_dir"; }
-trap cleanup EXIT INT TERM
+pids=()
+cleanup() {
+    local pid
+    for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    pids=()
+    rm -rf "$tmp_dir"
+}
+on_signal() {
+    cleanup
+    exit 130
+}
+trap cleanup EXIT
+trap on_signal INT TERM
 
 if [[ "$output" == - ]]; then
     out_fd=/dev/stdout
@@ -92,4 +108,3 @@ for flows in $flow_list; do
         done
     done
 done
-

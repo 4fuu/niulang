@@ -490,6 +490,24 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 			SessionID: hello.SessionID, FlowID: open.Header.FlowID, Sequence: serverSession.flow.remoteFinSequence.Load(),
 			Class: protocol.ClassBulk,
 		}})
+		// The final ACK above acknowledges the peer's FIN.  If the server's
+		// own FIN was lost while the last physical lane was closing, replay it
+		// as well; otherwise the client can receive the complete application
+		// body yet remain stuck waiting for the remote half-close until its
+		// replacement timeout.  Keep the ACK first for compatibility with
+		// clients that begin consuming the tombstone immediately after
+		// OpenOK, then let the normal flow reader process this FIN.
+		if serverSession.flow.finSent.Load() {
+			flags := uint16(protocol.FlagFin)
+			if serverSession.flow.localAbortSent.Load() {
+				flags |= protocol.FlagCloseAbort
+			}
+			_ = fc.Write(protocol.Frame{Header: protocol.Header{
+				Version: protocol.Version, Type: protocol.TypeClose, Flags: flags,
+				SessionID: hello.SessionID, FlowID: open.Header.FlowID, Sequence: serverSession.flow.finSequence.Load(),
+				Class: protocol.ClassBulk,
+			}})
+		}
 		return
 	}
 	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
