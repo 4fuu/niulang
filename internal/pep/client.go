@@ -542,6 +542,14 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 		case <-manageCtx.Done():
 			return
 		case <-ticker.C:
+			// The remote completion watcher can close its lanes just before
+			// this scheduler tick. Both FIN directions are already known at
+			// that point, so joining a tombstoned/unknown session would only
+			// create noisy warnings and transient UDP-health penalties.
+			if flow.finSent.Load() && flow.remoteFinSeen.Load() {
+				flow.closeAll()
+				return
+			}
 			snapshot := flow.snapshot()
 			if snapshot.HealthyLanes == 0 {
 				now := time.Now()
@@ -631,6 +639,9 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 	// already unregistered after the application completed.
 	recoveryCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if flow.finSent.Load() && flow.remoteFinSeen.Load() {
+		return context.Canceled
+	}
 	go func() {
 		select {
 		case <-flow.doneChan():

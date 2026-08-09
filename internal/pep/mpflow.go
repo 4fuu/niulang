@@ -566,6 +566,9 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 	buf := make([]byte, f.chunkSize)
 	var sequence uint64
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		n, readErr := f.inner.Read(buf)
 		if n > 0 {
 			bulk := f.observe(n, true)
@@ -582,6 +585,14 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 			}
 			sequence += uint64(n)
 			f.bytesUp.Add(uint64(n))
+		}
+		// HTTP clients often close a fully-consumed SOCKS socket without a
+		// TCP half-close. Treat that local close as EOF while the logical flow
+		// is still live, so the peer receives a normal FIN and can release its
+		// destination connection. Context cancellation remains fatal via the
+		// check above.
+		if readErr != nil && expectedHalfCloseError(readErr) {
+			readErr = io.EOF
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
