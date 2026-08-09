@@ -14,6 +14,16 @@ const (
 	Version           = byte(1)
 	HeaderSize        = 46
 	DefaultMaxPayload = 1 << 20
+	// FlagFin marks that the sender has reached EOF for the direction carried
+	// by the frame. A FIN is carried on a zero-length DATA frame so that it is
+	// ordered with respect to preceding bytes.
+	FlagFin uint16 = 1 << 0
+	// FlagAckFinal marks an acknowledgement as final for the flow.
+	FlagAckFinal uint16 = 1 << 1
+	// FlagAckUp and FlagAckDown identify which byte direction an ACK covers.
+	// They are needed because one framed lane carries both directions.
+	FlagAckUp   uint16 = 1 << 2
+	FlagAckDown uint16 = 1 << 3
 )
 
 type Type byte
@@ -79,6 +89,22 @@ func (h Header) Encode(dst []byte) error {
 	return nil
 }
 
+// Validate checks fields which are independent of the configured payload
+// limit. Keeping this separate from Encode makes it possible for callers to
+// validate a decoded frame before handing it to a flow state machine.
+func (h Header) Validate(maxPayload uint32) error {
+	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk {
+		return errors.New("invalid frame header")
+	}
+	if maxPayload == 0 || maxPayload > DefaultMaxPayload {
+		maxPayload = DefaultMaxPayload
+	}
+	if h.PayloadLen > maxPayload {
+		return fmt.Errorf("payload length %d exceeds limit %d", h.PayloadLen, maxPayload)
+	}
+	return nil
+}
+
 func DecodeHeader(src []byte, maxPayload uint32) (Header, error) {
 	if len(src) < HeaderSize {
 		return Header{}, io.ErrUnexpectedEOF
@@ -92,14 +118,8 @@ func DecodeHeader(src []byte, maxPayload uint32) (Header, error) {
 		PayloadLen: binary.BigEndian.Uint32(src[38:42]), Class: Class(src[42]),
 	}
 	copy(h.SessionID[:], src[6:22])
-	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk {
-		return Header{}, errors.New("unsupported frame header")
-	}
-	if maxPayload == 0 || maxPayload > DefaultMaxPayload {
-		maxPayload = DefaultMaxPayload
-	}
-	if h.PayloadLen > maxPayload {
-		return Header{}, fmt.Errorf("payload length %d exceeds limit %d", h.PayloadLen, maxPayload)
+	if err := h.Validate(maxPayload); err != nil {
+		return Header{}, fmt.Errorf("unsupported frame header: %w", err)
 	}
 	if src[43] != 0 || src[44] != 0 || src[45] != 0 {
 		return Header{}, errors.New("non-zero reserved bits")
@@ -132,9 +152,28 @@ func WriteFrame(w io.Writer, f Frame) error {
 	if err := f.Header.Encode(raw[:]); err != nil {
 		return err
 	}
-	if _, err := w.Write(raw[:]); err != nil {
+	if err := writeFull(w, raw[:]); err != nil {
 		return err
 	}
-	_, err := w.Write(f.Payload)
-	return err
+	return writeFull(w, f.Payload)
+}
+
+// writeFull is intentionally local rather than relying on a particular
+// transport. io.Writer is allowed to perform a short successful write, which
+// is common for rate-limited or instrumented writers and must not corrupt the
+// frame stream.
+func writeFull(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if n > 0 {
+			p = p[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }

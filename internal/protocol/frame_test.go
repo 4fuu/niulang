@@ -2,8 +2,26 @@ package protocol
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"testing"
 )
+
+type shortWriter struct {
+	max int
+	b   bytes.Buffer
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) > w.max {
+		p = p[:w.max]
+	}
+	return w.b.Write(p)
+}
+
+type zeroWriter struct{}
+
+func (zeroWriter) Write([]byte) (int, error) { return 0, nil }
 
 func TestFrameRoundTrip(t *testing.T) {
 	var sid [16]byte
@@ -22,6 +40,31 @@ func TestFrameRoundTrip(t *testing.T) {
 	}
 	if got.Header != want.Header || !bytes.Equal(got.Payload, want.Payload) {
 		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestWriteFrameHandlesShortWrites(t *testing.T) {
+	var sid [16]byte
+	f := Frame{Header: Header{Version: Version, Type: TypeData, SessionID: sid, FlowID: 7, Sequence: 3, Class: ClassBulk}, Payload: []byte("short writes are valid")}
+	var w shortWriter
+	w.max = 3
+	if err := WriteFrame(&w, f); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	got, err := ReadFrame(bytes.NewReader(w.b.Bytes()), DefaultMaxPayload)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if !bytes.Equal(got.Payload, f.Payload) || got.Header.Sequence != f.Header.Sequence {
+		t.Fatalf("round trip mismatch: %#v", got)
+	}
+}
+
+func TestWriteFrameRejectsZeroProgressWriter(t *testing.T) {
+	var sid [16]byte
+	f := Frame{Header: Header{Version: Version, Type: TypePing, SessionID: sid, Class: ClassNew}}
+	if err := WriteFrame(zeroWriter{}, f); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("expected io.ErrShortWrite, got %v", err)
 	}
 }
 

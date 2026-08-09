@@ -29,10 +29,15 @@ func DefaultConfig() Config {
 type Metrics struct {
 	CurrentLanes int
 	HealthyLanes int
-	MarginalGain float64
-	BaselineRTT  time.Duration
-	CurrentRTT   time.Duration
-	UDPHealthy   bool
+	// AvailableLanes is the number of additional lanes the transport policy
+	// is willing to create. HealthyLanes remains the number currently usable;
+	// separating them prevents the bulk bootstrap decision from getting stuck
+	// at one lane.
+	AvailableLanes int
+	MarginalGain   float64
+	BaselineRTT    time.Duration
+	CurrentRTT     time.Duration
+	UDPHealthy     bool
 }
 
 type Decision struct {
@@ -68,7 +73,11 @@ func (p *Planner) Decide(class classifier.Class, m Metrics) Decision {
 		}
 		return Decision{TargetLanes: maxInt(1, target), Class: class, Reason: "protect interactive RTT"}
 	case classifier.ClassBulk:
-		if m.HealthyLanes < p.cfg.BulkStartLanes || !m.UDPHealthy {
+		potential := m.HealthyLanes
+		if m.AvailableLanes > potential {
+			potential = m.AvailableLanes
+		}
+		if potential < p.cfg.BulkStartLanes || !m.UDPHealthy {
 			return Decision{TargetLanes: 1, Class: class, Reason: "bulk start constrained by healthy transport"}
 		}
 		if current < p.cfg.BulkStartLanes {
