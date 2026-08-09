@@ -29,6 +29,7 @@ type options struct {
 	mode                string
 	listen              string
 	remote              string
+	localAddress        string
 	serverName          string
 	secretFile          string
 	certFile            string
@@ -87,7 +88,8 @@ func run(args []string) error {
 		}
 		client, err := pep.NewClient(pep.ClientConfig{
 			ListenAddr: opts.listen, RemoteAddr: opts.remote, ServerName: opts.serverName,
-			Secret: secret, RootCAs: roots, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
+			LocalAddress: opts.localAddress,
+			Secret:       secret, RootCAs: roots, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
 			DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
 			MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
 			FallbackDelay: opts.fallbackDelay, UDPFailureThreshold: opts.udpFailureThreshold,
@@ -129,6 +131,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.mode, "mode", "", "agent mode: local or server")
 	fs.StringVar(&opts.listen, "listen", "", "local SOCKS5 or remote agent listen address")
 	fs.StringVar(&opts.remote, "remote", "", "remote agent host:port in local mode")
+	fs.StringVar(&opts.localAddress, "local-address", "", "optional local source IP for outer lanes (useful to bypass a host TUN route)")
 	fs.StringVar(&opts.serverName, "server-name", "", "verified TLS DNS name in local mode")
 	fs.StringVar(&opts.secretFile, "secret-file", "", "path to pre-shared session secret")
 	fs.StringVar(&opts.certFile, "tls-cert", "", "server TLS certificate path")
@@ -200,7 +203,7 @@ func parseOptions(args []string) (options, error) {
 		if opts.certFile == "" || opts.keyFile == "" {
 			return opts, errors.New("--tls-cert and --tls-key are required in server mode")
 		}
-		if opts.remote != "" || opts.serverName != "" || opts.rootCAFile != "" {
+		if opts.remote != "" || opts.serverName != "" || opts.rootCAFile != "" || opts.localAddress != "" {
 			return opts, errors.New("local-only flags used in server mode")
 		}
 	}

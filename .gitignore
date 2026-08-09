@@ -8,8 +8,8 @@
 *.local.yaml
 *.local.json
 /.env
+/.dev/
 
 # Runtime captures
 *.pcap
 *.log
-

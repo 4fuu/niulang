@@ -304,10 +304,10 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 	_ = conn.SetDeadline(time.Time{})
 	stats, err := flow.run(ctx)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		s.cfg.Logger.Debug("remote flow ended with error", "error", err, "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent)
+		s.cfg.Logger.Debug("remote flow ended with error", "error", err, "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "lane_bytes", stats.LaneBytes)
 		return
 	}
-	s.cfg.Logger.Debug("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "duration", stats.Ended.Sub(stats.Started))
+	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes)
 }
 
 func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameConn, hello session.Hello) {

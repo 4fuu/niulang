@@ -17,13 +17,15 @@ not HTTPS decryption or MITM.
 
 ## Current status
 
-This repository is the beginning of the implementation. The architecture and
-wire-format specification are tracked in [`docs/`](docs/). The initial Go
-module and testable classifier/scheduler core are being built before any
-client or server is deployed. The project is not yet safe to use as a
-general-purpose tunnel; no production deployment should replace the existing
-Clash profile until the interoperability, security, fallback, and real-link
-benchmarks pass.
+The repository now contains an authenticated SOCKS-to-PEP prototype with
+TLS/TCP, QUIC, lane joins, cross-lane reassembly, PIAS-inspired
+classification, and new-flow UDP/TCP racing. An isolated development service
+is deployed without replacing the existing tunnels. The prototype is still
+not safe to use as a general-purpose production tunnel: existing-flow resume,
+UDP destination ingress, congestion-control tuning, and the release gates in
+[`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md) remain incomplete.
+The current real-link evidence is recorded in
+[`docs/MEASUREMENTS-20260809.md`](docs/MEASUREMENTS-20260809.md).
 
 ## Design goals
 
@@ -56,6 +58,20 @@ The real-link benchmark harness will live under `scripts/` and will use an
 isolated listener on `icourses-dev`; the existing Xray, sing-box, and Clash
 Verge services remain out of scope for automatic modification.
 
+On a macOS host where Clash TUN captures the numeric server address, the local
+agent can bind the outer socket to the physical source IP:
+
+```sh
+wanoptd --mode local --listen 127.0.0.1:12080 \
+  --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
+  --local-address 192.168.3.66 --transport auto \
+  --secret-file .dev/session.secret
+```
+
+The source address is deployment-specific. Binding it is preferable to using
+the Clash fake-DNS address, which would route the PEP through the tunnel being
+measured.
+
 ## Security model
 
 The wire protocol must use an audited TLS/QUIC implementation and explicit
@@ -63,4 +79,3 @@ session authentication. It must impose limits on frame sizes, concurrent
 flows, buffered bytes, handshake work, and reconnect attempts. Rolling a new
 cryptographic primitive or accepting unauthenticated lane joins is out of
 scope.
-

@@ -21,6 +21,7 @@ type ClientConfig struct {
 	ListenAddr          string
 	RemoteAddr          string
 	ServerName          string
+	LocalAddress        string
 	Secret              []byte
 	RootCAs             *x509.CertPool
 	MaxPayload          uint32
@@ -190,10 +191,10 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	go c.manageLanes(ctx, flowSession, flow.sessionID, flow.flowID, flow.kind)
 	stats, err := flowSession.run(ctx)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		c.cfg.Logger.Debug("local flow ended with error", "error", err, "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead)
+		c.cfg.Logger.Debug("local flow ended with error", "error", err, "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead, "lane_bytes", stats.LaneBytes)
 		return
 	}
-	c.cfg.Logger.Debug("local flow complete", "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead, "duration", stats.Ended.Sub(stats.Started))
+	c.cfg.Logger.Info("local flow complete", "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes)
 }
 
 type openedFlow struct {
@@ -271,9 +272,9 @@ func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16
 	var err error
 	switch kind {
 	case TransportTCP:
-		outer, err = dialTCP(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout)
+		outer, err = dialTCP(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
 	case TransportQUIC:
-		outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout)
+		outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
 	default:
 		return nil, fmt.Errorf("cannot dial transport %q", kind)
 	}
@@ -334,7 +335,11 @@ func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, s
 		lane, err := c.openJoinLane(ctx, sessionID, flowID, laneID)
 		if err != nil {
 			c.cfg.Logger.Warn("additional lane unavailable", "lane", laneID, "error", err)
-			continue
+			// Keep the already-authenticated lane usable. Retrying the same
+			// join synchronously can delay SOCKS CONNECT indefinitely when UDP
+			// is filtered or the path is degraded; the adaptive manager may
+			// attempt replacement later under its normal health policy.
+			return
 		}
 		if err := flow.addLane(lane); err != nil {
 			_ = lane.fc.Close()

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -73,6 +74,7 @@ type streamConn interface {
 type quicStreamConn struct {
 	stream *quic.Stream
 	conn   *quic.Conn
+	packet net.PacketConn
 	once   sync.Once
 }
 
@@ -90,6 +92,9 @@ func (c *quicStreamConn) Close() error {
 		// wrapper with stream-only lifetime.
 		_ = c.stream.Close()
 		err = c.conn.CloseWithError(0, "wanopt lane closed")
+		if c.packet != nil {
+			_ = c.packet.Close()
+		}
 	})
 	return err
 }
@@ -102,9 +107,17 @@ func tlsClientConfig(serverName string, roots *x509.CertPool) *tls.Config {
 	return cfg
 }
 
-func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration) (streamConn, error) {
+func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string) (streamConn, error) {
+	var localAddr net.Addr
+	if localAddress != "" {
+		ip, err := netip.ParseAddr(localAddress)
+		if err != nil {
+			return nil, fmt.Errorf("parse local address %q: %w", localAddress, err)
+		}
+		localAddr = &net.TCPAddr{IP: ip.AsSlice()}
+	}
 	conn, err := (&tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
+		NetDialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second, LocalAddr: localAddr},
 		Config:    tlsClientConfig(serverName, roots),
 	}).DialContext(ctx, "tcp", remote)
 	if err != nil {
@@ -129,10 +142,16 @@ func quicConfig() *quic.Config {
 		MaxConnectionReceiveWindow:     16 * 1024 * 1024,
 		MaxIncomingStreams:             1,
 		MaxIncomingUniStreams:          0,
+		// The China path has a smaller effective UDP MTU than this host's
+		// interface. Disable probing until path-specific MTU discovery is
+		// available; otherwise a successful probe can raise packets above the
+		// path MTU and stall a long response.
+		DisablePathMTUDiscovery: true,
+		InitialPacketSize:       1200,
 	}
 }
 
-func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration) (streamConn, error) {
+func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string) (streamConn, error) {
 	dialCtx := ctx
 	var cancel context.CancelFunc
 	if dialTimeout > 0 {
@@ -140,6 +159,32 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 		defer cancel()
 	}
 	tlsCfg := tlsClientConfig(serverName, roots)
+	if localAddress != "" {
+		ip, parseErr := netip.ParseAddr(localAddress)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse local address %q: %w", localAddress, parseErr)
+		}
+		remoteAddr, resolveErr := net.ResolveUDPAddr("udp", remote)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		packetConn, listenErr := net.ListenUDP("udp", &net.UDPAddr{IP: ip.AsSlice()})
+		if listenErr != nil {
+			return nil, listenErr
+		}
+		conn, dialErr := quic.Dial(dialCtx, packetConn, remoteAddr, tlsCfg, quicConfig())
+		if dialErr != nil {
+			_ = packetConn.Close()
+			return nil, dialErr
+		}
+		stream, streamErr := conn.OpenStreamSync(dialCtx)
+		if streamErr != nil {
+			_ = conn.CloseWithError(0, "unable to open wanopt stream")
+			_ = packetConn.Close()
+			return nil, streamErr
+		}
+		return &quicStreamConn{stream: stream, conn: conn, packet: packetConn}, nil
+	}
 	conn, err := quic.DialAddr(dialCtx, remote, tlsCfg, quicConfig())
 	if err != nil {
 		return nil, err

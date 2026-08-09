@@ -33,6 +33,17 @@ func TestSustainedOneWayFlowBecomesBulk(t *testing.T) {
 	}
 }
 
+func TestConstrainedOneWayFlowStillBecomesBulk(t *testing.T) {
+	c := New(DefaultConfig())
+	got := c.Observe(Observation{
+		Age: 4 * time.Second, BytesDown: 4 * 1024 * 1024,
+		DownRate: 512 * 1024, SinceLastPayload: 5 * time.Millisecond,
+	})
+	if got != ClassBulk {
+		t.Fatalf("class = %s, want bulk on a constrained path", got)
+	}
+}
+
 func TestInteractiveBurstIsNotBulk(t *testing.T) {
 	c := New(DefaultConfig())
 	got := c.Observe(Observation{

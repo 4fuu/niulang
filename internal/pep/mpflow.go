@@ -27,6 +27,8 @@ type mpLane struct {
 	kind   TransportKind
 	fc     *frameConn
 	closed atomic.Bool
+	sent   atomic.Uint64
+	recv   atomic.Uint64
 }
 
 type inboundEvent struct {
@@ -148,6 +150,9 @@ func (f *multipathFlow) readLane(lane *mpLane) {
 			}
 			return
 		}
+		if frame.Header.Type == protocol.TypeData {
+			lane.recv.Add(uint64(len(frame.Payload)))
+		}
 		select {
 		case f.events <- inboundEvent{lane: lane, frame: frame}:
 		case <-f.ctx.Done():
@@ -199,6 +204,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				stats.Ended = time.Now()
 				stats.BytesSent = f.bytesUp.Load()
 				stats.BytesRead = f.bytesDown.Load()
+				stats.LaneBytes = f.laneStats()
 				return stats, err
 			}
 		case err := <-f.laneErr:
@@ -206,12 +212,14 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.Ended = time.Now()
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
+			stats.LaneBytes = f.laneStats()
 			return stats, err
 		case <-ctx.Done():
 			f.closeAll()
 			stats.Ended = time.Now()
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
+			stats.LaneBytes = f.laneStats()
 			return stats, ctx.Err()
 		}
 	}
@@ -219,7 +227,18 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	stats.Ended = time.Now()
 	stats.BytesSent = f.bytesUp.Load()
 	stats.BytesRead = f.bytesDown.Load()
+	stats.LaneBytes = f.laneStats()
 	return stats, nil
+}
+
+func (f *multipathFlow) laneStats() map[uint64]LaneStats {
+	f.lanesMu.RLock()
+	defer f.lanesMu.RUnlock()
+	stats := make(map[uint64]LaneStats, len(f.lanes))
+	for id, lane := range f.lanes {
+		stats[id] = LaneStats{Kind: lane.kind, Sent: lane.sent.Load(), Received: lane.recv.Load()}
+	}
+	return stats
 }
 
 func (f *multipathFlow) doneChan() <-chan struct{} { return f.done }
@@ -243,6 +262,7 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 			}, Payload: payload}); err != nil {
 				return err
 			}
+			lane.sent.Add(uint64(n))
 			sequence += uint64(n)
 			f.bytesUp.Add(uint64(n))
 		}

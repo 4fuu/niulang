@@ -42,10 +42,17 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		NewBytes:            64 * 1024,
-		NewAge:              3 * time.Second,
-		BulkBytes:           2 * 1024 * 1024,
-		BulkRateBytesPerSec: 2 * 1024 * 1024,
+		NewBytes: 64 * 1024,
+		NewAge:   3 * time.Second,
+		// Demote after a modest byte budget so a path whose single-lane goodput
+		// is below the bulk-rate floor can still unlock striping. Interactive
+		// bursts are excluded separately below, and hysteresis keeps a demoted
+		// flow in BULK once it crosses this boundary.
+		BulkBytes: 256 * 1024,
+		// Retained as a configuration/documentation hook for future rate-aware
+		// policies. The current classifier does not require a minimum rate: a
+		// slow bulk transfer must still be able to unlock additional lanes.
+		BulkRateBytesPerSec: 256 * 1024,
 		BulkMinimumAge:      2 * time.Second,
 		InteractiveMaxRate:  1 * 1024 * 1024,
 		InteractiveIdleGap:  250 * time.Millisecond,
@@ -102,7 +109,6 @@ func (c *Classifier) Observe(o Observation) Class {
 func (c *Classifier) isBulk(o Observation) bool {
 	return o.Age >= c.cfg.BulkMinimumAge &&
 		o.BytesUp+o.BytesDown >= c.cfg.BulkBytes &&
-		max(o.UpRate, o.DownRate) >= c.cfg.BulkRateBytesPerSec &&
 		(!o.Bidirectional || !o.SmallBidirectionalBursts)
 }
 

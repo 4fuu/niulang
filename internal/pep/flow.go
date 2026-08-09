@@ -19,6 +19,17 @@ type FlowStats struct {
 	Ended     time.Time
 	BytesSent uint64
 	BytesRead uint64
+	// LaneBytes records payload bytes carried by each outer lane. It is
+	// intentionally optional so one-lane callers can ignore it, while
+	// benchmarks and operators can verify actual striping rather than merely
+	// counting successful lane handshakes.
+	LaneBytes map[uint64]LaneStats
+}
+
+type LaneStats struct {
+	Kind     TransportKind
+	Sent     uint64
+	Received uint64
 }
 
 type closeWriter interface {
