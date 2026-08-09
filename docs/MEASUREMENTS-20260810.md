@@ -93,7 +93,21 @@ server-side stale-lane retirement, completion tombstones, aggregate pacing,
 UDP/TCP new-flow racing, and a tested mid-session TCP rescue. It is still not
 production-ready: HTTP completion loss and OpenAI tail failures remain, the
 SOCKS ingress is TCP-only (no destination UDP/TUN), QUIC controller/lane
-telemetry is incomplete, and controlled loss/reordering/MTU/fuzz/resource
-campaigns need broader coverage. Keep the existing tunnel as the rollback
-path and treat adaptive/Brutal as development profiles until those gates pass.
+telemetry now covers active lane count, RTT, and QUIC loss counters but still
+lacks bytes-in-flight/pacing/controller-rate signals, and controlled
+loss/reordering/MTU/fuzz/resource campaigns need broader coverage. Keep the
+existing tunnel as the rollback path and treat adaptive/Brutal as development
+profiles until those gates pass.
 
+## Post-hardening deployment smoke
+
+After the campaign, the metrics-enabled Linux/amd64 build was installed in
+the isolated `wanoptd-dev.service` and its SHA-256 was verified on both
+hosts. A clean 10 MiB CacheFly transfer through one adaptive QUIC lane
+returned HTTP 200, exactly 10,485,760 body bytes, and curl exit 0 in 2.736 s
+(3.83 MB/s application body rate). The client-side completion counters showed
+1 started, 1 completed, 0 failed, and 0 lane failures. During a separate
+100 MiB transfer, the live local metrics sample reported one active lane,
+approximately 199 ms smoothed RTT, and zero QUIC loss at that sample. These
+are deployment and observability checks, not a replacement for the repeated
+real-path campaign above.

@@ -52,6 +52,40 @@ The remaining limitation is congestion control/loss recovery, not merely
 frame reordering. These censored runs must not be summarized as throughput
 successes.
 
+## Controller comparison on the direct physical path
+
+After switching the isolated service to the apNet QUIC fork, the same client,
+source binding, destination, and 1200-byte QUIC configuration were measured
+with three controllers. The object was a fixed 256 KiB HTTP range from the
+same 10 MiB CacheFly object. Each cell is the median of three repetitions;
+all 18/18 requests per controller completed with the expected byte count.
+
+| Controller | One lane (Mbps) | Eight lanes (Mbps) |
+|---|---:|---:|
+| stock apNet QUIC (control) | 0.31 | 1.56 |
+| adaptive (wanopt) | 0.50 | 3.00 |
+| Brutal, 1 MiB/s per lane | 1.35 | 6.56 |
+
+The short-object result includes handshake and startup time, so it is not a
+steady-state link capacity estimate. A full 10 MiB transfer was then run with
+the fixed-rate controller (three repetitions):
+
+| Direction | One lane (Mbps) | Eight lanes aggregate (Mbps) | Complete |
+|---|---:|---:|---:|
+| HTTP download | 8.44 median | 64.47 median | 6/6 |
+| SSH upload | 6.95 median | 49.18 median | 6/6 |
+
+Eight simultaneous 10 MiB downloads completed in approximately 9.5–11.2 s
+per flow. Ten fresh Google `generate_204` requests during that bulk run were
+10/10 successful, with median 1.18 s and p95 2.19 s. This is a promising
+development result, not a production guarantee: the fixed rate is an operator
+target, each lane has its own controller, and the current prototype has no
+aggregate token bucket or seamless lane replacement.
+
+The server was restored to `wanoptd-dev.service` with its default controller
+immediately after the experiment. No existing Xray, sing-box, Cloudflare,
+Nginx, WireGuard, or Clash configuration was changed.
+
 ## QUIC request latency pilot
 
 Ten fresh one-lane requests per endpoint were attempted through the physical
@@ -88,6 +122,7 @@ service was restored and verified active immediately afterward. This verifies
 new-flow fallback selection only; it is not a seamless mid-session recovery
 test.
 
-The next transport experiment should compare a maintained BBR/rate-based
-QUIC congestion controller against this stock CUBIC baseline before changing
-the lane scheduler again.
+The next transport experiment should repeat the controller matrix in at least
+five randomized blocks, add confidence intervals, and compare matched
+single-flow results with TUIC and Hysteria 2. These initial controller results
+are development evidence, not a product SLA.

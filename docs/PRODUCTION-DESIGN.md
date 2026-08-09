@@ -89,9 +89,11 @@ above all lanes, with a reserved interactive share; an 8 MiB/s budget plus a
 It remains opt-in until queue-delay and retransmission guardrails are exposed
 as telemetry.
 
-The controller should expose at least RTT, smoothed RTT, bytes in flight,
-loss, pacing rate, congestion window, and delivery rate. These are needed to
-make lane-growth decisions measurable and to diagnose carrier policers.
+The endpoint now exposes aggregate active-QUIC lane count, latest/worst
+smoothed RTT, bytes sent/received, and QUIC loss counters through the
+loopback-only metrics listener. The controller still does not expose bytes in
+flight, pacing rate, congestion window, or delivery rate; those remain a
+release gate before automatic lane-growth decisions are enabled by default.
 
 ## PIAS-inspired workload policy
 
@@ -115,7 +117,11 @@ policy hint, not a security boundary, and it must be visible in metrics.
 The scheduler should grow one lane at a time. A candidate lane is retained
 only if its marginal goodput is positive and the interactive RTT budget is
 not exceeded. It should retire the worst lane after a sustained negative
-contribution, with a minimum dwell time to prevent oscillation.
+contribution, with a minimum dwell time to prevent oscillation. The current
+implementation now feeds the measured worst smoothed RTT into this guard and
+retires the least productive non-control lane when the budget is exceeded;
+controller-specific bytes-in-flight and delivery-rate signals are still needed
+to make that decision fully loss-aware.
 
 ## UDP preference and TCP fallback
 
