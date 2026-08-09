@@ -1,0 +1,15 @@
+# Build artifacts
+/bin/
+/dist/
+/coverage.out
+/coverage.html
+
+# Local configuration and secrets
+*.local.yaml
+*.local.json
+/.env
+
+# Runtime captures
+*.pcap
+*.log
+
