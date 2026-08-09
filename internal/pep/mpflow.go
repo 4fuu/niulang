@@ -72,17 +72,18 @@ type multipathFlow struct {
 	sendDone chan struct{}
 	done     chan struct{}
 
-	classifier  *classifier.Classifier
-	started     time.Time
-	bytesUp     atomic.Uint64
-	bytesDown   atomic.Uint64
-	class       atomic.Uint32
-	finSequence atomic.Uint64
-	lastPayload atomic.Int64
-	closeOnce   sync.Once
-	doneOnce    sync.Once
-	finished    atomic.Bool
-	nextJoinID  uint64
+	classifier        *classifier.Classifier
+	started           time.Time
+	bytesUp           atomic.Uint64
+	bytesDown         atomic.Uint64
+	class             atomic.Uint32
+	finSequence       atomic.Uint64
+	remoteFinSequence atomic.Uint64
+	lastPayload       atomic.Int64
+	closeOnce         sync.Once
+	doneOnce          sync.Once
+	finished          atomic.Bool
+	nextJoinID        uint64
 
 	replayMu     sync.Mutex
 	replay       map[uint64]protocol.Frame
@@ -692,6 +693,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					f.bytesDown.Add(uint64(len(out)))
 				}
 				if closed {
+					f.remoteFinSequence.Store(reassembler.NextSequence())
 					if cw, ok := f.inner.(closeWriter); ok {
 						if err := cw.CloseWrite(); err != nil && !errors.Is(err, net.ErrClosed) {
 							return err

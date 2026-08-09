@@ -17,6 +17,8 @@ import (
 	"github.com/icourses-dev/wanopt/internal/session"
 )
 
+const completedSessionLinger = 30 * time.Second
+
 type ServerConfig struct {
 	ListenAddr                    string
 	Certificate                   tls.Certificate
@@ -49,9 +51,10 @@ type Server struct {
 }
 
 type serverFlow struct {
-	flow     *multipathFlow
-	maxLanes int
-	mu       sync.Mutex
+	flow      *multipathFlow
+	maxLanes  int
+	completed atomic.Bool
+	mu        sync.Mutex
 }
 
 func (s *serverFlow) addLane(lane *mpLane) error {
@@ -325,13 +328,27 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 		flow.closeAll()
 		return
 	}
-	defer s.unregisterSession(sessionID, serverSession)
+	registered := true
+	defer func() {
+		if registered {
+			s.unregisterSession(sessionID, serverSession)
+		}
+	}()
 	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}}); err != nil {
 		flow.closeAll()
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
 	stats, err := flow.run(ctx)
+	if err == nil {
+		// Keep a bounded tombstone long enough for a client that lost the
+		// final cumulative ACK to authenticate a replacement lane and finish
+		// its local close handshake. No destination connection or payload is
+		// retained; only the flow's final sequence metadata remains.
+		serverSession.completed.Store(true)
+		registered = false
+		time.AfterFunc(completedSessionLinger, func() { s.unregisterSession(sessionID, serverSession) })
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.cfg.Logger.Debug("remote flow ended with error", "error", err, "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "lane_bytes", stats.LaneBytes)
 		return
@@ -357,6 +374,19 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
+	if serverSession.completed.Load() {
+		if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
+			return
+		}
+		// The completed server flow has already acknowledged the peer's FIN;
+		// repeat that ACK on this authenticated replacement lane.
+		_ = fc.Write(protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeAck, Flags: protocol.FlagAckFinal | serverSession.flow.recvAckFlag,
+			SessionID: hello.SessionID, FlowID: open.Header.FlowID, Sequence: serverSession.flow.remoteFinSequence.Load(),
+			Class: protocol.ClassBulk,
+		}})
+		return
+	}
 	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetFlowLimit, "lane unavailable")})
 		return
@@ -374,6 +404,9 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 func (s *Server) registerSession(id [16]byte, flow *serverFlow) bool {
 	s.sessionsMu.Lock()
 	defer s.sessionsMu.Unlock()
+	if len(s.sessions) >= s.cfg.MaxSessions {
+		return false
+	}
 	if _, exists := s.sessions[id]; exists {
 		return false
 	}
