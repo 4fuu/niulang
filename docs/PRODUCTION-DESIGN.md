@@ -82,14 +82,16 @@ QUIC.
 
 Before release, compare:
 
-1. a BBR-family controller with explicit loss and queue-delay limits;
+1. the opt-in independently implemented BBRv1-shaped controller with
+   explicit loss and queue-delay limits;
 2. a Hysteria 2/TUIC-style rate-based controller (including a Brutal-style
    mode where the operator supplies a tested target rate); and
 3. stock CUBIC/New Reno as the TCP-fallback control.
 
 The project uses the maintained apNet QUIC fork and keeps the stock controller
 available. It does not import Hysteria's `internal/` packages or fork
-cryptography. A per-lane controller alone is unsafe: eight controllers can
+cryptography. The BBR mode is an original implementation of the public BBR
+model, not a claim that apNet quic-go itself provides BBR. A per-lane controller alone is unsafe: eight controllers can
 overrun the path and starve SSH. The aggregate token bucket is now implemented
 above all lanes, with a reserved interactive share; an 8 MiB/s budget plus a
 512 KiB/s reserve preserved 10/10 Google requests during eight bulk downloads.

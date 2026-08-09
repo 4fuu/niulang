@@ -61,7 +61,7 @@ func (b *BrutalSender) OnPacketSent(sentTime monotime.Time, _ quiccongestion.Byt
 	b.pacer.sentPacket(sentTime, bytes)
 }
 func (b *BrutalSender) CanSend(bytesInFlight quiccongestion.ByteCount) bool {
-	return bytesInFlight <= b.GetCongestionWindow()
+	return bytesInFlight < b.GetCongestionWindow()
 }
 func (b *BrutalSender) MaybeExitSlowStart() {}
 func (b *BrutalSender) OnPacketAcked(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, _ quiccongestion.ByteCount, _ monotime.Time) {

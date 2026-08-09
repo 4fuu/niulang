@@ -78,3 +78,80 @@ func TestBrutalSenderCompensatesForModerateLoss(t *testing.T) {
 		t.Fatalf("loss compensation did not raise wire pacing rate: target=%d wire=%d", sender.bps, sender.bandwidth())
 	}
 }
+
+func TestBBRSenderBuildsDeliveryModelAndRecovers(t *testing.T) {
+	sender := NewBBRSender(1200)
+	rtt := &fakeRTT{smoothed: 200 * time.Millisecond}
+	sender.SetRTTStatsProvider(rtt)
+	start := monotime.Now()
+	initial := sender.GetCongestionWindow()
+
+	// Feed packet sends and ACK batches over several RTTs. The first ACK seeds
+	// the delivery clock; subsequent batches create a real delivery-rate
+	// sample and should grow both pacing and the ACK-clocked window.
+	var pn quiccongestion.PacketNumber
+	for round := 0; round < 8; round++ {
+		for i := 0; i < 32; i++ {
+			sender.OnPacketSent(start.Add(time.Duration(round)*200*time.Millisecond), sender.bytesInFlight, pn, 1200, true)
+			pn++
+		}
+		sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(time.Duration(round+1)*200*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: pn - 1, BytesAcked: 32 * 1200}}, nil)
+	}
+	if sender.maxBandwidth == 0 {
+		t.Fatal("BBR did not record a delivery-rate sample")
+	}
+	if sender.bandwidth() <= quiccongestion.ByteCount(initial) {
+		t.Fatalf("BBR pacing model did not grow: initial window=%d pacing=%d", initial, sender.bandwidth())
+	}
+	if sender.bandwidth() < bbrMinRate {
+		t.Fatalf("BBR pacing fell below safety floor: %d", sender.bandwidth())
+	}
+
+	before := sender.GetCongestionWindow()
+	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(3*time.Second), nil, []quiccongestion.LostPacketInfo{{PacketNumber: pn - 1, BytesLost: 1200}})
+	if !sender.InRecovery() {
+		t.Fatal("loss did not enter recovery")
+	}
+	if sender.GetCongestionWindow() > before {
+		t.Fatalf("loss increased effective window: before=%d after=%d", before, sender.GetCongestionWindow())
+	}
+
+	// A clean ACK beyond the recovery boundary exits recovery without ever
+	// dropping below the four-packet safety floor.
+	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(4*time.Second), []quiccongestion.AckedPacketInfo{{PacketNumber: pn + 1, BytesAcked: 1200}}, nil)
+	if sender.GetCongestionWindow() < sender.minCwnd {
+		t.Fatalf("window below minimum after recovery: %d", sender.GetCongestionWindow())
+	}
+}
+
+func TestBBRSenderTimeoutResetsToSafeStartup(t *testing.T) {
+	sender := NewBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 100 * time.Millisecond})
+	sender.maxBandwidth = 10 * 1024 * 1024
+	sender.fullBandwidth = true
+	sender.mode = bbrProbeBW
+	sender.cwnd = 2 * 1024 * 1024
+	sender.OnRetransmissionTimeout(true)
+	if sender.mode != bbrStartup || sender.fullBandwidth || sender.maxBandwidth != 0 {
+		t.Fatalf("timeout did not reset BBR state: mode=%v full=%v bw=%d", sender.mode, sender.fullBandwidth, sender.maxBandwidth)
+	}
+	if sender.GetCongestionWindow() != sender.minCwnd {
+		t.Fatalf("timeout window=%d, want minimum=%d", sender.GetCongestionWindow(), sender.minCwnd)
+	}
+}
+
+func TestRateControllersDoNotSendAtWindowBoundary(t *testing.T) {
+	adaptive := NewAdaptiveSender(1200, 64*1024, 1*1024*1024)
+	brutal := NewBrutalSender(1*1024*1024, false)
+	bbr := NewBBRSender(1200)
+	for name, sender := range map[string]quiccongestion.CongestionControl{
+		"adaptive": adaptive,
+		"brutal":   brutal,
+		"bbr":      bbr,
+	} {
+		window := sender.GetCongestionWindow()
+		if sender.CanSend(window) {
+			t.Errorf("%s admitted a packet at its congestion-window boundary", name)
+		}
+	}
+}

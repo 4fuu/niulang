@@ -33,13 +33,16 @@ const (
 )
 
 // CongestionControlKind selects the QUIC sender. Reno leaves the apNet
-// quic-go default untouched and is the safe control. Adaptive is a
-// rate-estimating controller for unknown paths. Brutal is a fixed-rate mode
-// for controlled experiments where the operator knows the per-lane budget.
+// quic-go default untouched and is the safe control. BBR is an independent
+// BBRv1-shaped model with explicit delivery-rate and recovery state. Adaptive
+// is a conservative rate-estimating controller for unknown paths. Brutal is a
+// fixed-rate mode for controlled experiments where the operator knows the
+// per-lane budget.
 type CongestionControlKind string
 
 const (
 	CongestionReno     CongestionControlKind = "reno"
+	CongestionBBR      CongestionControlKind = "bbr"
 	CongestionAdaptive CongestionControlKind = "adaptive"
 	CongestionBrutal   CongestionControlKind = "brutal"
 )
@@ -275,6 +278,8 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) {
 		return
 	}
 	switch cfg.kind {
+	case CongestionBBR:
+		conn.SetCongestionControl(wancongestion.NewBBRSender(conn.InitialPacketSize()))
 	case CongestionAdaptive:
 		conn.SetCongestionControl(wancongestion.NewAdaptiveSender(conn.InitialPacketSize(), cfg.adaptiveMinBytesPerSec, cfg.adaptiveMaxBytesPerSec))
 	case CongestionBrutal:

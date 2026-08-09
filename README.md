@@ -21,8 +21,9 @@ The repository now contains an authenticated SOCKS-to-PEP prototype with
 TLS/TCP, QUIC, lane joins, cross-lane reassembly, PIAS-inspired
 classification, new-flow UDP/TCP racing, bounded lane recovery, completion
 tombstones, aggregate pacing, and opt-in QUIC controllers. The stock apNet
-QUIC controller is retained as the control; an adaptive controller and a
-Hysteria-style fixed-rate (Brutal) controller can be selected for measurement.
+QUIC controller is retained as the control; an independently implemented
+BBRv1-shaped controller, an adaptive controller, and a Hysteria-style
+fixed-rate (Brutal) controller can be selected for measurement.
 An isolated development service is deployed without replacing the existing
 tunnels. The latest five-block real-link evidence is recorded in
 [`docs/MEASUREMENTS-20260810.md`](docs/MEASUREMENTS-20260810.md); the earlier
@@ -113,9 +114,11 @@ add the same aggregate budget at both endpoints, for example:
 ```
 
 `adaptive` is the safer experimental choice when no target is known; `reno`
-is the correctness baseline. Brutal remains an operator-supplied measurement
-mode, not a safe unattended default. These modes are not a recommendation to
-change a live Clash profile without a rollback plan.
+is the correctness baseline. `bbr` is path-specific experimental code and
+must pass the same loss, queue-delay, and application-tail campaign before it
+is selected. Brutal remains an operator-supplied measurement mode, not a safe
+unattended default. These modes are not a recommendation to change a live
+Clash profile without a rollback plan.
 
 For an operator-only health endpoint, bind metrics to loopback and keep it off
 the public listener:

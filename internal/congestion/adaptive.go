@@ -99,7 +99,11 @@ func (a *AdaptiveSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quic
 }
 
 func (a *AdaptiveSender) CanSend(bytesInFlight quiccongestion.ByteCount) bool {
-	return bytesInFlight <= a.GetCongestionWindow()
+	// quic-go asks this before adding the next packet to bytes in flight.  A
+	// packet is admissible only while the current flight is strictly below the
+	// window; using <= permits one extra datagram on every scheduling pass and
+	// is especially harmful when several independent lanes are probing at once.
+	return bytesInFlight < a.GetCongestionWindow()
 }
 
 func (a *AdaptiveSender) MaybeExitSlowStart() {}
