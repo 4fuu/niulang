@@ -63,3 +63,12 @@ func TestMetricsHandlerRejectsMutationMethods(t *testing.T) {
 		t.Fatalf("removed QUIC telemetry still reports %d lanes", got)
 	}
 }
+
+func TestZeroValueRegistryIsSafe(t *testing.T) {
+	var r Registry
+	r.ObserveQUIC(7, QUICObservation{Lanes: 1, SmoothedRTT: time.Millisecond})
+	if got := r.Snapshot().QUICLanes; got != 1 {
+		t.Fatalf("zero-value registry lanes = %d, want 1", got)
+	}
+	r.RemoveQUIC(7)
+}

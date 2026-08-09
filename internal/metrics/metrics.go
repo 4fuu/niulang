@@ -96,6 +96,9 @@ func (r *Registry) ObserveQUIC(key uint64, o QUICObservation) {
 		o.SmoothedRTT = 0
 	}
 	r.telemetryMu.Lock()
+	if r.quicFlows == nil {
+		r.quicFlows = make(map[uint64]QUICObservation)
+	}
 	r.quicFlows[key] = o
 	r.telemetryMu.Unlock()
 }
