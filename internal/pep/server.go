@@ -430,6 +430,13 @@ func (s *Server) watchFlowCompletion(ctx context.Context, sessionID [16]byte, se
 		case <-ticker.C:
 			if ctx.Err() == nil && serverSession.flow.finSent.Load() && serverSession.flow.remoteFinSeen.Load() {
 				s.retainCompletedSession(sessionID, serverSession)
+				// Both FINs are an application-level proof that no additional
+				// payload can be delivered in either direction. Tear down the
+				// physical lanes now; otherwise sendInner can wait forever for a
+				// final ACK lost in the last-lane close race and receiveInner can
+				// wait forever for another frame. The tombstone above preserves
+				// final-ACK metadata for bounded replay.
+				serverSession.flow.closeAll()
 				return
 			}
 		case <-serverSession.flow.doneChan():

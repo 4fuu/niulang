@@ -12,23 +12,25 @@ import (
 )
 
 type Registry struct {
-	activeFlows      atomic.Int64
-	flowsStarted     atomic.Uint64
-	flowsCompleted   atomic.Uint64
-	flowsFailed      atomic.Uint64
-	bytesUp          atomic.Uint64
-	bytesDown        atomic.Uint64
-	laneFailures     atomic.Uint64
-	laneReplacements atomic.Uint64
-	fallbacks        atomic.Uint64
-	classTransitions [3]atomic.Uint64
-	telemetryMu      sync.Mutex
-	quicFlows        map[uint64]QUICObservation
+	activeFlows        atomic.Int64
+	flowsStarted       atomic.Uint64
+	flowsCompleted     atomic.Uint64
+	flowsFailed        atomic.Uint64
+	bytesUp            atomic.Uint64
+	bytesDown          atomic.Uint64
+	laneFailures       atomic.Uint64
+	laneReplacements   atomic.Uint64
+	fallbacks          atomic.Uint64
+	completionTimeouts atomic.Uint64
+	classTransitions   [3]atomic.Uint64
+	telemetryMu        sync.Mutex
+	quicFlows          map[uint64]QUICObservation
 }
 
 type Snapshot struct {
 	ActiveFlows, FlowsStarted, FlowsCompleted, FlowsFailed           int64
 	BytesUp, BytesDown, LaneFailures, LaneReplacements, Fallbacks    uint64
+	CompletionTimeouts                                               uint64
 	ClassTransitions                                                 [3]uint64
 	QUICLanes                                                        int64
 	QUICLatestRTT, QUICSmoothedRTT                                   time.Duration
@@ -73,9 +75,10 @@ func (r *Registry) FlowFinished(bytesUp, bytesDown uint64, failed bool) {
 	r.bytesDown.Add(bytesDown)
 }
 
-func (r *Registry) LaneFailure()     { r.laneFailures.Add(1) }
-func (r *Registry) LaneReplacement() { r.laneReplacements.Add(1) }
-func (r *Registry) Fallback()        { r.fallbacks.Add(1) }
+func (r *Registry) LaneFailure()       { r.laneFailures.Add(1) }
+func (r *Registry) LaneReplacement()   { r.laneReplacements.Add(1) }
+func (r *Registry) Fallback()          { r.fallbacks.Add(1) }
+func (r *Registry) CompletionTimeout() { r.completionTimeouts.Add(1) }
 func (r *Registry) ClassTransition(class int) {
 	if class >= 0 && class < len(r.classTransitions) {
 		r.classTransitions[class].Add(1)
@@ -118,6 +121,7 @@ func (r *Registry) Snapshot() Snapshot {
 		FlowsCompleted: int64(r.flowsCompleted.Load()), FlowsFailed: int64(r.flowsFailed.Load()),
 		BytesUp: r.bytesUp.Load(), BytesDown: r.bytesDown.Load(), LaneFailures: r.laneFailures.Load(),
 		LaneReplacements: r.laneReplacements.Load(), Fallbacks: r.fallbacks.Load(),
+		CompletionTimeouts: r.completionTimeouts.Load(),
 	}
 	for i := range s.ClassTransitions {
 		s.ClassTransitions[i] = r.classTransitions[i].Load()
@@ -169,6 +173,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "wanopt_lane_failures_total %d\n", s.LaneFailures)
 	fmt.Fprintf(w, "wanopt_lane_replacements_total %d\n", s.LaneReplacements)
 	fmt.Fprintf(w, "wanopt_fallbacks_total %d\n", s.Fallbacks)
+	fmt.Fprintf(w, "wanopt_completion_timeouts_total %d\n", s.CompletionTimeouts)
 	fmt.Fprintf(w, "wanopt_quic_lanes %d\n", s.QUICLanes)
 	fmt.Fprintf(w, "wanopt_quic_latest_rtt_seconds %.9f\n", s.QUICLatestRTT.Seconds())
 	fmt.Fprintf(w, "wanopt_quic_smoothed_rtt_seconds %.9f\n", s.QUICSmoothedRTT.Seconds())

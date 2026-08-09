@@ -3,6 +3,7 @@ package pep
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,30 @@ import (
 	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 )
+
+func TestCompletionWatchdogReleasesProvenCompleteFlow(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer peer.Close()
+	registry := metrics.New()
+	flow := &multipathFlow{
+		ctx: context.Background(), inner: inner, done: make(chan struct{}),
+		lanes: make(map[uint64]*mpLane), metrics: registry, completionGrace: 10 * time.Millisecond,
+	}
+	stop := make(chan struct{})
+	go flow.completionWatchdog(stop)
+	flow.finSent.Store(true)
+	flow.remoteFinSeen.Store(true)
+	select {
+	case <-flow.done:
+	case <-time.After(time.Second):
+		close(stop)
+		t.Fatal("completion watchdog did not close proven-complete flow")
+	}
+	close(stop)
+	if got := registry.Snapshot().CompletionTimeouts; got != 1 {
+		t.Fatalf("completion watchdog metric=%d, want 1", got)
+	}
+}
 
 func TestLaneWriterStopsWhenFlowCompletes(t *testing.T) {
 	flow := &multipathFlow{ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1)}

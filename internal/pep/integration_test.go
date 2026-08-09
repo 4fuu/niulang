@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 )
 
@@ -188,6 +189,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		Metrics: metrics.New(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -199,6 +201,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
 		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, InitialLanes: 2, Logger: logger,
+		Metrics: metrics.New(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -281,6 +284,21 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	}
 	if !bytes.Equal(got2, payload2) {
 		t.Fatalf("pooled flow echo mismatch: got %d bytes, want %d", len(got2), len(payload2))
+	}
+	// A completed logical flow must release its worker goroutines and active
+	// gauge promptly even when the final ACK races with physical lane close.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if server.Metrics().Snapshot().ActiveFlows == 0 && client.Metrics().Snapshot().ActiveFlows == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := server.Metrics().Snapshot(); got.ActiveFlows != 0 || got.FlowsCompleted != 2 {
+		t.Fatalf("server flow lifecycle leaked: active=%d started=%d completed=%d failed=%d", got.ActiveFlows, got.FlowsStarted, got.FlowsCompleted, got.FlowsFailed)
+	}
+	if got := client.Metrics().Snapshot(); got.ActiveFlows != 0 || got.FlowsCompleted != 2 {
+		t.Fatalf("client flow lifecycle leaked: active=%d started=%d completed=%d failed=%d", got.ActiveFlows, got.FlowsStarted, got.FlowsCompleted, got.FlowsFailed)
 	}
 	cancel()
 	for range 2 {
@@ -582,7 +600,7 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	server, err := NewServer(ServerConfig{
 		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
-		Logger: logger,
+		Logger: logger, Metrics: metrics.New(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -593,7 +611,7 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportTCP, Logger: logger,
+		Secret: secret, RootCAs: roots, Transport: TransportTCP, Logger: logger, Metrics: metrics.New(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -644,6 +662,13 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	}
 	if flowID == 0 {
 		t.Fatal("completed flow tombstone was not retained")
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && server.Metrics().Snapshot().ActiveFlows != 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := server.Metrics().Snapshot(); got.ActiveFlows != 0 || got.FlowsCompleted != 1 {
+		t.Fatalf("server completion watcher did not release flow: active=%d completed=%d failed=%d", got.ActiveFlows, got.FlowsCompleted, got.FlowsFailed)
 	}
 
 	joinCtx, joinCancel := context.WithTimeout(context.Background(), 2*time.Second)

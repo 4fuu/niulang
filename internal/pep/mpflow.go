@@ -31,6 +31,10 @@ const (
 	// client normally detects a blackhole at ~15 s, then needs one scheduler
 	// tick and a bounded TCP handshake before the replacement can arrive.
 	laneReplacementWait = 45 * time.Second
+	// Once both FIN directions are observed, no additional application bytes
+	// can be delivered. This grace lets a healthy final ACK arrive, but bounds
+	// retention when the peer closes its last lane at exactly that point.
+	flowCompletionGrace = 5 * time.Second
 )
 
 type mpLane struct {
@@ -81,6 +85,7 @@ type multipathFlow struct {
 
 	classifier        *classifier.Classifier
 	started           time.Time
+	completionGrace   time.Duration
 	bytesUp           atomic.Uint64
 	bytesDown         atomic.Uint64
 	class             atomic.Uint32
@@ -115,7 +120,7 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, maxLaneEvents), laneErr: make(chan laneFailure, maxLaneEvents),
 		finalAck: make(chan struct{}, 1), sendDone: make(chan struct{}),
 		done:       make(chan struct{}),
-		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(),
+		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
 		replay: make(map[uint64]protocol.Frame), replayNotify: make(chan struct{}, 1),
 	}
 	f.telemetryID = nextTelemetryID.Add(1)
@@ -394,8 +399,11 @@ func (f *multipathFlow) chooseLane(bulk bool) (*mpLane, error) {
 func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	telemetryStop := make(chan struct{})
 	go f.telemetryLoop(telemetryStop)
+	completionStop := make(chan struct{})
+	go f.completionWatchdog(completionStop)
 	defer f.signalDone()
 	defer func() {
+		close(completionStop)
 		close(telemetryStop)
 		if f.metrics != nil {
 			f.metrics.RemoveQUIC(f.telemetryID)
@@ -470,6 +478,45 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	stats.BytesRead = f.bytesDown.Load()
 	stats.LaneBytes = f.laneStats()
 	return stats, nil
+}
+
+// completionWatchdog handles the one remaining shutdown race that transport
+// recovery cannot solve: both application FINs are known, but the final ACK
+// is lost while the last physical lane is closing. The FIN pair is the
+// correctness boundary; after a small grace period it is safe to release all
+// workers and lanes. Normal completion stops run before this timer fires.
+func (f *multipathFlow) completionWatchdog(stop <-chan struct{}) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	grace := f.completionGrace
+	if grace <= 0 {
+		grace = flowCompletionGrace
+	}
+	var bothSince time.Time
+	for {
+		select {
+		case <-ticker.C:
+			if f.finSent.Load() && f.remoteFinSeen.Load() {
+				if bothSince.IsZero() {
+					bothSince = time.Now()
+					continue
+				}
+				if time.Since(bothSince) >= grace {
+					if f.metrics != nil {
+						f.metrics.CompletionTimeout()
+					}
+					f.closeAll()
+					return
+				}
+			} else {
+				bothSince = time.Time{}
+			}
+		case <-stop:
+			return
+		case <-f.ctx.Done():
+			return
+		}
+	}
 }
 
 func (f *multipathFlow) telemetryLoop(stop <-chan struct{}) {
@@ -555,6 +602,16 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 			select {
 			case <-f.finalAck:
 				return nil
+			case <-f.done:
+				// Both FIN directions prove that all application bytes have
+				// crossed the logical flow. A final ACK may be lost during the
+				// normal last-lane close race; the completed-session tombstone
+				// can replay it on a replacement lane, so do not retain this
+				// worker indefinitely.
+				if f.finSent.Load() && f.remoteFinSeen.Load() {
+					return nil
+				}
+				return errors.New("flow closed before final acknowledgement")
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -886,6 +943,16 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 			default:
 				return fmt.Errorf("unexpected flow frame type %d", frame.Header.Type)
 			}
+		case <-f.done:
+			// closeAll is used by the completion watcher after both FIN
+			// directions have been observed, and by fatal shutdown paths.
+			// In the former case no additional frame is required; in the
+			// latter run has already selected the original error and is only
+			// draining this worker.
+			if f.finSent.Load() && f.remoteFinSeen.Load() {
+				return nil
+			}
+			return errors.New("flow closed")
 		case <-ctx.Done():
 			return ctx.Err()
 		}
