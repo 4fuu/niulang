@@ -24,7 +24,10 @@ const (
 	maxLaneWriteQueue   = 64
 	maxReplayBytes      = 8 * 1024 * 1024
 	maxReplayFrames     = 4096
-	laneReplacementWait = 15 * time.Second
+	// Must exceed QUIC dead-path detection plus TCP handshake time. The
+	// client normally detects a blackhole at ~15 s, then needs one scheduler
+	// tick and a bounded TCP handshake before the replacement can arrive.
+	laneReplacementWait = 45 * time.Second
 )
 
 type mpLane struct {

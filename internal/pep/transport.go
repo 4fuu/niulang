@@ -153,9 +153,12 @@ func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPoo
 
 func quicConfig() *quic.Config {
 	return &quic.Config{
-		HandshakeIdleTimeout:           10 * time.Second,
-		MaxIdleTimeout:                 2 * time.Minute,
-		KeepAlivePeriod:                20 * time.Second,
+		HandshakeIdleTimeout: 10 * time.Second,
+		// Existing-flow TCP rescue cannot begin until QUIC declares the
+		// black-holed lane dead. Keep this bound well below application-level
+		// request timeouts while allowing several PTOs on a 200 ms WAN.
+		MaxIdleTimeout:                 15 * time.Second,
+		KeepAlivePeriod:                5 * time.Second,
 		InitialStreamReceiveWindow:     512 * 1024,
 		MaxStreamReceiveWindow:         8 * 1024 * 1024,
 		InitialConnectionReceiveWindow: 1 * 1024 * 1024,
