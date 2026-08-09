@@ -111,3 +111,9 @@ returned HTTP 200, exactly 10,485,760 body bytes, and curl exit 0 in 2.736 s
 approximately 199 ms smoothed RTT, and zero QUIC loss at that sample. These
 are deployment and observability checks, not a replacement for the repeated
 real-path campaign above.
+
+The final `6301a47` build was then smoke-tested with a fresh Google
+`generate_204`: HTTP 204, zero curl errors, 1.004 s total time, and the local
+registry reported 1 completed / 0 failed flow and 0 lane failures. The remote
+registry reported the same clean completion and zero lane failures after the
+normal close handshake.
