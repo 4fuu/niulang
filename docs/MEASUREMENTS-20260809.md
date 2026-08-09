@@ -78,7 +78,16 @@ It currently does **not** prove:
 - seamless mid-session UDP-to-TCP recovery; or
 - safety for an unattended production Clash profile.
 
+## TCP fallback smoke test
+
+For a separate smoke test, the isolated listener was temporarily run with
+`--transport tcp` (UDP was absent), while the client used `--transport auto`.
+A 64 KiB HTTP range request completed in 2.99 s, and the client completion
+counter identified the lane as `Kind: tcp`. The normal dual TCP/UDP systemd
+service was restored and verified active immediately afterward. This verifies
+new-flow fallback selection only; it is not a seamless mid-session recovery
+test.
+
 The next transport experiment should compare a maintained BBR/rate-based
 QUIC congestion controller against this stock CUBIC baseline before changing
 the lane scheduler again.
-
