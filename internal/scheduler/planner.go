@@ -77,7 +77,13 @@ func (p *Planner) Decide(class classifier.Class, m Metrics) Decision {
 		if m.AvailableLanes > potential {
 			potential = m.AvailableLanes
 		}
-		if potential < p.cfg.BulkStartLanes || !m.UDPHealthy {
+		if !m.UDPHealthy {
+			return Decision{TargetLanes: 1, Class: class, Reason: "bulk start constrained by healthy transport"}
+		}
+		if m.BaselineRTT > 0 && m.CurrentRTT > m.BaselineRTT+p.cfg.InteractiveRTTBudget {
+			return Decision{TargetLanes: maxInt(1, current-1), Class: class, Reason: "retire lane: RTT budget exceeded"}
+		}
+		if potential < p.cfg.BulkStartLanes {
 			return Decision{TargetLanes: 1, Class: class, Reason: "bulk start constrained by healthy transport"}
 		}
 		if current < p.cfg.BulkStartLanes {

@@ -1,9 +1,12 @@
 package metrics
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestRegistryCountersAndHandler(t *testing.T) {
@@ -13,6 +16,10 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	r.LaneFailure()
 	r.LaneReplacement()
 	r.Fallback()
+	r.ObserveQUIC(1, QUICObservation{
+		Lanes: 2, LatestRTT: 250 * time.Millisecond, SmoothedRTT: 200 * time.Millisecond,
+		BytesSent: 100, BytesReceived: 200, BytesLost: 3, PacketsLost: 1,
+	})
 	r.FlowFinished(10, 20, false)
 	r.FlowStarted()
 	r.FlowFinished(1, 2, true)
@@ -22,7 +29,37 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "wanopt_lane_replacements_total 1") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "wanopt_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "wanopt_quic_smoothed_rtt_seconds 0.200000000") {
 		t.Fatalf("unexpected exposition: %s", rec.Body.String())
+	}
+}
+
+func TestFlowFinishedNeverMakesActiveGaugeNegative(t *testing.T) {
+	r := New()
+	const workers = 64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			r.FlowFinished(0, 0, true)
+		}()
+	}
+	wg.Wait()
+	if got := r.Snapshot().ActiveFlows; got != 0 {
+		t.Fatalf("active gauge = %d, want 0", got)
+	}
+}
+
+func TestMetricsHandlerRejectsMutationMethods(t *testing.T) {
+	r := New()
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/metrics", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+	r.RemoveQUIC(1)
+	if got := r.Snapshot().QUICLanes; got != 0 {
+		t.Fatalf("removed QUIC telemetry still reports %d lanes", got)
 	}
 }

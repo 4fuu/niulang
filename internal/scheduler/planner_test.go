@@ -23,7 +23,7 @@ func TestPlannerStartsBulkWithTwoLanes(t *testing.T) {
 	}
 }
 
-func TestPlannerStopsGrowthWhenLatencyBudgetExceeded(t *testing.T) {
+func TestPlannerRetiresLaneWhenLatencyBudgetExceeded(t *testing.T) {
 	p := New(DefaultConfig())
 	d := p.Decide(classifier.ClassBulk, Metrics{
 		CurrentLanes: 4,
@@ -33,8 +33,19 @@ func TestPlannerStopsGrowthWhenLatencyBudgetExceeded(t *testing.T) {
 		BaselineRTT:  200 * time.Millisecond,
 		CurrentRTT:   300 * time.Millisecond,
 	})
-	if d.TargetLanes != 4 {
-		t.Fatalf("target lanes = %d, want 4", d.TargetLanes)
+	if d.TargetLanes != 3 {
+		t.Fatalf("target lanes = %d, want 3", d.TargetLanes)
+	}
+}
+
+func TestPlannerHoldsOneLaneWhenLatencyBudgetExceeded(t *testing.T) {
+	p := New(DefaultConfig())
+	d := p.Decide(classifier.ClassBulk, Metrics{
+		CurrentLanes: 1, HealthyLanes: 1, AvailableLanes: 8, UDPHealthy: true,
+		BaselineRTT: 200 * time.Millisecond, CurrentRTT: 300 * time.Millisecond,
+	})
+	if d.TargetLanes != 1 {
+		t.Fatalf("target lanes = %d, want 1", d.TargetLanes)
 	}
 }
 

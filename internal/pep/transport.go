@@ -26,6 +26,12 @@ const (
 
 const defaultALPN = "wanopt/1"
 
+const (
+	defaultAdaptiveMinBytesPerSec = 64 * 1024
+	defaultAdaptiveMaxBytesPerSec = 200 * 1024 * 1024
+	maxConfiguredSessions         = 1 << 16
+)
+
 // CongestionControlKind selects the QUIC sender. Reno leaves the apNet
 // quic-go default untouched and is the safe control. Adaptive is a
 // rate-estimating controller for unknown paths. Brutal is a fixed-rate mode
@@ -91,6 +97,19 @@ type streamConn interface {
 	SetDeadline(time.Time) error
 }
 
+// laneTransportStats is intentionally a small internal projection of QUIC's
+// connection counters.  Keeping the QUIC type out of the flow and metrics
+// packages lets TCP rescue lanes remain dependency-independent.
+type laneTransportStats struct {
+	latestRTT, smoothedRTT   time.Duration
+	bytesSent, bytesReceived uint64
+	bytesLost, packetsLost   uint64
+}
+
+type laneStatsProvider interface {
+	transportStats() laneTransportStats
+}
+
 type quicStreamConn struct {
 	stream *quic.Stream
 	conn   *quic.Conn
@@ -98,10 +117,25 @@ type quicStreamConn struct {
 	once   sync.Once
 }
 
+func (c *quicStreamConn) transportStats() laneTransportStats {
+	if c == nil || c.conn == nil {
+		return laneTransportStats{}
+	}
+	s := c.conn.ConnectionStats()
+	return laneTransportStats{
+		latestRTT: s.LatestRTT, smoothedRTT: s.SmoothedRTT,
+		bytesSent: s.BytesSent, bytesReceived: s.BytesReceived,
+		bytesLost: s.BytesLost, packetsLost: s.PacketsLost,
+	}
+}
+
 func (c *quicStreamConn) Read(p []byte) (int, error)  { return c.stream.Read(p) }
 func (c *quicStreamConn) Write(p []byte) (int, error) { return c.stream.Write(p) }
 func (c *quicStreamConn) SetDeadline(t time.Time) error {
 	return c.stream.SetDeadline(t)
+}
+func (c *quicStreamConn) SetWriteDeadline(t time.Time) error {
+	return c.stream.SetWriteDeadline(t)
 }
 func (c *quicStreamConn) Close() error {
 	var err error

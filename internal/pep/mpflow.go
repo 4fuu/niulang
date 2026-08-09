@@ -18,6 +18,8 @@ import (
 	"github.com/icourses-dev/wanopt/internal/protocol"
 )
 
+var nextTelemetryID atomic.Uint64
+
 const (
 	maxLaneEvents       = 256
 	maxReassemblyBytes  = 8 * 1024 * 1024
@@ -89,6 +91,9 @@ type multipathFlow struct {
 	doneOnce          sync.Once
 	finished          atomic.Bool
 	nextJoinID        uint64
+	telemetryID       uint64
+	baselineRTTNS     atomic.Int64
+	currentRTTNS      atomic.Int64
 
 	replayMu     sync.Mutex
 	replay       map[uint64]protocol.Frame
@@ -111,6 +116,7 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(),
 		replay: make(map[uint64]protocol.Frame), replayNotify: make(chan struct{}, 1),
 	}
+	f.telemetryID = nextTelemetryID.Add(1)
 	f.class.Store(uint32(protocol.ClassNew))
 	return f
 }
@@ -160,7 +166,7 @@ func (f *multipathFlow) writeLane(lane *mpLane) {
 		case <-f.ctx.Done():
 			return
 		}
-		if err := lane.fc.Write(frame); err != nil {
+		if err := lane.fc.WriteContext(f.ctx, frame); err != nil {
 			f.failLane(lane, fmt.Errorf("lane %d write: %w", lane.id, err))
 			return
 		}
@@ -176,13 +182,46 @@ type flowSnapshot struct {
 	HealthyLanes int
 	Bytes        uint64
 	Elapsed      time.Duration
+	BaselineRTT  time.Duration
+	CurrentRTT   time.Duration
 }
 
 func (f *multipathFlow) snapshot() flowSnapshot {
 	lanes := f.healthyLanes()
+	f.observeTransport(lanes)
 	return flowSnapshot{
 		Class: classifier.Class(f.classifier.Class()), CurrentLanes: f.laneCount(), HealthyLanes: len(lanes),
 		Bytes: f.bytesUp.Load() + f.bytesDown.Load(), Elapsed: time.Since(f.started),
+		BaselineRTT: time.Duration(f.baselineRTTNS.Load()), CurrentRTT: time.Duration(f.currentRTTNS.Load()),
+	}
+}
+
+func (f *multipathFlow) observeTransport(lanes []*mpLane) {
+	var observation metrics.QUICObservation
+	for _, lane := range lanes {
+		provider, ok := lane.fc.conn.(laneStatsProvider)
+		if !ok {
+			continue
+		}
+		stats := provider.transportStats()
+		observation.Lanes++
+		if stats.latestRTT > observation.LatestRTT {
+			observation.LatestRTT = stats.latestRTT
+		}
+		if stats.smoothedRTT > observation.SmoothedRTT {
+			observation.SmoothedRTT = stats.smoothedRTT
+		}
+		observation.BytesSent += stats.bytesSent
+		observation.BytesReceived += stats.bytesReceived
+		observation.BytesLost += stats.bytesLost
+		observation.PacketsLost += stats.packetsLost
+	}
+	if observation.SmoothedRTT > 0 {
+		f.currentRTTNS.Store(observation.SmoothedRTT.Nanoseconds())
+		f.baselineRTTNS.CompareAndSwap(0, observation.SmoothedRTT.Nanoseconds())
+	}
+	if f.metrics != nil {
+		f.metrics.ObserveQUIC(f.telemetryID, observation)
 	}
 }
 
@@ -210,6 +249,36 @@ func (f *multipathFlow) retireOldestLane() bool {
 			continue
 		}
 		if victim == nil || lane.id < victim.id {
+			victim = lane
+		}
+	}
+	if victim == nil {
+		f.lanesMu.Unlock()
+		return false
+	}
+	delete(f.lanes, victim.id)
+	victim.closed.Store(true)
+	f.lanesMu.Unlock()
+	if victim.fc != nil {
+		_ = victim.fc.Close()
+	}
+	return true
+}
+
+// retireLeastProductiveLane removes one non-control lane.  It is used only
+// after the scheduler has measured a negative marginal contribution or an
+// RTT-budget violation.  The first lane is retained as the control/rescue
+// lane so a reduction never strands the logical flow without a preferred
+// path.
+func (f *multipathFlow) retireLeastProductiveLane() bool {
+	f.lanesMu.Lock()
+	var victim *mpLane
+	for _, lane := range f.lanes {
+		if lane.closed.Load() || lane.id == 0 {
+			continue
+		}
+		if victim == nil || lane.sent.Load()+lane.recv.Load() < victim.sent.Load()+victim.recv.Load() ||
+			(lane.sent.Load()+lane.recv.Load() == victim.sent.Load()+victim.recv.Load() && lane.id > victim.id) {
 			victim = lane
 		}
 	}
@@ -309,7 +378,15 @@ func (f *multipathFlow) chooseLane(bulk bool) (*mpLane, error) {
 }
 
 func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
+	telemetryStop := make(chan struct{})
+	go f.telemetryLoop(telemetryStop)
 	defer f.signalDone()
+	defer func() {
+		close(telemetryStop)
+		if f.metrics != nil {
+			f.metrics.RemoveQUIC(f.telemetryID)
+		}
+	}()
 	defer f.finished.Store(true)
 	stats := FlowStats{Started: f.started}
 	results := make(chan error, 2)
@@ -367,6 +444,21 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	stats.BytesRead = f.bytesDown.Load()
 	stats.LaneBytes = f.laneStats()
 	return stats, nil
+}
+
+func (f *multipathFlow) telemetryLoop(stop <-chan struct{}) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			f.observeTransport(f.healthyLanes())
+		case <-stop:
+			return
+		case <-f.ctx.Done():
+			return
+		}
+	}
 }
 
 func (f *multipathFlow) signalDone() {
@@ -621,7 +713,7 @@ func (f *multipathFlow) writeControl(ctx context.Context, frame protocol.Frame, 
 			if attempted != nil && attempted[lane.id] {
 				continue
 			}
-			if err := lane.fc.Write(frame); err != nil {
+			if err := lane.fc.WriteContext(ctx, frame); err != nil {
 				f.failLane(lane, fmt.Errorf("lane %d control write: %w", lane.id, err))
 				if attempted == nil {
 					attempted = make(map[uint64]bool)
