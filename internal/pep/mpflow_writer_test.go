@@ -2,10 +2,12 @@ package pep
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 )
 
@@ -124,5 +126,16 @@ func TestRetireLeastProductiveLaneKeepsControlLane(t *testing.T) {
 	}
 	if flow.lanes[0].closed.Load() {
 		t.Fatal("control lane was retired")
+	}
+}
+
+func TestExpectedCloseDoesNotCountAsLaneFailure(t *testing.T) {
+	registry := metrics.New()
+	flow := &multipathFlow{done: make(chan struct{}), metrics: registry}
+	lane := &mpLane{id: 1}
+	flow.finished.Store(true)
+	flow.failLane(lane, errors.New("normal close"))
+	if got := registry.Snapshot().LaneFailures; got != 0 {
+		t.Fatalf("normal close exported as %d lane failures", got)
 	}
 }

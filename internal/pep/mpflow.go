@@ -338,6 +338,11 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 	if f.finished.Load() {
 		return
 	}
+	select {
+	case <-f.done:
+		return
+	default:
+	}
 	if f.metrics != nil {
 		f.metrics.LaneFailure()
 	}
@@ -892,6 +897,10 @@ func (f *multipathFlow) observe(n int, up bool) bool {
 
 func (f *multipathFlow) closeAll() {
 	f.closeOnce.Do(func() {
+		// Mark completion before closing physical lanes. Their reader goroutines
+		// can observe the resulting EOF concurrently; those expected shutdown
+		// errors must not be exported as transport failures.
+		f.finished.Store(true)
 		_ = f.inner.Close()
 		f.lanesMu.RLock()
 		defer f.lanesMu.RUnlock()
