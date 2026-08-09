@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/classifier"
+	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/scheduler"
 	"github.com/icourses-dev/wanopt/internal/session"
@@ -18,35 +19,38 @@ import (
 )
 
 type ClientConfig struct {
-	ListenAddr          string
-	RemoteAddr          string
-	ServerName          string
-	LocalAddress        string
-	Secret              []byte
-	RootCAs             *x509.CertPool
-	MaxPayload          uint32
-	ChunkSize           int
-	DialTimeout         time.Duration
-	HandshakeTimeout    time.Duration
-	MaxSessions         int
-	Transport           TransportKind
-	Congestion          CongestionControlKind
-	BrutalBytesPerSec   uint64
-	AdaptiveMinBytesSec uint64
-	AdaptiveMaxBytesSec uint64
-	FallbackDelay       time.Duration
-	UDPFailureThreshold int
-	UDPCooldown         time.Duration
-	InitialLanes        int
-	MaxLanes            int
-	BulkStartLanes      int
-	MinimumMarginalGain float64
-	Logger              *slog.Logger
+	ListenAddr                    string
+	RemoteAddr                    string
+	ServerName                    string
+	LocalAddress                  string
+	Secret                        []byte
+	RootCAs                       *x509.CertPool
+	MaxPayload                    uint32
+	ChunkSize                     int
+	DialTimeout                   time.Duration
+	HandshakeTimeout              time.Duration
+	MaxSessions                   int
+	Transport                     TransportKind
+	Congestion                    CongestionControlKind
+	BrutalBytesPerSec             uint64
+	AdaptiveMinBytesSec           uint64
+	AdaptiveMaxBytesSec           uint64
+	AggregateBytesPerSec          uint64
+	InteractiveReserveBytesPerSec uint64
+	FallbackDelay                 time.Duration
+	UDPFailureThreshold           int
+	UDPCooldown                   time.Duration
+	InitialLanes                  int
+	MaxLanes                      int
+	BulkStartLanes                int
+	MinimumMarginalGain           float64
+	Logger                        *slog.Logger
 }
 
 type Client struct {
 	cfg       ClientConfig
 	udpHealth *udpHealth
+	budget    *limiter.Budget
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
@@ -116,7 +120,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.MinimumMarginalGain <= 0 {
 		cfg.MinimumMarginalGain = 0.10
 	}
-	return &Client{cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown)}, nil
+	return &Client{
+		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
+		budget: limiter.New(limiter.Config{
+			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
+		}),
+	}, nil
 }
 
 func (c *Client) Serve(ctx context.Context) error {
@@ -184,9 +193,10 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		c.cfg.Logger.Warn("remote flow open failed", "error", err)
 		return
 	}
-	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown)
+	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget)
 	if err := flowSession.addLane(&mpLane{id: flow.laneID, kind: flow.kind, fc: flow.fc}); err != nil {
 		_ = flow.fc.Close()
+		flowSession.closeAll()
 		return
 	}
 	if c.cfg.InitialLanes > 1 {
@@ -197,7 +207,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		c.openAdditionalLanes(ctx, flowSession, flow.sessionID, flow.flowID, flow.kind)
 	}
 	if err := socks5.WriteReply(inner, socks5.ReplySucceeded, nil); err != nil {
-		_ = flow.fc.Close()
+		flowSession.closeAll()
 		return
 	}
 	_ = inner.SetDeadline(time.Time{})
@@ -310,11 +320,11 @@ func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16
 	return &authenticatedLane{fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID}, nil
 }
 
-func (c *Client) openJoinLane(ctx context.Context, sessionID [16]byte, flowID, laneID uint64) (*mpLane, error) {
-	// Striping over TCP is intentionally disabled. The session's fallback lane
-	// is reliable, but several nested TCP congestion controllers can amplify
-	// head-of-line blocking under loss.
-	lane, err := c.dialJoinLane(ctx, TransportQUIC, sessionID, laneID)
+func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID [16]byte, flowID, laneID uint64) (*mpLane, error) {
+	if kind != TransportQUIC && kind != TransportTCP {
+		return nil, fmt.Errorf("unsupported join transport %q", kind)
+	}
+	lane, err := c.dialJoinLane(ctx, kind, sessionID, laneID)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +343,7 @@ func (c *Client) openJoinLane(ctx context.Context, sessionID [16]byte, flowID, l
 		_ = lane.fc.Close()
 		return nil, errors.New("invalid lane join acknowledgement")
 	}
-	return &mpLane{id: laneID, kind: TransportQUIC, fc: lane.fc}, nil
+	return &mpLane{id: laneID, kind: kind, fc: lane.fc}, nil
 }
 
 func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, initialKind TransportKind) {
@@ -348,7 +358,7 @@ func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, s
 		if err != nil {
 			return
 		}
-		lane, err := c.openJoinLane(ctx, sessionID, flowID, laneID)
+		lane, err := c.openJoinLane(ctx, TransportQUIC, sessionID, flowID, laneID)
 		if err != nil {
 			c.cfg.Logger.Warn("additional lane unavailable", "lane", laneID, "error", err)
 			// Keep the already-authenticated lane usable. Retrying the same
@@ -365,16 +375,17 @@ func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, s
 }
 
 func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, initialKind TransportKind) {
-	if initialKind != TransportQUIC || c.cfg.MaxLanes <= 1 {
+	if initialKind != TransportQUIC {
 		return
 	}
 	planner := scheduler.New(scheduler.Config{
 		MaxLanes: c.cfg.MaxLanes, InteractiveLanes: 1, BulkStartLanes: c.cfg.BulkStartLanes,
 		MinimumMarginalGain: c.cfg.MinimumMarginalGain, InteractiveRTTBudget: 40 * time.Millisecond,
 	})
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	var previous float64
+	var lastDecision time.Time
 	for {
 		select {
 		case <-flow.doneChan():
@@ -383,6 +394,24 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			return
 		case <-ticker.C:
 			snapshot := flow.snapshot()
+			if snapshot.HealthyLanes == 0 {
+				if err := c.openRecoveryLane(ctx, flow, sessionID, flowID); err != nil {
+					c.cfg.Logger.Warn("lane recovery unavailable", "error", err)
+				}
+				continue
+			}
+			// Once a TCP rescue lane is installed, keep the session on that
+			// reliable lane. TCP/QUIC striping compounds head-of-line blocking
+			// and would make the fallback less predictable.
+			for _, lane := range flow.healthyLanes() {
+				if lane.kind == TransportTCP {
+					return
+				}
+			}
+			if !lastDecision.IsZero() && time.Since(lastDecision) < 2*time.Second {
+				continue
+			}
+			lastDecision = time.Now()
 			if snapshot.Class != classifier.ClassBulk {
 				continue
 			}
@@ -404,7 +433,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				if err != nil {
 					return
 				}
-				lane, err := c.openJoinLane(ctx, sessionID, flowID, laneID)
+				lane, err := c.openJoinLane(ctx, TransportQUIC, sessionID, flowID, laneID)
 				if err != nil {
 					c.cfg.Logger.Warn("adaptive lane unavailable", "lane", laneID, "error", err)
 					break
@@ -416,6 +445,28 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			}
 		}
 	}
+}
+
+func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64) error {
+	laneID, err := flow.allocateJoinID()
+	if err != nil {
+		return err
+	}
+	kind := TransportQUIC
+	if c.cfg.Transport == TransportAuto {
+		// Losing every QUIC lane is a stronger signal than a failed probe.
+		// Install TCP immediately so recovery fits inside the bounded grace
+		// period; later new flows may probe UDP again through the health race.
+		kind = TransportTCP
+	}
+	lane, err := c.openJoinLane(ctx, kind, sessionID, flowID, laneID)
+	if err != nil {
+		return err
+	}
+	if kind == TransportQUIC {
+		c.udpHealth.success()
+	}
+	return flow.addLane(lane)
 }
 
 func (c *Client) chooseAuthenticatedLane(ctx context.Context) (*authenticatedLane, error) {

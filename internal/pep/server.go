@@ -12,27 +12,30 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
+	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/session"
 )
 
 type ServerConfig struct {
-	ListenAddr          string
-	Certificate         tls.Certificate
-	Secret              []byte
-	MaxPayload          uint32
-	ChunkSize           int
-	HandshakeTimeout    time.Duration
-	MaxSessions         int
-	DestinationPolicy   DestinationPolicy
-	EnableTCP           bool
-	EnableQUIC          bool
-	Congestion          CongestionControlKind
-	BrutalBytesPerSec   uint64
-	AdaptiveMinBytesSec uint64
-	AdaptiveMaxBytesSec uint64
-	MaxLanes            int
-	Logger              *slog.Logger
+	ListenAddr                    string
+	Certificate                   tls.Certificate
+	Secret                        []byte
+	MaxPayload                    uint32
+	ChunkSize                     int
+	HandshakeTimeout              time.Duration
+	MaxSessions                   int
+	DestinationPolicy             DestinationPolicy
+	EnableTCP                     bool
+	EnableQUIC                    bool
+	Congestion                    CongestionControlKind
+	BrutalBytesPerSec             uint64
+	AdaptiveMinBytesSec           uint64
+	AdaptiveMaxBytesSec           uint64
+	AggregateBytesPerSec          uint64
+	InteractiveReserveBytesPerSec uint64
+	MaxLanes                      int
+	Logger                        *slog.Logger
 }
 
 type Server struct {
@@ -42,25 +45,24 @@ type Server struct {
 	sessionsMu       sync.RWMutex
 	sessions         map[[16]byte]*serverFlow
 	maxObservedLanes atomic.Int64
+	budget           *limiter.Budget
 }
 
 type serverFlow struct {
 	flow     *multipathFlow
 	maxLanes int
 	mu       sync.Mutex
-	lanes    int
 }
 
 func (s *serverFlow) addLane(lane *mpLane) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.lanes >= s.maxLanes {
+	if s.flow.laneCount() >= s.maxLanes {
 		return errors.New("flow lane limit reached")
 	}
 	if err := s.flow.addLane(lane); err != nil {
 		return err
 	}
-	s.lanes++
 	return nil
 }
 
@@ -112,6 +114,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		replay:    session.NewReplayGuard(10*time.Minute, cfg.MaxSessions*4),
 		semaphore: make(chan struct{}, cfg.MaxSessions),
 		sessions:  make(map[[16]byte]*serverFlow),
+		budget:    limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 	}, nil
 }
 
@@ -304,18 +307,21 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 		return
 	}
 	defer destinationConn.Close()
-	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp)
+	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget)
 	serverSession := &serverFlow{flow: flow, maxLanes: s.cfg.MaxLanes}
 	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
+		flow.closeAll()
 		return
 	}
-	s.observeLanes(serverSession.lanes)
+	s.observeLanes(serverSession.flow.laneCount())
 	if !s.registerSession(sessionID, serverSession) {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetFlowLimit, "session already exists")})
+		flow.closeAll()
 		return
 	}
 	defer s.unregisterSession(sessionID, serverSession)
 	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}}); err != nil {
+		flow.closeAll()
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -349,7 +355,7 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetFlowLimit, "lane unavailable")})
 		return
 	}
-	s.observeLanes(serverSession.lanes)
+	s.observeLanes(serverSession.flow.laneCount())
 	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
 		return
 	}

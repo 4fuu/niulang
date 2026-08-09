@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/classifier"
+	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/multipath"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 )
@@ -20,20 +21,33 @@ const (
 	maxLaneEvents       = 256
 	maxReassemblyBytes  = 8 * 1024 * 1024
 	maxReassemblyFrames = 4096
+	maxLaneWriteQueue   = 64
+	maxReplayBytes      = 8 * 1024 * 1024
+	maxReplayFrames     = 4096
+	laneReplacementWait = 15 * time.Second
 )
 
 type mpLane struct {
-	id     uint64
-	kind   TransportKind
-	fc     *frameConn
-	closed atomic.Bool
-	sent   atomic.Uint64
-	recv   atomic.Uint64
+	id        uint64
+	kind      TransportKind
+	fc        *frameConn
+	writeQ    chan protocol.Frame
+	writeDone chan struct{}
+	closed    atomic.Bool
+	sent      atomic.Uint64
+	recv      atomic.Uint64
 }
 
 type inboundEvent struct {
 	lane  *mpLane
 	frame protocol.Frame
+}
+
+// laneFailure is emitted once for a physical lane. The identity prevents a
+// delayed error from an old lane being confused with a replacement failure.
+type laneFailure struct {
+	lane *mpLane
+	err  error
 }
 
 type multipathFlow struct {
@@ -42,16 +56,18 @@ type multipathFlow struct {
 	sessionID [16]byte
 	flowID    uint64
 	chunkSize int
+	budget    *limiter.Budget
 
 	sendAckFlag uint16
 	recvAckFlag uint16
 
-	lanesMu    sync.RWMutex
-	lanes      map[uint64]*mpLane
-	laneCursor int
+	lanesMu      sync.RWMutex
+	lanes        map[uint64]*mpLane
+	laneCursorMu sync.Mutex
+	laneCursor   int
 
 	events   chan inboundEvent
-	laneErr  chan error
+	laneErr  chan laneFailure
 	finalAck chan struct{}
 	sendDone chan struct{}
 	done     chan struct{}
@@ -64,21 +80,30 @@ type multipathFlow struct {
 	finSequence atomic.Uint64
 	lastPayload atomic.Int64
 	closeOnce   sync.Once
+	doneOnce    sync.Once
 	finished    atomic.Bool
 	nextJoinID  uint64
+
+	replayMu     sync.Mutex
+	replay       map[uint64]protocol.Frame
+	replayNotify chan struct{}
+	replayBytes  uint64
+	acked        uint64
+	highestSent  uint64
 }
 
-func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16) *multipathFlow {
+func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget) *multipathFlow {
 	if chunkSize <= 0 {
 		chunkSize = defaultChunkSize
 	}
 	f := &multipathFlow{
-		ctx: ctx, inner: inner, sessionID: sessionID, flowID: flowID, chunkSize: chunkSize,
+		ctx: ctx, inner: inner, sessionID: sessionID, flowID: flowID, chunkSize: chunkSize, budget: budget,
 		sendAckFlag: sendAckFlag, recvAckFlag: recvAckFlag,
-		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, maxLaneEvents), laneErr: make(chan error, 1),
+		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, maxLaneEvents), laneErr: make(chan laneFailure, maxLaneEvents),
 		finalAck: make(chan struct{}, 1), sendDone: make(chan struct{}),
 		done:       make(chan struct{}),
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(),
+		replay: make(map[uint64]protocol.Frame), replayNotify: make(chan struct{}, 1),
 	}
 	f.class.Store(uint32(protocol.ClassNew))
 	return f
@@ -93,13 +118,45 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 		f.lanesMu.Unlock()
 		return errors.New("duplicate lane id")
 	}
+	if lane.writeQ == nil {
+		lane.writeQ = make(chan protocol.Frame, maxLaneWriteQueue)
+	}
+	if lane.writeDone == nil {
+		lane.writeDone = make(chan struct{})
+	}
 	f.lanes[lane.id] = lane
 	if lane.id >= f.nextJoinID {
 		f.nextJoinID = lane.id + 1
 	}
 	f.lanesMu.Unlock()
 	go f.readLane(lane)
+	go f.writeLane(lane)
 	return nil
+}
+
+// writeLane serializes data and close frames for one lane while allowing
+// other lanes to make progress independently. The bounded queue prevents a
+// slow lane from becoming an unbounded memory sink. ACK/PING/PONG writes may
+// still call frameConn.Write directly; its mutex preserves frame integrity.
+func (f *multipathFlow) writeLane(lane *mpLane) {
+	defer close(lane.writeDone)
+	for {
+		var frame protocol.Frame
+		select {
+		case frame = <-lane.writeQ:
+		case <-f.done:
+			return
+		case <-f.ctx.Done():
+			return
+		}
+		if err := lane.fc.Write(frame); err != nil {
+			f.failLane(lane, fmt.Errorf("lane %d write: %w", lane.id, err))
+			return
+		}
+		if frame.Header.Type == protocol.TypeData {
+			lane.sent.Add(uint64(len(frame.Payload)))
+		}
+	}
 }
 
 type flowSnapshot struct {
@@ -121,7 +178,13 @@ func (f *multipathFlow) snapshot() flowSnapshot {
 func (f *multipathFlow) laneCount() int {
 	f.lanesMu.RLock()
 	defer f.lanesMu.RUnlock()
-	return len(f.lanes)
+	count := 0
+	for _, lane := range f.lanes {
+		if !lane.closed.Load() {
+			count++
+		}
+	}
+	return count
 }
 
 func (f *multipathFlow) allocateJoinID() (uint64, error) {
@@ -137,17 +200,10 @@ func (f *multipathFlow) allocateJoinID() (uint64, error) {
 }
 
 func (f *multipathFlow) readLane(lane *mpLane) {
-	defer lane.closed.Store(true)
 	for {
 		frame, err := lane.fc.Read()
 		if err != nil {
-			if f.finished.Load() {
-				return
-			}
-			select {
-			case f.laneErr <- fmt.Errorf("lane %d: %w", lane.id, err):
-			default:
-			}
+			f.failLane(lane, fmt.Errorf("lane %d: %w", lane.id, err))
 			return
 		}
 		if frame.Header.Type == protocol.TypeData {
@@ -158,6 +214,27 @@ func (f *multipathFlow) readLane(lane *mpLane) {
 		case <-f.ctx.Done():
 			return
 		}
+	}
+}
+
+// failLane transitions a lane to failed exactly once, stops both of its I/O
+// goroutines, and notifies the flow-level recovery coordinator. A failed lane
+// is never selected again, even if a buffered write completes later.
+func (f *multipathFlow) failLane(lane *mpLane, err error) {
+	if lane == nil || !lane.closed.CompareAndSwap(false, true) {
+		return
+	}
+	if lane.fc != nil {
+		_ = lane.fc.Close()
+	}
+	if f.finished.Load() {
+		return
+	}
+	select {
+	case f.laneErr <- laneFailure{lane: lane, err: err}:
+	default:
+		// The lane is already marked failed. The coordinator also observes
+		// current health directly, so coalescing notifications is safe.
 	}
 }
 
@@ -182,13 +259,15 @@ func (f *multipathFlow) chooseLane(bulk bool) (*mpLane, error) {
 	if !bulk || len(lanes) == 1 {
 		return lanes[0], nil
 	}
+	f.laneCursorMu.Lock()
+	defer f.laneCursorMu.Unlock()
 	lane := lanes[f.laneCursor%len(lanes)]
 	f.laneCursor = (f.laneCursor + 1) % len(lanes)
 	return lane, nil
 }
 
 func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
-	defer close(f.done)
+	defer f.signalDone()
 	defer f.finished.Store(true)
 	stats := FlowStats{Started: f.started}
 	results := make(chan error, 2)
@@ -207,7 +286,24 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				stats.LaneBytes = f.laneStats()
 				return stats, err
 			}
-		case err := <-f.laneErr:
+		case failure := <-f.laneErr:
+			err := failure.err
+			// A secondary lane can fail without invalidating the bytes already
+			// delivered on the logical flow. Replay unacknowledged frames on a
+			// surviving lane. If the last lane fails, or replay is impossible,
+			// fail closed and let the caller retry the application flow.
+			if len(f.healthyLanes()) == 0 {
+				if waitErr := f.waitForHealthyLane(ctx, laneReplacementWait); waitErr != nil {
+					err = fmt.Errorf("last lane failed (%v): %w", err, waitErr)
+				}
+			}
+			if len(f.healthyLanes()) > 0 {
+				if replayErr := f.replayPending(ctx); replayErr == nil {
+					continue
+				} else {
+					err = fmt.Errorf("lane failed (%v), replay failed: %w", err, replayErr)
+				}
+			}
 			f.closeAll()
 			stats.Ended = time.Now()
 			stats.BytesSent = f.bytesUp.Load()
@@ -231,6 +327,12 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	return stats, nil
 }
 
+func (f *multipathFlow) signalDone() {
+	if f.done != nil {
+		f.doneOnce.Do(func() { close(f.done) })
+	}
+}
+
 func (f *multipathFlow) laneStats() map[uint64]LaneStats {
 	f.lanesMu.RLock()
 	defer f.lanesMu.RUnlock()
@@ -251,18 +353,17 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 		n, readErr := f.inner.Read(buf)
 		if n > 0 {
 			bulk := f.observe(n, true)
-			lane, err := f.chooseLane(bulk)
-			if err != nil {
-				return err
-			}
 			payload := append([]byte(nil), buf[:n]...)
-			if err := lane.fc.Write(protocol.Frame{Header: protocol.Header{
+			frame := protocol.Frame{Header: protocol.Header{
 				Version: protocol.Version, Type: protocol.TypeData, SessionID: f.sessionID, FlowID: f.flowID,
 				Sequence: sequence, Class: protocol.Class(f.class.Load()),
-			}, Payload: payload}); err != nil {
+			}, Payload: payload}
+			if err := f.recordReplayContext(ctx, frame); err != nil {
 				return err
 			}
-			lane.sent.Add(uint64(n))
+			if err := f.enqueueOnHealthyLane(ctx, frame, bulk); err != nil {
+				return err
+			}
 			sequence += uint64(n)
 			f.bytesUp.Add(uint64(n))
 		}
@@ -271,14 +372,14 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 				return readErr
 			}
 			f.sendSequence(sequence)
-			lane, err := f.chooseLane(false)
-			if err != nil {
-				return err
-			}
-			if err := lane.fc.Write(protocol.Frame{Header: protocol.Header{
+			fin := protocol.Frame{Header: protocol.Header{
 				Version: protocol.Version, Type: protocol.TypeClose, Flags: protocol.FlagFin,
 				SessionID: f.sessionID, FlowID: f.flowID, Sequence: sequence, Class: protocol.Class(f.class.Load()),
-			}}); err != nil {
+			}}
+			if err := f.recordReplayContext(ctx, fin); err != nil {
+				return err
+			}
+			if err := f.enqueueOnHealthyLane(ctx, fin, false); err != nil {
 				return err
 			}
 			select {
@@ -291,6 +392,169 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 	}
 }
 
+func (f *multipathFlow) enqueueFrame(ctx context.Context, lane *mpLane, frame protocol.Frame) error {
+	if lane == nil || lane.closed.Load() {
+		return errors.New("lane is closed")
+	}
+	select {
+	case lane.writeQ <- frame:
+		return nil
+	case <-lane.writeDone:
+		f.failLane(lane, errors.New("lane writer stopped"))
+		return errors.New("lane writer stopped")
+	case <-f.done:
+		return errors.New("flow is closed")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (f *multipathFlow) enqueueOnHealthyLane(ctx context.Context, frame protocol.Frame, bulk bool) error {
+	if f.budget != nil {
+		interactive := !bulk
+		if err := f.budget.Wait(ctx, len(frame.Payload), interactive); err != nil {
+			return fmt.Errorf("aggregate pacing: %w", err)
+		}
+	}
+	for {
+		lane, err := f.chooseLane(bulk)
+		if err == nil {
+			if err = f.enqueueFrame(ctx, lane, frame); err == nil {
+				return nil
+			}
+		}
+		if err := f.waitForHealthyLane(ctx, laneReplacementWait); err != nil {
+			return err
+		}
+	}
+}
+
+func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Duration) error {
+	if len(f.healthyLanes()) > 0 {
+		return nil
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if len(f.healthyLanes()) > 0 {
+				return nil
+			}
+		case <-timer.C:
+			return errors.New("lane replacement timeout")
+		case <-f.done:
+			return errors.New("flow closed while waiting for lane replacement")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (f *multipathFlow) recordReplay(frame protocol.Frame) error {
+	return f.recordReplayContext(context.Background(), frame)
+}
+
+// recordReplayContext applies backpressure when the bounded replay window is
+// full. Returning an error immediately would reset a healthy application flow
+// merely because ACKs were delayed by the path; waiting is safe because the
+// caller's context and the flow shutdown path both have explicit bounds.
+func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.Frame) error {
+	if frame.Header.Type != protocol.TypeData && frame.Header.Type != protocol.TypeClose {
+		return errors.New("only data and close frames are replayable")
+	}
+	if frame.Header.Sequence > ^uint64(0)-uint64(len(frame.Payload)) {
+		return errors.New("replay sequence overflow")
+	}
+	for {
+		f.replayMu.Lock()
+		if f.replay == nil {
+			f.replay = make(map[uint64]protocol.Frame)
+		}
+		if _, exists := f.replay[frame.Header.Sequence]; exists {
+			f.replayMu.Unlock()
+			return errors.New("duplicate replay sequence")
+		}
+		if len(frame.Payload) > maxReplayBytes {
+			f.replayMu.Unlock()
+			return errors.New("replay frame exceeds buffer limit")
+		}
+		if len(f.replay)+1 <= maxReplayFrames && f.replayBytes+uint64(len(frame.Payload)) <= maxReplayBytes {
+			frame.Payload = append([]byte(nil), frame.Payload...)
+			f.replay[frame.Header.Sequence] = frame
+			f.replayBytes += uint64(len(frame.Payload))
+			end := frame.Header.Sequence + uint64(len(frame.Payload))
+			if end > f.highestSent {
+				f.highestSent = end
+			}
+			f.replayMu.Unlock()
+			return nil
+		}
+		f.replayMu.Unlock()
+		select {
+		case <-f.replayNotify:
+		case <-f.done:
+			return errors.New("flow closed while waiting for replay space")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) error {
+	f.replayMu.Lock()
+	if sequence > f.highestSent {
+		f.replayMu.Unlock()
+		return fmt.Errorf("acknowledgement %d exceeds sent sequence %d", sequence, f.highestSent)
+	}
+	if sequence < f.acked {
+		f.replayMu.Unlock()
+		return nil // delayed ACK from a slower lane
+	}
+	f.acked = sequence
+	for start, frame := range f.replay {
+		end := start + uint64(len(frame.Payload))
+		if frame.Header.Type == protocol.TypeData && end <= sequence {
+			delete(f.replay, start)
+			f.replayBytes -= uint64(len(frame.Payload))
+		}
+		if final && frame.Header.Type == protocol.TypeClose && start <= sequence {
+			delete(f.replay, start)
+		}
+	}
+	f.replayMu.Unlock()
+	select {
+	case f.replayNotify <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (f *multipathFlow) replayPending(ctx context.Context) error {
+	f.replayMu.Lock()
+	sequences := make([]uint64, 0, len(f.replay))
+	for sequence := range f.replay {
+		sequences = append(sequences, sequence)
+	}
+	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
+	frames := make([]protocol.Frame, 0, len(sequences))
+	for _, sequence := range sequences {
+		frame := f.replay[sequence]
+		frame.Payload = append([]byte(nil), frame.Payload...)
+		frames = append(frames, frame)
+	}
+	f.replayMu.Unlock()
+
+	for _, frame := range frames {
+		if err := f.enqueueOnHealthyLane(ctx, frame, frame.Header.Type == protocol.TypeData); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (f *multipathFlow) sendSequence(sequence uint64) {
 	// The sequence is immutable after FIN and is read by the receive loop when
 	// an ACK arrives. A channel would also work, but atomic storage avoids a
@@ -298,9 +562,55 @@ func (f *multipathFlow) sendSequence(sequence uint64) {
 	f.finSequence.Store(sequence)
 }
 
+func (f *multipathFlow) writeControl(ctx context.Context, frame protocol.Frame, preferred *mpLane) error {
+	var attempted map[uint64]bool
+	if preferred != nil {
+		attempted = map[uint64]bool{preferred.id: true}
+	}
+	for {
+		lanes := f.healthyLanes()
+		if len(lanes) == 0 {
+			if err := f.waitForHealthyLane(ctx, laneReplacementWait); err != nil {
+				return err
+			}
+			continue
+		}
+		for _, lane := range lanes {
+			if attempted != nil && attempted[lane.id] {
+				continue
+			}
+			if err := lane.fc.Write(frame); err != nil {
+				f.failLane(lane, fmt.Errorf("lane %d control write: %w", lane.id, err))
+				if attempted == nil {
+					attempted = make(map[uint64]bool)
+				}
+				attempted[lane.id] = true
+				continue
+			}
+			return nil
+		}
+		// Every lane in this pass failed. Start a new pass so a replacement
+		// installed by the lane manager can carry the control frame.
+		attempted = nil
+	}
+}
+
+func (f *multipathFlow) writeACK(ctx context.Context, sequence uint64, direction uint16, final bool) error {
+	flags := direction
+	if final {
+		flags |= protocol.FlagAckFinal
+	}
+	return f.writeControl(ctx, protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeAck, Flags: flags,
+		SessionID: f.sessionID, FlowID: f.flowID, Sequence: sequence,
+		Class: protocol.Class(f.class.Load()),
+	}}, nil)
+}
+
 func (f *multipathFlow) receiveInner(ctx context.Context) error {
 	reassembler := multipath.NewReassembler(multipath.Config{MaxBufferedBytes: maxReassemblyBytes, MaxBufferedFrames: maxReassemblyFrames})
 	remoteFin := false
+	var lastAckSequence uint64
 	for {
 		select {
 		case event := <-f.events:
@@ -323,6 +633,12 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 					f.observe(len(out), false)
 					f.bytesDown.Add(uint64(len(out)))
+					if next := reassembler.NextSequence(); next > lastAckSequence {
+						if err := f.writeACK(ctx, next, f.recvAckFlag, false); err != nil {
+							return err
+						}
+						lastAckSequence = next
+					}
 				}
 				if closed {
 					return errors.New("reassembler closed without FIN frame")
@@ -348,12 +664,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 							return err
 						}
 					}
-					if err := event.lane.fc.Write(protocol.Frame{Header: protocol.Header{
-						Version: protocol.Version, Type: protocol.TypeAck,
-						Flags:     protocol.FlagAckFinal | f.recvAckFlag,
-						SessionID: f.sessionID, FlowID: f.flowID, Sequence: reassembler.NextSequence(),
-						Class: protocol.Class(f.class.Load()),
-					}}); err != nil {
+					if err := f.writeACK(ctx, reassembler.NextSequence(), f.recvAckFlag, true); err != nil {
 						return err
 					}
 					remoteFin = true
@@ -364,7 +675,19 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 				}
 			case protocol.TypeAck:
-				if frame.Header.Flags&protocol.FlagAckFinal != 0 && frame.Header.Flags&f.sendAckFlag != 0 && frame.Header.Sequence == f.finSequence.Load() {
+				if frame.Header.Flags&f.sendAckFlag == 0 {
+					return errors.New("acknowledgement has wrong direction")
+				}
+				if frame.Header.Flags&protocol.FlagAckFinal == 0 {
+					if err := f.acknowledgeReplay(frame.Header.Sequence, false); err != nil {
+						return err
+					}
+					continue
+				}
+				if frame.Header.Sequence == f.finSequence.Load() {
+					if err := f.acknowledgeReplay(frame.Header.Sequence, true); err != nil {
+						return err
+					}
 					select {
 					case f.finalAck <- struct{}{}:
 					default:
@@ -372,6 +695,8 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					if remoteFin {
 						return nil
 					}
+				} else {
+					return errors.New("final acknowledgement sequence mismatch")
 				}
 			case protocol.TypeReset:
 				if len(frame.Payload) > 1 {
@@ -379,18 +704,16 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				}
 				return errors.New("peer reset flow")
 			case protocol.TypePing:
-				if err := event.lane.fc.Write(protocol.Frame{Header: protocol.Header{
+				if err := f.writeControl(ctx, protocol.Frame{Header: protocol.Header{
 					Version: protocol.Version, Type: protocol.TypePong, SessionID: f.sessionID, FlowID: f.flowID,
 					Sequence: reassembler.NextSequence(), Class: protocol.Class(f.class.Load()),
-				}, Payload: frame.Payload}); err != nil {
+				}, Payload: frame.Payload}, event.lane); err != nil {
 					return err
 				}
 			case protocol.TypePong, protocol.TypeWindow:
 			default:
 				return fmt.Errorf("unexpected flow frame type %d", frame.Header.Type)
 			}
-		case err := <-f.laneErr:
-			return err
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -399,7 +722,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 
 func (f *multipathFlow) observe(n int, up bool) bool {
 	now := time.Now()
-	f.lastPayload.Store(now.UnixNano())
+	previousPayload := f.lastPayload.Swap(now.UnixNano())
 	age := now.Sub(f.started)
 	if age <= 0 {
 		age = time.Nanosecond
@@ -415,6 +738,12 @@ func (f *multipathFlow) observe(n int, up bool) bool {
 		BytesUp: upBytes, BytesDown: downBytes,
 		UpRate: float64(upBytes) / age.Seconds(), DownRate: float64(downBytes) / age.Seconds(),
 		Age: age, Bidirectional: upBytes > 0 && downBytes > 0,
+		SinceLastPayload: func() time.Duration {
+			if previousPayload == 0 {
+				return age
+			}
+			return now.Sub(time.Unix(0, previousPayload))
+		}(),
 		SmallBidirectionalBursts: n <= 16*1024,
 	}
 	newClass := f.classifier.Observe(obs)
@@ -431,4 +760,5 @@ func (f *multipathFlow) closeAll() {
 			_ = lane.fc.Close()
 		}
 	})
+	f.signalDone()
 }
