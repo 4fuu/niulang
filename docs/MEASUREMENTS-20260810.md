@@ -237,3 +237,17 @@ are now implemented, but their resource-pressure behavior still needs a
 dedicated soak campaign. The existing
 `wanoptd-dev.service` on `:12443` was not changed by the isolated controller
 tests and remains the rollback path.
+
+## Latest development deployment
+
+The latest checked-out commit, `5213dd9`, was built as Linux/amd64 and
+installed only as `/usr/local/bin/wanoptd` for `wanoptd-dev.service`; the
+previous binary is retained at `/usr/local/bin/wanoptd-rollback-fdcb1b0`.
+The deployed SHA-256 is
+`672a1f0392177c3fc3ab575f0f01942053e0054f448019c3029355abe7875d38`.
+After restart, a fresh Google `generate_204` returned HTTP 204 in 1.043 s and
+a one-flow 10-MiB CacheFly smoke returned HTTP 200 with exactly 10,485,760
+bytes. Local and remote metrics both reported zero failed flows and zero flow
+timeouts. `wanoptd-dev`, Xray, sing-box, Cloudflare, Nginx, and the other
+pre-existing services were all active; no temporary `:12444` benchmark unit
+was left running.
