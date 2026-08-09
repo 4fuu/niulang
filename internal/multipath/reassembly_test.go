@@ -23,6 +23,23 @@ func TestReassemblerReordersAndDrains(t *testing.T) {
 	}
 }
 
+func TestReassemblerFinMayArriveBeforeMissingData(t *testing.T) {
+	r := NewReassembler(Config{MaxBufferedBytes: 64, MaxBufferedFrames: 8})
+	if _, closed, err := r.Insert(Segment{Sequence: 5, Payload: []byte(" world")}); err != nil || closed {
+		t.Fatalf("data insert: closed=%v err=%v", closed, err)
+	}
+	if _, closed, err := r.Insert(Segment{Sequence: 11, Final: true}); err != nil || closed {
+		t.Fatalf("buffered FIN insert: closed=%v err=%v", closed, err)
+	}
+	out, closed, err := r.Insert(Segment{Sequence: 0, Payload: []byte("hello")})
+	if err != nil || !closed || !bytes.Equal(out, []byte("hello world")) {
+		t.Fatalf("FIN drain: out=%q closed=%v err=%v", out, closed, err)
+	}
+	if !r.Closed() || r.NextSequence() != 11 {
+		t.Fatalf("state: closed=%v next=%d", r.Closed(), r.NextSequence())
+	}
+}
+
 func TestReassemblerBoundsOutOfOrderData(t *testing.T) {
 	r := NewReassembler(Config{MaxBufferedBytes: 4, MaxBufferedFrames: 1})
 	if _, _, err := r.Insert(Segment{Sequence: 10, Payload: []byte("12345")}); !errors.Is(err, ErrWindowExceeded) {

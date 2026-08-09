@@ -930,6 +930,25 @@ func (f *multipathFlow) writeACK(ctx context.Context, sequence uint64, direction
 	}}, nil)
 }
 
+func (f *multipathFlow) acknowledgeRemoteFIN(ctx context.Context, sequence uint64, abort bool) error {
+	f.remoteFinSequence.Store(sequence)
+	f.remoteFinSeen.Store(true)
+	if cw, ok := f.inner.(closeWriter); ok {
+		if err := cw.CloseWrite(); err != nil && !expectedHalfCloseError(err) {
+			return err
+		}
+	}
+	if err := f.writeACK(ctx, sequence, f.recvAckFlag, true); err != nil {
+		return err
+	}
+	if abort {
+		f.remoteAbort.Store(true)
+		// No response bytes remain useful after an explicit full-close.
+		_ = f.inner.Close()
+	}
+	return nil
+}
+
 func (f *multipathFlow) receiveInner(ctx context.Context) error {
 	reassembler := multipath.NewReassembler(multipath.Config{MaxBufferedBytes: maxReassemblyBytes, MaxBufferedFrames: maxReassemblyFrames})
 	remoteFin := false
@@ -985,13 +1004,35 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 				}
 				if closed {
-					return errors.New("reassembler closed without FIN frame")
+					// A FIN may arrive on one lane before an earlier data
+					// segment on another lane. Once that gap is filled,
+					// Reassembler reports closed=true here; the FIN was valid
+					// and must complete the normal ACK/half-close path.
+					abort := f.remoteAbort.Load()
+					if err := f.acknowledgeRemoteFIN(ctx, reassembler.NextSequence(), abort); err != nil {
+						return err
+					}
+					remoteFin = true
+					if abort {
+						return nil
+					}
+					select {
+					case <-f.sendDone:
+						return nil
+					default:
+					}
 				}
 			case protocol.TypeClose:
 				if frame.Header.Flags&protocol.FlagFin == 0 || len(frame.Payload) != 0 || frame.Header.Flags&protocol.FlagAckFinal != 0 || frame.Header.Flags&(protocol.FlagAckUp|protocol.FlagAckDown) != 0 {
 					return errors.New("invalid flow close frame")
 				}
 				abort := frame.Header.Flags&protocol.FlagCloseAbort != 0
+				if abort {
+					// Preserve the abort intent if the FIN is buffered behind
+					// out-of-order data; the contiguous data path above will
+					// perform the actual final ACK and close.
+					f.remoteAbort.Store(true)
+				}
 				out, closed, err := reassembler.Insert(multipath.Segment{Sequence: frame.Header.Sequence, Final: true})
 				if err != nil {
 					return err
@@ -1007,14 +1048,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 				}
 				if closed {
-					f.remoteFinSequence.Store(reassembler.NextSequence())
-					f.remoteFinSeen.Store(true)
-					if cw, ok := f.inner.(closeWriter); ok {
-						if err := cw.CloseWrite(); err != nil && !expectedHalfCloseError(err) {
-							return err
-						}
-					}
-					if err := f.writeACK(ctx, reassembler.NextSequence(), f.recvAckFlag, true); err != nil {
+					if err := f.acknowledgeRemoteFIN(ctx, reassembler.NextSequence(), abort); err != nil {
 						return err
 					}
 					if abort {
