@@ -339,6 +339,13 @@ func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID
 		_ = lane.fc.Close()
 		return nil, err
 	}
+	if response.Header.Type == protocol.TypeReset && response.Header.SessionID == sessionID && response.Header.FlowID == flowID {
+		_ = lane.fc.Close()
+		if len(response.Payload) > 1 {
+			return nil, fmt.Errorf("lane join rejected: %s", string(response.Payload[1:]))
+		}
+		return nil, errors.New("lane join rejected")
+	}
 	if response.Header.Type != protocol.TypeOpenOK || response.Header.SessionID != sessionID || response.Header.FlowID != flowID || len(response.Payload) != 0 {
 		_ = lane.fc.Close()
 		return nil, errors.New("invalid lane join acknowledgement")
@@ -386,6 +393,8 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	defer ticker.Stop()
 	var previous float64
 	var lastDecision time.Time
+	var recoveryBackoff time.Duration
+	var nextRecovery time.Time
 	for {
 		select {
 		case <-flow.doneChan():
@@ -395,8 +404,26 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 		case <-ticker.C:
 			snapshot := flow.snapshot()
 			if snapshot.HealthyLanes == 0 {
+				now := time.Now()
+				if !nextRecovery.IsZero() && now.Before(nextRecovery) {
+					continue
+				}
 				if err := c.openRecoveryLane(ctx, flow, sessionID, flowID); err != nil {
-					c.cfg.Logger.Warn("lane recovery unavailable", "error", err)
+					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+						c.cfg.Logger.Warn("lane recovery unavailable", "error", err)
+					}
+					if recoveryBackoff == 0 {
+						recoveryBackoff = time.Second
+					} else if recoveryBackoff < 15*time.Second {
+						recoveryBackoff *= 2
+						if recoveryBackoff > 15*time.Second {
+							recoveryBackoff = 15 * time.Second
+						}
+					}
+					nextRecovery = now.Add(recoveryBackoff)
+				} else {
+					recoveryBackoff = 0
+					nextRecovery = time.Time{}
 				}
 				continue
 			}
@@ -448,6 +475,18 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 }
 
 func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64) error {
+	// A replacement handshake must not outlive its logical flow. Without this
+	// bound, a dead UDP flow can keep dialing a session that the server has
+	// already unregistered after the application completed.
+	recoveryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-flow.doneChan():
+			cancel()
+		case <-recoveryCtx.Done():
+		}
+	}()
 	laneID, err := flow.allocateJoinID()
 	if err != nil {
 		return err
@@ -459,7 +498,7 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 		// period; later new flows may probe UDP again through the health race.
 		kind = TransportTCP
 	}
-	lane, err := c.openJoinLane(ctx, kind, sessionID, flowID, laneID)
+	lane, err := c.openJoinLane(recoveryCtx, kind, sessionID, flowID, laneID)
 	if err != nil {
 		return err
 	}

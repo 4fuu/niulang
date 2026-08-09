@@ -113,6 +113,11 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 	if lane == nil || lane.fc == nil {
 		return errors.New("invalid lane")
 	}
+	select {
+	case <-f.done:
+		return errors.New("flow is closed")
+	default:
+	}
 	f.lanesMu.Lock()
 	if _, exists := f.lanes[lane.id]; exists {
 		f.lanesMu.Unlock()
@@ -185,6 +190,34 @@ func (f *multipathFlow) laneCount() int {
 		}
 	}
 	return count
+}
+
+// retireOldestLane makes room for a replacement when the peer has observed a
+// dead lane but the server-side socket is still half-open. It is only used at
+// the configured lane cap; deleting the entry keeps the cap a real resource
+// bound rather than allowing unbounded historical lane IDs.
+func (f *multipathFlow) retireOldestLane() bool {
+	f.lanesMu.Lock()
+	var victim *mpLane
+	for _, lane := range f.lanes {
+		if lane.closed.Load() {
+			continue
+		}
+		if victim == nil || lane.id < victim.id {
+			victim = lane
+		}
+	}
+	if victim == nil {
+		f.lanesMu.Unlock()
+		return false
+	}
+	delete(f.lanes, victim.id)
+	victim.closed.Store(true)
+	f.lanesMu.Unlock()
+	if victim.fc != nil {
+		_ = victim.fc.Close()
+	}
+	return true
 }
 
 func (f *multipathFlow) allocateJoinID() (uint64, error) {

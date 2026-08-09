@@ -58,7 +58,13 @@ func (s *serverFlow) addLane(lane *mpLane) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.flow.laneCount() >= s.maxLanes {
-		return errors.New("flow lane limit reached")
+		// The peer can detect a dead QUIC socket before this endpoint does
+		// (for example, when the return path is black-holed). Retire one
+		// oldest active lane to admit the authenticated replacement while
+		// preserving the configured active-lane and memory bound.
+		if !s.flow.retireOldestLane() || s.flow.laneCount() >= s.maxLanes {
+			return errors.New("flow lane limit reached")
+		}
 	}
 	if err := s.flow.addLane(lane); err != nil {
 		return err
