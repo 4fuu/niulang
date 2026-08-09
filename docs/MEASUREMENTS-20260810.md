@@ -117,3 +117,46 @@ The final `6301a47` build was then smoke-tested with a fresh Google
 registry reported 1 completed / 0 failed flow and 0 lane failures. The remote
 registry reported the same clean completion and zero lane failures after the
 normal close handshake.
+
+## Post-pool and single-logical-flow campaign
+
+After the original campaign, the implementation was changed so an explicit
+`--quic-pool` option can share one bounded QUIC connection for initial/control
+streams. The server now accepts multiple streams per QUIC connection, with a
+per-stream `MaxSessions` admission bound. This was tested end-to-end with two
+logical SOCKS flows on one pooled connection, including a two-lane first flow;
+the integration test passed repeatedly.
+
+The pool was then measured on the real path with matched adaptive control. It
+was materially worse for four/eight concurrent 10 MiB flows (about 6.6–7.0
+Mbps aggregate in the first trial block) than independent lanes. This is a
+controller/path result, not a correctness failure: a shared QUIC controller
+must be a real BBR-like implementation before the pool can be the bulk
+default. The option is therefore opt-in, and the production default remains
+independent lanes for measured bulk performance.
+
+The default independent-lane build was refreshed with five trials at each
+concurrent-flow count. The rows below are aggregate wall-clock goodput, with
+the same exact-body completion rule as above. The local client selected the
+adaptive controller; the restored development service remained on its safe
+stock/Reno server control, so this refresh is deliberately labeled a real-path
+deployment result rather than a matched-controller comparison:
+
+| Workload | N=1 median Mbps | N=2 median Mbps | N=4 median Mbps | N=8 median Mbps | Completion |
+|---|---:|---:|---:|---:|---:|
+| Adaptive HTTP, refreshed | 30.06 (7.28–31.36) | 61.20 (60.05–61.80) | 118.92 (116.17–120.34) | 191.56 (179.05–205.50) | 5/5 at every N |
+
+The five N=1 aggregate observations were 31.36, 7.28, 31.18, 30.06, and
+29.74 Mbps; that single 7.28-Mbps observation is why the median interval is
+wide and why API/web tail reliability remains a release gate.
+
+The new `scripts/bench_single_flow.sh` harness measures one application
+connection per trial. A fixed eight-lane bootstrap was deliberately tested and
+was poor (median 7.64 Mbps, all 5/5 complete), because simultaneous handshakes
+and independent controllers temporarily starved the in-order reassembler. The
+behavioral scheduler with the default one-lane NEW phase and negative-marginal-
+gain retirement avoided that persistent regression: a 100 MiB single flow
+completed 2/2 at 94.0 and 99.4 Mbps (median 96.7 Mbps), and a 10 MiB dynamic
+single-flow check completed 5/5 with a 30.01-Mbps median. This is the reason
+fixed `--initial-lanes=8` is not a production recommendation; lane growth must
+be measured and reversible.

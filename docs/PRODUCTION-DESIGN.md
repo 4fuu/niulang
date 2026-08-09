@@ -51,6 +51,13 @@ reassembly window and emits cumulative acknowledgements. Selective ACK ranges
 and explicit resume tokens remain future protocol work; the current replay
 mechanism relies on duplicate-safe sequence reassembly.
 
+The implementation also has an explicit, opt-in QUIC stream pool. When
+`--quic-pool` is enabled, initial/control streams for concurrent flows share
+one bounded QUIC connection and one congestion controller, while bulk lane
+joins remain independent connections. This improves the short-flow handshake
+amortization characteristic of TUIC, but it is not the default: the measured
+path still needs a controller and queue policy that preserve bulk goodput.
+
 The scheduler must never wait for eight handshakes before acknowledging a
 short request. It should start one lane, optionally pre-warm one spare lane,
 and grow only after the classifier and a measured lane probe justify it.
@@ -119,7 +126,8 @@ only if its marginal goodput is positive and the interactive RTT budget is
 not exceeded. It should retire the worst lane after a sustained negative
 contribution, with a minimum dwell time to prevent oscillation. The current
 implementation now feeds the measured worst smoothed RTT into this guard and
-retires the least productive non-control lane when the budget is exceeded;
+retires the least productive non-control lane when the budget is exceeded or a
+negative marginal-gain probe is observed;
 controller-specific bytes-in-flight and delivery-rate signals are still needed
 to make that decision fully loss-aware.
 
