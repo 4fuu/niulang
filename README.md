@@ -30,9 +30,10 @@ tunnels. The latest five-block real-link evidence is recorded in
 pilot remains in [`docs/MEASUREMENTS-20260809.md`](docs/MEASUREMENTS-20260809.md).
 
 The prototype is still not safe to use as a general-purpose production
-tunnel: it has observed HTTP completion loss and API tail failures, accepts
-TCP CONNECT only (no destination UDP/TUN), lacks complete controller
-telemetry, and has not passed all controlled-loss/resource release gates in
+tunnel: BBR has failed on the measured path and broader loss/soak campaigns
+remain outstanding. It accepts TCP CONNECT only (no destination UDP/TUN),
+lacks complete controller telemetry, and has not passed all controlled-
+loss/resource release gates in
 [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals

@@ -91,8 +91,9 @@ state were verified restored afterward.
 The implementation now has bounded lane queues, cumulative ACK/replay,
 server-side stale-lane retirement, completion tombstones, aggregate pacing,
 UDP/TCP new-flow racing, and a tested mid-session TCP rescue. It is still not
-production-ready: HTTP completion loss and OpenAI tail failures remain, the
-SOCKS ingress is TCP-only (no destination UDP/TUN), QUIC controller/lane
+production-ready at that point in the campaign: HTTP completion loss and
+OpenAI tail failures remained, the SOCKS ingress is TCP-only (no destination
+UDP/TUN), and QUIC controller/lane
 telemetry now covers active lane count, RTT, and QUIC loss counters but still
 lacks bytes-in-flight/pacing/controller-rate signals, and controlled
 loss/reordering/MTU/fuzz/resource campaigns need broader coverage. Keep the
@@ -160,3 +161,77 @@ completed 2/2 at 94.0 and 99.4 Mbps (median 96.7 Mbps), and a 10 MiB dynamic
 single-flow check completed 5/5 with a 30.01-Mbps median. This is the reason
 fixed `--initial-lanes=8` is not a production recommendation; lane growth must
 be measured and reversible.
+
+## Post-lifecycle-hardening matched campaign
+
+Commit `49ef13c` added two correctness guards before this campaign. Adaptive
+lane growth is now limited to one speculative join per 500-ms scheduler tick,
+and a completed server tombstone replays both the peer's final ACK and the
+server's own FIN. The latter closes a real tail failure in which the complete
+HTTP body arrived but the local flow waited for a remote half-close until the
+replacement timeout. The benchmark also waits for child curls before cleaning
+its temporary directory when interrupted.
+
+The following 10-MiB CacheFly matrix used five trials at each of N=1/2/4/8,
+the exact-body completion rule above, independent QUIC lanes, and matched
+client/server controllers on the isolated `:12444` listener. These are raw
+medians over the individual flow goodputs (not a claim about a single
+application flow's aggregate rate):
+
+| Controller | N=1 median Mbps | N=2 median Mbps | N=4 median Mbps | N=8 median Mbps | Completion |
+|---|---:|---:|---:|---:|---:|
+| Reno (matched) | 29.87 | 30.08 | 28.27 | 27.17 | 75/75 |
+| Adaptive (matched) | 21.02 | 20.86 | 20.53 | 15.68 | 75/75 |
+| Brutal, 1 MiB/s/lane (matched) | 9.68 | 9.78 | 9.54 | 9.76 | 75/75 |
+| BBR-shaped (matched, stopped after release failure) | 2.90* | 2.31* | 0* | 0* | 5/5, 6/10, 0/20, 0/40 |
+
+`*` BBR values are medians of successful rows only; the run produced 45/75
+successful HTTP rows, repeated 120-second timeouts at N=8, flow failures,
+completion-watchdog events, and high lane-replacement churn. BBR is therefore
+disabled as an automatic choice. Reno is the reliability control, while
+Adaptive is the safer experimental controller for this path. Brutal is useful
+only with an operator-tested rate and an aggregate budget; it is not a
+general-purpose default.
+
+The lifecycle counters after the corrected Adaptive and Brutal campaigns were
+75 started, 75 completed, 0 failed, and 0 completion timeouts at both
+endpoints. Adaptive recorded five local and two remote lane-failure events in
+the final matrix, with two bounded replacements; these did not affect logical
+completion. The earlier Adaptive campaign before the tombstone fix recorded
+one to three local failures per 75-flow block and is retained as the
+regression evidence that motivated the change.
+
+## Fresh, reused, and interactive latency after hardening
+
+With matched Adaptive control and the fixed US egress, 30 fresh Google
+`generate_204` requests through QUIC were 30/30 HTTP 204, with median 1.035 s
+and p95 1.047 s. The first request on one reused HTTPS connection took 1.037 s;
+the following 19 requests were approximately 200 ms each (the measured WAN
+RTT). Forced TCP was 20/20 successful, with fresh median 1.225 s and p95
+1.243 s. The extra fresh latency is handshake cost, not a one-second physical
+RTT lower bound.
+
+During eight simultaneous 10-MiB downloads, a reused Google connection stayed
+at 20/20 success: after the initial 1.088-s request, the median remained about
+0.204 s and the p95 was 0.211 s. The eight bulk flows were 8/8 complete, with
+per-flow rates from 1.60 to 2.63 MB/s. This is evidence that the current
+classifier/scheduler does not starve an already-established interactive
+connection, but it is not yet a controlled packet-loss or multi-hour soak
+campaign.
+
+An exploratory 1-MiB POST to `httpbin.org` returned HTTP 200 and transferred
+the complete request body; it took 6.86 s through Adaptive. Public upload
+endpoints impose application limits and are not suitable as a throughput
+oracle, so a dedicated US-side upload sink is still required for a rigorous
+single-stream upload matrix.
+
+## Release status after this run
+
+The unbounded adaptive-join and tombstone FIN bugs are fixed and covered by
+integration tests. The project remains a development release: SOCKS5 ingress
+is still TCP CONNECT only (no UDP ASSOCIATE, destination UDP, TUN, or VLESS),
+HTTP/3 preservation is not implemented, BBR is unsafe on the measured path,
+and controlled loss/reordering/MTU, resource-limit, prolonged-soak, and
+dedicated upload campaigns remain release gates. The existing
+`wanoptd-dev.service` on `:12443` was not changed by the isolated controller
+tests and remains the rollback path.

@@ -62,7 +62,11 @@ The scheduler must never wait for eight handshakes before acknowledging a
 short request. It should start one lane, optionally pre-warm one spare lane,
 and grow only after the classifier and a measured lane probe justify it.
 Lane joins must be bounded-time and failure-tolerant; a failed join leaves
-the original flow usable.
+the original flow usable. The adaptive manager opens at most one speculative
+join per scheduler tick and stops joining as soon as both FIN directions are
+observable. This is an important resource invariant: a session that is
+already completing must not turn a rejected join into an unbounded stream of
+zero-byte lanes.
 
 ### Congestion control and pacing
 
@@ -149,7 +153,8 @@ The implementation now covers the basic bounded recovery path:
 1. a bounded sender replay buffer and cumulative ACKs;
 2. authenticated replacement-lane joins bound to the session and flow;
 3. duplicate suppression before bytes reach the application;
-4. stale-lane retirement and a 30-second completion tombstone; and
+4. stale-lane retirement and a 90-second completion tombstone that replays
+   both final directions; and
 5. an upper bound on recovery time, after which the flow is reset explicitly.
 
 The controlled UDP-blackhole test transferred a complete 100 MiB response over
