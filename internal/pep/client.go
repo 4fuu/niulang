@@ -273,8 +273,13 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	go c.manageLanes(ctx, flowSession, flow.sessionID, flow.flowID, flow.kind)
 	c.metrics.FlowStarted()
 	stats, err := flowSession.run(ctx)
-	c.metrics.FlowFinished(stats.BytesSent, stats.BytesRead, err != nil && !errors.Is(err, context.Canceled))
-	if err != nil && !errors.Is(err, context.Canceled) {
+	// A peer may close the last outer lane immediately after the application
+	// bytes and FIN exchange complete. Both direction flags are the same
+	// correctness proof used by the server tombstone path; classify a late
+	// socket EOF as a completed logical flow rather than a transport failure.
+	flowComplete := err == nil || (ctx.Err() == nil && flowSession.finSent.Load() && flowSession.remoteFinSeen.Load())
+	c.metrics.FlowFinished(stats.BytesSent, stats.BytesRead, !flowComplete && err != nil && !errors.Is(err, context.Canceled))
+	if !flowComplete && err != nil && !errors.Is(err, context.Canceled) {
 		c.cfg.Logger.Debug("local flow ended with error", "error", err, "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead, "lane_bytes", stats.LaneBytes)
 		return
 	}
