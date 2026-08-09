@@ -13,6 +13,7 @@ import (
 
 	"github.com/icourses-dev/wanopt/internal/classifier"
 	"github.com/icourses-dev/wanopt/internal/limiter"
+	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/multipath"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 )
@@ -60,6 +61,7 @@ type multipathFlow struct {
 	flowID    uint64
 	chunkSize int
 	budget    *limiter.Budget
+	metrics   *metrics.Registry
 
 	sendAckFlag uint16
 	recvAckFlag uint16
@@ -96,12 +98,12 @@ type multipathFlow struct {
 	highestSent  uint64
 }
 
-func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget) *multipathFlow {
+func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget, registry *metrics.Registry) *multipathFlow {
 	if chunkSize <= 0 {
 		chunkSize = defaultChunkSize
 	}
 	f := &multipathFlow{
-		ctx: ctx, inner: inner, sessionID: sessionID, flowID: flowID, chunkSize: chunkSize, budget: budget,
+		ctx: ctx, inner: inner, sessionID: sessionID, flowID: flowID, chunkSize: chunkSize, budget: budget, metrics: registry,
 		sendAckFlag: sendAckFlag, recvAckFlag: recvAckFlag,
 		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, maxLaneEvents), laneErr: make(chan laneFailure, maxLaneEvents),
 		finalAck: make(chan struct{}, 1), sendDone: make(chan struct{}),
@@ -266,6 +268,9 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 	}
 	if f.finished.Load() {
 		return
+	}
+	if f.metrics != nil {
+		f.metrics.LaneFailure()
 	}
 	select {
 	case f.laneErr <- laneFailure{lane: lane, err: err}:
@@ -784,8 +789,12 @@ func (f *multipathFlow) observe(n int, up bool) bool {
 		}(),
 		SmallBidirectionalBursts: n <= 16*1024,
 	}
+	oldClass := classifier.Class(f.class.Load())
 	newClass := f.classifier.Observe(obs)
 	f.class.Store(uint32(protocol.Class(newClass)))
+	if f.metrics != nil && newClass != oldClass {
+		f.metrics.ClassTransition(int(newClass))
+	}
 	return newClass == classifier.ClassBulk
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/apernet/quic-go"
 	"github.com/icourses-dev/wanopt/internal/limiter"
+	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/session"
 )
@@ -36,6 +37,7 @@ type ServerConfig struct {
 	AdaptiveMaxBytesSec           uint64
 	AggregateBytesPerSec          uint64
 	InteractiveReserveBytesPerSec uint64
+	Metrics                       *metrics.Registry
 	MaxLanes                      int
 	Logger                        *slog.Logger
 }
@@ -48,6 +50,7 @@ type Server struct {
 	sessions         map[[16]byte]*serverFlow
 	maxObservedLanes atomic.Int64
 	budget           *limiter.Budget
+	metrics          *metrics.Registry
 }
 
 type serverFlow struct {
@@ -115,6 +118,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = metrics.New()
+	}
 	if !cfg.EnableTCP && !cfg.EnableQUIC {
 		cfg.EnableTCP = true
 	}
@@ -124,8 +130,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		semaphore: make(chan struct{}, cfg.MaxSessions),
 		sessions:  make(map[[16]byte]*serverFlow),
 		budget:    limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
+		metrics:   cfg.Metrics,
 	}, nil
 }
+
+// Metrics exposes aggregate counters for an optional operator endpoint.
+func (s *Server) Metrics() *metrics.Registry { return s.metrics }
 
 func (s *Server) Serve(ctx context.Context) error {
 	serveCtx, cancel := context.WithCancel(ctx)
@@ -316,7 +326,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 		return
 	}
 	defer destinationConn.Close()
-	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget)
+	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics)
 	serverSession := &serverFlow{flow: flow, maxLanes: s.cfg.MaxLanes}
 	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
 		flow.closeAll()
@@ -339,7 +349,9 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
+	s.metrics.FlowStarted()
 	stats, err := flow.run(ctx)
+	s.metrics.FlowFinished(stats.BytesRead, stats.BytesSent, err != nil && !errors.Is(err, context.Canceled))
 	if err == nil {
 		// Keep a bounded tombstone long enough for a client that lost the
 		// final cumulative ACK to authenticate a replacement lane and finish

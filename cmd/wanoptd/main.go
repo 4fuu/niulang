@@ -9,6 +9,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -56,6 +58,7 @@ type options struct {
 	allowPrivate                  bool
 	logLevel                      string
 	jsonLogs                      bool
+	metricsListen                 string
 	showVersion                   bool
 }
 
@@ -108,6 +111,11 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		stopMetrics, err := serveMetrics(opts.metricsListen, client.Metrics(), logger)
+		if err != nil {
+			return err
+		}
+		defer stopMetrics()
 		return client.Serve(ctx)
 	case "server":
 		certificate, err := tls.LoadX509KeyPair(opts.certFile, opts.keyFile)
@@ -130,6 +138,11 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		stopMetrics, err := serveMetrics(opts.metricsListen, server.Metrics(), logger)
+		if err != nil {
+			return err
+		}
+		defer stopMetrics()
 		return server.Serve(ctx)
 	default:
 		return errors.New("--mode must be local or server")
@@ -170,6 +183,7 @@ func parseOptions(args []string) (options, error) {
 	fs.BoolVar(&opts.allowPrivate, "allow-private-destinations", false, "allow the server to reach private/link-local destinations")
 	fs.StringVar(&opts.logLevel, "log-level", "info", "debug, info, warn, or error")
 	fs.BoolVar(&opts.jsonLogs, "json-logs", false, "write structured JSON logs")
+	fs.StringVar(&opts.metricsListen, "metrics-listen", "", "optional local metrics HTTP listen address (serves /metrics)")
 	fs.BoolVar(&opts.showVersion, "version", false, "print build version")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
@@ -299,4 +313,27 @@ func goVersion() string {
 		return info.GoVersion
 	}
 	return "unknown"
+}
+
+func serveMetrics(addr string, handler http.Handler, logger *slog.Logger) (func(), error) {
+	if addr == "" {
+		return func() {}, nil
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen metrics endpoint: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", handler)
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics endpoint stopped", "error", err)
+		}
+	}()
+	return func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}, nil
 }

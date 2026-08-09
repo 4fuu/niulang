@@ -9,13 +9,12 @@ Clash profile.
 ## What the measurements imply
 
 The prototype is functionally useful, but it is not yet a production
-transport. On the direct physical path, a three-repeat 10 MiB HTTP matrix
-completed over the prototype's TCP lane at a median of 4.7, 6.9, 17.6, and
-16.5 Mbps for 1, 2, 4, and 8 *independent application flows*. A single
-logical QUIC flow was much slower and often censored by the 90-second limit;
-the server nevertheless observed payload striped across several lanes. This
-is evidence that the framing and reassembly work, not evidence that the
-current congestion controller is good.
+transport. The latest five-block campaign is summarized in
+[`MEASUREMENTS-20260810.md`](MEASUREMENTS-20260810.md): adaptive reached a
+101.8 Mbps median for eight concurrent 10 MiB HTTP flows with 40/40 complete,
+while the stock control had 33/40 complete and Brutal had 39/40. The same
+campaign still found OpenAI timeouts and long tails, so goodput alone is not a
+release criterion.
 
 The packet trace also found an effective path MTU problem. Starting QUIC at
 1200-byte packets avoids the 1441-byte probe packets that stalled the first
@@ -48,7 +47,9 @@ One logical flow has a random `session_id` and `flow_id`. The first lane is a
 control/interactive lane. Additional lanes are independent authenticated
 QUIC connections, each carrying a reliable stream of bounded frames. Every
 DATA frame carries a byte sequence number. The receiver uses a bounded
-reassembly window and emits cumulative plus selective acknowledgements.
+reassembly window and emits cumulative acknowledgements. Selective ACK ranges
+and explicit resume tokens remain future protocol work; the current replay
+mechanism relies on duplicate-safe sequence reassembly.
 
 The scheduler must never wait for eight handshakes before acknowledging a
 short request. It should start one lane, optionally pre-warm one spare lane,
@@ -60,22 +61,33 @@ the original flow usable.
 
 Each QUIC lane needs a loss-aware controller with a conservative initial
 packet size (1200 bytes) and path-specific MTU probing only after the base
-path is proven. The current stock quic-go controller is a useful correctness
-baseline, but not the production choice for this path. The next experiment
-should compare:
+path is proven. The stock apNet QUIC controller is a useful correctness
+baseline, but it is not the best measured choice for this path. A matched
+development experiment with the apNet fork found that a wanopt adaptive
+controller improved median 256-KiB goodput from 0.31 to 0.50 Mbps for one lane
+and from 1.56 to 3.00 Mbps for eight lanes. A Hysteria-style fixed-rate
+controller at 1 MiB/s per lane reached 8.44 Mbps for a one-lane 10-MiB
+download and 64.47 Mbps aggregate for eight lanes; an 8-MiB SSH upload reached
+6.95 and 49.18 Mbps respectively. Ten fresh Google requests during eight bulk
+downloads remained 10/10 successful (median 1.18 s, p95 2.19 s). These are
+path-specific development measurements, not a universal claim about Brutal or
+QUIC.
+
+Before release, compare:
 
 1. a BBR-family controller with explicit loss and queue-delay limits;
 2. a Hysteria 2/TUIC-style rate-based controller (including a Brutal-style
    mode where the operator supplies a tested target rate); and
 3. stock CUBIC/New Reno as the TCP-fallback control.
 
-The project should reuse a maintained QUIC implementation or congestion
-module (for example the implementation used by Hysteria 2) rather than
-forking cryptography or inventing a new ACK algorithm. A per-lane controller
-alone is unsafe: eight controllers can overrun the path and starve SSH. Put
-one aggregate token bucket above the lanes, reserve a small interactive
-share, and increase the bulk budget only when queue delay and retransmission
-signals stay within limits.
+The project uses the maintained apNet QUIC fork and keeps the stock controller
+available. It does not import Hysteria's `internal/` packages or fork
+cryptography. A per-lane controller alone is unsafe: eight controllers can
+overrun the path and starve SSH. The aggregate token bucket is now implemented
+above all lanes, with a reserved interactive share; an 8 MiB/s budget plus a
+512 KiB/s reserve preserved 10/10 Google requests during eight bulk downloads.
+It remains opt-in until queue-delay and retransmission guardrails are exposed
+as telemetry.
 
 The controller should expose at least RTT, smoothed RTT, bytes in flight,
 loss, pacing rate, congestion window, and delivery rate. These are needed to
@@ -116,17 +128,18 @@ When UDP is blocked, new sessions use one TCP lane and keep the same frame
 protocol and destination semantics. TCP striping is not the default: nested
 reliable congestion controllers compound head-of-line blocking under loss.
 
-Seamless fallback of an *existing* flow requires work that is not optional for
-production:
+The implementation now covers the basic bounded recovery path:
 
-1. receiver ACK/SACK ranges and a bounded sender replay buffer;
-2. a resume token bound to session, flow, and lane generation;
-3. replacement-lane authentication and sequence-range replay;
-4. duplicate suppression before bytes reach the application; and
+1. a bounded sender replay buffer and cumulative ACKs;
+2. authenticated replacement-lane joins bound to the session and flow;
+3. duplicate suppression before bytes reach the application;
+4. stale-lane retirement and a 30-second completion tombstone; and
 5. an upper bound on recovery time, after which the flow is reset explicitly.
 
-The current prototype closes a flow when its lane fails. That is an honest
-development behavior and must remain documented until resume is implemented.
+The controlled UDP-blackhole test transferred a complete 100 MiB response over
+a TCP rescue lane. This is development evidence, not a guarantee under all
+loss patterns: selective ACK ranges, path-independent resume tokens,
+intermittent blocking, and a broader fault matrix remain release gates.
 
 ## Clash Verge integration
 
@@ -175,4 +188,3 @@ measured on the real China-US path:
 6. mid-session lane replacement without duplicate or missing bytes;
 7. resource-limit, fuzz, race, and interoperability tests; and
 8. a documented rollback that leaves the existing tunnel unchanged.
-

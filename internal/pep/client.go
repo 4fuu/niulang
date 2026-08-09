@@ -12,6 +12,7 @@ import (
 
 	"github.com/icourses-dev/wanopt/internal/classifier"
 	"github.com/icourses-dev/wanopt/internal/limiter"
+	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/scheduler"
 	"github.com/icourses-dev/wanopt/internal/session"
@@ -37,6 +38,7 @@ type ClientConfig struct {
 	AdaptiveMaxBytesSec           uint64
 	AggregateBytesPerSec          uint64
 	InteractiveReserveBytesPerSec uint64
+	Metrics                       *metrics.Registry
 	FallbackDelay                 time.Duration
 	UDPFailureThreshold           int
 	UDPCooldown                   time.Duration
@@ -51,6 +53,7 @@ type Client struct {
 	cfg       ClientConfig
 	udpHealth *udpHealth
 	budget    *limiter.Budget
+	metrics   *metrics.Registry
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
@@ -77,6 +80,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = metrics.New()
 	}
 	if cfg.Transport == "" {
 		cfg.Transport = TransportAuto
@@ -125,6 +131,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		budget: limiter.New(limiter.Config{
 			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
 		}),
+		metrics: cfg.Metrics,
 	}, nil
 }
 
@@ -136,6 +143,9 @@ func (c *Client) Serve(ctx context.Context) error {
 	}
 	return c.ServeListener(ctx, listener)
 }
+
+// Metrics exposes aggregate counters for an optional operator endpoint.
+func (c *Client) Metrics() *metrics.Registry { return c.metrics }
 
 // ServeListener is primarily useful for tests and service managers which
 // provide an already-bound socket. The listener is closed when the context is
@@ -193,7 +203,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		c.cfg.Logger.Warn("remote flow open failed", "error", err)
 		return
 	}
-	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget)
+	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics)
 	if err := flowSession.addLane(&mpLane{id: flow.laneID, kind: flow.kind, fc: flow.fc}); err != nil {
 		_ = flow.fc.Close()
 		flowSession.closeAll()
@@ -212,7 +222,9 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	}
 	_ = inner.SetDeadline(time.Time{})
 	go c.manageLanes(ctx, flowSession, flow.sessionID, flow.flowID, flow.kind)
+	c.metrics.FlowStarted()
 	stats, err := flowSession.run(ctx)
+	c.metrics.FlowFinished(stats.BytesSent, stats.BytesRead, err != nil && !errors.Is(err, context.Canceled))
 	if err != nil && !errors.Is(err, context.Canceled) {
 		c.cfg.Logger.Debug("local flow ended with error", "error", err, "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead, "lane_bytes", stats.LaneBytes)
 		return
@@ -505,7 +517,12 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 	if kind == TransportQUIC {
 		c.udpHealth.success()
 	}
-	return flow.addLane(lane)
+	if err := flow.addLane(lane); err != nil {
+		_ = lane.fc.Close()
+		return err
+	}
+	c.metrics.LaneReplacement()
+	return nil
 }
 
 func (c *Client) chooseAuthenticatedLane(ctx context.Context) (*authenticatedLane, error) {
@@ -522,6 +539,7 @@ func (c *Client) chooseAuthenticatedLane(ctx context.Context) (*authenticatedLan
 		return lane, nil
 	case TransportAuto:
 		if !c.udpHealth.allow(time.Now()) {
+			c.metrics.Fallback()
 			return c.dialAuthenticatedLane(ctx, TransportTCP)
 		}
 		return c.raceUDPAndTCP(ctx)
@@ -552,6 +570,7 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 			return result.lane, nil
 		}
 		c.udpHealth.failure(time.Now())
+		c.metrics.Fallback()
 		return c.dialAuthenticatedLane(ctx, TransportTCP)
 	case <-timer.C:
 	case <-ctx.Done():
@@ -579,6 +598,7 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 		case result := <-tcpResult:
 			tcpResult = nil
 			if result.err == nil {
+				c.metrics.Fallback()
 				cancel()
 				closeLateLane(quicResult)
 				return result.lane, nil

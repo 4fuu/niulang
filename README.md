@@ -19,13 +19,20 @@ not HTTPS decryption or MITM.
 
 The repository now contains an authenticated SOCKS-to-PEP prototype with
 TLS/TCP, QUIC, lane joins, cross-lane reassembly, PIAS-inspired
-classification, and new-flow UDP/TCP racing. An isolated development service
-is deployed without replacing the existing tunnels. The prototype is still
-not safe to use as a general-purpose production tunnel: existing-flow resume,
-UDP destination ingress, congestion-control tuning, and the release gates in
-[`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md) remain incomplete.
-The current real-link evidence is recorded in
-[`docs/MEASUREMENTS-20260809.md`](docs/MEASUREMENTS-20260809.md).
+classification, new-flow UDP/TCP racing, bounded lane recovery, completion
+tombstones, aggregate pacing, and opt-in QUIC controllers. The stock apNet
+QUIC controller is retained as the control; an adaptive controller and a
+Hysteria-style fixed-rate (Brutal) controller can be selected for measurement.
+An isolated development service is deployed without replacing the existing
+tunnels. The latest five-block real-link evidence is recorded in
+[`docs/MEASUREMENTS-20260810.md`](docs/MEASUREMENTS-20260810.md); the earlier
+pilot remains in [`docs/MEASUREMENTS-20260809.md`](docs/MEASUREMENTS-20260809.md).
+
+The prototype is still not safe to use as a general-purpose production
+tunnel: it has observed HTTP completion loss and API tail failures, accepts
+TCP CONNECT only (no destination UDP/TUN), lacks complete controller
+telemetry, and has not passed all controlled-loss/resource release gates in
+[`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals
 
@@ -35,7 +42,11 @@ The current real-link evidence is recorded in
 - A PIAS-inspired policy that protects one-shot and interactive flows while
   allocating additional lanes to bulk flows.
 - No HTTPS MITM: the optimizer forwards encrypted application bytes.
-- UDP health probing, UDP/TCP racing, fallback, and eventually lane resume.
+- UDP health probing, UDP/TCP racing, fallback, and bounded mid-session lane
+  replacement.
+- One aggregate token bucket with an interactive reserve above all lanes.
+- Optional localhost `/metrics` counters for flow completion, bytes, fallback,
+  lane failure/replacement, and PIAS class transitions.
 - Reproducible measurements for latency, throughput, loss, queueing, and
   application-visible failures.
 
@@ -71,6 +82,39 @@ wanoptd --mode local --listen 127.0.0.1:12080 \
 The source address is deployment-specific. Binding it is preferable to using
 the Clash fake-DNS address, which would route the PEP through the tunnel being
 measured.
+
+For a controlled bulk experiment, both endpoints can select the fixed-rate
+controller. The rate is bytes per second per QUIC lane; it must be measured for
+the path and reduced if loss or interactive tail latency rises:
+
+```sh
+wanoptd --mode local --listen 127.0.0.1:12080 \
+  --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
+  --local-address 192.168.3.66 --transport quic \
+  --congestion brutal --brutal-bytes-per-sec 1048576 \
+  --max-lanes 8 --secret-file .dev/session.secret
+```
+
+The matching server must use the same `--congestion` and rate. To constrain
+all lanes and flows together while reserving service for interactive traffic,
+add the same aggregate budget at both endpoints, for example:
+
+```text
+--aggregate-bytes-per-sec 8388608 \
+--interactive-reserve-bytes-per-sec 524288
+```
+
+`adaptive` is the safer experimental choice when no target is known; `reno`
+is the correctness baseline. Brutal remains an operator-supplied measurement
+mode, not a safe unattended default. These modes are not a recommendation to
+change a live Clash profile without a rollback plan.
+
+For an operator-only health endpoint, bind metrics to loopback and keep it off
+the public listener:
+
+```text
+--metrics-listen 127.0.0.1:19090
+```
 
 ## Security model
 
