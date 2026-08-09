@@ -114,7 +114,11 @@ type quicStreamConn struct {
 	stream *quic.Stream
 	conn   *quic.Conn
 	packet net.PacketConn
-	once   sync.Once
+	// closeConn is true for a dedicated lane. Streams obtained from the
+	// client pool and streams accepted by the server must only close their
+	// stream; closing the connection would tear down unrelated flows.
+	closeConn bool
+	once      sync.Once
 }
 
 func (c *quicStreamConn) transportStats() laneTransportStats {
@@ -140,14 +144,14 @@ func (c *quicStreamConn) SetWriteDeadline(t time.Time) error {
 func (c *quicStreamConn) Close() error {
 	var err error
 	c.once.Do(func() {
-		// Closing the connection as well as the stream ensures that a lane
-		// cannot remain alive after a flow has been terminated. A future
-		// session manager may share a QUIC connection and will use a different
-		// wrapper with stream-only lifetime.
 		_ = c.stream.Close()
-		err = c.conn.CloseWithError(0, "wanopt lane closed")
-		if c.packet != nil {
-			_ = c.packet.Close()
+		if c.closeConn {
+			// Dedicated lanes own their QUIC connection and socket. Pooled
+			// streams deliberately leave both alive for other flows.
+			err = c.conn.CloseWithError(0, "wanopt lane closed")
+			if c.packet != nil {
+				_ = c.packet.Close()
+			}
 		}
 	})
 	return err
@@ -196,9 +200,12 @@ func quicConfig() *quic.Config {
 		InitialStreamReceiveWindow:     512 * 1024,
 		MaxStreamReceiveWindow:         8 * 1024 * 1024,
 		InitialConnectionReceiveWindow: 1 * 1024 * 1024,
-		MaxConnectionReceiveWindow:     16 * 1024 * 1024,
-		MaxIncomingStreams:             1,
-		MaxIncomingUniStreams:          0,
+		MaxConnectionReceiveWindow:     64 * 1024 * 1024,
+		// A bounded stream fan-out lets one QUIC connection carry multiple
+		// independent PEP flows, like TUIC, without allowing an unbounded
+		// stream/receive-window memory commitment.
+		MaxIncomingStreams:    128,
+		MaxIncomingUniStreams: 0,
 		// The China path has a smaller effective UDP MTU than this host's
 		// interface. Disable probing until path-specific MTU discovery is
 		// available; otherwise a successful probe can raise packets above the
@@ -209,6 +216,26 @@ func quicConfig() *quic.Config {
 }
 
 func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string, ccfg congestionConfig) (streamConn, error) {
+	conn, packetConn, err := dialQUICConnection(ctx, remote, serverName, roots, dialTimeout, localAddress)
+	if err != nil {
+		return nil, err
+	}
+	configureQUICController(conn, ccfg)
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		_ = conn.CloseWithError(0, "unable to open wanopt stream")
+		if packetConn != nil {
+			_ = packetConn.Close()
+		}
+		return nil, err
+	}
+	return &quicStreamConn{stream: stream, conn: conn, packet: packetConn, closeConn: true}, nil
+}
+
+// dialQUICConnection establishes only the QUIC connection. Keeping this
+// separate from stream creation allows the client to pool one connection and
+// open a stream for each logical flow without paying another handshake.
+func dialQUICConnection(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string) (*quic.Conn, net.PacketConn, error) {
 	dialCtx := ctx
 	var cancel context.CancelFunc
 	if dialTimeout > 0 {
@@ -219,41 +246,28 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 	if localAddress != "" {
 		ip, parseErr := netip.ParseAddr(localAddress)
 		if parseErr != nil {
-			return nil, fmt.Errorf("parse local address %q: %w", localAddress, parseErr)
+			return nil, nil, fmt.Errorf("parse local address %q: %w", localAddress, parseErr)
 		}
 		remoteAddr, resolveErr := net.ResolveUDPAddr("udp", remote)
 		if resolveErr != nil {
-			return nil, resolveErr
+			return nil, nil, resolveErr
 		}
 		packetConn, listenErr := net.ListenUDP("udp", &net.UDPAddr{IP: ip.AsSlice()})
 		if listenErr != nil {
-			return nil, listenErr
+			return nil, nil, listenErr
 		}
 		conn, dialErr := quic.Dial(dialCtx, packetConn, remoteAddr, tlsCfg, quicConfig())
 		if dialErr != nil {
 			_ = packetConn.Close()
-			return nil, dialErr
+			return nil, nil, dialErr
 		}
-		configureQUICController(conn, ccfg)
-		stream, streamErr := conn.OpenStreamSync(dialCtx)
-		if streamErr != nil {
-			_ = conn.CloseWithError(0, "unable to open wanopt stream")
-			_ = packetConn.Close()
-			return nil, streamErr
-		}
-		return &quicStreamConn{stream: stream, conn: conn, packet: packetConn}, nil
+		return conn, packetConn, nil
 	}
 	conn, err := quic.DialAddr(dialCtx, remote, tlsCfg, quicConfig())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	configureQUICController(conn, ccfg)
-	stream, err := conn.OpenStreamSync(dialCtx)
-	if err != nil {
-		_ = conn.CloseWithError(0, "unable to open wanopt stream")
-		return nil, err
-	}
-	return &quicStreamConn{stream: stream, conn: conn}, nil
+	return conn, nil, nil
 }
 
 func configureQUICController(conn *quic.Conn, cfg congestionConfig) {
@@ -281,7 +295,6 @@ func quicServerTLSConfig(certificate tls.Certificate) *tls.Config {
 
 func quicServerConfig() *quic.Config {
 	cfg := quicConfig()
-	cfg.MaxIncomingStreams = 1
 	return cfg
 }
 
@@ -290,7 +303,7 @@ func acceptQUICStream(ctx context.Context, conn *quic.Conn) (streamConn, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &quicStreamConn{stream: stream, conn: conn}, nil
+	return &quicStreamConn{stream: stream, conn: conn, closeConn: false}, nil
 }
 
 func transportError(kind TransportKind, err error) error {

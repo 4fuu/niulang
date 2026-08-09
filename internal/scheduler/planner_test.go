@@ -38,6 +38,18 @@ func TestPlannerRetiresLaneWhenLatencyBudgetExceeded(t *testing.T) {
 	}
 }
 
+func TestPlannerRetiresLaneWhenMarginalGainIsNegative(t *testing.T) {
+	p := New(DefaultConfig())
+	d := p.Decide(classifier.ClassBulk, Metrics{
+		CurrentLanes: 4, HealthyLanes: 4, AvailableLanes: 8,
+		UDPHealthy: true, MarginalGain: -0.20,
+		BaselineRTT: 200 * time.Millisecond, CurrentRTT: 205 * time.Millisecond,
+	})
+	if d.TargetLanes != 3 {
+		t.Fatalf("target lanes = %d, want 3", d.TargetLanes)
+	}
+}
+
 func TestPlannerHoldsOneLaneWhenLatencyBudgetExceeded(t *testing.T) {
 	p := New(DefaultConfig())
 	d := p.Decide(classifier.ClassBulk, Metrics{

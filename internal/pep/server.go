@@ -57,6 +57,7 @@ type serverFlow struct {
 	flow      *multipathFlow
 	maxLanes  int
 	completed atomic.Bool
+	tombstone sync.Once
 	mu        sync.Mutex
 }
 
@@ -273,22 +274,24 @@ func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn)
 			}
 			return fmt.Errorf("accept QUIC lane: %w", acceptErr)
 		}
-		select {
-		case s.semaphore <- struct{}{}:
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer func() { <-s.semaphore }()
-				s.handleQUIC(ctx, conn)
-			}()
-		default:
-			_ = conn.CloseWithError(1, "session limit reached")
-			s.cfg.Logger.Warn("remote session limit reached")
-		}
+		// Session admission is performed per QUIC stream in handleQUIC. Holding
+		// one global semaphore slot for the lifetime of a multiplexed
+		// connection would incorrectly reduce MaxSessions and prevent the
+		// connection from carrying the configured number of independent flows.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.handleQUIC(ctx, conn)
+		}()
 	}
 }
 
 func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
+	var wg sync.WaitGroup
+	// Close the shared connection before waiting for stream handlers. This
+	// ordering is important during shutdown: a handler blocked in Read must be
+	// released before Wait can complete.
+	defer wg.Wait()
 	defer conn.CloseWithError(0, "wanopt session complete")
 	configureQUICController(conn, congestionConfig{
 		kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
@@ -297,14 +300,34 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	if conn.ConnectionState().TLS.NegotiatedProtocol != defaultALPN {
 		return
 	}
-	streamCtx, cancel := context.WithTimeout(ctx, s.cfg.HandshakeTimeout)
-	defer cancel()
-	stream, err := acceptQUICStream(streamCtx, conn)
-	if err != nil {
-		s.cfg.Logger.Debug("accept QUIC stream failed", "error", err)
-		return
+	// A single QUIC connection is a bounded stream pool. Each stream still
+	// performs its own authenticated wanopt hello and owns one logical flow,
+	// while QUIC supplies one shared congestion controller and packet-loss
+	// state. This is the same multiplexing property that makes TUIC effective
+	// for short flows, without sharing application/session framing state.
+	for {
+		streamCtx, cancel := context.WithTimeout(ctx, s.cfg.HandshakeTimeout)
+		stream, err := acceptQUICStream(streamCtx, conn)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				s.cfg.Logger.Debug("accept QUIC stream failed", "error", err)
+			}
+			return
+		}
+		select {
+		case s.semaphore <- struct{}{}:
+			wg.Add(1)
+			go func(stream streamConn) {
+				defer wg.Done()
+				defer func() { <-s.semaphore }()
+				s.handleSession(ctx, stream)
+			}(stream)
+		default:
+			_ = stream.Close()
+			s.cfg.Logger.Warn("remote session limit reached")
+		}
 	}
-	s.handleSession(ctx, stream)
 }
 
 func (s *Server) handleSession(ctx context.Context, conn streamConn) {
@@ -357,6 +380,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 		return
 	}
 	registered := true
+	go s.watchFlowCompletion(ctx, sessionID, serverSession)
 	defer func() {
 		if registered {
 			s.unregisterSession(sessionID, serverSession)
@@ -370,20 +394,57 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 	s.metrics.FlowStarted()
 	stats, err := flow.run(ctx)
 	s.metrics.FlowFinished(stats.BytesRead, stats.BytesSent, err != nil && !errors.Is(err, context.Canceled))
-	if err == nil {
+	// A peer may close the transport immediately after receiving the final
+	// bytes, racing the server's final-ACK bookkeeping. If both directions
+	// have observed FIN sequences, the logical flow is complete even when the
+	// runner reports the late socket EOF as an error; retain the same bounded
+	// tombstone so a replacement lane can replay the final ACK. Do not retain
+	// one-sided or context-canceled flows.
+	flowComplete := err == nil || (ctx.Err() == nil && serverSession.flow.finSent.Load() && serverSession.flow.remoteFinSeen.Load())
+	if flowComplete {
 		// Keep a bounded tombstone long enough for a client that lost the
 		// final cumulative ACK to authenticate a replacement lane and finish
 		// its local close handshake. No destination connection or payload is
 		// retained; only the flow's final sequence metadata remains.
-		serverSession.completed.Store(true)
+		s.retainCompletedSession(sessionID, serverSession)
 		registered = false
-		time.AfterFunc(completedSessionLinger, func() { s.unregisterSession(sessionID, serverSession) })
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.cfg.Logger.Debug("remote flow ended with error", "error", err, "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "lane_bytes", stats.LaneBytes)
 		return
 	}
 	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes)
+}
+
+// watchFlowCompletion closes a correctness gap between the application FIN
+// exchange and the flow runner's final goroutine return. Both direction FIN
+// sequences prove that no additional payload can be delivered, so retaining
+// a tombstone at that point lets a replacement lane replay the final ACK even
+// if the peer has already closed its socket and the runner is waiting for a
+// late duplicate ACK.
+func (s *Server) watchFlowCompletion(ctx context.Context, sessionID [16]byte, serverSession *serverFlow) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if ctx.Err() == nil && serverSession.flow.finSent.Load() && serverSession.flow.remoteFinSeen.Load() {
+				s.retainCompletedSession(sessionID, serverSession)
+				return
+			}
+		case <-serverSession.flow.doneChan():
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *Server) retainCompletedSession(sessionID [16]byte, serverSession *serverFlow) {
+	serverSession.tombstone.Do(func() {
+		serverSession.completed.Store(true)
+		time.AfterFunc(completedSessionLinger, func() { s.unregisterSession(sessionID, serverSession) })
+	})
 }
 
 func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameConn, hello session.Hello) {

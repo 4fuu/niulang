@@ -43,6 +43,7 @@ type options struct {
 	dialTimeout                   time.Duration
 	handshakeTimeout              time.Duration
 	transport                     string
+	quicPool                      bool
 	congestion                    string
 	brutalBytesPerSec             uint64
 	adaptiveMinBytesSec           uint64
@@ -101,7 +102,8 @@ func run(args []string) error {
 			Secret:       secret, RootCAs: roots, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
 			DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
 			MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
-			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
+			EnableQUICPool: opts.quicPool,
+			Congestion:     pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
 			FallbackDelay: opts.fallbackDelay, UDPFailureThreshold: opts.udpFailureThreshold,
@@ -168,6 +170,7 @@ func parseOptions(args []string) (options, error) {
 	fs.DurationVar(&opts.dialTimeout, "dial-timeout", 10*time.Second, "destination or remote dial timeout")
 	fs.DurationVar(&opts.handshakeTimeout, "handshake-timeout", 10*time.Second, "SOCKS, TLS, and session handshake timeout")
 	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
+	fs.BoolVar(&opts.quicPool, "quic-pool", false, "share one persistent QUIC connection for initial/control streams (opt-in)")
 	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionReno), "QUIC congestion controller: reno, adaptive, or brutal")
 	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "fixed per-lane Brutal target in bytes/s (required with --congestion brutal)")
 	fs.Uint64Var(&opts.adaptiveMinBytesSec, "adaptive-min-bytes-per-sec", 64*1024, "Adaptive controller minimum rate in bytes/s")
@@ -250,7 +253,7 @@ func parseOptions(args []string) (options, error) {
 		if opts.certFile == "" || opts.keyFile == "" {
 			return opts, errors.New("--tls-cert and --tls-key are required in server mode")
 		}
-		if opts.remote != "" || opts.serverName != "" || opts.rootCAFile != "" || opts.localAddress != "" {
+		if opts.remote != "" || opts.serverName != "" || opts.rootCAFile != "" || opts.localAddress != "" || opts.quicPool {
 			return opts, errors.New("local-only flags used in server mode")
 		}
 	}

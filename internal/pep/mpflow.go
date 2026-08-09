@@ -86,6 +86,8 @@ type multipathFlow struct {
 	class             atomic.Uint32
 	finSequence       atomic.Uint64
 	remoteFinSequence atomic.Uint64
+	finSent           atomic.Bool
+	remoteFinSeen     atomic.Bool
 	lastPayload       atomic.Int64
 	closeOnce         sync.Once
 	doneOnce          sync.Once
@@ -412,6 +414,18 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			}
 		case failure := <-f.laneErr:
 			err := failure.err
+			// Both FIN directions have already been observed. The application
+			// bytes are complete, and a tombstone can replay a lost final ACK;
+			// waiting the full lane-replacement grace here would leak an active
+			// server flow after a normal peer close.
+			if f.finSent.Load() && f.remoteFinSeen.Load() {
+				f.closeAll()
+				stats.Ended = time.Now()
+				stats.BytesSent = f.bytesUp.Load()
+				stats.BytesRead = f.bytesDown.Load()
+				stats.LaneBytes = f.laneStats()
+				return stats, nil
+			}
 			// A secondary lane can fail without invalidating the bytes already
 			// delivered on the logical flow. Replay unacknowledged frames on a
 			// surviving lane. If the last lane fails, or replay is impossible,
@@ -521,6 +535,7 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 			if err := f.enqueueOnHealthyLane(ctx, fin, false); err != nil {
 				return err
 			}
+			f.finSent.Store(true)
 			select {
 			case <-f.finalAck:
 				return nil
@@ -799,8 +814,9 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				}
 				if closed {
 					f.remoteFinSequence.Store(reassembler.NextSequence())
+					f.remoteFinSeen.Store(true)
 					if cw, ok := f.inner.(closeWriter); ok {
-						if err := cw.CloseWrite(); err != nil && !errors.Is(err, net.ErrClosed) {
+						if err := cw.CloseWrite(); err != nil && !expectedHalfCloseError(err) {
 							return err
 						}
 					}

@@ -83,6 +83,13 @@ func (p *Planner) Decide(class classifier.Class, m Metrics) Decision {
 		if m.BaselineRTT > 0 && m.CurrentRTT > m.BaselineRTT+p.cfg.InteractiveRTTBudget {
 			return Decision{TargetLanes: maxInt(1, current-1), Class: class, Reason: "retire lane: RTT budget exceeded"}
 		}
+		// A probe that reduces aggregate goodput is evidence that the path or
+		// receiver is being harmed by striping. Retire one lane immediately;
+		// holding the current target here would turn a temporary experiment into
+		// a persistent single-flow performance regression.
+		if current > 1 && m.MarginalGain < 0 {
+			return Decision{TargetLanes: current - 1, Class: class, Reason: "retire lane: negative marginal gain"}
+		}
 		if potential < p.cfg.BulkStartLanes {
 			return Decision{TargetLanes: 1, Class: class, Reason: "bulk start constrained by healthy transport"}
 		}

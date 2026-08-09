@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/protocol"
@@ -187,7 +188,7 @@ func (r *flowRunner) receiveInner(ctx context.Context) error {
 				return errors.New("invalid flow close frame")
 			}
 			if cw, ok := r.inner.(closeWriter); ok {
-				if err := cw.CloseWrite(); err != nil && !errors.Is(err, net.ErrClosed) {
+				if err := cw.CloseWrite(); err != nil && !expectedHalfCloseError(err) {
 					return err
 				}
 			}
@@ -233,6 +234,15 @@ func (r *flowRunner) receiveInner(ctx context.Context) error {
 			return fmt.Errorf("unexpected flow frame type %d", f.Header.Type)
 		}
 	}
+}
+
+// expectedHalfCloseError handles the normal race where an HTTP client closes
+// its local socket immediately after consuming the complete response, before
+// the proxy's best-effort CloseWrite reaches the socket. These errors do not
+// imply missing payload or a failed transport; all read/write errors remain
+// fatal.
+func expectedHalfCloseError(err error) bool {
+	return errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ENOTCONN) || errors.Is(err, syscall.EPIPE)
 }
 
 func writeFull(w io.Writer, p []byte) error {

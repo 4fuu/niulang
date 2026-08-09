@@ -198,7 +198,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, InitialLanes: 2, Logger: logger,
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, InitialLanes: 2, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -261,6 +261,26 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	}
 	if server.MaxObservedLanes() < 2 {
 		t.Fatalf("expected a joined QUIC lane, observed %d", server.MaxObservedLanes())
+	}
+	// A second logical flow must reuse the pooled QUIC connection without
+	// disturbing the first flow's session or destination stream.
+	conn2 := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
+	defer conn2.Close()
+	payload2 := bytes.Repeat([]byte("wanopt-pooled-flow-"), 1024)
+	if _, err := conn2.Write(payload2); err != nil {
+		t.Fatal(err)
+	}
+	if tcp, ok := conn2.(*net.TCPConn); ok {
+		if err := tcp.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got2, err := io.ReadAll(conn2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got2, payload2) {
+		t.Fatalf("pooled flow echo mismatch: got %d bytes, want %d", len(got2), len(payload2))
 	}
 	cancel()
 	for range 2 {

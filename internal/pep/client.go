@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apernet/quic-go"
 	"github.com/icourses-dev/wanopt/internal/classifier"
 	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/metrics"
@@ -20,18 +21,23 @@ import (
 )
 
 type ClientConfig struct {
-	ListenAddr                    string
-	RemoteAddr                    string
-	ServerName                    string
-	LocalAddress                  string
-	Secret                        []byte
-	RootCAs                       *x509.CertPool
-	MaxPayload                    uint32
-	ChunkSize                     int
-	DialTimeout                   time.Duration
-	HandshakeTimeout              time.Duration
-	MaxSessions                   int
-	Transport                     TransportKind
+	ListenAddr       string
+	RemoteAddr       string
+	ServerName       string
+	LocalAddress     string
+	Secret           []byte
+	RootCAs          *x509.CertPool
+	MaxPayload       uint32
+	ChunkSize        int
+	DialTimeout      time.Duration
+	HandshakeTimeout time.Duration
+	MaxSessions      int
+	Transport        TransportKind
+	// EnableQUICPool enables a persistent multiplexed QUIC connection for
+	// initial/control streams. It is opt-in because bulk performance on a
+	// path-specific Reno peer can be worse than independent QUIC lanes; the
+	// scheduler still opens independent lanes for measured bulk traffic.
+	EnableQUICPool                bool
 	Congestion                    CongestionControlKind
 	BrutalBytesPerSec             uint64
 	AdaptiveMinBytesSec           uint64
@@ -54,6 +60,15 @@ type Client struct {
 	udpHealth *udpHealth
 	budget    *limiter.Budget
 	metrics   *metrics.Registry
+
+	// One QUIC connection can carry many independent PEP streams. This is
+	// intentionally a single bounded pool: it gives concurrent flows a shared
+	// congestion controller (the TUIC property) while preserving the PEP
+	// session/framing isolation on each stream. A dead connection is discarded
+	// before the next stream is opened and is recreated on demand.
+	quicMu     sync.Mutex
+	quicConn   *quic.Conn
+	quicPacket net.PacketConn
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
@@ -170,6 +185,7 @@ func (c *Client) Metrics() *metrics.Registry { return c.metrics }
 // cancelled or the method returns.
 func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error {
 	defer listener.Close()
+	defer c.closeQUICPool()
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, c.cfg.MaxSessions)
@@ -204,6 +220,21 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 			_ = conn.Close()
 			c.cfg.Logger.Warn("local session limit reached")
 		}
+	}
+}
+
+// closeQUICPool is called when the local agent stops. It is safe to call more
+// than once and closes the packet socket owned by a locally-bound QUIC dial.
+func (c *Client) closeQUICPool() {
+	c.quicMu.Lock()
+	conn, packet := c.quicConn, c.quicPacket
+	c.quicConn, c.quicPacket = nil, nil
+	c.quicMu.Unlock()
+	if conn != nil {
+		_ = conn.CloseWithError(0, "wanopt client stopped")
+	}
+	if packet != nil {
+		_ = packet.Close()
 	}
 }
 
@@ -317,20 +348,33 @@ func (c *Client) dialAuthenticatedLane(ctx context.Context, kind TransportKind) 
 }
 
 func (c *Client) dialJoinLane(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64) (*authenticatedLane, error) {
-	return c.dialLane(ctx, kind, sessionID, laneID, session.HelloJoin)
+	return c.dialLaneMode(ctx, kind, sessionID, laneID, session.HelloJoin, false)
 }
 
 func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind) (*authenticatedLane, error) {
+	return c.dialLaneMode(ctx, kind, sessionID, laneID, helloKind, c.cfg.EnableQUICPool)
+}
+
+// dialLaneMode uses the shared QUIC stream pool only for a flow's initial
+// control stream. Additional lanes are independent QUIC connections: they
+// provide true bulk capacity and independent loss paths, while the pooled
+// control stream remains available for short/interactive traffic.
+func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind, pooled bool) (*authenticatedLane, error) {
 	var outer streamConn
 	var err error
 	switch kind {
 	case TransportTCP:
 		outer, err = dialTCP(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
 	case TransportQUIC:
-		outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, congestionConfig{
+		ccfg := congestionConfig{
 			kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
 			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
-		})
+		}
+		if pooled {
+			outer, err = c.dialPooledQUICLane(ctx, ccfg)
+		} else {
+			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg)
+		}
 	default:
 		return nil, fmt.Errorf("cannot dial transport %q", kind)
 	}
@@ -348,6 +392,50 @@ func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16
 	}
 	_ = outer.SetDeadline(time.Time{})
 	return &authenticatedLane{fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID}, nil
+}
+
+// dialPooledQUICLane opens a stream on the client's shared QUIC connection.
+// The mutex covers connection creation and stream-limit admission, so two
+// simultaneous first flows cannot create competing pools. A stream-open
+// failure caused by a dead connection clears the pool and lets the caller's
+// normal AUTO fallback/retry policy establish a fresh transport.
+func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig) (streamConn, error) {
+	dialCtx := ctx
+	var cancel context.CancelFunc
+	if c.cfg.DialTimeout > 0 {
+		dialCtx, cancel = context.WithTimeout(ctx, c.cfg.DialTimeout)
+		defer cancel()
+	}
+	c.quicMu.Lock()
+	defer c.quicMu.Unlock()
+
+	if c.quicConn == nil || c.quicConn.Context().Err() != nil {
+		if c.quicConn != nil {
+			_ = c.quicConn.CloseWithError(0, "wanopt stale pooled connection")
+		}
+		if c.quicPacket != nil {
+			_ = c.quicPacket.Close()
+		}
+		conn, packet, err := dialQUICConnection(dialCtx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
+		if err != nil {
+			c.quicConn, c.quicPacket = nil, nil
+			return nil, err
+		}
+		configureQUICController(conn, ccfg)
+		c.quicConn, c.quicPacket = conn, packet
+	}
+	stream, err := c.quicConn.OpenStreamSync(dialCtx)
+	if err != nil {
+		if c.quicConn.Context().Err() != nil {
+			_ = c.quicConn.CloseWithError(0, "wanopt pooled connection failed")
+			if c.quicPacket != nil {
+				_ = c.quicPacket.Close()
+			}
+			c.quicConn, c.quicPacket = nil, nil
+		}
+		return nil, err
+	}
+	return &quicStreamConn{stream: stream, conn: c.quicConn, closeConn: false}, nil
 }
 
 func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID [16]byte, flowID, laneID uint64) (*mpLane, error) {
@@ -397,6 +485,7 @@ func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, s
 		}
 		lane, err := c.openJoinLane(ctx, TransportQUIC, sessionID, flowID, laneID)
 		if err != nil {
+			c.udpHealth.failure(time.Now())
 			c.cfg.Logger.Warn("additional lane unavailable", "lane", laneID, "error", err)
 			// Keep the already-authenticated lane usable. Retrying the same
 			// join synchronously can delay SOCKS CONNECT indefinitely when UDP
@@ -419,6 +508,15 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 		MaxLanes: c.cfg.MaxLanes, InteractiveLanes: 1, BulkStartLanes: c.cfg.BulkStartLanes,
 		MinimumMarginalGain: c.cfg.MinimumMarginalGain, InteractiveRTTBudget: 40 * time.Millisecond,
 	})
+	manageCtx, manageCancel := context.WithCancel(ctx)
+	defer manageCancel()
+	go func() {
+		select {
+		case <-flow.doneChan():
+			manageCancel()
+		case <-manageCtx.Done():
+		}
+	}()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	var previous float64
@@ -429,7 +527,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 		select {
 		case <-flow.doneChan():
 			return
-		case <-ctx.Done():
+		case <-manageCtx.Done():
 			return
 		case <-ticker.C:
 			snapshot := flow.snapshot()
@@ -438,7 +536,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				if !nextRecovery.IsZero() && now.Before(nextRecovery) {
 					continue
 				}
-				if err := c.openRecoveryLane(ctx, flow, sessionID, flowID); err != nil {
+				if err := c.openRecoveryLane(manageCtx, flow, sessionID, flowID); err != nil {
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 						c.cfg.Logger.Warn("lane recovery unavailable", "error", err)
 					}
@@ -497,8 +595,9 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				if err != nil {
 					return
 				}
-				lane, err := c.openJoinLane(ctx, TransportQUIC, sessionID, flowID, laneID)
+				lane, err := c.openJoinLane(manageCtx, TransportQUIC, sessionID, flowID, laneID)
 				if err != nil {
+					c.udpHealth.failure(time.Now())
 					c.cfg.Logger.Warn("adaptive lane unavailable", "lane", laneID, "error", err)
 					break
 				}
@@ -534,6 +633,7 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 		// Install TCP immediately so recovery fits inside the bounded grace
 		// period; later new flows may probe UDP again through the health race.
 		kind = TransportTCP
+		c.udpHealth.failure(time.Now())
 	}
 	lane, err := c.openJoinLane(recoveryCtx, kind, sessionID, flowID, laneID)
 	if err != nil {
@@ -599,6 +699,7 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 		return c.dialAuthenticatedLane(ctx, TransportTCP)
 	case <-timer.C:
 	case <-ctx.Done():
+		closeLateLane(quicResult)
 		return nil, ctx.Err()
 	}
 
@@ -630,6 +731,8 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 			}
 			tcpErr = result.err
 		case <-ctx.Done():
+			closeLateLane(quicResult)
+			closeLateLane(tcpResult)
 			return nil, ctx.Err()
 		}
 	}
