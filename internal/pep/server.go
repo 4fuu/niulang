@@ -18,7 +18,11 @@ import (
 	"github.com/icourses-dev/wanopt/internal/session"
 )
 
-const completedSessionLinger = 30 * time.Second
+// Must exceed the client's bounded lane-replacement wait so a final-ACK loss
+// can still be repaired after QUIC dead-path detection and scheduler backoff.
+// Tombstones retain only final sequence metadata and remain bounded by the
+// configured session admission limit.
+const completedSessionLinger = 90 * time.Second
 
 type ServerConfig struct {
 	ListenAddr                    string
