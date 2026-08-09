@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/icourses-dev/wanopt/internal/protocol"
 )
 
 func testCertificate(t *testing.T) (tlsCertificate tls.Certificate, roots *x509.CertPool) {
@@ -536,6 +538,111 @@ func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
 
 	cancel()
 	for i := 0; i < 3; i++ {
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("service shutdown: %v", err)
+		}
+	}
+}
+
+func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
+	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destinationListener.Close()
+	go echoDestination(destinationListener)
+
+	certificate, roots := testCertificate(t)
+	secret := []byte("integration-test-secret-value-32bytes")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(ServerConfig{
+		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(ClientConfig{
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "wanopt.test",
+		Secret: secret, RootCAs: roots, Transport: TransportTCP, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errorsCh := make(chan error, 2)
+	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
+	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
+
+	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
+	payload := []byte("tombstone")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		if err := tcp.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := io.ReadAll(conn)
+	_ = conn.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("echo mismatch: got %q, want %q", got, payload)
+	}
+
+	var sessionID [16]byte
+	var flowID uint64
+	var finalSequence uint64
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		server.sessionsMu.RLock()
+		for id, sessionFlow := range server.sessions {
+			if sessionFlow.completed.Load() {
+				sessionID = id
+				flowID = sessionFlow.flow.flowID
+				finalSequence = sessionFlow.flow.remoteFinSequence.Load()
+			}
+		}
+		server.sessionsMu.RUnlock()
+		if flowID != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if flowID == 0 {
+		t.Fatal("completed flow tombstone was not retained")
+	}
+
+	joinCtx, joinCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer joinCancel()
+	lane, err := client.openJoinLane(joinCtx, TransportTCP, sessionID, flowID, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lane.fc.Close()
+	ack, err := lane.fc.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Header.Type != protocol.TypeAck || ack.Header.Flags&protocol.FlagAckFinal == 0 || ack.Header.Sequence != finalSequence {
+		t.Fatalf("unexpected tombstone ACK: type=%d flags=%x sequence=%d want=%d", ack.Header.Type, ack.Header.Flags, ack.Header.Sequence, finalSequence)
+	}
+
+	cancel()
+	for range 2 {
 		if err := <-errorsCh; err != nil {
 			t.Fatalf("service shutdown: %v", err)
 		}

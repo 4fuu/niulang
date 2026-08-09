@@ -107,3 +107,22 @@ func TestEnqueueFrameStopsWhenLaneWriterStops(t *testing.T) {
 		t.Fatal("enqueue succeeded after lane writer stopped")
 	}
 }
+
+func TestRetireLeastProductiveLaneKeepsControlLane(t *testing.T) {
+	flow := &multipathFlow{lanes: map[uint64]*mpLane{
+		0: {id: 0},
+		1: {id: 1},
+		2: {id: 2},
+	}}
+	flow.lanes[1].sent.Store(100)
+	flow.lanes[2].sent.Store(10)
+	if !flow.retireLeastProductiveLane() {
+		t.Fatal("expected a non-control lane to be retired")
+	}
+	if _, ok := flow.lanes[2]; ok {
+		t.Fatal("least productive lane remained attached")
+	}
+	if flow.lanes[0].closed.Load() {
+		t.Fatal("control lane was retired")
+	}
+}
