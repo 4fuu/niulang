@@ -49,6 +49,10 @@ controlled-loss/resource release gates in
 - No HTTPS MITM: the optimizer forwards encrypted application bytes.
 - UDP health probing, UDP/TCP racing, fallback, and bounded mid-session lane
   replacement.
+- Dedicated cold flows pipeline the authenticated `HELLO` and destination
+  `OPEN` frames, preserving the original wire order of acknowledgements while
+  removing one sequential China-US control exchange. Pooled streams retain
+  capability-negotiated `OPEN_FAST`.
 - One aggregate token bucket with an interactive reserve above all lanes.
 - Optional localhost `/metrics` counters for flow completion, bytes, fallback,
   lane failure/replacement, PIAS class transitions, active QUIC RTT/loss, and

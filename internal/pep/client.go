@@ -347,7 +347,183 @@ type authenticatedLane struct {
 }
 
 func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow, error) {
+	// A fresh, dedicated lane can pipeline HELLO and OPEN on the same stream.
+	// The server still validates and acknowledges HELLO first, but it can read
+	// OPEN from the already-buffered stream without making the client wait for
+	// an extra China-US round trip. Pooled streams deliberately keep their
+	// existing capability-negotiation path: the first pool stream must learn
+	// HelloOK before later OPEN_FAST streams are admitted.
+	if !c.cfg.EnableQUICPool {
+		return c.openInitialFlow(ctx, destination)
+	}
 	return c.openFlowMode(ctx, destination, false)
+}
+
+// openInitialFlow establishes a new dedicated flow while writing HELLO and
+// OPEN back-to-back. This is wire-compatible with the original server (which
+// reads HELLO, writes HELLO_OK, then reads OPEN) and removes one sequential
+// request/response exchange from every cold flow. AUTO preserves the normal
+// UDP preference and races a delayed TCP candidate against the pipelined
+// QUIC candidate.
+func (c *Client) openInitialFlow(ctx context.Context, destination string) (*openedFlow, error) {
+	payload, err := session.EncodeDestination(destination)
+	if err != nil {
+		return nil, err
+	}
+	if c.cfg.Transport == TransportTCP {
+		return c.dialPipelinedFlow(ctx, TransportTCP, payload)
+	}
+	if c.cfg.Transport == TransportQUIC {
+		flow, err := c.dialPipelinedFlow(ctx, TransportQUIC, payload)
+		if err != nil {
+			c.udpHealth.failure(time.Now())
+			return nil, err
+		}
+		c.udpHealth.success()
+		return flow, nil
+	}
+	if c.cfg.Transport != TransportAuto {
+		return nil, fmt.Errorf("unsupported transport %q", c.cfg.Transport)
+	}
+	if !c.udpHealth.allow(time.Now()) {
+		c.metrics.Fallback()
+		return c.dialPipelinedFlow(ctx, TransportTCP, payload)
+	}
+	return c.racePipelinedFlow(ctx, payload)
+}
+
+func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payload []byte) (*openedFlow, error) {
+	sessionID, err := session.NewSessionID()
+	if err != nil {
+		return nil, err
+	}
+	flowID, err := randomFlowID()
+	if err != nil {
+		return nil, err
+	}
+	lane, err := c.dialLaneMode(ctx, kind, sessionID, 0, session.HelloNew, false, true)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*openedFlow, error) {
+		_ = lane.fc.Close()
+		return nil, err
+	}
+	_ = lane.outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	if err := lane.fc.Write(protocol.Frame{
+		Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeOpen, SessionID: sessionID, FlowID: flowID, Class: protocol.ClassNew},
+		Payload: payload,
+	}); err != nil {
+		return fail(fmt.Errorf("send pipelined flow open: %w", err))
+	}
+	// The server emits HELLO_OK before OPEN_OK, even though both client
+	// requests were sent without waiting between them.
+	helloAck, err := lane.fc.Read()
+	if err != nil {
+		return fail(fmt.Errorf("read pipelined hello acknowledgement: %w", err))
+	}
+	if helloAck.Header.Type == protocol.TypeReset {
+		return fail(errors.New("server rejected session authentication"))
+	}
+	if helloAck.Header.Type != protocol.TypeHelloOK || helloAck.Header.SessionID != sessionID || helloAck.Header.FlowID != 0 {
+		return fail(errors.New("invalid pipelined session acknowledgement"))
+	}
+	var helloOK session.HelloOK
+	if err := helloOK.UnmarshalBinary(helloAck.Payload); err != nil {
+		return fail(fmt.Errorf("decode pipelined session acknowledgement: %w", err))
+	}
+	openAck, err := lane.fc.Read()
+	if err != nil {
+		return fail(fmt.Errorf("read pipelined flow acknowledgement: %w", err))
+	}
+	if openAck.Header.SessionID != sessionID || openAck.Header.FlowID != flowID {
+		return fail(errors.New("pipelined flow acknowledgement identity mismatch"))
+	}
+	if openAck.Header.Type == protocol.TypeReset {
+		return fail(errors.New("remote destination unavailable"))
+	}
+	if openAck.Header.Type != protocol.TypeOpenOK || len(openAck.Payload) != 0 {
+		return fail(errors.New("invalid pipelined flow acknowledgement"))
+	}
+	_ = lane.outer.SetDeadline(time.Time{})
+	return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind}, nil
+}
+
+func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*openedFlow, error) {
+	raceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	quicResult := make(chan openedFlowResult, 1)
+	go func() {
+		flow, err := c.dialPipelinedFlow(raceCtx, TransportQUIC, payload)
+		quicResult <- openedFlowResult{flow: flow, err: err}
+	}()
+	timer := time.NewTimer(c.cfg.FallbackDelay)
+	defer timer.Stop()
+	select {
+	case result := <-quicResult:
+		if result.err == nil {
+			c.udpHealth.success()
+			return result.flow, nil
+		}
+		c.udpHealth.failure(time.Now())
+		c.metrics.Fallback()
+		return c.dialPipelinedFlow(ctx, TransportTCP, payload)
+	case <-timer.C:
+	case <-ctx.Done():
+		closeLateFlow(quicResult)
+		return nil, ctx.Err()
+	}
+	tcpResult := make(chan openedFlowResult, 1)
+	go func() {
+		flow, err := c.dialPipelinedFlow(raceCtx, TransportTCP, payload)
+		tcpResult <- openedFlowResult{flow: flow, err: err}
+	}()
+	var quicErr, tcpErr error
+	for quicResult != nil || tcpResult != nil {
+		select {
+		case result := <-quicResult:
+			quicResult = nil
+			if result.err == nil {
+				c.udpHealth.success()
+				cancel()
+				closeLateFlow(tcpResult)
+				return result.flow, nil
+			}
+			quicErr = result.err
+			c.udpHealth.failure(time.Now())
+		case result := <-tcpResult:
+			tcpResult = nil
+			if result.err == nil {
+				c.metrics.Fallback()
+				cancel()
+				closeLateFlow(quicResult)
+				return result.flow, nil
+			}
+			tcpErr = result.err
+		case <-ctx.Done():
+			closeLateFlow(quicResult)
+			closeLateFlow(tcpResult)
+			return nil, ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("QUIC failed (%v); TCP fallback failed (%v)", quicErr, tcpErr)
+}
+
+type openedFlowResult struct {
+	flow *openedFlow
+	err  error
+}
+
+func closeLateFlow(ch <-chan openedFlowResult) {
+	if ch == nil {
+		return
+	}
+	go func() {
+		result := <-ch
+		if result.flow != nil {
+			_ = result.flow.fc.Close()
+		}
+	}()
 }
 
 func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry bool) (*openedFlow, error) {
@@ -422,18 +598,18 @@ func (c *Client) dialAuthenticatedLane(ctx context.Context, kind TransportKind) 
 }
 
 func (c *Client) dialJoinLane(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64) (*authenticatedLane, error) {
-	return c.dialLaneMode(ctx, kind, sessionID, laneID, session.HelloJoin, false)
+	return c.dialLaneMode(ctx, kind, sessionID, laneID, session.HelloJoin, false, false)
 }
 
 func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind) (*authenticatedLane, error) {
-	return c.dialLaneMode(ctx, kind, sessionID, laneID, helloKind, c.cfg.EnableQUICPool)
+	return c.dialLaneMode(ctx, kind, sessionID, laneID, helloKind, c.cfg.EnableQUICPool, false)
 }
 
 // dialLaneMode uses the shared QUIC stream pool only for a flow's initial
 // control stream. Additional lanes are independent QUIC connections: they
 // provide true bulk capacity and independent loss paths, while the pooled
 // control stream remains available for short/interactive traffic.
-func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind, pooled bool) (*authenticatedLane, error) {
+func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind, pooled bool, pipelineHello bool) (*authenticatedLane, error) {
 	dialStarted := time.Now()
 	var outer streamConn
 	var err error
@@ -466,7 +642,18 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
 	fc := newFrameConn(outer, c.cfg.MaxPayload)
 	if !alreadyAuthenticated {
-		if err := clientAuthenticateKind(fc, c.cfg.Secret, sessionID, laneID, helloKind, time.Now()); err != nil {
+		if pipelineHello {
+			hello, helloErr := session.NewHello(c.cfg.Secret, sessionID, laneID, helloKind, time.Now())
+			if helloErr != nil {
+				return fail(helloErr)
+			}
+			if err := fc.Write(protocol.Frame{
+				Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeHello, SessionID: sessionID, Class: protocol.ClassNew},
+				Payload: hello.MarshalBinary(),
+			}); err != nil {
+				return fail(fmt.Errorf("send pipelined session hello: %w", err))
+			}
+		} else if err := clientAuthenticateKind(fc, c.cfg.Secret, sessionID, laneID, helloKind, time.Now()); err != nil {
 			return fail(err)
 		}
 	}

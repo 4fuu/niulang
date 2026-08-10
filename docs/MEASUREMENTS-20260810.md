@@ -762,3 +762,63 @@ did not inflate its 51.475-s measurement, but it retains resources and adds a
 false flow failure. Completion-vs-rescue coordination is consequently a
 production blocker alongside controller telemetry. All isolated profiling
 listeners and clients were stopped after this campaign.
+
+## Latency root-cause profile and initial-flow pipeline candidate
+
+The next profile used a fresh worktree binary on isolated UDP `:12448` with
+`bbr-tuic`, a fixed remote HTTP oracle on the US host (`:28081`, HTTP 200 with
+the directory listing), and the existing TUIC control on local
+`127.0.0.1:12086`. The live `:12443` service was not changed. The oracle was
+chosen to remove Google certificate, HTTP/2, and application-server variance;
+the server's own destination dial was typically 0.3--5 ms.
+
+The packet capture explains the long tails. In a representative degraded
+QUIC connection, the first Initial packet reached the US host at
+`1786375905.017565`; the server's first response burst left at
+`1786375905.022607`. Subsequent server retransmission bursts were separated by
+approximately 2.25 s, 3.1 s, and 3.6 s. The client eventually completed, but
+the loss/PTO schedule—not CPU, HMAC verification, DNS, or the destination
+dial—accounted for the seconds of delay. A separate debug run measured an
+outer QUIC dial of 7.85 s, with 0.28 s for the WANOPT Hello exchange and 0.26 s
+for the remaining flow-open path; the server spent 0.12 ms authenticating and
+only 0.4 ms dialing the oracle.
+
+The original cold-flow protocol also serialized two application exchanges:
+
+```text
+QUIC/TLS handshake -> HELLO / HELLO_OK -> OPEN / OPEN_OK -> application
+```
+
+The new candidate client writes `HELLO` and `OPEN` back-to-back on a dedicated
+lane. It is wire-compatible with the existing server: the server still sends
+`HELLO_OK` before `OPEN_OK`, but `OPEN` is already buffered when the handler
+finishes authentication. On the old sequential path, server `open_duration`
+was commonly 0.2--0.35 s and reached 1.99 s when that request was lost. With
+the pipelined client and the unchanged profiling server, server
+`open_duration` was 3--26 microseconds in the successful samples. The end to
+end flow time remains dominated by the outer QUIC handshake when that handshake
+hits a PTO, so this is a fixed-cost reduction, not a cure for a blocked UDP
+path.
+
+For context, representative five-request samples collected during the same
+campaign were:
+
+| Profile | Resulting total times (s) |
+|---|---|
+| Existing TUIC control | 0.492, 0.421, 0.382, 0.378, 0.346 |
+| WANOPT pooled `OPEN_FAST` | 0.563, 7.643, 2.008, 0.825, 2.009 |
+| WANOPT fresh QUIC (legacy sequential control) | 4.906 in the captured sample; other fresh trials ranged from ~1.9 to ~9.7 |
+| WANOPT fresh QUIC (pipelined HELLO+OPEN candidate) | 8.658, 1.756, 3.272, 3.212, plus one 10-s proxy-close failure |
+
+These rows are intentionally diagnostic rather than a throughput or latency
+release claim: the China path changed during the interleaved trials. They do
+show the causal split. TUIC's persistent connection avoids repeated QUIC
+handshakes; WANOPT's pooled mode removes repeated authentication but still
+depends on the health of one QUIC connection; and the pipeline removes one
+WANOPT request/response RTT without changing the UDP loss behavior.
+
+The candidate passed the full Go, race, vet, and protocol integration suites.
+It must still be tested with the automatic TCP race and pooled first-stream
+pipeline before deployment. The temporary oracle, listeners, packet captures,
+and profiling clients remain test-only resources and must be stopped after
+the campaign.
