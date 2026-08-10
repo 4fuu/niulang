@@ -345,6 +345,10 @@ type authenticatedLane struct {
 }
 
 func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow, error) {
+	return c.openFlowMode(ctx, destination, false)
+}
+
+func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry bool) (*openedFlow, error) {
 	payload, err := session.EncodeDestination(destination)
 	if err != nil {
 		return nil, err
@@ -380,6 +384,11 @@ func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow,
 		return fail(errors.New("flow open acknowledgement identity mismatch"))
 	}
 	if response.Header.Type == protocol.TypeReset {
+		if !fastRetry && lane.fastOpen && resetCode(response.Payload) == session.ResetProtocol {
+			c.disableQUICPoolFast()
+			_ = lane.fc.Close()
+			return c.openFlowMode(ctx, destination, true)
+		}
 		return fail(errors.New("remote destination unavailable"))
 	}
 	if response.Header.Type != protocol.TypeOpenOK || len(response.Payload) != 0 {
@@ -387,6 +396,19 @@ func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow,
 	}
 	_ = lane.outer.SetDeadline(time.Time{})
 	return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind}, nil
+}
+
+func resetCode(payload []byte) session.ResetCode {
+	if len(payload) == 0 {
+		return 0
+	}
+	return session.ResetCode(payload[0])
+}
+
+func (c *Client) disableQUICPoolFast() {
+	c.quicMu.Lock()
+	c.quicPoolFast = false
+	c.quicMu.Unlock()
 }
 
 func (c *Client) dialAuthenticatedLane(ctx context.Context, kind TransportKind) (*authenticatedLane, error) {

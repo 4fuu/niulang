@@ -61,6 +61,7 @@ type Server struct {
 	// is consistent for every stream on a connection. It is initialized to the
 	// current capability set; tests may set it to zero to model an older peer.
 	quicCapabilities uint64
+	quicFastStreams  atomic.Bool
 }
 
 type serverFlow struct {
@@ -169,7 +170,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if !cfg.EnableTCP && !cfg.EnableQUIC {
 		cfg.EnableTCP = true
 	}
-	return &Server{
+	server := &Server{
 		cfg:              cfg,
 		replay:           session.NewReplayGuard(10*time.Minute, cfg.MaxSessions*4),
 		semaphore:        make(chan struct{}, cfg.MaxSessions),
@@ -177,7 +178,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 		metrics:          cfg.Metrics,
 		quicCapabilities: session.CapabilityFastStreams,
-	}, nil
+	}
+	server.quicFastStreams.Store(true)
+	return server, nil
 }
 
 // Metrics exposes aggregate counters for an optional operator endpoint.
@@ -384,6 +387,10 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 			return
 		}
 		if first.Header.Type == protocol.TypeOpenFast {
+			if !s.quicFastStreams.Load() {
+				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "fast streams unavailable")})
+				return
+			}
 			if session.IsZeroSessionID(first.Header.SessionID) || first.Header.FlowID == 0 || first.Header.Sequence != 0 {
 				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "invalid fast flow open")})
 				return

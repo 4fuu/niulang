@@ -315,6 +315,10 @@ func (c *Client) closeUDPAssociation(lane *authenticatedLane, flowID uint64, res
 }
 
 func (c *Client) openUDPAssociation(ctx context.Context) (*authenticatedLane, uint64, error) {
+	return c.openUDPAssociationMode(ctx, false)
+}
+
+func (c *Client) openUDPAssociationMode(ctx context.Context, fastRetry bool) (*authenticatedLane, uint64, error) {
 	lane, err := c.chooseAuthenticatedLane(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -346,6 +350,11 @@ func (c *Client) openUDPAssociation(ctx context.Context) (*authenticatedLane, ui
 		return nil, 0, errors.New("UDP association acknowledgement identity mismatch")
 	}
 	if response.Header.Type == protocol.TypeReset {
+		if !fastRetry && lane.fastOpen && resetCode(response.Payload) == session.ResetProtocol {
+			c.disableQUICPoolFast()
+			_ = lane.fc.Close()
+			return c.openUDPAssociationMode(ctx, true)
+		}
 		_ = lane.fc.Close()
 		return nil, 0, errors.New("remote UDP association rejected")
 	}

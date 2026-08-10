@@ -336,6 +336,73 @@ func TestQUICPoolFastUDPAssociation(t *testing.T) {
 	}
 }
 
+func TestQUICPoolFastRejectDowngradesToLegacy(t *testing.T) {
+	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destinationListener.Close()
+	go discardDestination(destinationListener)
+
+	certificate, roots := testCertificate(t)
+	secret := []byte("fast-stream-test-secret-32-bytes")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(ServerConfig{
+		ListenAddr: packetConn.LocalAddr().String(), Certificate: certificate, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		HandshakeTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
+		MaxLanes: 1, InitialLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- server.ServePacketConn(ctx, packetConn) }()
+
+	first, err := client.openFlow(ctx, destinationListener.Addr().String())
+	if err != nil {
+		t.Fatalf("warm pooled flow: %v", err)
+	}
+	if !client.quicPoolFast {
+		t.Fatal("server did not advertise fast streams")
+	}
+	// Simulate a peer that advertised the capability during a rolling deploy
+	// but cannot yet process OPEN_FAST. The client must retry once with HELLO.
+	server.quicFastStreams.Store(false)
+	second, err := client.openFlow(ctx, destinationListener.Addr().String())
+	if err != nil {
+		t.Fatalf("legacy downgrade flow: %v", err)
+	}
+	if client.quicPoolFast {
+		t.Fatal("fast capability remained enabled after protocol rejection")
+	}
+	_ = first.outer.Close()
+	_ = second.outer.Close()
+	client.closeQUICPool()
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
 func discardDestination(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
