@@ -333,3 +333,30 @@ bash -n scripts/bench_http.sh scripts/bench_single_flow.sh
 
 These are software-quality gates only. They do not waive the real-path
 release gates in the interpretation above.
+
+## Post-deployment single-flow validation
+
+After deploying `fd2ffac`, the local client on `127.0.0.1:12081` was run in
+`auto`, Reno, one-lane mode and the exact 10 MiB CacheFly object was requested
+five times with the same complete-body criterion. This is a validation block,
+not a replacement for the earlier matched TUIC campaign:
+
+| Trial | HTTP | Body bytes | Total seconds | Complete |
+|---:|---:|---:|---:|---:|
+| 1 | 200 | 10,485,760 | 18.642567 | yes |
+| 2 | 200 | 10,485,760 | 20.220707 | yes |
+| 3 | 200 | 10,485,760 | 24.775699 | yes |
+| 4 | 200 | 10,485,760 | 18.091671 | yes |
+| 5 | — | 261,452 | 180.435546 | no, curl exit 28 |
+
+The block completed 4/5. The local post-block counters were six started, four
+completed, two failed, 42,374,367 bytes down, six lane failures, and four lane
+replacements (the counters also include the immediately preceding UDP smoke).
+This is consistent with the project’s release decision: the bounded rescue
+kept several flows complete, but tail reliability is not yet a production
+guarantee. The host’s DHCP address changed during the broader work between
+`172.20.10.2` and `172.20.10.4`; when the configured `--local-address` is not
+present, every outer dial fails locally with `bind: can't assign requested
+address`. A production client must discover the physical egress binding or
+receive a configuration update on DHCP change rather than silently retaining
+an obsolete address.
