@@ -403,6 +403,69 @@ func TestQUICPoolFastRejectDowngradesToLegacy(t *testing.T) {
 	}
 }
 
+func TestOptimisticOpenReturnsBeforeOpenOKAndPreservesResponse(t *testing.T) {
+	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destinationListener.Close()
+	go discardDestination(destinationListener)
+
+	certificate, roots := testCertificate(t)
+	secret := []byte("fast-stream-test-secret-32-bytes")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(ServerConfig{
+		ListenAddr: packetConn.LocalAddr().String(), Certificate: certificate, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		HandshakeTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
+		OptimisticOpen: true, MaxLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- server.ServePacketConn(ctx, packetConn) }()
+
+	flow, err := client.openFlow(ctx, destinationListener.Addr().String())
+	if err != nil {
+		t.Fatalf("optimistic open: %v", err)
+	}
+	if !flow.openPending {
+		t.Fatal("optimistic open did not retain pending OPEN_OK state")
+	}
+	response, err := flow.fc.Read()
+	if err != nil {
+		t.Fatalf("read deferred OPEN_OK: %v", err)
+	}
+	if response.Header.Type != protocol.TypeOpenOK || response.Header.SessionID != flow.sessionID || response.Header.FlowID != flow.flowID || len(response.Payload) != 0 {
+		t.Fatalf("deferred response = %+v, want matching OPEN_OK", response.Header)
+	}
+	_ = flow.outer.Close()
+	client.closeQUICPool()
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
 func discardDestination(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()

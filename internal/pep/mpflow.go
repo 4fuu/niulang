@@ -125,19 +125,24 @@ type multipathFlow struct {
 	localClosed       atomic.Bool
 	remoteAbort       atomic.Bool
 	localAbortSent    atomic.Bool
-	ackSequence       atomic.Uint64
-	ackClosing        atomic.Bool
-	lastPayload       atomic.Int64
-	lastActivity      atomic.Int64
-	closeOnce         sync.Once
-	doneOnce          sync.Once
-	finished          atomic.Bool
-	nextJoinID        uint64
-	telemetryID       uint64
-	baselineRTTNS     atomic.Int64
-	currentRTTNS      atomic.Int64
-	idleTimeout       time.Duration
-	maxLifetime       time.Duration
+	// openAckPending is set only for the opt-in optimistic OPEN path. The
+	// application may begin sending immediately, but the eventual OPEN_OK is
+	// still required on the authenticated stream and is consumed by the flow
+	// reader before ordinary data/control frames are accepted.
+	openAckPending bool
+	ackSequence    atomic.Uint64
+	ackClosing     atomic.Bool
+	lastPayload    atomic.Int64
+	lastActivity   atomic.Int64
+	closeOnce      sync.Once
+	doneOnce       sync.Once
+	finished       atomic.Bool
+	nextJoinID     uint64
+	telemetryID    uint64
+	baselineRTTNS  atomic.Int64
+	currentRTTNS   atomic.Int64
+	idleTimeout    time.Duration
+	maxLifetime    time.Duration
 
 	replayMu     sync.Mutex
 	replay       map[uint64]protocol.Frame
@@ -1362,6 +1367,11 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				} else {
 					return errors.New("final acknowledgement sequence mismatch")
 				}
+			case protocol.TypeOpenOK:
+				if !f.openAckPending || frame.Header.SessionID != f.sessionID || frame.Header.FlowID != f.flowID || len(frame.Payload) != 0 {
+					return errors.New("unexpected flow open acknowledgement")
+				}
+				f.openAckPending = false
 			case protocol.TypeReset:
 				if len(frame.Payload) > 1 {
 					return fmt.Errorf("peer reset flow: %s", string(frame.Payload[1:]))

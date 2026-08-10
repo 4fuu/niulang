@@ -49,7 +49,14 @@ type ClientConfig struct {
 	// initial/control streams. It is opt-in because bulk performance on a
 	// path-specific Reno peer can be worse than independent QUIC lanes; the
 	// scheduler still opens independent lanes for measured bulk traffic.
-	EnableQUICPool                bool
+	EnableQUICPool bool
+	// OptimisticOpen returns SOCKS success after the authenticated OPEN has
+	// been queued, without waiting for OPEN_OK. The flow reader validates the
+	// eventual OPEN_OK (or propagates a typed RESET), allowing application
+	// request bytes to overlap the destination dial and one WAN RTT. It is
+	// opt-in until deployment campaigns prove acceptable destination-error
+	// behavior for all callers.
+	OptimisticOpen                bool
 	Congestion                    CongestionControlKind
 	BrutalBytesPerSec             uint64
 	AdaptiveMinBytesSec           uint64
@@ -295,6 +302,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics, c.cfg.Logger)
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
+	flowSession.openAckPending = flow.openPending
 	if err := flowSession.addLane(&mpLane{id: flow.laneID, kind: flow.kind, fc: flow.fc}); err != nil {
 		_ = flow.fc.Close()
 		flowSession.closeAll()
@@ -329,12 +337,13 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 }
 
 type openedFlow struct {
-	fc        *frameConn
-	outer     streamConn
-	sessionID [16]byte
-	flowID    uint64
-	laneID    uint64
-	kind      TransportKind
+	fc          *frameConn
+	outer       streamConn
+	sessionID   [16]byte
+	flowID      uint64
+	laneID      uint64
+	kind        TransportKind
+	openPending bool
 }
 
 type authenticatedLane struct {
@@ -431,6 +440,10 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 	var helloOK session.HelloOK
 	if err := helloOK.UnmarshalBinary(helloAck.Payload); err != nil {
 		return fail(fmt.Errorf("decode pipelined session acknowledgement: %w", err))
+	}
+	if c.cfg.OptimisticOpen {
+		_ = lane.outer.SetDeadline(time.Time{})
+		return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind, openPending: true}, nil
 	}
 	openAck, err := lane.fc.Read()
 	if err != nil {
@@ -553,6 +566,10 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 		Payload: payload,
 	}); err != nil {
 		return fail(fmt.Errorf("send flow open: %w", err))
+	}
+	if c.cfg.OptimisticOpen {
+		_ = lane.outer.SetDeadline(time.Time{})
+		return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind, openPending: true}, nil
 	}
 	response, err := lane.fc.Read()
 	if err != nil {
