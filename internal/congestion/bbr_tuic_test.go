@@ -47,6 +47,16 @@ func TestTUICRateArithmeticSaturates(t *testing.T) {
 	}
 }
 
+func TestTUICRecoverySaturatesOversizedLoss(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.recovery = tuicConservation
+	sender.recoveryWindow = sender.initialCwnd
+	sender.calculateRecoveryWindow(0, ^uint64(0), sender.initialCwnd)
+	if sender.recoveryWindow < sender.minCwnd || sender.recoveryWindow > sender.initialCwnd {
+		t.Fatalf("oversized loss corrupted recovery window: %d", sender.recoveryWindow)
+	}
+}
+
 func TestTUICBBRSenderStartupAndRecovery(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})

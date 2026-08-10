@@ -541,12 +541,16 @@ func (b *TUICBBRSender) calculateRecoveryWindow(bytesAcked, bytesLost uint64, in
 	if !b.recovery.inRecovery() {
 		return
 	}
+	lost := maxCongestionByteCount
+	if bytesLost < uint64(maxCongestionByteCount) {
+		lost = quiccongestion.ByteCount(bytesLost)
+	}
 	if b.recoveryWindow == 0 {
 		b.recoveryWindow = maxByteCount(b.minCwnd, saturatingByteAdd(inFlight, bytesAcked))
 		return
 	}
-	if b.recoveryWindow >= quiccongestion.ByteCount(bytesLost) {
-		b.recoveryWindow -= quiccongestion.ByteCount(bytesLost)
+	if b.recoveryWindow >= lost {
+		b.recoveryWindow -= lost
 	} else {
 		b.recoveryWindow = b.maxDatagramSize
 	}
