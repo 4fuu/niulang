@@ -566,3 +566,22 @@ TUIC in this measurement window. BBR completed the logical request but was
 slower and more variable; it remains experimental. The script is
 [`scripts/upload_sink.py`](../scripts/upload_sink.py), deliberately bounded
 and intended only for a temporary operator-controlled listener.
+
+## Interactive requests during eight-flow bulk
+
+As a final current-window stress check, eight concurrent 10 MiB downloads ran
+while ten serial Google `generate_204` requests were issued through the same
+local SOCKS endpoint. The 120-second exact-body rule was retained for every
+bulk flow.
+
+| Profile | Bulk completion | Bulk bytes per flow at deadline | Interactive success | Interactive times (s), median / maximum |
+|---|---:|---|---:|---:|
+| TUIC control | 0/8 | 7,503,800--7,602,104 | 10/10 | 3.151 / 8.468 |
+| WANOPT live safe default | 0/8 | 999,424--3,440,604 | 10/10 | 3.571 / 6.534 |
+
+Neither endpoint provided a useful bulk result in this severe loss window;
+the interactive rows are therefore tail-latency observations under a
+stressed path, not evidence that WANOPT has overtaken TUIC. A production
+policy must gate bulk admission on path health and preserve an explicit
+interactive reserve rather than infer safety from successful HTTP status
+alone.
