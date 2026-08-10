@@ -321,9 +321,13 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	// state. This is the same multiplexing property that makes TUIC effective
 	// for short flows, without sharing application/session framing state.
 	for {
-		streamCtx, cancel := context.WithTimeout(ctx, s.cfg.HandshakeTimeout)
-		stream, err := acceptQUICStream(streamCtx, conn)
-		cancel()
+		// Waiting for another stream is not a handshake operation. Applying the
+		// per-stream authentication timeout here used to close the entire QUIC
+		// connection after ten seconds without a *new* stream, even while an
+		// existing long download was actively transferring. Each accepted stream
+		// still gets the bounded authentication deadline in handleSession; the
+		// outer connection is bounded by QUIC's idle timeout and server shutdown.
+		stream, err := acceptQUICStream(ctx, conn)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.cfg.Logger.Debug("accept QUIC stream failed", "error", err)
@@ -386,7 +390,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 		return
 	}
 	defer destinationConn.Close()
-	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics)
+	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics, s.cfg.Logger)
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	serverSession := &serverFlow{flow: flow, maxLanes: s.cfg.MaxLanes}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sort"
 	"sync"
@@ -84,6 +85,7 @@ type multipathFlow struct {
 	chunkSize int
 	budget    *limiter.Budget
 	metrics   *metrics.Registry
+	logger    *slog.Logger
 
 	sendAckFlag uint16
 	recvAckFlag uint16
@@ -132,7 +134,7 @@ type multipathFlow struct {
 	highestSent  uint64
 }
 
-func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget, registry *metrics.Registry) *multipathFlow {
+func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget, registry *metrics.Registry, loggers ...*slog.Logger) *multipathFlow {
 	if chunkSize <= 0 {
 		chunkSize = defaultChunkSize
 	}
@@ -144,6 +146,9 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 		done:       make(chan struct{}),
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
 		replay: make(map[uint64]protocol.Frame), replayNotify: make(chan struct{}, 1),
+	}
+	if len(loggers) > 0 && loggers[0] != nil {
+		f.logger = loggers[0]
 	}
 	f.idleTimeout = defaultFlowIdleTimeout
 	f.maxLifetime = defaultFlowMaxLifetime
@@ -391,6 +396,9 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 	}
 	if f.metrics != nil {
 		f.metrics.LaneFailure()
+	}
+	if f.logger != nil {
+		f.logger.Debug("multipath lane failed", "flow_id", f.flowID, "lane_id", lane.id, "transport", lane.kind, "error", err)
 	}
 	select {
 	case f.laneErr <- laneFailure{lane: lane, err: err}:

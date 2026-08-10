@@ -337,7 +337,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
-		Metrics: metrics.New(),
+		Metrics: metrics.New(), HandshakeTimeout: 300 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -394,6 +394,11 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	if reply[1] != 0 {
 		t.Fatalf("SOCKS connect failed: %v", reply)
 	}
+	// The per-stream authentication timeout must not be used as a timer for
+	// accepting the next QUIC stream. Keep this established flow idle beyond
+	// that bound, then prove that the same stream still transfers data. The old
+	// behavior closed the whole connection with "wanopt session complete".
+	time.Sleep(750 * time.Millisecond)
 	payload := bytes.Repeat([]byte("wanopt-quic-"), 8192)
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatal(err)
