@@ -109,6 +109,7 @@ type laneTransportStats struct {
 	latestRTT, smoothedRTT   time.Duration
 	bytesSent, bytesReceived uint64
 	bytesLost, packetsLost   uint64
+	controller               wancongestion.ControllerTelemetry
 }
 
 type laneStatsProvider interface {
@@ -116,9 +117,10 @@ type laneStatsProvider interface {
 }
 
 type quicStreamConn struct {
-	stream *quic.Stream
-	conn   *quic.Conn
-	packet net.PacketConn
+	stream     *quic.Stream
+	conn       *quic.Conn
+	packet     net.PacketConn
+	controller wancongestion.TelemetryProvider
 	// closeConn is true for a dedicated lane. Streams obtained from the
 	// client pool and streams accepted by the server must only close their
 	// stream; closing the connection would tear down unrelated flows.
@@ -131,11 +133,15 @@ func (c *quicStreamConn) transportStats() laneTransportStats {
 		return laneTransportStats{}
 	}
 	s := c.conn.ConnectionStats()
-	return laneTransportStats{
+	stats := laneTransportStats{
 		latestRTT: s.LatestRTT, smoothedRTT: s.SmoothedRTT,
 		bytesSent: s.BytesSent, bytesReceived: s.BytesReceived,
 		bytesLost: s.BytesLost, packetsLost: s.PacketsLost,
 	}
+	if c.controller != nil {
+		stats.controller = c.controller.Telemetry()
+	}
+	return stats
 }
 
 func (c *quicStreamConn) Read(p []byte) (int, error)  { return c.stream.Read(p) }
@@ -225,7 +231,7 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 	if err != nil {
 		return nil, err
 	}
-	configureQUICController(conn, ccfg)
+	controller := configureQUICController(conn, ccfg)
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		_ = conn.CloseWithError(0, "unable to open wanopt stream")
@@ -234,7 +240,7 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 		}
 		return nil, err
 	}
-	return &quicStreamConn{stream: stream, conn: conn, packet: packetConn, closeConn: true}, nil
+	return &quicStreamConn{stream: stream, conn: conn, packet: packetConn, controller: controller, closeConn: true}, nil
 }
 
 // dialQUICConnection establishes only the QUIC connection. Keeping this
@@ -367,18 +373,24 @@ func resolveLocalAddress(spec string) (netip.Addr, error) {
 	return first.address, nil
 }
 
-func configureQUICController(conn *quic.Conn, cfg congestionConfig) {
+func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestion.TelemetryProvider {
 	if conn == nil {
-		return
+		return nil
 	}
 	switch cfg.kind {
 	case CongestionBBR:
-		conn.SetCongestionControl(wancongestion.NewBBRSender(conn.InitialPacketSize()))
+		controller := wancongestion.NewBBRSender(conn.InitialPacketSize())
+		conn.SetCongestionControl(controller)
+		return controller
 	case CongestionAdaptive:
-		conn.SetCongestionControl(wancongestion.NewAdaptiveSender(conn.InitialPacketSize(), cfg.adaptiveMinBytesPerSec, cfg.adaptiveMaxBytesPerSec))
+		controller := wancongestion.NewAdaptiveSender(conn.InitialPacketSize(), cfg.adaptiveMinBytesPerSec, cfg.adaptiveMaxBytesPerSec)
+		conn.SetCongestionControl(controller)
+		return controller
 	case CongestionBrutal:
 		if cfg.brutalBytesPerSecond > 0 {
-			conn.SetCongestionControl(wancongestion.NewBrutalSender(cfg.brutalBytesPerSecond, false))
+			controller := wancongestion.NewBrutalSender(cfg.brutalBytesPerSecond, false)
+			conn.SetCongestionControl(controller)
+			return controller
 		}
 	case CongestionReno, "":
 		// Keep the controller selected by the QUIC implementation.
@@ -386,6 +398,7 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) {
 		// Configuration is validated before dialing. Fail-safe to the stock
 		// controller if a future caller constructs an invalid config directly.
 	}
+	return nil
 }
 
 func quicServerTLSConfig(certificate tls.Certificate) *tls.Config {
@@ -397,12 +410,12 @@ func quicServerConfig() *quic.Config {
 	return cfg
 }
 
-func acceptQUICStream(ctx context.Context, conn *quic.Conn) (streamConn, error) {
+func acceptQUICStream(ctx context.Context, conn *quic.Conn, controller wancongestion.TelemetryProvider) (streamConn, error) {
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &quicStreamConn{stream: stream, conn: conn, closeConn: false}, nil
+	return &quicStreamConn{stream: stream, conn: conn, controller: controller, closeConn: false}, nil
 }
 
 func transportError(kind TransportKind, err error) error {

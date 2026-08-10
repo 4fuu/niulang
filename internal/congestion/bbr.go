@@ -76,6 +76,7 @@ type BBRSender struct {
 	recoveryLosses  quiccongestion.ByteCount
 	probeRTTExit    monotime.Time
 	probeRTTStarted bool
+	telemetry       telemetryState
 }
 
 type bbrMode uint8
@@ -150,8 +151,10 @@ func NewBBRSender(initialPacketSize quiccongestion.ByteCount) *BBRSender {
 		// would apply the 2.885 factor twice before a delivery sample exists.
 		cwndGain:   bbrStartupCwndGain,
 		sendStates: make(map[quiccongestion.PacketNumber]bbrSendState),
+		telemetry:  newTelemetryState("bbr"),
 	}
 	b.pacer = newPacer(b.bandwidth)
+	b.publishTelemetry()
 	return b
 }
 
@@ -159,6 +162,7 @@ func (b *BBRSender) SetRTTStatsProvider(provider quiccongestion.RTTStatsProvider
 	b.rttStats = provider
 	b.refreshRTT(monotime.Now())
 	b.updateWindow(0)
+	b.publishTelemetry()
 }
 
 func (b *BBRSender) rtt() time.Duration {
@@ -219,6 +223,7 @@ func (b *BBRSender) bandwidth() quiccongestion.ByteCount {
 	if paced > float64(bbrMaxRate) {
 		paced = float64(bbrMaxRate)
 	}
+	b.telemetry.pacingRate.Store(uint64(paced))
 	return quiccongestion.ByteCount(paced)
 }
 
@@ -253,6 +258,7 @@ func (b *BBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quicconge
 		deliveredTimeSend: deliveredTime, sentBytesAtSend: b.addSentBytes(bytes),
 	}
 	b.pacer.sentPacket(sentTime, bytes)
+	b.publishTelemetry()
 }
 
 func (b *BBRSender) addSentBytes(bytes quiccongestion.ByteCount) uint64 {
@@ -301,6 +307,7 @@ func (b *BBRSender) MaybeExitSlowStart() {}
 
 func (b *BBRSender) OnPacketAcked(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, priorInFlight quiccongestion.ByteCount, _ monotime.Time) {
 	b.bytesInFlight = priorInFlight
+	b.publishTelemetry()
 }
 
 func (b *BBRSender) OnCongestionEvent(number quiccongestion.PacketNumber, lostBytes quiccongestion.ByteCount, priorInFlight quiccongestion.ByteCount) {
@@ -311,6 +318,7 @@ func (b *BBRSender) OnCongestionEvent(number quiccongestion.PacketNumber, lostBy
 	b.bytesInFlight = priorInFlight
 	b.noteLoss(number, lostBytes, now)
 	b.updateWindow(0)
+	b.publishTelemetry()
 }
 
 func (b *BBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, eventTime monotime.Time, acked []quiccongestion.AckedPacketInfo, lost []quiccongestion.LostPacketInfo) {
@@ -361,6 +369,7 @@ func (b *BBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, 
 	} else {
 		b.recoveryLosses -= ackedBytes
 	}
+	b.publishTelemetry()
 }
 
 func (b *BBRSender) noteLoss(number quiccongestion.PacketNumber, lostBytes quiccongestion.ByteCount, now monotime.Time) {
@@ -632,6 +641,7 @@ func (b *BBRSender) OnRetransmissionTimeout(retransmitted bool) {
 	b.sendStates = make(map[quiccongestion.PacketNumber]bbrSendState)
 	b.pacer = newPacer(b.bandwidth)
 	b.pacer.setMaxDatagramSize(b.maxDatagramSize)
+	b.publishTelemetry()
 }
 
 func (b *BBRSender) SetMaxDatagramSize(size quiccongestion.ByteCount) {
@@ -646,6 +656,7 @@ func (b *BBRSender) SetMaxDatagramSize(size quiccongestion.ByteCount) {
 	}
 	b.pacer.setMaxDatagramSize(size)
 	b.updateWindow(0)
+	b.publishTelemetry()
 }
 
 func (b *BBRSender) InSlowStart() bool { return b.mode == bbrStartup }
@@ -660,3 +671,9 @@ func (b *BBRSender) GetCongestionWindow() quiccongestion.ByteCount {
 	}
 	return window
 }
+
+func (b *BBRSender) publishTelemetry() {
+	b.telemetry.update(uint32(b.mode)+ControllerModeStartup, b.maxBandwidth, uint64(b.bandwidth()), int64(b.GetCongestionWindow()), int64(b.bytesInFlight), b.minRTT, b.inRecovery)
+}
+
+func (b *BBRSender) Telemetry() ControllerTelemetry { return b.telemetry.snapshot() }

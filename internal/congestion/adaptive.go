@@ -33,6 +33,7 @@ type AdaptiveSender struct {
 	windowAcked   quiccongestion.ByteCount
 	windowLost    quiccongestion.ByteCount
 	lastLoss      monotime.Time
+	telemetry     telemetryState
 }
 
 const (
@@ -65,14 +66,17 @@ func NewAdaptiveSender(initialPacketSize quiccongestion.ByteCount, minRate, maxR
 		minRateBps:      float64(minRate),
 		maxRateBps:      float64(maxRate),
 		cwnd:            32 * initialPacketSize,
+		telemetry:       newTelemetryState("adaptive"),
 	}
 	a.pacer = newPacer(a.bandwidth)
+	a.publishTelemetry()
 	return a
 }
 
 func (a *AdaptiveSender) SetRTTStatsProvider(provider quiccongestion.RTTStatsProvider) {
 	a.rttStats = provider
 	a.updateWindow()
+	a.publishTelemetry()
 }
 
 func (a *AdaptiveSender) bandwidth() quiccongestion.ByteCount {
@@ -82,6 +86,7 @@ func (a *AdaptiveSender) bandwidth() quiccongestion.ByteCount {
 	if a.rateBps > a.maxRateBps {
 		a.rateBps = a.maxRateBps
 	}
+	a.telemetry.pacingRate.Store(uint64(a.rateBps))
 	return quiccongestion.ByteCount(a.rateBps)
 }
 
@@ -96,6 +101,7 @@ func (a *AdaptiveSender) HasPacingBudget(now monotime.Time) bool {
 func (a *AdaptiveSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quiccongestion.ByteCount, _ quiccongestion.PacketNumber, bytes quiccongestion.ByteCount, _ bool) {
 	a.pacer.sentPacket(sentTime, bytes)
 	a.bytesInFlight = bytesInFlight
+	a.publishTelemetry()
 }
 
 func (a *AdaptiveSender) CanSend(bytesInFlight quiccongestion.ByteCount) bool {
@@ -110,12 +116,14 @@ func (a *AdaptiveSender) MaybeExitSlowStart() {}
 
 func (a *AdaptiveSender) OnPacketAcked(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, priorInFlight quiccongestion.ByteCount, _ monotime.Time) {
 	a.bytesInFlight = priorInFlight
+	a.publishTelemetry()
 }
 
 func (a *AdaptiveSender) OnCongestionEvent(_ quiccongestion.PacketNumber, lostBytes quiccongestion.ByteCount, _ quiccongestion.ByteCount) {
 	if lostBytes > 0 {
 		a.backoff(0.70)
 	}
+	a.publishTelemetry()
 }
 
 func (a *AdaptiveSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, eventTime monotime.Time, acked []quiccongestion.AckedPacketInfo, lost []quiccongestion.LostPacketInfo) {
@@ -159,11 +167,13 @@ func (a *AdaptiveSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCo
 	a.windowAcked, a.windowLost = 0, 0
 	a.windowStart = eventTime
 	a.updateWindow()
+	a.publishTelemetry()
 }
 
 func (a *AdaptiveSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	if packetsRetransmitted {
 		a.backoff(0.50)
+		a.publishTelemetry()
 	}
 }
 
@@ -174,6 +184,7 @@ func (a *AdaptiveSender) SetMaxDatagramSize(size quiccongestion.ByteCount) {
 	a.maxDatagramSize = size
 	a.pacer.setMaxDatagramSize(size)
 	a.updateWindow()
+	a.publishTelemetry()
 }
 
 func (a *AdaptiveSender) InSlowStart() bool { return false }
@@ -188,6 +199,12 @@ func (a *AdaptiveSender) GetCongestionWindow() quiccongestion.ByteCount {
 	}
 	return a.cwnd
 }
+
+func (a *AdaptiveSender) publishTelemetry() {
+	a.telemetry.update(ControllerModeAdaptive, uint64(a.rateBps), uint64(a.bandwidth()), int64(a.GetCongestionWindow()), int64(a.bytesInFlight), a.rtt(), a.InRecovery())
+}
+
+func (a *AdaptiveSender) Telemetry() ControllerTelemetry { return a.telemetry.snapshot() }
 
 func (a *AdaptiveSender) backoff(factor float64) {
 	if factor <= 0 || factor >= 1 {

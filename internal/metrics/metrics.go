@@ -40,6 +40,12 @@ type Snapshot struct {
 	QUICLanes                                                        int64
 	QUICLatestRTT, QUICSmoothedRTT                                   time.Duration
 	QUICBytesSent, QUICBytesReceived, QUICBytesLost, QUICPacketsLost uint64
+	QUICControllerKind                                               string
+	QUICControllerMode                                               uint32
+	QUICControllerMaxBandwidth, QUICControllerPacingRate             uint64
+	QUICControllerCongestionWindow, QUICControllerBytesInFlight      uint64
+	QUICControllerMinRTT                                             time.Duration
+	QUICControllerInRecovery                                         bool
 }
 
 // QUICObservation is a point-in-time aggregate over the lanes of one logical
@@ -47,13 +53,21 @@ type Snapshot struct {
 // active lane without any user-controlled labels.  Byte and loss values are
 // the sum of the QUIC connection counters at that point.
 type QUICObservation struct {
-	Lanes         int
-	LatestRTT     time.Duration
-	SmoothedRTT   time.Duration
-	BytesSent     uint64
-	BytesReceived uint64
-	BytesLost     uint64
-	PacketsLost   uint64
+	Lanes                      int
+	LatestRTT                  time.Duration
+	SmoothedRTT                time.Duration
+	BytesSent                  uint64
+	BytesReceived              uint64
+	BytesLost                  uint64
+	PacketsLost                uint64
+	ControllerKind             string
+	ControllerMode             uint32
+	ControllerMaxBandwidth     uint64
+	ControllerPacingRate       uint64
+	ControllerCongestionWindow uint64
+	ControllerBytesInFlight    uint64
+	ControllerMinRTT           time.Duration
+	ControllerInRecovery       bool
 }
 
 func New() *Registry { return &Registry{quicFlows: make(map[uint64]QUICObservation)} }
@@ -145,6 +159,11 @@ func (r *Registry) Snapshot() Snapshot {
 	var quicLanes int64
 	var latestRTT, smoothedRTT time.Duration
 	var bytesSent, bytesReceived, bytesLost, packetsLost uint64
+	var controllerKind string
+	var controllerMode uint32
+	var controllerMaxBandwidth, controllerPacingRate, controllerCwnd, controllerBytesInFlight uint64
+	var controllerMinRTT time.Duration
+	var controllerRecovery bool
 	for _, o := range r.quicFlows {
 		quicLanes += int64(o.Lanes)
 		if o.LatestRTT > latestRTT {
@@ -157,6 +176,32 @@ func (r *Registry) Snapshot() Snapshot {
 		bytesReceived += o.BytesReceived
 		bytesLost += o.BytesLost
 		packetsLost += o.PacketsLost
+		if o.ControllerKind != "" {
+			if controllerKind == "" {
+				controllerKind = o.ControllerKind
+			} else if controllerKind != o.ControllerKind {
+				controllerKind = "mixed"
+			}
+			if o.ControllerMode > controllerMode {
+				controllerMode = o.ControllerMode
+			}
+			if o.ControllerMaxBandwidth > controllerMaxBandwidth {
+				controllerMaxBandwidth = o.ControllerMaxBandwidth
+			}
+			if o.ControllerPacingRate > controllerPacingRate {
+				controllerPacingRate = o.ControllerPacingRate
+			}
+			if o.ControllerCongestionWindow > controllerCwnd {
+				controllerCwnd = o.ControllerCongestionWindow
+			}
+			if o.ControllerBytesInFlight > controllerBytesInFlight {
+				controllerBytesInFlight = o.ControllerBytesInFlight
+			}
+			if o.ControllerMinRTT > controllerMinRTT {
+				controllerMinRTT = o.ControllerMinRTT
+			}
+			controllerRecovery = controllerRecovery || o.ControllerInRecovery
+		}
 	}
 	r.telemetryMu.Unlock()
 	s.QUICLanes = quicLanes
@@ -166,6 +211,14 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICBytesReceived = bytesReceived
 	s.QUICBytesLost = bytesLost
 	s.QUICPacketsLost = packetsLost
+	s.QUICControllerKind = controllerKind
+	s.QUICControllerMode = controllerMode
+	s.QUICControllerMaxBandwidth = controllerMaxBandwidth
+	s.QUICControllerPacingRate = controllerPacingRate
+	s.QUICControllerCongestionWindow = controllerCwnd
+	s.QUICControllerBytesInFlight = controllerBytesInFlight
+	s.QUICControllerMinRTT = controllerMinRTT
+	s.QUICControllerInRecovery = controllerRecovery
 	return s
 }
 
@@ -199,6 +252,20 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "wanopt_quic_bytes_received %d\n", s.QUICBytesReceived)
 	fmt.Fprintf(w, "wanopt_quic_bytes_lost %d\n", s.QUICBytesLost)
 	fmt.Fprintf(w, "wanopt_quic_packets_lost %d\n", s.QUICPacketsLost)
+	if s.QUICControllerKind != "" {
+		fmt.Fprintf(w, "wanopt_quic_controller_kind{kind=\"%s\"} 1\n", s.QUICControllerKind)
+	}
+	fmt.Fprintf(w, "wanopt_quic_controller_mode %d\n", s.QUICControllerMode)
+	fmt.Fprintf(w, "wanopt_quic_controller_max_bandwidth_bytes_per_second %d\n", s.QUICControllerMaxBandwidth)
+	fmt.Fprintf(w, "wanopt_quic_controller_pacing_rate_bytes_per_second %d\n", s.QUICControllerPacingRate)
+	fmt.Fprintf(w, "wanopt_quic_controller_congestion_window_bytes %d\n", s.QUICControllerCongestionWindow)
+	fmt.Fprintf(w, "wanopt_quic_controller_bytes_in_flight %d\n", s.QUICControllerBytesInFlight)
+	fmt.Fprintf(w, "wanopt_quic_controller_min_rtt_seconds %.9f\n", s.QUICControllerMinRTT.Seconds())
+	if s.QUICControllerInRecovery {
+		fmt.Fprintln(w, "wanopt_quic_controller_in_recovery 1")
+	} else {
+		fmt.Fprintln(w, "wanopt_quic_controller_in_recovery 0")
+	}
 	for i, value := range s.ClassTransitions {
 		fmt.Fprintf(w, "wanopt_class_transitions_total{class=\"%d\"} %d\n", i, value)
 	}

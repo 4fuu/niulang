@@ -264,6 +264,25 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 		observation.BytesReceived += stats.bytesReceived
 		observation.BytesLost += stats.bytesLost
 		observation.PacketsLost += stats.packetsLost
+		controller := stats.controller
+		if controller.Kind != "" {
+			if observation.ControllerKind == "" {
+				observation.ControllerKind = controller.Kind
+			} else if observation.ControllerKind != controller.Kind {
+				observation.ControllerKind = "mixed"
+			}
+			if controller.Mode > observation.ControllerMode {
+				observation.ControllerMode = controller.Mode
+			}
+			observation.ControllerMaxBandwidth += controller.MaxBandwidth
+			observation.ControllerPacingRate += controller.PacingRate
+			observation.ControllerCongestionWindow += controller.CongestionWindow
+			observation.ControllerBytesInFlight += controller.BytesInFlight
+			if controller.MinRTT > observation.ControllerMinRTT {
+				observation.ControllerMinRTT = controller.MinRTT
+			}
+			observation.ControllerInRecovery = observation.ControllerInRecovery || controller.InRecovery
+		}
 	}
 	if observation.SmoothedRTT > 0 {
 		f.currentRTTNS.Store(observation.SmoothedRTT.Nanoseconds())

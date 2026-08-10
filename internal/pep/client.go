@@ -12,6 +12,7 @@ import (
 
 	"github.com/apernet/quic-go"
 	"github.com/icourses-dev/wanopt/internal/classifier"
+	wancongestion "github.com/icourses-dev/wanopt/internal/congestion"
 	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/protocol"
@@ -77,9 +78,10 @@ type Client struct {
 	// congestion controller (the TUIC property) while preserving the PEP
 	// session/framing isolation on each stream. A dead connection is discarded
 	// before the next stream is opened and is recreated on demand.
-	quicMu     sync.Mutex
-	quicConn   *quic.Conn
-	quicPacket net.PacketConn
+	quicMu         sync.Mutex
+	quicConn       *quic.Conn
+	quicPacket     net.PacketConn
+	quicController wancongestion.TelemetryProvider
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
@@ -254,7 +256,7 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 func (c *Client) closeQUICPool() {
 	c.quicMu.Lock()
 	conn, packet := c.quicConn, c.quicPacket
-	c.quicConn, c.quicPacket = nil, nil
+	c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
 	c.quicMu.Unlock()
 	if conn != nil {
 		_ = conn.CloseWithError(0, "wanopt client stopped")
@@ -455,11 +457,11 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig) 
 		}
 		conn, packet, err := dialQUICConnection(dialCtx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
 		if err != nil {
-			c.quicConn, c.quicPacket = nil, nil
+			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
 			return nil, err
 		}
-		configureQUICController(conn, ccfg)
-		c.quicConn, c.quicPacket = conn, packet
+		controller := configureQUICController(conn, ccfg)
+		c.quicConn, c.quicPacket, c.quicController = conn, packet, controller
 	}
 	stream, err := c.quicConn.OpenStreamSync(dialCtx)
 	if err != nil {
@@ -468,11 +470,11 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig) 
 			if c.quicPacket != nil {
 				_ = c.quicPacket.Close()
 			}
-			c.quicConn, c.quicPacket = nil, nil
+			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
 		}
 		return nil, err
 	}
-	return &quicStreamConn{stream: stream, conn: c.quicConn, closeConn: false}, nil
+	return &quicStreamConn{stream: stream, conn: c.quicConn, controller: c.quicController, closeConn: false}, nil
 }
 
 func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID [16]byte, flowID, laneID uint64) (*mpLane, error) {

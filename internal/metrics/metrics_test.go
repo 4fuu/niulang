@@ -22,6 +22,10 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	r.ObserveQUIC(1, QUICObservation{
 		Lanes: 2, LatestRTT: 250 * time.Millisecond, SmoothedRTT: 200 * time.Millisecond,
 		BytesSent: 100, BytesReceived: 200, BytesLost: 3, PacketsLost: 1,
+		ControllerKind: "bbr", ControllerMode: 3, ControllerMaxBandwidth: 1_000_000,
+		ControllerPacingRate: 1_250_000, ControllerCongestionWindow: 400_000,
+		ControllerBytesInFlight: 200_000, ControllerMinRTT: 190 * time.Millisecond,
+		ControllerInRecovery: true,
 	})
 	r.FlowFinished(10, 20, false)
 	r.FlowStarted()
@@ -32,7 +36,7 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "wanopt_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "wanopt_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "wanopt_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "wanopt_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "wanopt_quic_smoothed_rtt_seconds 0.200000000") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "wanopt_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "wanopt_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "wanopt_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "wanopt_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "wanopt_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "wanopt_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "wanopt_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "wanopt_quic_controller_in_recovery 1") {
 		t.Fatalf("unexpected exposition: %s", rec.Body.String())
 	}
 }

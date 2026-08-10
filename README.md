@@ -51,7 +51,8 @@ controlled-loss/resource release gates in
   replacement.
 - One aggregate token bucket with an interactive reserve above all lanes.
 - Optional localhost `/metrics` counters for flow completion, bytes, fallback,
-  lane failure/replacement, PIAS class transitions, and active QUIC RTT/loss
+  lane failure/replacement, PIAS class transitions, active QUIC RTT/loss, and
+  controller mode/max bandwidth/pacing/cwnd/bytes-in-flight/min-RTT/recovery
   telemetry, plus explicit flow-idle/lifetime timeouts. The endpoint is
   loopback-only in the development service.
 - Reproducible measurements for latency, throughput, loss, queueing, and

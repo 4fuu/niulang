@@ -308,7 +308,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	// released before Wait can complete.
 	defer wg.Wait()
 	defer conn.CloseWithError(0, "wanopt session complete")
-	configureQUICController(conn, congestionConfig{
+	controller := configureQUICController(conn, congestionConfig{
 		kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
 		adaptiveMinBytesPerSec: s.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: s.cfg.AdaptiveMaxBytesSec,
 	})
@@ -327,7 +327,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 		// existing long download was actively transferring. Each accepted stream
 		// still gets the bounded authentication deadline in handleSession; the
 		// outer connection is bounded by QUIC's idle timeout and server shutdown.
-		stream, err := acceptQUICStream(ctx, conn)
+		stream, err := acceptQUICStream(ctx, conn, controller)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.cfg.Logger.Debug("accept QUIC stream failed", "error", err)

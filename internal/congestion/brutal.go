@@ -21,6 +21,7 @@ type BrutalSender struct {
 	lossCount               uint64
 	lastSample              monotime.Time
 	disableLossCompensation bool
+	telemetry               telemetryState
 }
 
 const (
@@ -39,16 +40,22 @@ func NewBrutalSender(bytesPerSecond uint64, disableLossCompensation bool) *Bruta
 		maxDatagramSize:         quiccongestion.InitialPacketSize,
 		ackRate:                 1,
 		disableLossCompensation: disableLossCompensation,
+		telemetry:               newTelemetryState("brutal"),
 	}
 	b.pacer = newPacer(b.bandwidth)
+	b.publishTelemetry()
 	return b
 }
 
-func (b *BrutalSender) SetRTTStatsProvider(r quiccongestion.RTTStatsProvider) { b.rttStats = r }
+func (b *BrutalSender) SetRTTStatsProvider(r quiccongestion.RTTStatsProvider) {
+	b.rttStats = r
+	b.publishTelemetry()
+}
 func (b *BrutalSender) bandwidth() quiccongestion.ByteCount {
 	if b.ackRate <= 0 {
 		b.ackRate = 1
 	}
+	b.telemetry.pacingRate.Store(uint64(float64(b.bps) / b.ackRate))
 	return quiccongestion.ByteCount(float64(b.bps) / b.ackRate)
 }
 func (b *BrutalSender) TimeUntilSend(_ quiccongestion.ByteCount) monotime.Time {
@@ -59,6 +66,7 @@ func (b *BrutalSender) HasPacingBudget(now monotime.Time) bool {
 }
 func (b *BrutalSender) OnPacketSent(sentTime monotime.Time, _ quiccongestion.ByteCount, _ quiccongestion.PacketNumber, bytes quiccongestion.ByteCount, _ bool) {
 	b.pacer.sentPacket(sentTime, bytes)
+	b.publishTelemetry()
 }
 func (b *BrutalSender) CanSend(bytesInFlight quiccongestion.ByteCount) bool {
 	return bytesInFlight < b.GetCongestionWindow()
@@ -85,6 +93,7 @@ func (b *BrutalSender) SetMaxDatagramSize(size quiccongestion.ByteCount) {
 	if size > 0 {
 		b.maxDatagramSize = size
 		b.pacer.setMaxDatagramSize(size)
+		b.publishTelemetry()
 	}
 }
 func (b *BrutalSender) OnCongestionEventEx(_ quiccongestion.ByteCount, eventTime monotime.Time, acked []quiccongestion.AckedPacketInfo, lost []quiccongestion.LostPacketInfo) {
@@ -108,4 +117,20 @@ func (b *BrutalSender) OnCongestionEventEx(_ quiccongestion.ByteCount, eventTime
 	b.ackRate = rate
 	b.ackCount, b.lossCount = 0, 0
 	b.lastSample = eventTime
+	b.publishTelemetry()
 }
+
+func (b *BrutalSender) publishTelemetry() {
+	b.telemetry.update(ControllerModeBrutal, uint64(b.bps), uint64(b.bandwidth()), int64(b.GetCongestionWindow()), 0, b.currentRTT(), false)
+}
+
+func (b *BrutalSender) currentRTT() time.Duration {
+	if b.rttStats != nil {
+		if rtt := b.rttStats.SmoothedRTT(); rtt > 0 {
+			return rtt
+		}
+	}
+	return 200 * time.Millisecond
+}
+
+func (b *BrutalSender) Telemetry() ControllerTelemetry { return b.telemetry.snapshot() }
