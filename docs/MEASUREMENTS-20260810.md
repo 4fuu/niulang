@@ -647,3 +647,59 @@ path, and the controller remains opt-in.
 
 The isolated listener and local test processes were intentionally left out of
 the live deployment; they must be stopped before a clean handoff.
+
+## Authenticated pooled fast-stream campaign (1d7a556)
+
+The pooled fast-stream implementation was tested after the controller campaign
+without changing `wanoptd-dev.service` or its `:12443` listener. The isolated
+servers used the `70d431a` Linux/amd64 binary (SHA-256
+`5cfaa72031cecc018898aa9de0aee511448630bd79b89c5c9819ac55c929ece3`) on
+`:12446` with `adaptive` and `:12447` with `bbr-tuic`. The client used a
+physical source binding (`--local-address auto`), SNI `icourses-dev.01.me`,
+and the fixed public address. All HTTP results below preserve the exact-body
+and curl-exit completion rule; a 200 response with a timeout is incomplete.
+
+### Short requests
+
+Ten fresh Google `generate_204` requests were issued serially through one
+adaptive QUIC client. The pooled profile used one persistent QUIC connection;
+the first request performed `HELLO` plus `OPEN`, and later requests used
+`OPEN_FAST`. The independent profile created a fresh QUIC connection for every
+flow. The path was variable, so these are an amortization campaign rather than
+a randomized causal estimate.
+
+| Profile | Success | Times (s) | Median / max (s) |
+|---|---:|---|---:|
+| Adaptive, pooled fast stream | 10/10 | 8.376, 3.497, 1.844, 2.574, 2.807, 1.754, 2.586, 2.804, 2.434, 2.169 | 2.580 / 8.376 |
+| Adaptive, independent QUIC | 10/10 | 3.563, 6.092, 4.388, 8.623, 4.095, 3.687, 6.735, 9.208, 4.498, 3.229 | 4.443 / 9.208 |
+
+The cold pooled request was 8.376 s; the nine warmed requests had a median of
+2.574 s. The pooled median was 42% lower than the contemporaneous independent
+median, but the sample is too small and the path too variable for a release
+claim. A new client using the corrected receiver was also tested against the
+unchanged live service, which still emits the interim 32-byte capability
+acknowledgement: five Google requests succeeded (times 5.266, 2.172, 3.455,
+2.790, 4.325 s; median 3.455 s). This was a compatibility check, not a
+comparison with the isolated server.
+
+### Bulk and upload stress window
+
+The path entered a severe loss/throttle window during the same session. This
+is useful failure evidence, not a capacity estimate:
+
+| Profile | Workload | Result |
+|---|---|---|
+| Adaptive, independent, one flow | 30-s 10 MiB download | 834,892 bytes, HTTP 200, curl 28 (incomplete; 0.223 Mb/s) |
+| Adaptive, pooled, one flow | 30-s 10 MiB download | 917,504 bytes, HTTP 200, curl 28 (incomplete; 0.245 Mb/s) |
+| `bbr-tuic`, independent, one flow | 30-s 10 MiB download | 10,125,222 bytes, HTTP 200, curl 28 (incomplete; 2.699 Mb/s) |
+| `bbr-tuic`, independent, one flow | 60-s 10 MiB download | 10,485,760 bytes, HTTP 200, curl 0 in 34.380 s (2.440 Mb/s) |
+| Adaptive, pooled, one upload | 10 MiB US sink | 10,485,760 bytes, HTTP 200, curl 0 in 25.409 s (3.301 Mb/s) |
+| `bbr-tuic`, independent, one upload | 10 MiB US sink | 10,485,760 bytes, HTTP 200, curl 0 in 60.084 s (1.396 Mb/s) |
+| Adaptive, pooled, two concurrent downloads | 60-s 10 MiB each | 0/2 complete; 1,097,018 and 1,064,942 bytes, curl 28 (0.146/0.142 Mb/s per flow) |
+
+The result reinforces the existing release decision: pooled fast streams target
+handshake latency and do not increase a hard path capacity limit. Bulk mode
+still requires a path-health gate and must not select `adaptive`, `bbr-tuic`, or
+pooling globally based on this stress window. The temporary listeners, upload
+sink, and isolated processes were stopped; the live service remained active
+and unchanged.
