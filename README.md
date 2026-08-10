@@ -92,12 +92,14 @@ agent can bind the outer socket to the physical source IP:
 ```sh
 wanoptd --mode local --listen 127.0.0.1:12080 \
   --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
-  --local-address 172.20.10.2 --transport auto \
+  --local-address auto --transport auto \
   --secret-file .dev/session.secret
 ```
 
-The source address is deployment-specific; `172.20.10.2` was the address on
-the final measurement host. Binding it is preferable to using
+`--local-address auto` discovers the active non-loopback, non-point-to-point
+IPv4 address before each outer dial, so ordinary DHCP changes do not strand
+the client. A literal address or `if:NAME` may be used when the host has more
+than one physical IPv4 address. Binding it is preferable to using
 the Clash fake-DNS address, which would route the PEP through the tunnel being
 measured.
 
@@ -108,7 +110,7 @@ the path and reduced if loss or interactive tail latency rises:
 ```sh
 wanoptd --mode local --listen 127.0.0.1:12080 \
   --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
-  --local-address 172.20.10.2 --transport quic \
+  --local-address auto --transport quic \
   --congestion brutal --brutal-bytes-per-sec 1048576 \
   --max-lanes 8 --secret-file .dev/session.secret
 ```

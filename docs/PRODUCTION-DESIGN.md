@@ -190,8 +190,13 @@ UDP. No HTTPS MITM is needed for either mode.
 
 On a host where Clash TUN installs a default route through `198.18.0.1`, the
 outer dev endpoint must be explicitly excluded from that route or the client
-must bind the physical source address. This is a measurement/deployment
-detail, not a reason to use the fake DNS address as the PEP socket endpoint.
+must bind a physical source address. The client accepts a literal IP,
+`if:NAME`, or `auto`; `auto` resolves an active non-loopback,
+non-point-to-point IPv4 address before each dial and therefore handles normal
+DHCP changes. If more than one physical address is active, configure `if:NAME`
+or a literal address rather than relying on an ambiguous automatic choice.
+This is a measurement/deployment detail, not a reason to use the fake DNS
+address as the PEP socket endpoint.
 
 ## Security and operations
 
