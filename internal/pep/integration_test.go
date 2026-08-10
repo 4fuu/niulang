@@ -298,6 +298,9 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 			t.Fatalf("service shutdown: %v", err)
 		}
 	}
+	if snapshot := server.Metrics().Snapshot(); snapshot.FlowsFailed != 0 {
+		t.Fatalf("clean UDP association counted as failed: %+v", snapshot)
+	}
 }
 
 func serverListenerAddr(listener net.Listener, packetConn net.PacketConn) string {

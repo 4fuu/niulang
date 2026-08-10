@@ -306,6 +306,12 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 			case <-assocCtx.Done():
 				return
 			}
+			// A graceful UDP dissociation is terminal. Stop reading immediately
+			// after queueing CLOSE so a following transport EOF cannot race the
+			// CLOSE event and turn a clean association into a false failure.
+			if frame.Header.Type == protocol.TypeClose {
+				return
+			}
 		}
 	}()
 	packets := make(chan udpDatagram, 32)
