@@ -183,3 +183,22 @@ func TestExpectedCloseDoesNotCountAsLaneFailure(t *testing.T) {
 		t.Fatalf("normal close exported as %d lane failures", got)
 	}
 }
+
+func TestProvenCompleteFlowDoesNotWaitForLaneReplacementForFinalACK(t *testing.T) {
+	flow := &multipathFlow{
+		ctx: context.Background(), done: make(chan struct{}),
+		lanes: make(map[uint64]*mpLane),
+	}
+	flow.finSent.Store(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := flow.acknowledgeRemoteFIN(ctx, 0, false)
+	if err != nil {
+		t.Fatalf("proven-complete final ACK cleanup returned error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("final ACK cleanup took %s; lane replacement was not bounded", elapsed)
+	}
+}

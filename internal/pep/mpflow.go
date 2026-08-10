@@ -42,6 +42,11 @@ const (
 	flowAbortGrace        = 5 * time.Second
 	interactiveAbortGrace = 30 * time.Second
 	remoteFinDrainGrace   = 500 * time.Millisecond
+	// Once the peer FIN has proved the receive sequence complete, do not spend
+	// the full lane-replacement window trying to deliver its final ACK. If the
+	// local direction is also closing, the server completion tombstone can
+	// absorb a lost ACK without keeping the application flow alive.
+	finalAckWriteGrace = 2 * time.Second
 	// These limits are deliberately long enough for quiet SSH and remote
 	// desktop sessions, while preventing an abandoned authenticated flow from
 	// retaining a destination socket and replay window forever.
@@ -1031,7 +1036,17 @@ func (f *multipathFlow) acknowledgeRemoteFIN(ctx context.Context, sequence uint6
 			return err
 		}
 	}
-	if err := f.writeACK(ctx, sequence, f.recvAckFlag, true); err != nil {
+	ackCtx, cancel := context.WithTimeout(ctx, finalAckWriteGrace)
+	err := f.writeACK(ackCtx, sequence, f.recvAckFlag, true)
+	cancel()
+	if err != nil {
+		// The peer FIN and reassembly sequence prove that all inbound bytes are
+		// complete. Once our side is also closing, failure to return the final
+		// ACK is a cleanup race, not an application-data failure. The server
+		// retains a bounded tombstone and can replay/absorb the close state.
+		if f.finSent.Load() || f.localClosed.Load() || abort {
+			return nil
+		}
 		return err
 	}
 	if abort {
