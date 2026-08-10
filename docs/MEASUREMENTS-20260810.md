@@ -585,3 +585,65 @@ stressed path, not evidence that WANOPT has overtaken TUIC. A production
 policy must gate bulk admission on path health and preserve an explicit
 interactive reserve rather than infer safety from successful HTTP status
 alone.
+
+## TUIC-aligned BBR port (isolated, same-day follow-up)
+
+The `bbr-tuic` controller is a separate opt-in implementation. It ports the
+state machine and estimator used by TUIC's `quinn-congestions` BBR: a
+send/ACK-rate minimum estimator, ten-round max filter, ACK-aggregation height,
+startup/full-bandwidth detection, recovery conservation/growth, randomized
+ProbeBW cycling, and BDP-based ProbeRTT. The public `quic-go` callback does not
+provide an application-limited bit, so this implementation uses cumulative
+send/ACK deltas and only marks a drained flight after an RTT-scale idle gap as
+app-limited. It was deployed only on an isolated remote UDP listener `:12445`
+and local SOCKS listeners `127.0.0.1:12087`/`:12088`; the live `:12443`
+service was not changed. The binary SHA-256 was
+`7f8049c930330af169d4a83b8c75e53fa3ffab9fa1bcdfefb027587d7151b48a`.
+That first candidate was later found to apply `high_gain` to its IW/RTT
+fallback before a delivery sample existed. The final candidate corrects this
+to TUIC's IW/RTT initialization; its SHA-256 is
+`631119d8b8ea48900f7514d04f5ba068c410d51937da0e4a04bfac7a15bbf372`.
+
+The path changed during this block, so the contemporaneous TUIC rows below
+are the useful control. Each result is an exact 10-MiB CacheFly body and a
+complete row requires HTTP 200, curl exit 0, and exactly 10,485,760 bytes.
+
+| Profile | N=1 completion | N=1 goodput (Mb/s) | N=2 completion | N=2 aggregate goodput (Mb/s) |
+|---|---:|---|---:|---|
+| TUIC, contemporaneous control | 5/5 | 1.737, 5.810, 6.022, 5.493, 2.691 (median 5.493) | not rerun in this block | not rerun |
+| WANOPT `bbr-tuic`, independent lane | 5/5 | 3.657, 3.126, 1.767, 3.424, 2.685 (median 3.126) | 9/10 flows complete; one pair had one dial failure | 5.660, 5.989, 5.442, incomplete, 4.612 (successful-pair median 5.660) |
+
+The port is materially better than the old custom BBR in the previous
+campaign, and its two-flow successful pairs are close to the contemporaneous
+TUIC range. It still has lower single-flow median goodput and one two-flow
+dial failure; this is not a deployment gate pass. More importantly, ten fresh
+Google `generate_204` requests through the independent-lane port took
+`1.516, 2.001, 2.811, 3.376, 4.798, 6.124, 6.677, 6.863, 7.831, 9.715` seconds
+(median 5.750 s). A persistent pooled `bbr-tuic` control stream reduced this
+to `1.102, 1.594, 1.699, 2.189, 2.795, 3.102, 3.269, 3.685, 3.696, 4.649`
+seconds (median 2.998 s), still well behind contemporaneous TUIC fresh
+requests (`0.478, 0.497, 0.496, 0.499, 0.509, 0.545, 0.695, 0.704, 1.044,
+1.569`; median 0.620 s). This isolates a major architectural issue: a
+controller port alone cannot remove the per-flow PEP/session and destination
+dial latency. The pooled stream remains useful for amortization, but pooled
+mode is not automatically enabled for bulk because it has not passed the
+single-flow and failure gates.
+
+Five serial 10-MiB uploads to the bounded US-side sink completed `5/5` in
+`13.818, 16.059, 17.779, 16.176, 19.922` seconds (median 16.176 s,
+approximately 5.19 Mb/s). This is better than the earlier WANOPT BBR upload
+median but below the same campaign's TUIC control and remains experimental.
+
+The corrected IW/RTT candidate then completed three exact 10-MiB confirmation
+downloads in `30.709, 20.976, 30.856` seconds (`2.732, 3.999, 2.719` Mb/s;
+median 2.732 Mb/s). Eight of ten independent fresh Google requests succeeded
+in `1.151, 2.157, 2.842, 2.957, 4.002, 5.163, 5.623, 7.917` seconds (successful
+median 3.480 s); two QUIC connection attempts hit the ten-second handshake
+deadline before the controller is installed. This confirms that the
+high-gain correction is appropriate model fidelity but does not solve the
+outer-handshake reliability or per-flow latency problem. A production AUTO
+profile must rescue these UDP handshake failures over its bounded TLS/TCP
+path, and the controller remains opt-in.
+
+The isolated listener and local test processes were intentionally left out of
+the live deployment; they must be stopped before a clean handoff.
