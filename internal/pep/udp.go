@@ -126,6 +126,19 @@ done:
 			Class: protocol.ClassInteractive,
 		}})
 		closeCancel()
+		// Complete a bounded dissociation handshake. Without this wait the
+		// QUIC stream can be closed immediately after the local write is
+		// accepted, racing the peer's read and producing false remote failures.
+		select {
+		case ackErr := <-resultCh:
+			if ackErr != nil && !errors.Is(ackErr, context.Canceled) {
+				failed = true
+				endErr = ackErr
+			}
+		case <-time.After(2 * time.Second):
+			failed = true
+			endErr = errors.New("UDP association close acknowledgement timeout")
+		}
 	}
 	if endErr != nil && failed {
 		c.cfg.Logger.Debug("UDP association ended", "error", endErr, "age", time.Since(started))
@@ -243,7 +256,13 @@ func runClientUDPDownlink(ctx context.Context, udpConn *net.UDPConn, fc *frameCo
 			}
 			return err
 		}
-		if frame.Header.SessionID != sessionID || frame.Header.FlowID != flowID || frame.Header.Type != protocol.TypePacket || frame.Header.Flags != 0 {
+		if frame.Header.SessionID != sessionID || frame.Header.FlowID != flowID {
+			return errors.New("invalid UDP association frame")
+		}
+		if frame.Header.Type == protocol.TypeAck && frame.Header.Flags == protocol.FlagAckFinal && frame.Header.Sequence == 0 && len(frame.Payload) == 0 {
+			return nil
+		}
+		if frame.Header.Type != protocol.TypePacket || frame.Header.Flags != 0 {
 			return errors.New("invalid UDP association frame")
 		}
 		if frame.Header.Sequence != expectedSequence {
@@ -375,6 +394,12 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 				if frame.Header.Flags != protocol.FlagFin || len(frame.Payload) != 0 || frame.Header.Sequence != 0 {
 					endErr = errors.New("invalid UDP association close")
 					failed = true
+				}
+				if !failed {
+					_ = fc.WriteContext(assocCtx, protocol.Frame{Header: protocol.Header{
+						Version: protocol.Version, Type: protocol.TypeAck, Flags: protocol.FlagAckFinal,
+						SessionID: sessionID, FlowID: flowID, Sequence: 0, Class: protocol.ClassInteractive,
+					}})
 				}
 				goto done
 			}
