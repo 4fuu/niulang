@@ -43,6 +43,11 @@ type Snapshot struct {
 	QUICControllerKind                                               string
 	QUICControllerMode                                               uint32
 	QUICControllerMaxBandwidth, QUICControllerPacingRate             uint64
+	QUICControllerLatestSample, QUICControllerSamples                uint64
+	QUICControllerLatestAckRate, QUICControllerLatestSendRate        uint64
+	QUICControllerNonAppSamples, QUICControllerAppSamples            uint64
+	QUICControllerStateMisses, QUICControllerZeroSamples             uint64
+	QUICControllerRound                                              uint64
 	QUICControllerCongestionWindow, QUICControllerBytesInFlight      uint64
 	QUICControllerBytesLost, QUICControllerPacketsLost               uint64
 	QUICControllerMinRTT                                             time.Duration
@@ -64,6 +69,15 @@ type QUICObservation struct {
 	ControllerKind             string
 	ControllerMode             uint32
 	ControllerMaxBandwidth     uint64
+	ControllerLatestSample     uint64
+	ControllerLatestAckRate    uint64
+	ControllerLatestSendRate   uint64
+	ControllerSamples          uint64
+	ControllerNonAppSamples    uint64
+	ControllerAppSamples       uint64
+	ControllerStateMisses      uint64
+	ControllerZeroSamples      uint64
+	ControllerRound            uint64
 	ControllerPacingRate       uint64
 	ControllerCongestionWindow uint64
 	ControllerBytesInFlight    uint64
@@ -165,6 +179,9 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerKind string
 	var controllerMode uint32
 	var controllerMaxBandwidth, controllerPacingRate, controllerCwnd, controllerBytesInFlight uint64
+	var controllerLatestSample, controllerSamples, controllerNonAppSamples, controllerAppSamples uint64
+	var controllerLatestAckRate, controllerLatestSendRate uint64
+	var controllerStateMisses, controllerZeroSamples, controllerRound uint64
 	var controllerBytesLost, controllerPacketsLost uint64
 	var controllerMinRTT time.Duration
 	var controllerRecovery bool
@@ -191,6 +208,23 @@ func (r *Registry) Snapshot() Snapshot {
 			}
 			if o.ControllerMaxBandwidth > controllerMaxBandwidth {
 				controllerMaxBandwidth = o.ControllerMaxBandwidth
+			}
+			if o.ControllerLatestSample > controllerLatestSample {
+				controllerLatestSample = o.ControllerLatestSample
+			}
+			if o.ControllerLatestAckRate > controllerLatestAckRate {
+				controllerLatestAckRate = o.ControllerLatestAckRate
+			}
+			if o.ControllerLatestSendRate > controllerLatestSendRate {
+				controllerLatestSendRate = o.ControllerLatestSendRate
+			}
+			controllerSamples += o.ControllerSamples
+			controllerNonAppSamples += o.ControllerNonAppSamples
+			controllerAppSamples += o.ControllerAppSamples
+			controllerStateMisses += o.ControllerStateMisses
+			controllerZeroSamples += o.ControllerZeroSamples
+			if o.ControllerRound > controllerRound {
+				controllerRound = o.ControllerRound
 			}
 			if o.ControllerPacingRate > controllerPacingRate {
 				controllerPacingRate = o.ControllerPacingRate
@@ -220,6 +254,15 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICControllerKind = controllerKind
 	s.QUICControllerMode = controllerMode
 	s.QUICControllerMaxBandwidth = controllerMaxBandwidth
+	s.QUICControllerLatestSample = controllerLatestSample
+	s.QUICControllerLatestAckRate = controllerLatestAckRate
+	s.QUICControllerLatestSendRate = controllerLatestSendRate
+	s.QUICControllerSamples = controllerSamples
+	s.QUICControllerNonAppSamples = controllerNonAppSamples
+	s.QUICControllerAppSamples = controllerAppSamples
+	s.QUICControllerStateMisses = controllerStateMisses
+	s.QUICControllerZeroSamples = controllerZeroSamples
+	s.QUICControllerRound = controllerRound
 	s.QUICControllerPacingRate = controllerPacingRate
 	s.QUICControllerCongestionWindow = controllerCwnd
 	s.QUICControllerBytesInFlight = controllerBytesInFlight
@@ -265,6 +308,15 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	fmt.Fprintf(w, "wanopt_quic_controller_mode %d\n", s.QUICControllerMode)
 	fmt.Fprintf(w, "wanopt_quic_controller_max_bandwidth_bytes_per_second %d\n", s.QUICControllerMaxBandwidth)
+	fmt.Fprintf(w, "wanopt_quic_controller_latest_sample_bytes_per_second %d\n", s.QUICControllerLatestSample)
+	fmt.Fprintf(w, "wanopt_quic_controller_latest_ack_rate_bytes_per_second %d\n", s.QUICControllerLatestAckRate)
+	fmt.Fprintf(w, "wanopt_quic_controller_latest_send_rate_bytes_per_second %d\n", s.QUICControllerLatestSendRate)
+	fmt.Fprintf(w, "wanopt_quic_controller_samples_total %d\n", s.QUICControllerSamples)
+	fmt.Fprintf(w, "wanopt_quic_controller_non_app_limited_samples_total %d\n", s.QUICControllerNonAppSamples)
+	fmt.Fprintf(w, "wanopt_quic_controller_app_limited_samples_total %d\n", s.QUICControllerAppSamples)
+	fmt.Fprintf(w, "wanopt_quic_controller_state_misses_total %d\n", s.QUICControllerStateMisses)
+	fmt.Fprintf(w, "wanopt_quic_controller_zero_samples_total %d\n", s.QUICControllerZeroSamples)
+	fmt.Fprintf(w, "wanopt_quic_controller_round %d\n", s.QUICControllerRound)
 	fmt.Fprintf(w, "wanopt_quic_controller_pacing_rate_bytes_per_second %d\n", s.QUICControllerPacingRate)
 	fmt.Fprintf(w, "wanopt_quic_controller_congestion_window_bytes %d\n", s.QUICControllerCongestionWindow)
 	fmt.Fprintf(w, "wanopt_quic_controller_bytes_in_flight %d\n", s.QUICControllerBytesInFlight)

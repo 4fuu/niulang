@@ -294,6 +294,23 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 				observation.ControllerMode = controller.Mode
 			}
 			observation.ControllerMaxBandwidth += controller.MaxBandwidth
+			if controller.LatestSample > observation.ControllerLatestSample {
+				observation.ControllerLatestSample = controller.LatestSample
+			}
+			if controller.LatestAckRate > observation.ControllerLatestAckRate {
+				observation.ControllerLatestAckRate = controller.LatestAckRate
+			}
+			if controller.LatestSendRate > observation.ControllerLatestSendRate {
+				observation.ControllerLatestSendRate = controller.LatestSendRate
+			}
+			observation.ControllerSamples += controller.Samples
+			observation.ControllerNonAppSamples += controller.NonAppSamples
+			observation.ControllerAppSamples += controller.AppSamples
+			observation.ControllerStateMisses += controller.StateMisses
+			observation.ControllerZeroSamples += controller.ZeroSamples
+			if controller.Round > observation.ControllerRound {
+				observation.ControllerRound = controller.Round
+			}
 			observation.ControllerPacingRate += controller.PacingRate
 			observation.ControllerCongestionWindow += controller.CongestionWindow
 			observation.ControllerBytesInFlight += controller.BytesInFlight

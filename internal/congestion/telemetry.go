@@ -13,6 +13,15 @@ type ControllerTelemetry struct {
 	Kind             string
 	Mode             uint32
 	MaxBandwidth     uint64
+	LatestSample     uint64
+	LatestAckRate    uint64
+	LatestSendRate   uint64
+	Samples          uint64
+	NonAppSamples    uint64
+	AppSamples       uint64
+	StateMisses      uint64
+	ZeroSamples      uint64
+	Round            uint64
 	PacingRate       uint64
 	CongestionWindow uint64
 	BytesInFlight    uint64
@@ -48,6 +57,15 @@ type telemetryState struct {
 	kind             string
 	mode             atomic.Uint32
 	maxBandwidth     atomic.Uint64
+	latestSample     atomic.Uint64
+	latestAckRate    atomic.Uint64
+	latestSendRate   atomic.Uint64
+	samples          atomic.Uint64
+	nonAppSamples    atomic.Uint64
+	appSamples       atomic.Uint64
+	stateMisses      atomic.Uint64
+	zeroSamples      atomic.Uint64
+	round            atomic.Uint64
 	pacingRate       atomic.Uint64
 	congestionWindow atomic.Uint64
 	bytesInFlight    atomic.Uint64
@@ -88,11 +106,34 @@ func (t *telemetryState) update(mode uint32, maxBandwidth, pacingRate uint64, co
 	t.inRecovery.Store(inRecovery)
 }
 
+// updateSampler publishes diagnostic delivery-sampler state. Controllers
+// that do not use the TUIC packet sampler leave these values at zero.
+func (t *telemetryState) updateSampler(latestSample, latestAckRate, latestSendRate, samples, nonAppSamples, appSamples, stateMisses, zeroSamples, round uint64) {
+	t.latestSample.Store(latestSample)
+	t.latestAckRate.Store(latestAckRate)
+	t.latestSendRate.Store(latestSendRate)
+	t.samples.Store(samples)
+	t.nonAppSamples.Store(nonAppSamples)
+	t.appSamples.Store(appSamples)
+	t.stateMisses.Store(stateMisses)
+	t.zeroSamples.Store(zeroSamples)
+	t.round.Store(round)
+}
+
 func (t *telemetryState) snapshot() ControllerTelemetry {
 	return ControllerTelemetry{
 		Kind:             t.kind,
 		Mode:             t.mode.Load(),
 		MaxBandwidth:     t.maxBandwidth.Load(),
+		LatestSample:     t.latestSample.Load(),
+		LatestAckRate:    t.latestAckRate.Load(),
+		LatestSendRate:   t.latestSendRate.Load(),
+		Samples:          t.samples.Load(),
+		NonAppSamples:    t.nonAppSamples.Load(),
+		AppSamples:       t.appSamples.Load(),
+		StateMisses:      t.stateMisses.Load(),
+		ZeroSamples:      t.zeroSamples.Load(),
+		Round:            t.round.Load(),
 		PacingRate:       t.pacingRate.Load(),
 		CongestionWindow: t.congestionWindow.Load(),
 		BytesInFlight:    t.bytesInFlight.Load(),
