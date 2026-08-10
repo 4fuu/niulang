@@ -703,3 +703,62 @@ still requires a path-health gate and must not select `adaptive`, `bbr-tuic`, or
 pooling globally based on this stress window. The temporary listeners, upload
 sink, and isolated processes were stopped; the live service remained active
 and unchanged.
+
+## Flow-stage latency profile after ACK-batch correction
+
+Commit `49406de` corrected the TUIC-aligned estimator so a coalesced QUIC ACK
+event contributes its complete acknowledged byte count instead of only the
+first packet in the batch. Commit `1565f74` then added debug-only stage timing.
+The instrumented candidate was run on isolated UDP `:12448`; the live `:12443`
+service remained unchanged. The existing TUIC client on `127.0.0.1:12086` and
+server inbound `:2444` were the contemporaneous control.
+
+One fresh WANOPT Google `generate_204` request completed in 5.256 s. Its
+measured critical path was:
+
+| Stage | Duration |
+|---|---:|
+| Outer QUIC connection establishment | 2.869 s |
+| WANOPT Hello authentication round trip | 0.905 s |
+| Remaining flow-open path, including `OPEN` / `OPEN_OK` | 0.382 s |
+| US-side DNS plus destination TCP connect | 0.0057 s |
+| Curl destination TLS complete | 4.445 s from request start |
+| First response byte / total | 5.256 s / 5.256 s |
+
+The server-side profile independently measured 0.996 s waiting for the
+post-Hello `OPEN`, only 5.7 ms dialing the destination, and 1.402 s running the
+proxied application flow. This rules out US-side DNS/TCP establishment as the
+dominant latency. The impaired China-to-US outer handshake plus WANOPT's two
+serial control exchanges dominate a cold request.
+
+A persistent authenticated QUIC pool removed most of that cost. Three serial
+WANOPT requests completed in 4.858, 2.694, and 0.818 s. The first still paid a
+2.444-s outer handshake; subsequent `OPEN_FAST` streams took about 0.264--0.265
+s to open. The same-window TUIC control completed three requests in 0.590,
+0.555, and 0.532 s. TUIC therefore retained both a lower median and lower
+variance, but the warm WANOPT floor is no longer multi-second: the remaining
+fixed protocol cost is approximately one China-US `OPEN_FAST` round trip plus
+the end-to-end destination TLS/request exchange.
+
+The bulk profile exposed two additional release blockers. One pooled WANOPT
+10-MiB download completed in 51.475 s (1.63 Mb/s application goodput). During
+the transfer, the remote controller entered recovery while its pacing-rate
+telemetry ranged from roughly 2.6 to 15.4 MB/s; QUIC connection bytes sent
+reached about 20.5 MiB while the application delivered 10 MiB. The public loss
+counters incorrectly remained zero because apNet quic-go updates those
+counters in its built-in CUBIC controller, while an externally installed
+controller receives loss callbacks without access to the connection counter.
+Zero exported loss is therefore not evidence of a loss-free path and the
+telemetry must be repaired before controller decisions rely on it. A
+same-window TUIC trial received 9,272,598 of 10,485,760 bytes before its 60-s
+timeout, confirming that the path itself was also in a severe degradation
+window; this single pair is diagnostic, not a throughput ranking.
+
+Finally, after the WANOPT response body completed, a normal last-lane EOF was
+not recognized as completed on the client. The recovery manager opened six
+sequential zero-payload replacement lanes and eventually reported the bounded
+45-s replacement timeout. Curl had already received the exact body, so this
+did not inflate its 51.475-s measurement, but it retains resources and adds a
+false flow failure. Completion-vs-rescue coordination is consequently a
+production blocker alongside controller telemetry. All isolated profiling
+listeners and clients were stopped after this campaign.
