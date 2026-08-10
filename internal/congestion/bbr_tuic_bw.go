@@ -57,6 +57,20 @@ type tuicPacketState struct {
 	lastAckedSentTime monotime.Time
 	lastAckedAckTime  monotime.Time
 	appLimited        bool
+	// bytesInFlight is the post-send flight recorded with this packet. Native
+	// TUIC uses this send-time state both for mixed ACK/loss event ordering and
+	// for the bounded STARTUP loss-exit test.
+	bytesInFlight uint64
+}
+
+// tuicSendState is the small part of a packet snapshot consumed by the BBR
+// state machine after a congestion event. Keeping the packet number here makes
+// mixed ACK/loss selection independent of callback slice ordering.
+type tuicSendState struct {
+	packetNumber  quiccongestion.PacketNumber
+	bytesInFlight uint64
+	appLimited    bool
+	valid         bool
 }
 
 const tuicMaxSendStates = 8192
@@ -113,6 +127,7 @@ func (e *tuicBandwidthEstimator) onSentPacket(now monotime.Time, number quiccong
 		lastAckedSentTime: e.lastAckedSentTime,
 		lastAckedAckTime:  e.lastAckedAckTime,
 		appLimited:        e.appLimited,
+		bytesInFlight:     satAddUint64(bytesInFlight, bytes),
 	}
 }
 
@@ -121,8 +136,17 @@ func (e *tuicBandwidthEstimator) onSentPacket(now monotime.Time, number quiccong
 // the delivery sampler's cumulative curves consistent. Obsolete states are
 // removed by removeObsolete after each congestion event; the bounded prune is
 // only a final memory guard.
-func (e *tuicBandwidthEstimator) onLost(number quiccongestion.PacketNumber) {
-	_ = number
+func (e *tuicBandwidthEstimator) onLost(number quiccongestion.PacketNumber) tuicSendState {
+	state, ok := e.packetStates[number]
+	if !ok {
+		return tuicSendState{}
+	}
+	return tuicSendState{
+		packetNumber:  number,
+		bytesInFlight: state.bytesInFlight,
+		appLimited:    state.appLimited,
+		valid:         true,
+	}
 }
 
 // removeObsolete drops states that are below the oldest packet QUIC is likely
@@ -138,9 +162,12 @@ func (e *tuicBandwidthEstimator) removeObsolete(leastUnacked quiccongestion.Pack
 }
 
 type tuicAckSample struct {
-	lastAppLimited bool
-	hasSample      bool
-	minRTT         time.Duration
+	lastAppLimited   bool
+	hasSample        bool
+	maxBandwidth     uint64
+	sampleAppLimited bool
+	minRTT           time.Duration
+	lastSendState    tuicSendState
 }
 
 // onAckBatch consumes one congestion event. ACK packets are processed in the
@@ -206,11 +233,13 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 		} else {
 			e.zeroSamples = satAddUint64(e.zeroSamples, 1)
 		}
-		// App-limited samples cannot safely lower the path model, but a sample
-		// above the current maximum is still proof of higher deliverable rate.
-		// Native TUIC permits exactly that one-way update.
-		if sample > 0 && (!state.appLimited || sample > e.maxFilter.get()) {
-			e.maxFilter.updateMax(round, sample)
+		// Native TUIC selects one maximum bandwidth sample for the complete ACK
+		// event and updates its ten-round filter once. Updating the filter for
+		// every packet in a coalesced ACK batch changes the second/third samples
+		// and can expire a valid peak early even though all packets share a round.
+		if sample > result.maxBandwidth {
+			result.maxBandwidth = sample
+			result.sampleAppLimited = state.appLimited
 		}
 		if !haveLargest || packet.PacketNumber > largestPN {
 			largestPN, largestState, haveLargest = packet.PacketNumber, state, true
@@ -230,6 +259,17 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 		e.totalSentAtAck = largestState.totalSentAtSend
 		e.lastAckedPacket = largestPN
 		result.lastAppLimited = largestState.appLimited
+		result.lastSendState = tuicSendState{
+			packetNumber:  largestPN,
+			bytesInFlight: largestState.bytesInFlight,
+			appLimited:    largestState.appLimited,
+			valid:         true,
+		}
+	}
+	// App-limited samples cannot lower the model, but an app-limited event
+	// above the current best is still proof of higher deliverable bandwidth.
+	if result.maxBandwidth > 0 && (!result.sampleAppLimited || result.maxBandwidth > e.maxFilter.get()) {
+		e.maxFilter.updateMax(round, result.maxBandwidth)
 	}
 	return result
 }

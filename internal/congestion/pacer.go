@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	maxBurstPackets               = 10
-	maxBurstPacingDelayMultiplier = 4
+	maxBurstPackets         = 10
+	defaultBurstPacingDelay = 4 * quiccongestion.MinPacingDelay
+	tuicBurstPacingDelay    = quiccongestion.MinPacingDelay + time.Millisecond
 )
 
 // pacer is a bounded token bucket. QUIC asks the controller both whether a
@@ -27,13 +28,26 @@ type pacer struct {
 	maxDatagramSize  quiccongestion.ByteCount
 	lastSentTime     monotime.Time
 	getBandwidth     func() quiccongestion.ByteCount // bytes per second
+	burstPacingDelay time.Duration
 }
 
 func newPacer(getBandwidth func() quiccongestion.ByteCount) *pacer {
+	return newPacerWithBurstDelay(getBandwidth, defaultBurstPacingDelay)
+}
+
+func newTUICPacer(getBandwidth func() quiccongestion.ByteCount) *pacer {
+	return newPacerWithBurstDelay(getBandwidth, tuicBurstPacingDelay)
+}
+
+func newPacerWithBurstDelay(getBandwidth func() quiccongestion.ByteCount, burstPacingDelay time.Duration) *pacer {
+	if burstPacingDelay <= 0 {
+		burstPacingDelay = defaultBurstPacingDelay
+	}
 	return &pacer{
 		budgetAtLastSent: maxBurstPackets * quiccongestion.InitialPacketSize,
 		maxDatagramSize:  quiccongestion.InitialPacketSize,
 		getBandwidth:     getBandwidth,
+		burstPacingDelay: burstPacingDelay,
 	}
 }
 
@@ -64,7 +78,7 @@ func (p *pacer) budget(now monotime.Time) quiccongestion.ByteCount {
 
 func (p *pacer) maxBurstSize() quiccongestion.ByteCount {
 	return maxByteCount(
-		quiccongestion.ByteCount((maxBurstPacingDelayMultiplier*quiccongestion.MinPacingDelay).Nanoseconds())*p.getBandwidth()/1e9,
+		quiccongestion.ByteCount(p.burstPacingDelay.Nanoseconds())*p.getBandwidth()/1e9,
 		maxBurstPackets*p.maxDatagramSize,
 	)
 }

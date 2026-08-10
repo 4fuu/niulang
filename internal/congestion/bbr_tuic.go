@@ -13,47 +13,49 @@ import (
 // quinn-congestions fork. It is intentionally opt-in while it is being
 // validated against the stock controller and the existing BBRSender.
 //
-// quic-go's public CongestionControlEx callback does not expose the
-// application-limited bit, so the port uses a conservative idle-gap heuristic
-// for app-limited epochs. Packet send state is captured in the controller's
-// bounded delivery sampler; ACK receive timestamps are used when the QUIC
-// fork supplies them and the congestion-event time otherwise.
+// quic-go's public CongestionControlEx callback does not expose an explicit
+// application-limited notification, so the controller derives the same
+// congestion-window-headroom condition at each event and records that marker
+// per packet. ACK receive timestamps are used when the QUIC fork supplies them
+// and the congestion-event time otherwise.
 type TUICBBRSender struct {
 	rttStats        quiccongestion.RTTStatsProvider
 	maxDatagramSize quiccongestion.ByteCount
 	pacer           *pacer
 
-	mode                tuicBbrMode
-	pacingGain          float64
-	highGain            float64
-	drainGain           float64
-	cwndGain            float64
-	highCwndGain        float64
-	lastCycle           monotime.Time
-	cycleOffset         uint8
-	randomState         uint64
-	initialCwnd         quiccongestion.ByteCount
-	minCwnd             quiccongestion.ByteCount
-	maxCwnd             quiccongestion.ByteCount
-	exitProbeRTT        monotime.Time
-	probeRTTRoundPassed bool
-	minRTT              time.Duration
-	minRTTAt            monotime.Time
-	exitingQuiescence   bool
-	maxAckedPN          quiccongestion.PacketNumber
-	maxSentPN           quiccongestion.PacketNumber
-	endRecoveryPN       quiccongestion.PacketNumber
-	cwnd                quiccongestion.ByteCount
-	roundEndPN          quiccongestion.PacketNumber
-	round               uint64
-	bwAtLastRound       uint64
-	roundsNoGain        uint8
-	fullBandwidth       bool
+	mode                 tuicBbrMode
+	pacingGain           float64
+	highGain             float64
+	drainGain            float64
+	cwndGain             float64
+	highCwndGain         float64
+	lastCycle            monotime.Time
+	cycleOffset          uint8
+	randomState          uint64
+	initialCwnd          quiccongestion.ByteCount
+	minCwnd              quiccongestion.ByteCount
+	maxCwnd              quiccongestion.ByteCount
+	exitProbeRTT         monotime.Time
+	probeRTTRoundPassed  bool
+	minRTT               time.Duration
+	minRTTAt             monotime.Time
+	exitingQuiescence    bool
+	maxAckedPN           quiccongestion.PacketNumber
+	maxSentPN            quiccongestion.PacketNumber
+	endRecoveryPN        quiccongestion.PacketNumber
+	cwnd                 quiccongestion.ByteCount
+	roundEndPN           quiccongestion.PacketNumber
+	round                uint64
+	bwAtLastRound        uint64
+	roundsNoGain         uint8
+	fullBandwidth        bool
+	lastSampleAppLimited bool
+	lossEventsInRound    uint64
+	bytesLostInRound     uint64
 
 	estimator      tuicBandwidthEstimator
 	ackedBytes     uint64
 	ackAgg         tuicAckAggregation
-	lossState      tuicLossState
 	recovery       tuicRecoveryState
 	recoveryWindow quiccongestion.ByteCount
 
@@ -81,8 +83,6 @@ const (
 
 func (r tuicRecoveryState) inRecovery() bool { return r != tuicNotInRecovery }
 
-type tuicLossState struct{ lostBytes uint64 }
-
 type tuicAckAggregation struct {
 	maxAckHeight tuicMinMax
 	epochStart   monotime.Time
@@ -97,6 +97,8 @@ const (
 	tuicProbeRTTDuration    = 200 * time.Millisecond
 	tuicStartupGrowth       = 1.25
 	tuicStartupNoGainRounds = 3
+	tuicStartupLossEvents   = 8
+	tuicStartupLossFraction = 0.02
 	tuicMaxBurstPackets     = 10
 	// sing-quic's TUIC BBR uses the standard 32-packet initial window.
 	// A previous port accidentally used 200 packets, creating a burst roughly
@@ -149,17 +151,13 @@ func NewTUICBBRSender(initialPacketSize quiccongestion.ByteCount) *TUICBBRSender
 		randomState:   uint64(monotime.Now()) ^ uint64(initialPacketSize)<<17,
 		telemetry:     newTelemetryState("bbr-tuic"),
 	}
-	b.pacer = newPacer(b.bandwidth)
+	b.pacer = newTUICPacer(b.bandwidth)
 	b.publishTelemetry()
 	return b
 }
 
 func (b *TUICBBRSender) SetRTTStatsProvider(provider quiccongestion.RTTStatsProvider) {
 	b.rttStats = provider
-	b.refreshRTT(monotime.Now())
-	if b.pacingRate == 0 {
-		b.pacingRate = b.initialPacingRate()
-	}
 	b.publishTelemetry()
 }
 
@@ -168,25 +166,11 @@ func (b *TUICBBRSender) rtt() time.Duration {
 		return b.minRTT
 	}
 	if b.rttStats != nil {
-		if r := b.rttStats.SmoothedRTT(); r > 0 {
-			return r
-		}
-		if r := b.rttStats.LatestRTT(); r > 0 {
+		if r := b.rttStats.MinRTT(); r > 0 {
 			return r
 		}
 	}
-	return 200 * time.Millisecond
-}
-
-func (b *TUICBBRSender) refreshRTT(now monotime.Time) {
-	if b.rttStats == nil {
-		return
-	}
-	measured := b.rttStats.MinRTT()
-	if measured > 0 && (b.minRTT <= 0 || measured < b.minRTT) {
-		b.minRTT = measured
-		b.minRTTAt = now
-	}
+	return 100 * time.Millisecond
 }
 
 // refreshRTTSample mirrors TUIC's sampler-owned minimum RTT model. The
@@ -256,11 +240,9 @@ func (b *TUICBBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quicc
 	if bytesInFlight == 0 {
 		b.exitingQuiescence = true
 	}
-	if bytesInFlight < 0 || bytes < 0 || bytesInFlight > maxCongestionByteCount-bytes {
-		b.bytesInFlight = maxCongestionByteCount
-	} else {
-		b.bytesInFlight = bytesInFlight + bytes
-	}
+	// Native TUIC records quic-go's pre-send flight here. The sampler below
+	// separately stores bytesInFlight+bytes in the packet snapshot.
+	b.bytesInFlight = maxByteCount(0, bytesInFlight)
 	b.estimator.onSentPacket(sentTime, number, uint64(maxByteCount(0, bytes)), uint64(maxByteCount(0, bytesInFlight)), retransmittable)
 	b.pacer.sentPacket(sentTime, bytes)
 	b.publishTelemetry()
@@ -272,26 +254,25 @@ func (b *TUICBBRSender) CanSend(bytesInFlight quiccongestion.ByteCount) bool {
 
 func (b *TUICBBRSender) MaybeExitSlowStart() {}
 
-func (b *TUICBBRSender) OnPacketAcked(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, priorInFlight quiccongestion.ByteCount, _ monotime.Time) {
-	b.bytesInFlight = priorInFlight
-	b.publishTelemetry()
+func (b *TUICBBRSender) OnPacketAcked(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, _ quiccongestion.ByteCount, _ monotime.Time) {
 }
 
 // quic-go calls this once for every newly detected lost packet and then calls
 // OnCongestionEventEx with the complete loss batch. The extended callback is
-// the single source of truth, so this method intentionally only updates the
-// observational in-flight value and does not count loss twice.
-func (b *TUICBBRSender) OnCongestionEvent(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, priorInFlight quiccongestion.ByteCount) {
-	b.bytesInFlight = priorInFlight
+// the single source of truth, so the legacy callback deliberately does nothing.
+func (b *TUICBBRSender) OnCongestionEvent(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, _ quiccongestion.ByteCount) {
 }
 
 func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, eventTime monotime.Time, acked []quiccongestion.AckedPacketInfo, lost []quiccongestion.LostPacketInfo) {
 	if eventTime.IsZero() {
 		eventTime = monotime.Now()
 	}
+	hasLosses := len(lost) != 0
 	ackedBytes := uint64(0)
 	lostBytes := uint64(0)
-	var largestAck quiccongestion.PacketNumber
+	largestAck := quiccongestion.PacketNumber(-1)
+	largestLoss := quiccongestion.PacketNumber(-1)
+	lastLostState := tuicSendState{}
 	for _, p := range acked {
 		if p.BytesAcked > 0 {
 			ackedBytes = satAddUint64(ackedBytes, uint64(p.BytesAcked))
@@ -304,9 +285,13 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		if p.BytesLost > 0 {
 			lostBytes = satAddUint64(lostBytes, uint64(p.BytesLost))
 		}
-		b.estimator.onLost(p.PacketNumber)
+		state := b.estimator.onLost(p.PacketNumber)
+		if state.valid && p.PacketNumber > largestLoss {
+			largestLoss = p.PacketNumber
+			lastLostState = state
+		}
 	}
-	if lostBytes > 0 {
+	if hasLosses {
 		b.telemetry.observeLoss(lostBytes, uint64(len(lost)))
 	}
 	b.bytesInFlight = saturatingRemaining(priorInFlight, ackedBytes, lostBytes)
@@ -330,6 +315,12 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		b.roundEndPN = b.maxSentPN
 		b.round++
 	}
+	// TUIC changes recovery only on events with an ACK. A loss-only callback
+	// updates sampler/loss accounting, but waits for an ACK-clocked event before
+	// entering or advancing packet conservation.
+	if len(acked) != 0 {
+		b.updateRecoveryState(largestAck, hasLosses, isRoundStart)
+	}
 	// Process the complete ACK batch as one sample. quic-go gives every packet
 	// in this callback the same receive/event time; updating the estimator once
 	// per packet would make all but the first packet have a zero ACK interval.
@@ -337,45 +328,42 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	if ackedBytes > 0 {
 		sample = b.estimator.onAckBatch(eventTime, acked, b.round)
 	}
-	b.ackedBytes = satAddUint64(b.ackedBytes, ackedBytes)
 	minRTTExpired := false
 	if ackedBytes > 0 {
-		// Prefer the sampler's per-packet RTT sample. The provider's minimum
-		// RTT is still consulted for QUIC versions that do not expose one.
+		// The sampler owns BBR's expiring minimum-RTT model. The RTT provider is
+		// only a startup pacing fallback before a packet sample exists.
 		if sample.minRTT > 0 {
 			minRTTExpired = b.refreshRTTSample(eventTime, sample.minRTT)
-		} else {
-			b.refreshRTT(eventTime)
 		}
 		b.maxAckedPN = largestAck
 	}
-	b.lossState.lostBytes = satAddUint64(b.lossState.lostBytes, lostBytes)
 
 	bytesAckedWindow := b.estimator.bytesAckedThisWindow()
-	excessAcked := b.ackAgg.update(bytesAckedWindow, eventTime, b.round, b.estimator.estimate())
-	b.estimator.endAcks()
-	if ackedBytes > 0 {
-		// The largest acknowledged packet carries the app-limited marker that
-		// upstream BBR uses for its startup exit test. If no packet state was
-		// available, avoid treating the event as useful growth.
-		if sample.hasSample {
-			appLimited = sample.lastAppLimited
-		} else {
-			appLimited = true
-		}
+	b.ackedBytes = satAddUint64(b.ackedBytes, bytesAckedWindow)
+	excessAcked := uint64(0)
+	if bytesAckedWindow > 0 {
+		excessAcked = b.ackAgg.update(bytesAckedWindow, eventTime, b.round, b.estimator.estimate())
 	}
-	// Native TUIC updates recovery before consuming the sampler. In particular,
-	// the current event's largest ACK is allowed to end recovery and the current
-	// round is extended immediately when loss starts conservation.
-	b.updateRecoveryState(largestAck, isRoundStart)
+	b.estimator.endAcks()
+	lastSendState := sample.lastSendState
+	if lastLostState.valid && (!lastSendState.valid || lastLostState.packetNumber > lastSendState.packetNumber) {
+		lastSendState = lastLostState
+	}
+	if lastSendState.valid {
+		b.lastSampleAppLimited = lastSendState.appLimited
+	}
+	if hasLosses {
+		b.lossEventsInRound = satAddUint64(b.lossEventsInRound, 1)
+		b.bytesLostInRound = satAddUint64(b.bytesLostInRound, lostBytes)
+	}
 	if b.mode == tuicBbrProbeBW {
-		b.updateGainCycle(eventTime, priorInFlight, b.bytesInFlight, lostBytes > 0)
+		b.updateGainCycle(eventTime, priorInFlight, b.bytesInFlight, hasLosses)
 	}
 	if isRoundStart && !b.fullBandwidth {
-		b.checkFullBandwidth(appLimited)
+		b.checkFullBandwidth(lastSendState)
 	}
 	b.maybeExitStartupDrain(eventTime, b.bytesInFlight)
-	b.maybeProbeRTT(eventTime, isRoundStart, b.bytesInFlight, appLimited, minRTTExpired)
+	b.maybeProbeRTT(eventTime, isRoundStart, b.bytesInFlight, minRTTExpired)
 	b.calculatePacingRate()
 	b.calculateCwnd(bytesAckedWindow, excessAcked)
 	// Native TUIC calculates recovery from the post-event in-flight remainder.
@@ -385,7 +373,10 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	if leastUnacked, ok := obsoletePacketNumber(acked, lost); ok {
 		b.estimator.removeObsolete(leastUnacked)
 	}
-	b.lossState.lostBytes = 0
+	if isRoundStart {
+		b.lossEventsInRound = 0
+		b.bytesLostInRound = 0
+	}
 	b.publishTelemetry()
 }
 
@@ -455,22 +446,19 @@ func obsoletePacketNumber(acked []quiccongestion.AckedPacketInfo, lost []quiccon
 	return largest + 1, true
 }
 
-func (b *TUICBBRSender) updateRecoveryState(lastAckedPacket quiccongestion.PacketNumber, roundStart bool) {
-	if b.lossState.lostBytes > 0 {
+func (b *TUICBBRSender) updateRecoveryState(lastAckedPacket quiccongestion.PacketNumber, hasLosses, roundStart bool) {
+	// TUIC deliberately suppresses packet conservation until STARTUP has
+	// established the bottleneck model. Mode alone is not sufficient: ProbeRTT
+	// can occur before full bandwidth is known.
+	if !b.fullBandwidth {
+		return
+	}
+	if hasLosses {
 		b.endRecoveryPN = b.maxSentPN
 	}
 	switch b.recovery {
 	case tuicNotInRecovery:
-		// A loss during STARTUP is not enough evidence that the bottleneck
-		// model is complete.  QUIC can report reordering and ACK thinning as
-		// loss before the first useful delivery sample arrives.  Entering
-		// conservation here immediately marks the connection full-bandwidth
-		// and lets a sparse first ACK shrink both cwnd and recoveryWindow to a
-		// handful of packets.  Keep STARTUP ACK-clocked until the normal
-		// no-gain test exits it, matching the loss treatment used by the
-		// production BBR-shaped controller.  A timeout still resets STARTUP
-		// immediately through OnRetransmissionTimeout.
-		if b.lossState.lostBytes > 0 && (b.fullBandwidth || b.mode != tuicBbrStartup) {
+		if hasLosses {
 			b.recovery = tuicConservation
 			b.recoveryWindow = 0
 			b.roundEndPN = b.maxSentPN
@@ -479,9 +467,8 @@ func (b *TUICBBRSender) updateRecoveryState(lastAckedPacket quiccongestion.Packe
 		if b.recovery == tuicConservation && roundStart {
 			b.recovery = tuicGrowth
 		}
-		if b.lossState.lostBytes == 0 && lastAckedPacket > b.endRecoveryPN {
+		if !hasLosses && lastAckedPacket > b.endRecoveryPN {
 			b.recovery = tuicNotInRecovery
-			b.recoveryWindow = 0
 		}
 	}
 }
@@ -538,8 +525,8 @@ func (b *TUICBBRSender) nextCycleOffset() uint8 {
 	return offset
 }
 
-func (b *TUICBBRSender) checkFullBandwidth(appLimited bool) {
-	if appLimited {
+func (b *TUICBBRSender) checkFullBandwidth(lastSendState tuicSendState) {
+	if b.lastSampleAppLimited {
 		return
 	}
 	target := uint64(float64(b.bwAtLastRound) * tuicStartupGrowth)
@@ -550,19 +537,20 @@ func (b *TUICBBRSender) checkFullBandwidth(appLimited bool) {
 		return
 	}
 	b.roundsNoGain++
-	// A single loss event is not proof that STARTUP has found the bottleneck.
-	// In particular, an isolated reordered/lost packet is common on the
-	// China-US path. Leaving STARTUP on any recovery transition immediately
-	// made the first sparse delivery sample control pacing and cwnd. TUIC's
-	// current BBR waits for the normal no-gain rounds (or a separately bounded
-	// excessive-loss test); keep that distinction here as well.
-	if b.roundsNoGain >= tuicStartupNoGainRounds {
+	if b.roundsNoGain >= tuicStartupNoGainRounds || b.shouldExitStartupForLoss(lastSendState) {
 		b.fullBandwidth = true
 	}
 }
 
-func (b *TUICBBRSender) maybeProbeRTT(now monotime.Time, roundStart bool, inFlight quiccongestion.ByteCount, appLimited bool, minRTTExpired bool) {
-	if !appLimited && minRTTExpired && !b.exitingQuiescence && b.mode != tuicBbrProbeRTT {
+func (b *TUICBBRSender) shouldExitStartupForLoss(lastSendState tuicSendState) bool {
+	if b.lossEventsInRound < tuicStartupLossEvents || !lastSendState.valid || lastSendState.bytesInFlight == 0 || b.bytesLostInRound == 0 {
+		return false
+	}
+	return float64(b.bytesLostInRound) > float64(lastSendState.bytesInFlight)*tuicStartupLossFraction
+}
+
+func (b *TUICBBRSender) maybeProbeRTT(now monotime.Time, roundStart bool, inFlight quiccongestion.ByteCount, minRTTExpired bool) {
+	if minRTTExpired && !b.exitingQuiescence && b.mode != tuicBbrProbeRTT {
 		b.mode = tuicBbrProbeRTT
 		b.pacingGain = 1
 		b.exitProbeRTT = 0
@@ -634,8 +622,23 @@ func (b *TUICBBRSender) calculatePacingRate() {
 	target := uint64(float64(bw) * b.pacingGain)
 	if b.fullBandwidth {
 		b.pacingRate = target
-	} else if b.pacingRate < target {
-		b.pacingRate = target
+	} else {
+		// The public startup rate is high_gain*IW/RTT while the stored rate is
+		// still zero. On the first useful event with a provider RTT, native TUIC
+		// seeds the stored model at IW/min_rtt before later ACKs grow it toward
+		// the delivery estimate.
+		if b.pacingRate == 0 && b.rttStats != nil {
+			if rtt := b.rttStats.MinRTT(); rtt > 0 {
+				b.pacingRate = rateFromDelta(uint64(b.initialCwnd), rtt)
+				if b.pacingRate > tuicMaxRate {
+					b.pacingRate = tuicMaxRate
+				}
+				return
+			}
+		}
+		if b.pacingRate < target {
+			b.pacingRate = target
+		}
 	}
 	if b.pacingRate > tuicMaxRate {
 		b.pacingRate = tuicMaxRate
@@ -717,10 +720,10 @@ func (b *TUICBBRSender) SetMaxDatagramSize(size quiccongestion.ByteCount) {
 	default:
 		b.cwnd = minByteCount(b.maxCwnd, maxByteCount(b.minCwnd, b.cwnd))
 	}
-	if b.recoveryWindow > 0 {
-		b.recoveryWindow = scaleTUICWindow(b.recoveryWindow, oldSize, size)
-		b.recoveryWindow = minByteCount(b.maxCwnd, maxByteCount(b.minCwnd, b.recoveryWindow))
-	}
+	// Recovery is a byte budget accumulated from actual ACK/loss events, not a
+	// packet-count setting. Preserve its byte value across an MTU increase and
+	// only clamp it to the newly valid window range.
+	b.recoveryWindow = minByteCount(b.maxCwnd, maxByteCount(b.minCwnd, b.recoveryWindow))
 	b.pacer.setMaxDatagramSize(size)
 	b.publishTelemetry()
 }

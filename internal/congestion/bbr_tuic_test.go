@@ -24,6 +24,34 @@ func TestTUICMinMaxRetainsPeakForTenRounds(t *testing.T) {
 	}
 }
 
+func TestTUICMinMaxHalfWindowStartsAtThirdSample(t *testing.T) {
+	m := newTUICMinMax()
+	m.updateMax(0, 100)
+	// The quarter-window refresh records the second and third samples at round
+	// three. The half-window clock must start there, not at the original best.
+	m.updateMax(3, 90)
+	m.updateMax(6, 80)
+	if got := m.samples[2]; got.round != 3 || got.value != 90 {
+		t.Fatalf("third sample advanced before its half-window elapsed: %+v", got)
+	}
+	m.updateMax(9, 80)
+	if got := m.samples[2]; got.round != 9 || got.value != 80 {
+		t.Fatalf("third sample did not advance after its half-window: %+v", got)
+	}
+}
+
+func TestTUICPacerUsesNativeBurstInterval(t *testing.T) {
+	rate := quiccongestion.ByteCount(100 * 1024 * 1024)
+	p := newTUICPacer(func() quiccongestion.ByteCount { return rate })
+	want := quiccongestion.ByteCount(tuicBurstPacingDelay.Nanoseconds()) * rate / 1e9
+	if floor := quiccongestion.ByteCount(maxBurstPackets) * p.maxDatagramSize; want < floor {
+		want = floor
+	}
+	if got := p.maxBurstSize(); got != want {
+		t.Fatalf("TUIC burst budget=%d, want %d", got, want)
+	}
+}
+
 func TestTUICBandwidthUsesMinimumOfSendAndACKRates(t *testing.T) {
 	e := newTUICBandwidthEstimator()
 	start := monotime.Now()
@@ -162,6 +190,124 @@ func TestTUICFirstPacketStartsFirstRound(t *testing.T) {
 	}
 }
 
+func TestTUICInitialPacingFieldMatchesNativeTransition(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	// With no RTT sample, the public rate uses TUIC's 100-ms fallback while the
+	// internal pacing field remains zero.
+	wantFallback := quiccongestion.ByteCount(float64(sender.initialCwnd) * tuicHighGain / 0.1)
+	if got := sender.bandwidth(); got != wantFallback || sender.pacingRate != 0 {
+		t.Fatalf("fallback pacing mismatch: public=%d stored=%d want=%d", got, sender.pacingRate, wantFallback)
+	}
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	wantPublic := quiccongestion.ByteCount(float64(sender.initialCwnd) * tuicHighGain / 0.2)
+	if got := sender.bandwidth(); got != wantPublic || sender.pacingRate != 0 {
+		t.Fatalf("provider pacing seeded stored field early: public=%d stored=%d want=%d", got, sender.pacingRate, wantPublic)
+	}
+	start := monotime.Now()
+	sender.OnPacketSent(start, 0, 0, 1200, true)
+	sender.OnCongestionEventEx(1200, start.Add(200*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}}, nil)
+	wantStored := rateFromDelta(uint64(sender.initialCwnd), 200*time.Millisecond)
+	if sender.pacingRate != wantStored {
+		t.Fatalf("first useful event pacing=%d, want IW/min_rtt=%d", sender.pacingRate, wantStored)
+	}
+}
+
+func TestTUICFlightTelemetryUsesPreSendValueAndIgnoresLegacyCallbacks(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	start := monotime.Now()
+	sender.OnPacketSent(start, 12_000, 7, 1200, true)
+	if sender.bytesInFlight != 12_000 {
+		t.Fatalf("send telemetry stored post-send flight: %d", sender.bytesInFlight)
+	}
+	sender.OnPacketAcked(7, 1200, 10_800, start.Add(time.Millisecond))
+	sender.OnCongestionEvent(7, 1200, 9_600)
+	if sender.bytesInFlight != 12_000 {
+		t.Fatalf("legacy callbacks mutated extended-event flight state: %d", sender.bytesInFlight)
+	}
+	if got := sender.estimator.packetStates[7].bytesInFlight; got != 13_200 {
+		t.Fatalf("packet snapshot flight=%d, want post-send 13200", got)
+	}
+}
+
+func TestTUICLossOnlyEventDoesNotEnterRecovery(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.fullBandwidth = true
+	sender.mode = tuicBbrProbeBW
+	start := monotime.Now()
+	sender.OnPacketSent(start, 0, 0, 1200, true)
+	sender.OnCongestionEventEx(1200, start.Add(200*time.Millisecond), nil, []quiccongestion.LostPacketInfo{{PacketNumber: 0, BytesLost: 1200}})
+	if sender.InRecovery() {
+		t.Fatal("loss-only event entered recovery before an ACK-clocked event")
+	}
+}
+
+func TestTUICRecoveryRequiresFullBandwidthAndUsesLossPresence(t *testing.T) {
+	start := monotime.Now()
+	newMixedEvent := func(sender *TUICBBRSender) {
+		sender.OnPacketSent(start, 0, 0, 1200, true)
+		sender.OnPacketSent(start.Add(time.Millisecond), 1200, 1, 1200, true)
+		sender.OnCongestionEventEx(2400, start.Add(200*time.Millisecond),
+			[]quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}},
+			[]quiccongestion.LostPacketInfo{{PacketNumber: 1, BytesLost: 0}})
+	}
+	beforeModel := NewTUICBBRSender(1200)
+	beforeModel.mode = tuicBbrProbeRTT
+	newMixedEvent(beforeModel)
+	if beforeModel.InRecovery() {
+		t.Fatal("non-STARTUP mode bypassed the full-bandwidth recovery guard")
+	}
+	afterModel := NewTUICBBRSender(1200)
+	afterModel.fullBandwidth = true
+	afterModel.mode = tuicBbrProbeBW
+	newMixedEvent(afterModel)
+	if !afterModel.InRecovery() {
+		t.Fatal("zero-byte loss entry was ignored despite a non-empty loss batch")
+	}
+	if got := afterModel.Telemetry(); got.PacketsLost != 1 || got.BytesLost != 0 {
+		t.Fatalf("zero-byte loss telemetry mismatch: %+v", got)
+	}
+}
+
+func TestTUICMixedEventUsesNewestPacketSendState(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	start := monotime.Now()
+	sender.OnPacketSent(start, 0, 0, 1200, true)
+	sender.estimator.markAppLimited()
+	sender.OnPacketSent(start.Add(time.Millisecond), 1200, 1, 1200, true)
+	sender.OnCongestionEventEx(2400, start.Add(200*time.Millisecond),
+		[]quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}},
+		[]quiccongestion.LostPacketInfo{{PacketNumber: 1, BytesLost: 1200}})
+	if !sender.lastSampleAppLimited {
+		t.Fatal("newer lost packet did not provide the event's app-limited state")
+	}
+	if sender.roundsNoGain != 0 {
+		t.Fatalf("app-limited mixed event advanced STARTUP no-gain rounds: %d", sender.roundsNoGain)
+	}
+}
+
+func TestTUICStartupExitsOnlyAfterBoundedLossEvidence(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	sender.bwAtLastRound = 10 * 1024 * 1024
+	start := monotime.Now()
+	for i := 0; i < 10; i++ {
+		sender.OnPacketSent(start.Add(time.Duration(i)*time.Millisecond), quiccongestion.ByteCount(i*1200), quiccongestion.PacketNumber(i), 1200, true)
+	}
+	for i := 0; i < tuicStartupLossEvents; i++ {
+		sender.OnCongestionEventEx(quiccongestion.ByteCount((10-i)*1200), start.Add(time.Duration(100+i)*time.Millisecond), nil,
+			[]quiccongestion.LostPacketInfo{{PacketNumber: quiccongestion.PacketNumber(i), BytesLost: 1200}})
+		if sender.fullBandwidth {
+			t.Fatalf("STARTUP exited before an ACK round at loss event %d", i)
+		}
+	}
+	sender.OnCongestionEventEx(2400, start.Add(200*time.Millisecond),
+		[]quiccongestion.AckedPacketInfo{{PacketNumber: 9, BytesAcked: 1200}}, nil)
+	if !sender.fullBandwidth {
+		t.Fatal("bounded repeated-loss evidence did not exit STARTUP")
+	}
+}
+
 func TestTUICLossRecoveryPreservesRateModelAtQuarterLoss(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
@@ -255,12 +401,14 @@ func TestTUICBBRSenderStartupAndRecovery(t *testing.T) {
 	start := monotime.Now()
 	var pn quiccongestion.PacketNumber
 	for round := 0; round < 8; round++ {
+		var inFlight quiccongestion.ByteCount
 		for i := 0; i < 32; i++ {
 			sent := start.Add(time.Duration(round)*200*time.Millisecond + time.Duration(i)*time.Millisecond)
-			sender.OnPacketSent(sent, sender.bytesInFlight, pn, 1200, true)
+			sender.OnPacketSent(sent, inFlight, pn, 1200, true)
+			inFlight += 1200
 			pn++
 		}
-		sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(time.Duration(round+1)*200*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: pn - 1, BytesAcked: 32 * 1200}}, nil)
+		sender.OnCongestionEventEx(inFlight, start.Add(time.Duration(round+1)*200*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: pn - 1, BytesAcked: 32 * 1200}}, nil)
 	}
 	if sender.estimator.estimate() == 0 {
 		t.Fatal("TUIC-aligned estimator did not record bandwidth")
@@ -274,7 +422,9 @@ func TestTUICBBRSenderStartupAndRecovery(t *testing.T) {
 	sender.fullBandwidth = true
 	sender.mode = tuicBbrProbeBW
 	before := sender.GetCongestionWindow()
-	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(3*time.Second), nil, []quiccongestion.LostPacketInfo{{PacketNumber: pn - 1, BytesLost: 1200}})
+	sender.OnPacketSent(start.Add(3*time.Second), 0, pn, 1200, true)
+	sender.OnPacketSent(start.Add(3*time.Second+time.Millisecond), 1200, pn+1, 1200, true)
+	sender.OnCongestionEventEx(2400, start.Add(3200*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: pn, BytesAcked: 1200}}, []quiccongestion.LostPacketInfo{{PacketNumber: pn + 1, BytesLost: 1200}})
 	if !sender.InRecovery() || sender.GetCongestionWindow() > before {
 		t.Fatalf("loss did not bound recovery: recovery=%v cwnd=%d before=%d", sender.InRecovery(), sender.GetCongestionWindow(), before)
 	}
@@ -303,8 +453,8 @@ func TestTUICDatagramResizePreservesPacketSizedWindows(t *testing.T) {
 	if sender.initialCwnd != 32*1400 || sender.cwnd != sender.initialCwnd {
 		t.Fatalf("initial window resize mismatch: initial=%d cwnd=%d", sender.initialCwnd, sender.cwnd)
 	}
-	if sender.minCwnd != 4*1400 || sender.recoveryWindow != 64*1400 {
-		t.Fatalf("packet-sized window resize mismatch: min=%d recovery=%d", sender.minCwnd, sender.recoveryWindow)
+	if sender.minCwnd != 4*1400 || sender.recoveryWindow != 64*1200 {
+		t.Fatalf("window resize mismatch: min=%d recovery=%d", sender.minCwnd, sender.recoveryWindow)
 	}
 }
 
@@ -342,7 +492,7 @@ func TestTUICStartupLossDoesNotCollapseBeforeBandwidthModel(t *testing.T) {
 	acked := make([]quiccongestion.AckedPacketInfo, 0, 5)
 	lost := make([]quiccongestion.LostPacketInfo, 0, 195)
 	for i := 0; i < 200; i++ {
-		sender.OnPacketSent(start.Add(time.Duration(i)*time.Millisecond), sender.bytesInFlight, pn, 1200, true)
+		sender.OnPacketSent(start.Add(time.Duration(i)*time.Millisecond), quiccongestion.ByteCount(i*1200), pn, 1200, true)
 		if i%40 == 39 {
 			acked = append(acked, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
 		} else {
@@ -350,7 +500,7 @@ func TestTUICStartupLossDoesNotCollapseBeforeBandwidthModel(t *testing.T) {
 		}
 		pn++
 	}
-	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(200*time.Millisecond), acked, lost)
+	sender.OnCongestionEventEx(200*1200, start.Add(200*time.Millisecond), acked, lost)
 	if sender.fullBandwidth {
 		t.Fatal("startup loss prematurely declared the bottleneck model complete")
 	}
@@ -365,7 +515,9 @@ func TestTUICStartupLossDoesNotCollapseBeforeBandwidthModel(t *testing.T) {
 	// recovery; this guard prevents the startup exception from becoming an
 	// unlimited loss-ignoring mode.
 	sender.fullBandwidth = true
-	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(400*time.Millisecond), nil, []quiccongestion.LostPacketInfo{{PacketNumber: pn, BytesLost: 1200}})
+	sender.OnPacketSent(start.Add(300*time.Millisecond), 0, pn, 1200, true)
+	sender.OnPacketSent(start.Add(301*time.Millisecond), 1200, pn+1, 1200, true)
+	sender.OnCongestionEventEx(2400, start.Add(400*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: pn, BytesAcked: 1200}}, []quiccongestion.LostPacketInfo{{PacketNumber: pn + 1, BytesLost: 1200}})
 	if !sender.InRecovery() {
 		t.Fatal("loss after startup did not enter recovery")
 	}
@@ -378,7 +530,7 @@ func TestTUICStartupDoesNotExitOnOnePostModelLoss(t *testing.T) {
 	sender.roundsNoGain = 0
 	sender.bwAtLastRound = 1
 	sender.estimator.maxFilter.updateMax(1, 1)
-	sender.checkFullBandwidth(false)
+	sender.checkFullBandwidth(tuicSendState{valid: true})
 	if sender.fullBandwidth {
 		t.Fatal("one recovery event prematurely exited startup")
 	}
@@ -437,7 +589,7 @@ func TestTUICProbeRTTPreservesModelAndExitsAfterPriorRound(t *testing.T) {
 	sender.cwnd = 512 * 1024
 	sender.estimator.maxFilter.updateMax(1, 2*1024*1024)
 	start := monotime.Now()
-	sender.maybeProbeRTT(start, false, 0, false, true)
+	sender.maybeProbeRTT(start, false, 0, true)
 	if sender.mode != tuicBbrProbeRTT || sender.GetCongestionWindow() != sender.minCwnd || !sender.estimator.appLimited {
 		t.Fatalf("ProbeRTT entry mismatch: mode=%v window=%d app_limited=%v", sender.mode, sender.GetCongestionWindow(), sender.estimator.appLimited)
 	}
@@ -447,8 +599,8 @@ func TestTUICProbeRTTPreservesModelAndExitsAfterPriorRound(t *testing.T) {
 	}
 	// A round can pass before the 200-ms timer. Native TUIC remembers it and
 	// exits as soon as the timer expires; it does not wait for another round.
-	sender.maybeProbeRTT(start.Add(100*time.Millisecond), true, 0, true, false)
-	sender.maybeProbeRTT(start.Add(201*time.Millisecond), false, 0, true, false)
+	sender.maybeProbeRTT(start.Add(100*time.Millisecond), true, 0, false)
+	sender.maybeProbeRTT(start.Add(201*time.Millisecond), false, 0, false)
 	if sender.mode != tuicBbrProbeBW {
 		t.Fatalf("ProbeRTT did not exit after timer and prior round: mode=%v", sender.mode)
 	}
@@ -465,7 +617,7 @@ func TestTUICStartupGrowthPreservesAckHeight(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.ackAgg.maxAckHeight.updateMax(1, 24*1200)
 	sender.estimator.maxFilter.updateMax(1, 1024*1024)
-	sender.checkFullBandwidth(false)
+	sender.checkFullBandwidth(tuicSendState{valid: true})
 	if got := sender.ackAgg.maxAckHeight.get(); got != 24*1200 {
 		t.Fatalf("startup bandwidth growth discarded ACK height: %d", got)
 	}

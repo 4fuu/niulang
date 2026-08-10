@@ -60,10 +60,12 @@ func (m *tuicMinMax) subWindowUpdate(sample tuicMinMaxSample) {
 			m.samples[1] = m.samples[2]
 			m.samples[2] = sample
 		}
-	} else if m.samples[1].round == m.samples[0].round && delta > m.window/4 {
+	} else if m.samples[1].value == m.samples[0].value &&
+		sample.round >= m.samples[1].round && sample.round-m.samples[1].round > m.window/4 {
 		m.samples[2] = sample
 		m.samples[1] = sample
-	} else if m.samples[2].round == m.samples[1].round && delta > m.window/2 {
+	} else if m.samples[2].value == m.samples[1].value &&
+		sample.round >= m.samples[2].round && sample.round-m.samples[2].round > m.window/2 {
 		m.samples[2] = sample
 	}
 }
