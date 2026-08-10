@@ -434,3 +434,11 @@ completed 5/5 in 49.262, 24.309, 12.089, 7.969, and 8.301 seconds (median
 China-to-US path is currently highly variable; the WANOPT result still fails
 the bulk reliability bar, and no production performance claim is made from a
 single block.
+
+As a separate post-deployment latency smoke, ten fresh Google
+`generate_204` requests through the unchanged local `auto` node completed
+10/10 with HTTP 204. Total times were 1.332, 1.805, 1.843, 1.325, 1.533,
+1.282, 1.358, 1.807, 1.830, and 2.263 seconds (median 1.668 s, maximum
+2.263 s). This is a small availability check rather than a latency campaign;
+it confirms that the server lifecycle change did not break short API/web
+requests while the bulk block was loss-limited.
