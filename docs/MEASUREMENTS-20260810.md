@@ -244,11 +244,11 @@ tests and remains the rollback path.
 
 ## Latest development deployment
 
-The latest checked-out commit, `fd2ffac`, was built as Linux/amd64 and
+The latest checked-out commit, `55363f9`, was built as Linux/amd64 and
 installed only as `/usr/local/bin/wanoptd` for `wanoptd-dev.service`; the
-previous binary is retained at `/usr/local/bin/wanoptd-rollback-4d93c03`.
+previous binary is retained at `/usr/local/bin/wanoptd-rollback-fd2ffac`.
 The deployed SHA-256 is
-`3fac24a9305924fcf8169e1d2a41cac4710aacd3e5e7eb888b6251a5f22f1b18`.
+`0de7071fee1601d8b28ffaebe7b6c902b5b70d99b3d088ecfb2342f7a5949113`.
 After restart, a fresh Google `generate_204` returned HTTP 204 in 1.043 s and
 a one-flow 10-MiB CacheFly smoke returned HTTP 200 with exactly 10,485,760
 bytes. Local and remote metrics both reported zero failed flows and zero flow
@@ -259,12 +259,13 @@ was left running.
 ## Final current-window TUIC comparison and UDP smoke
 
 The following measurements were taken after the UDP-association hardening,
-using the final deployed source revision `fd2ffac` (`wanoptd dev-fd2ffac`,
-remote binary SHA-256
-`3fac24a9305924fcf8169e1d2a41cac4710aacd3e5e7eb888b6251a5f22f1b18`). The
-local outer socket was explicitly bound to `172.20.10.2`. These trials are a
-new, matched time window and must not be mixed with the older pilot numbers
-above.
+using source revision `fd2ffac` (the UDP-hardening build immediately before
+the deployed address-resolver revision). The current service is
+`55363f9` (`wanoptd dev-55363f9`, remote binary SHA-256
+`0de7071fee1601d8b28ffaebe7b6c902b5b70d99b3d088ecfb2342f7a5949113`); the
+transport code is unchanged between those two revisions. The local outer
+socket was explicitly bound to `172.20.10.2`. These trials are a new,
+matched time window and must not be mixed with the older pilot numbers above.
 
 The workload was the exact 10 MiB CacheFly object
 `https://cachefly.cachefly.net/10mb.test`; a trial counted as complete only
@@ -301,14 +302,14 @@ wanopt_lane_failures_total 0
 wanopt_lane_replacements_total 0
 ```
 
-For this smoke the local client was bound to the then-current DHCP address
-`172.20.10.2`. `auto` completed the association using its TCP fallback race
-(`wanopt_fallbacks_total` increased by one); a separate forced-QUIC UDP smoke
-on the same deployed revision also returned a valid 71-byte reply. This is a
-useful operational warning: the physical source address is not stable on the
-measurement host, and a fixed `--local-address` must be refreshed when DHCP
-changes it. The production service was not changed to capture the Clash TUN
-route automatically.
+For the final smoke the client used `--local-address auto`; it selected the
+then-current physical `172.20.10.2` and completed over QUIC with
+`wanopt_fallbacks_total 0`. Earlier in the same window, a fixed address became
+invalid when DHCP moved the host to `172.20.10.4`, producing
+`bind: can't assign requested address`; this is the operational failure that
+the automatic resolver is intended to prevent. If multiple physical IPv4
+addresses are active, configure `if:NAME` or a literal address. The production
+service was not changed to capture the Clash TUN route automatically.
 
 This validates bounded UDP framing, US-side resolution, peer pinning, graceful
 dissociation, and the code-level rescue path (the controlled fault test uses a
@@ -316,7 +317,7 @@ local dual-stack server). It does not yet demonstrate recovery of every
 intermittent-loss pattern on the real China-US path; native QUIC DATAGRAM and
 loss/reordering campaign coverage remain release gates. The service was left
 active on `:12443` and the previous binary is available at
-`/usr/local/bin/wanoptd-rollback-4d93c03` on the server.
+`/usr/local/bin/wanoptd-rollback-fd2ffac` on the server.
 
 ## Final quality checks
 
