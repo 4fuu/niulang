@@ -153,7 +153,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, errors.New("initial lane count must be between 1 and 8")
 	}
 	if cfg.MaxLanes <= 0 {
-		cfg.MaxLanes = 8
+		// One lane is the unattended-safe default. Independent congestion
+		// controllers can reduce goodput or amplify loss; operators may raise
+		// this only after a path-specific probe campaign proves a benefit.
+		cfg.MaxLanes = 1
 	}
 	if cfg.MaxLanes > 8 {
 		return nil, errors.New("maximum lane count must not exceed 8")

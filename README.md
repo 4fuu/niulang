@@ -56,12 +56,15 @@ release gates in
 - Reproducible measurements for latency, throughput, loss, queueing, and
   application-visible failures.
 
-The client defaults to independent QUIC connections for bulk lanes because
-that is the safer behavior on the measured path. `--quic-pool` is an explicit
-opt-in that keeps one bounded QUIC connection for initial/control streams and
-lets multiple short flows share its congestion controller; bulk lane joins
-remain independent. This mode must be validated with the supplied single-flow
-and concurrent-flow harnesses before being enabled in a live Clash profile.
+The unattended client default is one QUIC lane because independent congestion
+controllers can reduce goodput on a lossy path. `--max-lanes` and
+`--bulk-start-lanes` are explicit path-validation knobs for measured bulk
+experiments; adaptive growth still requires positive marginal gain.
+`--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
+initial/control streams and lets multiple short flows share its congestion
+controller; configured bulk lane joins remain independent. These modes must
+be validated with the supplied single-flow and concurrent-flow harnesses
+before being enabled in a live Clash profile.
 
 ## Non-goals
 

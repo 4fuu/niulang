@@ -59,8 +59,9 @@ amortization characteristic of TUIC, but it is not the default: the measured
 path still needs a controller and queue policy that preserve bulk goodput.
 
 The scheduler must never wait for eight handshakes before acknowledging a
-short request. It should start one lane, optionally pre-warm one spare lane,
-and grow only after the classifier and a measured lane probe justify it.
+short request. The unattended-safe default starts one lane and grows only
+after the classifier and a measured lane probe justify it; operators can
+explicitly pre-warm spare lanes after a path-specific campaign.
 Lane joins must be bounded-time and failure-tolerant; a failed join leaves
 the original flow usable. The adaptive manager opens at most one speculative
 join per scheduler tick and stops joining as soon as both FIN directions are

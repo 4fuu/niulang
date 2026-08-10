@@ -345,7 +345,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, InitialLanes: 2, Logger: logger,
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, InitialLanes: 2, MaxLanes: 2, Logger: logger,
 		Metrics: metrics.New(),
 	})
 	if err != nil {

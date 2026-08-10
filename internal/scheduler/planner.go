@@ -18,7 +18,7 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		MaxLanes:         8,
+		MaxLanes:         1,
 		InteractiveLanes: 1,
 		// Start with one lane and let the adaptive manager add a lane only
 		// after it has a measured marginal-gain sample. Immediate striping is
