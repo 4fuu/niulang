@@ -24,7 +24,10 @@ import (
 // cause an endless replacement storm while the application waits for a final
 // FIN. Recovery is deliberately finite; the logical flow then fails closed
 // and the caller can retry.
-const maxLaneRecoveryAttempts = 8
+const (
+	maxLaneRecoveryAttempts = 8
+	laneRecoveryResetAfter  = 5 * time.Minute
+)
 
 type ClientConfig struct {
 	ListenAddr       string
@@ -565,6 +568,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	var recoveryBackoff time.Duration
 	var nextRecovery time.Time
 	recoveryAttempts := 0
+	var lastRecoveryAttempt time.Time
 	for {
 		select {
 		case <-flow.doneChan():
@@ -590,6 +594,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					continue
 				}
 				recoveryAttempts++
+				lastRecoveryAttempt = now
 				if err := c.openRecoveryLane(manageCtx, flow, sessionID, flowID); err != nil {
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 						c.cfg.Logger.Warn("lane recovery unavailable", "error", err)
@@ -620,12 +625,16 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				}
 				continue
 			}
-			// A stable lane resets the finite recovery budget. This permits a
-			// later independent failure without making a healthy flow consume
-			// its entire lifetime budget.
-			recoveryAttempts = 0
-			recoveryBackoff = 0
-			nextRecovery = time.Time{}
+			// A replacement that survives one 500-ms scheduler tick is not yet
+			// stable. Reset the lifetime budget only after a sustained healthy
+			// dwell; otherwise accept-then-close peers can bypass the cap by
+			// keeping each replacement alive very briefly.
+			if recoveryAttempts > 0 && !lastRecoveryAttempt.IsZero() && time.Since(lastRecoveryAttempt) >= laneRecoveryResetAfter {
+				recoveryAttempts = 0
+				recoveryBackoff = 0
+				nextRecovery = time.Time{}
+				lastRecoveryAttempt = time.Time{}
+			}
 			// Once a TCP rescue lane is installed, keep the session on that
 			// reliable lane. TCP/QUIC striping compounds head-of-line blocking
 			// and would make the fallback less predictable.
