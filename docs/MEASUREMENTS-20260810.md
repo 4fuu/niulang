@@ -244,11 +244,11 @@ tests and remains the rollback path.
 
 ## Latest development deployment
 
-The latest checked-out commit, `4d93c03`, was built as Linux/amd64 and
+The latest checked-out commit, `fd2ffac`, was built as Linux/amd64 and
 installed only as `/usr/local/bin/wanoptd` for `wanoptd-dev.service`; the
-previous binary is retained at `/usr/local/bin/wanoptd-rollback-bd3cbd4`.
+previous binary is retained at `/usr/local/bin/wanoptd-rollback-4d93c03`.
 The deployed SHA-256 is
-`afb550b53596fbfdd1bffd3e4aba5351818a56d434c589df72ecbb064ef5132d`.
+`3fac24a9305924fcf8169e1d2a41cac4710aacd3e5e7eb888b6251a5f22f1b18`.
 After restart, a fresh Google `generate_204` returned HTTP 204 in 1.043 s and
 a one-flow 10-MiB CacheFly smoke returned HTTP 200 with exactly 10,485,760
 bytes. Local and remote metrics both reported zero failed flows and zero flow
@@ -259,9 +259,9 @@ was left running.
 ## Final current-window TUIC comparison and UDP smoke
 
 The following measurements were taken after the UDP-association hardening,
-using the final deployed source revision `4d93c03` (`wanoptd dev-4d93c03`,
+using the final deployed source revision `fd2ffac` (`wanoptd dev-fd2ffac`,
 remote binary SHA-256
-`afb550b53596fbfdd1bffd3e4aba5351818a56d434c589df72ecbb064ef5132d`). The
+`3fac24a9305924fcf8169e1d2a41cac4710aacd3e5e7eb888b6251a5f22f1b18`). The
 local outer socket was explicitly bound to `172.20.10.2`. These trials are a
 new, matched time window and must not be mixed with the older pilot numbers
 above.
@@ -301,13 +301,22 @@ wanopt_lane_failures_total 0
 wanopt_lane_replacements_total 0
 ```
 
+For this smoke the local client was bound to the then-current DHCP address
+`172.20.10.2`. `auto` completed the association using its TCP fallback race
+(`wanopt_fallbacks_total` increased by one); a separate forced-QUIC UDP smoke
+on the same deployed revision also returned a valid 71-byte reply. This is a
+useful operational warning: the physical source address is not stable on the
+measurement host, and a fixed `--local-address` must be refreshed when DHCP
+changes it. The production service was not changed to capture the Clash TUN
+route automatically.
+
 This validates bounded UDP framing, US-side resolution, peer pinning, graceful
 dissociation, and the code-level rescue path (the controlled fault test uses a
 local dual-stack server). It does not yet demonstrate recovery of every
 intermittent-loss pattern on the real China-US path; native QUIC DATAGRAM and
 loss/reordering campaign coverage remain release gates. The service was left
 active on `:12443` and the previous binary is available at
-`/usr/local/bin/wanoptd-rollback-bd3cbd4` on the server.
+`/usr/local/bin/wanoptd-rollback-4d93c03` on the server.
 
 ## Final quality checks
 
