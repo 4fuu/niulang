@@ -107,6 +107,9 @@ func TestBBRSenderBuildsDeliveryModelAndRecovers(t *testing.T) {
 		t.Fatalf("BBR pacing fell below safety floor: %d", sender.bandwidth())
 	}
 
+	// Startup tolerates isolated loss; once the bottleneck model is established
+	// the same loss must enter bounded recovery.
+	sender.fullBandwidth = true
 	before := sender.GetCongestionWindow()
 	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(3*time.Second), nil, []quiccongestion.LostPacketInfo{{PacketNumber: pn - 1, BytesLost: 1200}})
 	if !sender.InRecovery() {
@@ -137,6 +140,31 @@ func TestBBRSenderTimeoutResetsToSafeStartup(t *testing.T) {
 	}
 	if sender.GetCongestionWindow() != sender.minCwnd {
 		t.Fatalf("timeout window=%d, want minimum=%d", sender.GetCongestionWindow(), sender.minCwnd)
+	}
+}
+
+func TestBBRSenderUsesSingleStartupPacingGain(t *testing.T) {
+	sender := NewBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	// Before a delivery sample exists, pacing is high_gain * IW / RTT. A
+	// second high-gain multiplication would overpace startup by ~2.885x.
+	want := quiccongestion.ByteCount(float64(sender.initialCwnd) / 0.2 * bbrHighGain)
+	if got := sender.bandwidth(); got < want-2 || got > want+2 {
+		t.Fatalf("startup pacing=%d, want approximately %d", got, want)
+	}
+}
+
+func TestBBRSenderBoundsPacketSamplerState(t *testing.T) {
+	sender := NewBBRSender(1200)
+	start := monotime.Now()
+	for i := 0; i < bbrMaxSendStates+512; i++ {
+		sender.OnPacketSent(start.Add(time.Duration(i)*time.Microsecond), sender.bytesInFlight, quiccongestion.PacketNumber(i), 1200, true)
+	}
+	if len(sender.sendStates) > bbrMaxSendStates {
+		t.Fatalf("packet sampler state grew beyond cap: %d > %d", len(sender.sendStates), bbrMaxSendStates)
+	}
+	if len(sender.sendStates) == 0 {
+		t.Fatal("packet sampler state unexpectedly empty")
 	}
 }
 

@@ -47,6 +47,13 @@ type BBRSender struct {
 	maxBandwidth uint64
 	bwSamples    [10]bwSample
 
+	// sendStates is the bounded packet history used for delivery-rate samples.
+	// A sample must measure bytes delivered since the packet was sent, not the
+	// size of one ACK callback divided by callback spacing; ACK coalescing on a
+	// long-haul path makes the latter estimator wildly noisy.
+	sendStates     map[quiccongestion.PacketNumber]bbrSendState
+	deliveredBytes uint64
+
 	bwAtLastRound uint64
 	roundsNoGain  uint8
 	fullBandwidth bool
@@ -76,6 +83,12 @@ type bwSample struct {
 	bps   uint64
 }
 
+type bbrSendState struct {
+	sentTime          monotime.Time
+	deliveredAtSend   uint64
+	deliveredTimeSend monotime.Time
+}
+
 const (
 	bbrHighGain                   = 2.885
 	bbrDrainGain                  = 1 / bbrHighGain
@@ -84,8 +97,14 @@ const (
 	bbrProbeRTTDuration           = 200 * time.Millisecond
 	bbrStartupGrowth              = 1.25
 	bbrStartupNoGainRounds        = 3
+	bbrStartupCwndGain            = 2.0
 	bbrMinRate                    = 64 * 1024
 	bbrMaxRate             uint64 = 2 * 1024 * 1024 * 1024
+	// A loss or a peer that stops acknowledging must not turn the sampler's
+	// per-packet state into an unbounded allocation. QUIC's own outstanding
+	// packet limit is much lower during normal operation; this cap is a final
+	// defense for long-lived or adversarial sessions.
+	bbrMaxSendStates = 8192
 )
 
 var bbrPacingGains = [...]float64{1.25, 0.75, 1, 1, 1, 1, 1, 1}
@@ -98,7 +117,11 @@ func NewBBRSender(initialPacketSize quiccongestion.ByteCount) *BBRSender {
 	if initialPacketSize < quiccongestion.MinInitialPacketSize {
 		initialPacketSize = quiccongestion.InitialPacketSize
 	}
-	initial := maxByteCount(10*initialPacketSize, 14720)
+	// TUIC's BBR uses the standard 32-packet initial window. The old wanopt
+	// controller used ten packets, which unnecessarily serialized startup over
+	// a 200-ms path and made a single flow look much worse than TUIC before its
+	// estimator had any useful sample.
+	initial := maxByteCount(32*initialPacketSize, 14720)
 	maxCwnd := quiccongestion.MaxCongestionWindowPackets * initialPacketSize
 	if initial > maxCwnd {
 		initial = maxCwnd
@@ -111,7 +134,11 @@ func NewBBRSender(initialPacketSize quiccongestion.ByteCount) *BBRSender {
 		cwnd:            initial,
 		mode:            bbrStartup,
 		pacingGain:      bbrHighGain,
-		cwndGain:        bbrHighGain,
+		// BBR uses a high pacing gain in STARTUP, but its congestion-window
+		// gain is 2.0. Applying the pacing gain to the initial rate as well
+		// would apply the 2.885 factor twice before a delivery sample exists.
+		cwndGain:   bbrStartupCwndGain,
+		sendStates: make(map[quiccongestion.PacketNumber]bbrSendState),
 	}
 	b.pacer = newPacer(b.bandwidth)
 	return b
@@ -163,7 +190,10 @@ func (b *BBRSender) bandwidth() quiccongestion.ByteCount {
 		if rtt <= 0 {
 			rtt = 200 * time.Millisecond
 		}
-		rate = uint64(float64(b.initialCwnd) / rtt.Seconds() * bbrHighGain)
+		// The pacing gain is applied below. Keep the initial model at IW/RTT,
+		// matching the standard BBR startup behavior and avoiding a squared
+		// startup gain on high-RTT paths.
+		rate = uint64(float64(b.initialCwnd) / rtt.Seconds())
 	}
 	if rate < bbrMinRate {
 		rate = bbrMinRate
@@ -197,7 +227,46 @@ func (b *BBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quicconge
 	} else {
 		b.bytesInFlight = bytesInFlight + bytes
 	}
+	if b.sendStates == nil {
+		b.sendStates = make(map[quiccongestion.PacketNumber]bbrSendState)
+	}
+	if len(b.sendStates) >= bbrMaxSendStates {
+		b.pruneSendStates()
+	}
+	deliveredTime := b.lastDelivery
+	if deliveredTime.IsZero() {
+		deliveredTime = sentTime
+	}
+	b.sendStates[number] = bbrSendState{
+		sentTime: sentTime, deliveredAtSend: b.deliveredBytes,
+		deliveredTimeSend: deliveredTime,
+	}
 	b.pacer.sentPacket(sentTime, bytes)
+}
+
+// pruneSendStates removes the oldest quarter of samples when the hard cap is
+// reached. QUIC normally removes states on every ACK/loss; this path is only
+// exercised when acknowledgements stop arriving, so a bounded scan is safer
+// than retaining unacknowledged history indefinitely.
+func (b *BBRSender) pruneSendStates() {
+	if len(b.sendStates) < bbrMaxSendStates {
+		return
+	}
+	remove := bbrMaxSendStates / 4
+	for i := 0; i < remove; i++ {
+		var oldestPN quiccongestion.PacketNumber
+		var oldest monotime.Time
+		first := true
+		for pn, state := range b.sendStates {
+			if first || state.sentTime.Before(oldest) {
+				oldestPN, oldest, first = pn, state.sentTime, false
+			}
+		}
+		if first {
+			return
+		}
+		delete(b.sendStates, oldestPN)
+	}
 }
 
 func (b *BBRSender) CanSend(bytesInFlight quiccongestion.ByteCount) bool {
@@ -240,18 +309,29 @@ func (b *BBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, 
 	if len(acked) > 0 {
 		b.lastAcked = largestAck
 		b.refreshRTT(eventTime)
-		b.updateBandwidth(eventTime, uint64(ackedBytes))
+		b.updateBandwidthFromPackets(eventTime, acked, uint64(ackedBytes))
 		b.updateRound(largestAck)
 	}
 	for _, p := range lost {
-		b.noteLoss(p.PacketNumber, p.BytesLost, eventTime)
-	}
-	if len(lost) > 0 {
-		b.fullBandwidth = true
+		// BBR does not leave STARTUP on an isolated loss. Doing so was a major
+		// source of the old controller's collapse on this path: one reordered
+		// packet permanently converted a healthy startup into a tiny recovery
+		// window. Recovery remains active once the controller has established a
+		// bottleneck model, or after a timeout resets it explicitly.
+		if b.fullBandwidth || b.mode != bbrStartup {
+			b.noteLoss(p.PacketNumber, p.BytesLost, eventTime)
+		}
 	}
 	b.transition(eventTime, priorInFlight, len(lost) > 0)
 	b.updateWindow(ackedBytes)
 	b.bytesInFlight = priorInFlight
+	b.deliveredBytes += uint64(ackedBytes)
+	for _, p := range acked {
+		delete(b.sendStates, p.PacketNumber)
+	}
+	for _, p := range lost {
+		delete(b.sendStates, p.PacketNumber)
+	}
 	if ackedBytes >= b.recoveryLosses {
 		b.recoveryLosses = 0
 	} else {
@@ -288,20 +368,37 @@ func (b *BBRSender) noteLoss(number quiccongestion.PacketNumber, lostBytes quicc
 	}
 }
 
-func (b *BBRSender) updateBandwidth(now monotime.Time, bytes uint64) {
-	if bytes == 0 {
+func (b *BBRSender) updateBandwidthFromPackets(now monotime.Time, acked []quiccongestion.AckedPacketInfo, bytes uint64) {
+	if bytes == 0 || len(acked) == 0 {
 		return
 	}
-	if !b.lastDelivery.IsZero() {
-		delta := now.Sub(b.lastDelivery)
-		if delta < time.Millisecond {
-			delta = time.Millisecond
+	var best uint64
+	deliveredNow := b.deliveredBytes + bytes
+	for _, packet := range acked {
+		state, ok := b.sendStates[packet.PacketNumber]
+		if !ok {
+			continue
 		}
-		sample := uint64(float64(bytes) / delta.Seconds())
-		if sample > 0 {
-			b.bwSamples[b.round%uint64(len(b.bwSamples))] = bwSample{round: b.round, bps: sample}
-			b.recomputeBandwidth()
+		if deliveredNow <= state.deliveredAtSend {
+			continue
 		}
+		ackElapsed := now.Sub(state.deliveredTimeSend)
+		sendElapsed := now.Sub(state.sentTime)
+		interval := ackElapsed
+		if sendElapsed > interval {
+			interval = sendElapsed
+		}
+		if interval < time.Millisecond {
+			interval = time.Millisecond
+		}
+		sample := uint64(float64(deliveredNow-state.deliveredAtSend) / interval.Seconds())
+		if sample > best {
+			best = sample
+		}
+	}
+	if best > 0 {
+		b.bwSamples[b.round%uint64(len(b.bwSamples))] = bwSample{round: b.round, bps: best}
+		b.recomputeBandwidth()
 	}
 	b.lastDelivery = now
 }
@@ -345,7 +442,7 @@ func (b *BBRSender) transition(now monotime.Time, inFlight quiccongestion.ByteCo
 	if b.mode == bbrStartup && (b.fullBandwidth || b.roundsNoGain >= bbrStartupNoGainRounds) {
 		b.mode = bbrDrain
 		b.pacingGain = bbrDrainGain
-		b.cwndGain = bbrHighGain
+		b.cwndGain = bbrStartupCwndGain
 	}
 	if b.mode == bbrDrain && inFlight <= b.targetWindow(1) {
 		b.mode = bbrProbeBW
@@ -389,7 +486,7 @@ func (b *BBRSender) transition(now monotime.Time, inFlight quiccongestion.ByteCo
 			} else {
 				b.mode = bbrStartup
 				b.pacingGain = bbrHighGain
-				b.cwndGain = bbrHighGain
+				b.cwndGain = bbrStartupCwndGain
 			}
 			b.minRTTAt = now
 			b.probeRTTStarted = false
@@ -461,8 +558,10 @@ func (b *BBRSender) OnRetransmissionTimeout(retransmitted bool) {
 	b.fullBandwidth = false
 	b.mode = bbrStartup
 	b.pacingGain = bbrHighGain
-	b.cwndGain = bbrHighGain
+	b.cwndGain = bbrStartupCwndGain
 	b.lastDelivery = 0
+	b.deliveredBytes = 0
+	b.sendStates = make(map[quiccongestion.PacketNumber]bbrSendState)
 	b.pacer = newPacer(b.bandwidth)
 	b.pacer.setMaxDatagramSize(b.maxDatagramSize)
 }
