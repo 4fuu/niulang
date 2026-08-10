@@ -284,12 +284,14 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		c.handleUDPAssociate(ctx, inner)
 		return
 	}
+	flowOpenStarted := time.Now()
 	flow, err := c.openFlow(ctx, req.Destination)
 	if err != nil {
 		_ = socks5.WriteReply(inner, socks5.ReplyHostUnreachable, nil)
 		c.cfg.Logger.Warn("remote flow open failed", "error", err)
 		return
 	}
+	c.cfg.Logger.Debug("local flow opened", "transport", flow.kind, "duration", time.Since(flowOpenStarted))
 	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics, c.cfg.Logger)
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
@@ -432,6 +434,7 @@ func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16
 // provide true bulk capacity and independent loss paths, while the pooled
 // control stream remains available for short/interactive traffic.
 func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind, pooled bool) (*authenticatedLane, error) {
+	dialStarted := time.Now()
 	var outer streamConn
 	var err error
 	fastOpen := false
@@ -455,6 +458,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	if err != nil {
 		return nil, transportError(kind, err)
 	}
+	outerReady := time.Now()
 	fail := func(err error) (*authenticatedLane, error) {
 		_ = outer.Close()
 		return nil, transportError(kind, err)
@@ -467,6 +471,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 		}
 	}
 	_ = outer.SetDeadline(time.Time{})
+	c.cfg.Logger.Debug("outer lane authenticated", "transport", kind, "dial_duration", outerReady.Sub(dialStarted), "authentication_duration", time.Since(outerReady), "pooled", pooled, "fast_open", fastOpen)
 	return &authenticatedLane{fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID, fastOpen: fastOpen}, nil
 }
 

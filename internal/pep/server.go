@@ -368,6 +368,9 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 
 func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicAuthState) {
 	defer conn.Close()
+	sessionStarted := time.Now()
+	authFinished := time.Time{}
+	openFinished := time.Time{}
 	_ = conn.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
 	fc := newFrameConn(conn, s.cfg.MaxPayload)
 	var (
@@ -399,6 +402,8 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 			sessionID = first.Header.SessionID
 			open = first
 			laneID = 0
+			authFinished = time.Now()
+			openFinished = authFinished
 		} else {
 			hello, readErr = serverAuthenticateHelloFrameCallback(fc, s.cfg.Secret, s.replay, time.Now(), s.quicCapabilities, &first, func(h session.Hello) {
 				if h.Kind == session.HelloNew && h.LaneID == 0 {
@@ -410,6 +415,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 				return
 			}
 			helloReady = true
+			authFinished = time.Now()
 		}
 	}
 	if !fastOpen && !helloReady {
@@ -427,6 +433,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 			s.cfg.Logger.Warn("session authentication failed", "error", err)
 			return
 		}
+		authFinished = time.Now()
 	}
 	if !fastOpen {
 		if hello.Kind == session.HelloJoin {
@@ -446,6 +453,13 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		if err != nil {
 			return
 		}
+		openFinished = time.Now()
+	}
+	if authFinished.IsZero() {
+		authFinished = time.Now()
+	}
+	if openFinished.IsZero() {
+		openFinished = authFinished
 	}
 	expectedOpenType := protocol.TypeOpen
 	if fastOpen {
@@ -464,12 +478,14 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetDestination, "destination unavailable")})
 		return
 	}
+	destinationDialStarted := time.Now()
 	destinationConn, err := s.cfg.DestinationPolicy.DialContext(ctx, destination)
 	if err != nil {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetDestination, "destination unavailable")})
 		s.cfg.Logger.Debug("destination dial failed", "error", err)
 		return
 	}
+	s.cfg.Logger.Debug("remote flow opened", "transport", transportKindForConn(conn), "authentication_duration", authFinished.Sub(sessionStarted), "open_duration", openFinished.Sub(authFinished), "destination_dial_duration", time.Since(destinationDialStarted), "total_duration", time.Since(sessionStarted))
 	defer destinationConn.Close()
 	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics, s.cfg.Logger)
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
