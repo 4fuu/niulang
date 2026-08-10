@@ -119,10 +119,12 @@ func (a *AdaptiveSender) OnPacketAcked(_ quiccongestion.PacketNumber, _ quiccong
 	a.publishTelemetry()
 }
 
-func (a *AdaptiveSender) OnCongestionEvent(_ quiccongestion.PacketNumber, lostBytes quiccongestion.ByteCount, _ quiccongestion.ByteCount) {
-	if lostBytes > 0 {
-		a.backoff(0.70)
-	}
+// OnCongestionEvent is the legacy per-packet callback. quic-go follows it
+// with OnCongestionEventEx when the controller implements the extended API;
+// loss adaptation therefore belongs only in the batch callback to avoid
+// backing off twice for one loss event.
+func (a *AdaptiveSender) OnCongestionEvent(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, priorInFlight quiccongestion.ByteCount) {
+	a.bytesInFlight = priorInFlight
 	a.publishTelemetry()
 }
 
@@ -131,8 +133,15 @@ func (a *AdaptiveSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCo
 	for _, p := range acked {
 		a.windowAcked += p.BytesAcked
 	}
+	var lostBytes uint64
 	for _, p := range lost {
+		if p.BytesLost > 0 {
+			lostBytes = satAddUint64(lostBytes, uint64(p.BytesLost))
+		}
 		a.windowLost += p.BytesLost
+	}
+	if lostBytes > 0 {
+		a.telemetry.observeLoss(lostBytes, uint64(len(lost)))
 	}
 	if a.windowStart.IsZero() {
 		a.windowStart = eventTime

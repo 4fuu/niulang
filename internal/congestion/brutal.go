@@ -97,6 +97,15 @@ func (b *BrutalSender) SetMaxDatagramSize(size quiccongestion.ByteCount) {
 	}
 }
 func (b *BrutalSender) OnCongestionEventEx(_ quiccongestion.ByteCount, eventTime monotime.Time, acked []quiccongestion.AckedPacketInfo, lost []quiccongestion.LostPacketInfo) {
+	var lostBytes uint64
+	for _, p := range lost {
+		if p.BytesLost > 0 {
+			lostBytes = satAddUint64(lostBytes, uint64(p.BytesLost))
+		}
+	}
+	if lostBytes > 0 {
+		b.telemetry.observeLoss(lostBytes, uint64(len(lost)))
+	}
 	for range acked {
 		b.ackCount++
 	}

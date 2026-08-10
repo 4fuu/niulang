@@ -44,6 +44,7 @@ type Snapshot struct {
 	QUICControllerMode                                               uint32
 	QUICControllerMaxBandwidth, QUICControllerPacingRate             uint64
 	QUICControllerCongestionWindow, QUICControllerBytesInFlight      uint64
+	QUICControllerBytesLost, QUICControllerPacketsLost               uint64
 	QUICControllerMinRTT                                             time.Duration
 	QUICControllerInRecovery                                         bool
 }
@@ -66,6 +67,8 @@ type QUICObservation struct {
 	ControllerPacingRate       uint64
 	ControllerCongestionWindow uint64
 	ControllerBytesInFlight    uint64
+	ControllerBytesLost        uint64
+	ControllerPacketsLost      uint64
 	ControllerMinRTT           time.Duration
 	ControllerInRecovery       bool
 }
@@ -162,6 +165,7 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerKind string
 	var controllerMode uint32
 	var controllerMaxBandwidth, controllerPacingRate, controllerCwnd, controllerBytesInFlight uint64
+	var controllerBytesLost, controllerPacketsLost uint64
 	var controllerMinRTT time.Duration
 	var controllerRecovery bool
 	for _, o := range r.quicFlows {
@@ -197,6 +201,8 @@ func (r *Registry) Snapshot() Snapshot {
 			if o.ControllerBytesInFlight > controllerBytesInFlight {
 				controllerBytesInFlight = o.ControllerBytesInFlight
 			}
+			controllerBytesLost += o.ControllerBytesLost
+			controllerPacketsLost += o.ControllerPacketsLost
 			if o.ControllerMinRTT > controllerMinRTT {
 				controllerMinRTT = o.ControllerMinRTT
 			}
@@ -217,6 +223,8 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICControllerPacingRate = controllerPacingRate
 	s.QUICControllerCongestionWindow = controllerCwnd
 	s.QUICControllerBytesInFlight = controllerBytesInFlight
+	s.QUICControllerBytesLost = controllerBytesLost
+	s.QUICControllerPacketsLost = controllerPacketsLost
 	s.QUICControllerMinRTT = controllerMinRTT
 	s.QUICControllerInRecovery = controllerRecovery
 	return s
@@ -260,6 +268,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "wanopt_quic_controller_pacing_rate_bytes_per_second %d\n", s.QUICControllerPacingRate)
 	fmt.Fprintf(w, "wanopt_quic_controller_congestion_window_bytes %d\n", s.QUICControllerCongestionWindow)
 	fmt.Fprintf(w, "wanopt_quic_controller_bytes_in_flight %d\n", s.QUICControllerBytesInFlight)
+	fmt.Fprintf(w, "wanopt_quic_controller_bytes_lost %d\n", s.QUICControllerBytesLost)
+	fmt.Fprintf(w, "wanopt_quic_controller_packets_lost %d\n", s.QUICControllerPacketsLost)
 	fmt.Fprintf(w, "wanopt_quic_controller_min_rtt_seconds %.9f\n", s.QUICControllerMinRTT.Seconds())
 	if s.QUICControllerInRecovery {
 		fmt.Fprintln(w, "wanopt_quic_controller_in_recovery 1")

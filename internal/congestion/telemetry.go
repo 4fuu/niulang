@@ -16,6 +16,8 @@ type ControllerTelemetry struct {
 	PacingRate       uint64
 	CongestionWindow uint64
 	BytesInFlight    uint64
+	BytesLost        uint64
+	PacketsLost      uint64
 	MinRTT           time.Duration
 	InRecovery       bool
 }
@@ -49,12 +51,22 @@ type telemetryState struct {
 	pacingRate       atomic.Uint64
 	congestionWindow atomic.Uint64
 	bytesInFlight    atomic.Uint64
+	bytesLost        atomic.Uint64
+	packetsLost      atomic.Uint64
 	minRTTNS         atomic.Int64
 	inRecovery       atomic.Bool
 }
 
 func newTelemetryState(kind string) telemetryState {
 	return telemetryState{kind: kind}
+}
+
+// observeLoss records loss reported to an external congestion controller.
+// quic-go's public controller interface doesn't provide a connection-stats
+// handle, so custom controllers must retain their own authoritative counters.
+func (t *telemetryState) observeLoss(bytes, packets uint64) {
+	t.bytesLost.Add(bytes)
+	t.packetsLost.Add(packets)
 }
 
 func (t *telemetryState) update(mode uint32, maxBandwidth, pacingRate uint64, congestionWindow, bytesInFlight int64, minRTT time.Duration, inRecovery bool) {
@@ -84,6 +96,8 @@ func (t *telemetryState) snapshot() ControllerTelemetry {
 		PacingRate:       t.pacingRate.Load(),
 		CongestionWindow: t.congestionWindow.Load(),
 		BytesInFlight:    t.bytesInFlight.Load(),
+		BytesLost:        t.bytesLost.Load(),
+		PacketsLost:      t.packetsLost.Load(),
 		MinRTT:           time.Duration(t.minRTTNS.Load()),
 		InRecovery:       t.inRecovery.Load(),
 	}

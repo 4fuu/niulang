@@ -57,6 +57,29 @@ func TestTUICBandwidthAggregatesCoalescedAckBatch(t *testing.T) {
 	}
 }
 
+func TestTUICPacketSamplerUsesPerPacketSendState(t *testing.T) {
+	e := newTUICBandwidthEstimator()
+	start := monotime.Now()
+	var pn quiccongestion.PacketNumber
+	first := make([]quiccongestion.AckedPacketInfo, 0, 50)
+	for i := 0; i < 50; i++ {
+		e.onSentPacket(start.Add(time.Duration(i)*time.Millisecond), pn, 1200, true)
+		first = append(first, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
+		pn++
+	}
+	e.onAckBatch(start.Add(100*time.Millisecond), first, 1, false)
+	second := make([]quiccongestion.AckedPacketInfo, 0, 50)
+	for i := 0; i < 50; i++ {
+		e.onSentPacket(start.Add(101*time.Millisecond+time.Duration(i)*time.Millisecond), pn, 1200, true)
+		second = append(second, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
+		pn++
+	}
+	e.onAckBatch(start.Add(200*time.Millisecond), second, 2, false)
+	if got := e.estimate(); got < 500*1024 {
+		t.Fatalf("packet-state sampler underestimated ACK batch: %d B/s", got)
+	}
+}
+
 func TestTUICRateArithmeticSaturates(t *testing.T) {
 	if got := rateFromDelta(^uint64(0), time.Nanosecond); got != ^uint64(0) {
 		t.Fatalf("rate arithmetic wrapped: %d", got)
@@ -122,5 +145,16 @@ func TestTUICBBRTimeoutReturnsToSafeStartup(t *testing.T) {
 	}
 	if sender.GetCongestionWindow() != sender.minCwnd {
 		t.Fatalf("timeout cwnd=%d, want %d", sender.GetCongestionWindow(), sender.minCwnd)
+	}
+}
+
+func TestTUICTelemetryReportsControllerLoss(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.OnCongestionEventEx(2400, monotime.Now(), nil, []quiccongestion.LostPacketInfo{
+		{PacketNumber: 1, BytesLost: 1200}, {PacketNumber: 2, BytesLost: 1200},
+	})
+	got := sender.Telemetry()
+	if got.BytesLost != 2400 || got.PacketsLost != 2 {
+		t.Fatalf("loss telemetry=%d bytes/%d packets, want 2400/2", got.BytesLost, got.PacketsLost)
 	}
 }

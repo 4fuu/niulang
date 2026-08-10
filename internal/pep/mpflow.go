@@ -278,6 +278,8 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 			observation.ControllerPacingRate += controller.PacingRate
 			observation.ControllerCongestionWindow += controller.CongestionWindow
 			observation.ControllerBytesInFlight += controller.BytesInFlight
+			observation.ControllerBytesLost += controller.BytesLost
+			observation.ControllerPacketsLost += controller.PacketsLost
 			if controller.MinRTT > observation.ControllerMinRTT {
 				observation.ControllerMinRTT = controller.MinRTT
 			}

@@ -311,13 +311,10 @@ func (b *BBRSender) OnPacketAcked(_ quiccongestion.PacketNumber, _ quiccongestio
 }
 
 func (b *BBRSender) OnCongestionEvent(number quiccongestion.PacketNumber, lostBytes quiccongestion.ByteCount, priorInFlight quiccongestion.ByteCount) {
-	if lostBytes == 0 {
-		return
-	}
-	now := monotime.Now()
+	// The extended callback receives the complete loss batch and is the single
+	// source of truth. Applying noteLoss here as well would halve the recovery
+	// window twice when quic-go invokes both callbacks.
 	b.bytesInFlight = priorInFlight
-	b.noteLoss(number, lostBytes, now)
-	b.updateWindow(0)
 	b.publishTelemetry()
 }
 
@@ -344,7 +341,11 @@ func (b *BBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, 
 		b.updateBandwidthFromPackets(eventTime, acked, uint64(ackedBytes))
 		b.updateRound(largestAck)
 	}
+	var lostBytes uint64
 	for _, p := range lost {
+		if p.BytesLost > 0 {
+			lostBytes = satAddUint64(lostBytes, uint64(p.BytesLost))
+		}
 		// BBR does not leave STARTUP on an isolated loss. Doing so was a major
 		// source of the old controller's collapse on this path: one reordered
 		// packet permanently converted a healthy startup into a tiny recovery
@@ -353,6 +354,9 @@ func (b *BBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, 
 		if b.fullBandwidth || b.mode != bbrStartup {
 			b.noteLoss(p.PacketNumber, p.BytesLost, eventTime)
 		}
+	}
+	if lostBytes > 0 {
+		b.telemetry.observeLoss(lostBytes, uint64(len(lost)))
 	}
 	b.transition(eventTime, priorInFlight, len(lost) > 0)
 	b.updateWindow(ackedBytes)

@@ -14,11 +14,10 @@ import (
 // validated against the stock controller and the existing BBRSender.
 //
 // quic-go's public CongestionControlEx callback does not expose the
-// application-limited bit or packet send timestamps. The port therefore uses
-// cumulative send/ACK deltas (the same estimator used by TUIC) and a
-// conservative idle-gap heuristic for app-limited epochs. This preserves the
-// important ACK aggregation, round, recovery, and ProbeRTT behavior without
-// reaching into quic-go internals.
+// application-limited bit, so the port uses a conservative idle-gap heuristic
+// for app-limited epochs. Packet send state is captured in the controller's
+// bounded delivery sampler; ACK receive timestamps are used when the QUIC
+// fork supplies them and the congestion-event time otherwise.
 type TUICBBRSender struct {
 	rttStats        quiccongestion.RTTStatsProvider
 	maxDatagramSize quiccongestion.ByteCount
@@ -229,7 +228,7 @@ func (b *TUICBBRSender) HasPacingBudget(now monotime.Time) bool {
 	return b.pacer.budget(now) >= b.maxDatagramSize
 }
 
-func (b *TUICBBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quiccongestion.ByteCount, number quiccongestion.PacketNumber, bytes quiccongestion.ByteCount, _ bool) {
+func (b *TUICBBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quiccongestion.ByteCount, number quiccongestion.PacketNumber, bytes quiccongestion.ByteCount, retransmittable bool) {
 	b.maxSentPN = number
 	b.lastSend = sentTime
 	if bytesInFlight < 0 || bytes < 0 || bytesInFlight > maxCongestionByteCount-bytes {
@@ -237,7 +236,7 @@ func (b *TUICBBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quicc
 	} else {
 		b.bytesInFlight = bytesInFlight + bytes
 	}
-	b.estimator.onSent(sentTime, uint64(maxByteCount(0, bytes)))
+	b.estimator.onSentPacket(sentTime, number, uint64(maxByteCount(0, bytes)), retransmittable)
 	b.pacer.sentPacket(sentTime, bytes)
 	b.publishTelemetry()
 }
@@ -280,6 +279,10 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		if p.BytesLost > 0 {
 			lostBytes = satAddUint64(lostBytes, uint64(p.BytesLost))
 		}
+		b.estimator.onLost(p.PacketNumber)
+	}
+	if lostBytes > 0 {
+		b.telemetry.observeLoss(lostBytes, uint64(len(lost)))
 	}
 	b.bytesInFlight = saturatingRemaining(priorInFlight, ackedBytes, lostBytes)
 
@@ -288,7 +291,7 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	// in this callback the same receive/event time; updating the estimator once
 	// per packet would make all but the first packet have a zero ACK interval.
 	if ackedBytes > 0 {
-		b.estimator.onAckEvent(eventTime, ackedBytes, b.round, appLimited)
+		b.estimator.onAckBatch(eventTime, acked, b.round, appLimited)
 	}
 	b.ackedBytes = satAddUint64(b.ackedBytes, ackedBytes)
 	if ackedBytes > 0 {
