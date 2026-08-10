@@ -477,3 +477,56 @@ that this guard prevents churn, not proof of lossless resume or universal BBR
 stability. BBR remains opt-in and is not selected by `wanoptd-dev.service`;
 controlled loss/reordering, interactive-under-bulk, upload, soak, and
 multi-path campaigns remain release gates.
+
+## Latest controlled loss-window matrix (b053b96)
+
+After the final-ACK cleanup fix (`b053b96`), a fresh isolated Linux/amd64
+build was installed as `/usr/local/bin/wanoptd-b053b96` and tested on the
+temporary QUIC listener `23.135.236.244:12444`. The live
+`wanoptd-dev.service` on `:12443`, TUIC listener, Xray, sing-box, Cloudflare,
+Nginx, WireGuard, and Clash profile were not changed. The client was bound
+with `--local-address auto`; all trials used one physical China-to-US path
+and the exact 10 MiB CacheFly object. A row was complete only for curl exit 0,
+HTTP 200, and exactly 10,485,760 bytes. Each N=1 block contained five serial
+trials; each N=2 block contained five pairs of concurrent trials. The timeout
+was 120 s, and incomplete rows stayed in the denominator for completion
+reliability.
+
+| Profile | N=1 completion | N=1 completion times (s) | N=1 successful goodput (Mb/s) | N=2 completion | N=2 aggregate goodput (Mb/s) |
+|---|---:|---|---|---:|---|
+| TUIC control | 5/5 | 25.233, 12.874, 12.488, 10.746, 13.614 | 3.324, 6.162, 6.516, 6.717, 7.806 (median 6.516) | 10/10 | 3.675, 4.631, 7.209, 7.799, 8.124 (median 7.209) |
+| WANOPT BBR-shaped, independent lane | 4/5 | 57.017, 56.709, failed at 10.001, 75.807, 64.055 | 1.107, 1.310, 1.471, 1.479 (successful median 1.390) | 10/10 | 2.269, 2.612, 2.653, 3.153, 3.535 (median 2.653) |
+| WANOPT BBR-shaped, pooled control stream | 5/5 | 33.645, 46.244, 39.410, 48.946, 49.860 | 1.682, 1.714, 1.814, 2.129, 2.493 (median 1.814) | 10/10 | 1.601, 1.815, 2.082, 2.196, 2.319 (median 2.082) |
+| WANOPT Reno control | 0/5 | 1,015,808--1,310,702 bytes delivered at the 120-s deadline; one dial failed at 12.803 s | no complete row | 0/10 | 999,424--1,260,858 bytes per flow at the 120-s deadline |
+
+These are not capacity estimates: the China-to-US path was visibly in a
+severe loss/throttle window, and no configuration was tested simultaneously
+with another configuration. They do establish the current release decision:
+the custom BBR sampler and pooled mode are not safe automatic choices, and
+the stock Reno controller can fail closed under this window. TUIC remains the
+measured bulk control. BBR's N=2 rows completed only because the bounded
+recovery/tombstone path eventually delivered the logical body; its client
+metrics still recorded substantial lane churn during the block, so completion
+alone must not be treated as health.
+
+For the same window, ten fresh Google `generate_204` requests gave these
+total-time observations:
+
+| Profile | HTTP success | Times (s) | Median / p95 (s) |
+|---|---:|---|---:|
+| TUIC | 10/10 | 0.489, 1.025, 0.477, 0.474, 0.679, 0.666, 0.541, 0.723, 0.515, 1.326 | 0.592 / 1.326 |
+| WANOPT BBR-shaped | 10/10 | 2.023, 4.936, 3.191, 2.687, 1.818, 1.465, 1.880, 3.086, 2.087, 4.422 | 2.355 / 4.936 |
+| WANOPT Adaptive | 10/10 | 2.232, 3.874, 1.908, 3.570, 1.658, 7.472, 2.310, 2.147, 1.617, 1.980 | 2.139 / 7.472 |
+| WANOPT Brutal, 1 MiB/s/lane | 10/10 | 2.760, 3.908, 7.096, 4.156, 7.072, 1.606, 2.820, 5.890, 2.856, 3.599 | 3.658 / 7.096 |
+
+The latency observations reinforce the workload policy: a fixed-rate bulk
+controller creates queueing delay for fresh short requests, while a custom
+controller that is loss-limited can have a several-second handshake/tail. A
+production client should therefore keep a low-latency control profile for
+one-shot and interactive traffic, promote a flow only after a measured byte
+and dwell threshold, and make promotion reversible when RTT or loss violates
+the interactive budget. No custom controller should be selected globally
+without a path-health gate.
+
+All temporary `:12444`, `:19093`, and `:19094` resources were stopped after
+the campaign. The fixed-egress development service was verified active.
