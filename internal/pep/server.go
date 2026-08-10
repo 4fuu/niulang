@@ -370,6 +370,10 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "invalid flow open")})
 		return
 	}
+	if session.IsUDPAssociation(open.Payload) {
+		s.handleUDPAssociation(ctx, conn, fc, sessionID, open.Header.FlowID)
+		return
+	}
 	destination, err := session.DecodeDestination(open.Payload)
 	if err != nil {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetDestination, "destination unavailable")})

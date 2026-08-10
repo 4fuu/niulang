@@ -31,7 +31,7 @@ func TestReadDomainConnect(t *testing.T) {
 }
 
 func TestRejectUnsupportedCommand(t *testing.T) {
-	b := []byte{5, 1, 0, 5, 3, 0, 1, 127, 0, 0, 1, 0, 53}
+	b := []byte{5, 1, 0, 5, 2, 0, 1, 127, 0, 0, 1, 0, 53}
 	rw := bytes.NewBuffer(b)
 	if _, err := ReadRequest(rw); err == nil {
 		t.Fatal("expected rejection")
@@ -39,5 +39,40 @@ func TestRejectUnsupportedCommand(t *testing.T) {
 	got := rw.Bytes()
 	if len(got) < 10 || got[len(got)-9] != ReplyCommandNotSupported {
 		t.Fatalf("unexpected reply %v", got)
+	}
+}
+
+func TestReadUDPAssociateAllowsZeroBindPort(t *testing.T) {
+	b := []byte{5, 1, 0, 5, CommandUDPAssociate, 0, 1, 0, 0, 0, 0, 0, 0}
+	req, err := ReadRequest(bytes.NewBuffer(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Command != CommandUDPAssociate || req.Destination != "0.0.0.0:0" {
+		t.Fatalf("unexpected request %#v", req)
+	}
+}
+
+func TestUDPDatagramRoundTrip(t *testing.T) {
+	payload := []byte("dns-payload")
+	var b bytes.Buffer
+	if err := WriteUDPDatagram(&b, "example.com:53", payload); err != nil {
+		t.Fatal(err)
+	}
+	datagram, err := ReadUDPDatagram(b.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if datagram.Destination != "example.com:53" || !bytes.Equal(datagram.Payload, payload) {
+		t.Fatalf("got destination=%q payload=%q", datagram.Destination, datagram.Payload)
+	}
+}
+
+func TestUDPDatagramRejectsFragmentsAndMalformedAddresses(t *testing.T) {
+	if _, err := ReadUDPDatagram([]byte{0, 0, 1, 1, 127, 0, 0, 1, 0, 53, 1}); err == nil {
+		t.Fatal("fragmented datagram accepted")
+	}
+	if _, err := ReadUDPDatagram([]byte{0, 0, 0, 3, 0, 0, 0, 53, 1}); err == nil {
+		t.Fatal("empty domain accepted")
 	}
 }

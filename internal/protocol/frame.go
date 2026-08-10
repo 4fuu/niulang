@@ -45,9 +45,13 @@ const (
 	TypeReset
 	TypePing
 	TypePong
+	// TypePacket carries one bounded SOCKS UDP datagram. It is intentionally
+	// distinct from TypeData: packet payloads preserve datagram boundaries and
+	// are not inserted into the byte-stream reassembler.
+	TypePacket
 )
 
-func (t Type) valid() bool { return t >= TypeHello && t <= TypePong }
+func (t Type) valid() bool { return t >= TypeHello && t <= TypePacket }
 
 type Class byte
 

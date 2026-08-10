@@ -22,6 +22,7 @@ import (
 
 	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/protocol"
+	"github.com/icourses-dev/wanopt/internal/socks5"
 )
 
 func testCertificate(t *testing.T) (tlsCertificate tls.Certificate, roots *x509.CertPool) {
@@ -169,6 +170,150 @@ func TestTLSOneLaneSOCKSEndToEnd(t *testing.T) {
 			t.Fatalf("service shutdown: %v", err)
 		}
 	}
+}
+
+func TestUDPAssociateSOCKSEndToEnd(t *testing.T) {
+	runUDPAssociateSOCKSEndToEnd(t, TransportTCP)
+}
+
+func TestUDPAssociateQUICSOCKSEndToEnd(t *testing.T) {
+	runUDPAssociateSOCKSEndToEnd(t, TransportQUIC)
+}
+
+func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
+	destination, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, readErr := destination.ReadFromUDP(buf)
+			if readErr != nil {
+				return
+			}
+			_, _ = destination.WriteToUDP(buf[:n], addr)
+		}
+	}()
+
+	certificate, roots := testCertificate(t)
+	secret := []byte("integration-test-secret-value-32bytes")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var serverListener net.Listener
+	var serverPacketConn net.PacketConn
+	if transport == TransportQUIC {
+		serverPacketConn, err = net.ListenPacket("udp", "127.0.0.1:0")
+	} else {
+		serverListener, err = net.Listen("tcp", "127.0.0.1:0")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverAddr := serverListenerAddr(serverListener, serverPacketConn)
+	server, err := NewServer(ServerConfig{
+		ListenAddr: serverAddr, Certificate: certificate, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: transport != TransportQUIC, EnableQUIC: transport != TransportTCP, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(ClientConfig{
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "wanopt.test",
+		Secret: secret, RootCAs: roots, Transport: transport, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errorsCh := make(chan error, 2)
+	if transport == TransportQUIC {
+		go func() { errorsCh <- server.ServePacketConn(ctx, serverPacketConn) }()
+	} else {
+		go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
+	}
+	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
+
+	control, err := net.DialTimeout("tcp", clientListener.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	_ = control.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := control.Write([]byte{5, 1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	var method [2]byte
+	if _, err := io.ReadFull(control, method[:]); err != nil || method != [2]byte{5, 0} {
+		t.Fatalf("method response %v err=%v", method, err)
+	}
+	if _, err := control.Write([]byte{5, socks5.CommandUDPAssociate, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	var reply [10]byte
+	if _, err := io.ReadFull(control, reply[:]); err != nil {
+		t.Fatal(err)
+	}
+	if reply[1] != socks5.ReplySucceeded {
+		t.Fatalf("UDP associate failed: %v", reply)
+	}
+	bound := net.JoinHostPort(net.IP(reply[4:8]).String(), strconv.Itoa(int(binary.BigEndian.Uint16(reply[8:10]))))
+	udpClient, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpClient.Close()
+	host, portText, _ := net.SplitHostPort(destination.LocalAddr().String())
+	port, _ := strconv.Atoi(portText)
+	request := []byte{0, 0, 0, 1}
+	request = append(request, net.ParseIP(host).To4()...)
+	var portBytes [2]byte
+	binary.BigEndian.PutUint16(portBytes[:], uint16(port))
+	request = append(request, portBytes[:]...)
+	request = append(request, []byte("udp-echo")...)
+	if _, err := udpClient.WriteToUDP(request, mustUDPAddr(t, bound)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 2048)
+	_ = udpClient.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := udpClient.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := socks5.ReadUDPDatagram(buf[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Payload) != "udp-echo" {
+		t.Fatalf("UDP payload %q", got.Payload)
+	}
+	cancel()
+	for range 2 {
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("service shutdown: %v", err)
+		}
+	}
+}
+
+func serverListenerAddr(listener net.Listener, packetConn net.PacketConn) string {
+	if listener != nil {
+		return listener.Addr().String()
+	}
+	return packetConn.LocalAddr().String()
+}
+
+func mustUDPAddr(t *testing.T, address string) *net.UDPAddr {
+	t.Helper()
+	addr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return addr
 }
 
 func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {

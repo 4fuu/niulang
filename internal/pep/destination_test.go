@@ -1,6 +1,7 @@
 package pep
 
 import (
+	"context"
 	"net"
 	"testing"
 )
@@ -24,5 +25,22 @@ func TestPublicDestinationIP(t *testing.T) {
 		if got := publicDestinationIP(net.ParseIP(test.ip)); got != test.public {
 			t.Errorf("publicDestinationIP(%s) = %v, want %v", test.ip, got, test.public)
 		}
+	}
+}
+
+func TestResolveUDPAddrUsesDestinationPolicy(t *testing.T) {
+	addresses, err := (DestinationPolicy{}).ResolveUDPAddr(context.Background(), "8.8.8.8:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addresses) != 1 || !addresses[0].IP.Equal(net.ParseIP("8.8.8.8")) || addresses[0].Port != 53 {
+		t.Fatalf("unexpected addresses %#v", addresses)
+	}
+	if _, err := (DestinationPolicy{}).ResolveUDPAddr(context.Background(), "127.0.0.1:53"); err == nil {
+		t.Fatal("private UDP destination accepted")
+	}
+	addresses, err = (DestinationPolicy{AllowPrivate: true}).ResolveUDPAddr(context.Background(), "127.0.0.1:53")
+	if err != nil || len(addresses) != 1 {
+		t.Fatalf("private destination with explicit allow failed: %v", err)
 	}
 }

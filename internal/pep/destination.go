@@ -28,13 +28,9 @@ var additionallyForbidden = []netip.Prefix{
 }
 
 func (p DestinationPolicy) DialContext(ctx context.Context, destination string) (net.Conn, error) {
-	host, portText, err := net.SplitHostPort(destination)
-	if err != nil || host == "" {
-		return nil, errors.New("invalid destination")
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 {
-		return nil, errors.New("invalid destination port")
+	host, port, err := parseDestination(destination)
+	if err != nil {
+		return nil, err
 	}
 	timeout := p.DialTimeout
 	if timeout <= 0 {
@@ -74,6 +70,55 @@ func (p DestinationPolicy) DialContext(ctx context.Context, destination string) 
 		lastErr = errors.New("destination unavailable")
 	}
 	return nil, fmt.Errorf("destination unavailable: %w", lastErr)
+}
+
+// ResolveUDPAddr validates and resolves a destination using exactly the same
+// public-address policy as TCP CONNECT. It deliberately returns a concrete
+// address: the server performs DNS resolution at the US egress and does not
+// let the client influence a later DNS rebinding or private-address hop.
+func (p DestinationPolicy) ResolveUDPAddr(ctx context.Context, destination string) ([]*net.UDPAddr, error) {
+	host, port, err := parseDestination(destination)
+	if err != nil {
+		return nil, err
+	}
+	timeout := p.DialTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var addresses []net.IPAddr
+	if parsed := net.ParseIP(host); parsed != nil {
+		addresses = []net.IPAddr{{IP: parsed}}
+	} else {
+		addresses, err = net.DefaultResolver.LookupIPAddr(resolveCtx, host)
+		if err != nil {
+			return nil, errors.New("destination resolution failed")
+		}
+	}
+	result := make([]*net.UDPAddr, 0, len(addresses))
+	for _, candidate := range addresses {
+		if !p.AllowPrivate && !publicDestinationIP(candidate.IP) {
+			continue
+		}
+		result = append(result, &net.UDPAddr{IP: append(net.IP(nil), candidate.IP...), Port: port})
+	}
+	if len(result) == 0 {
+		return nil, errors.New("destination address is not public or did not resolve")
+	}
+	return result, nil
+}
+
+func parseDestination(destination string) (string, int, error) {
+	host, portText, err := net.SplitHostPort(destination)
+	if err != nil || host == "" {
+		return "", 0, errors.New("invalid destination")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, errors.New("invalid destination port")
+	}
+	return host, port, nil
 }
 
 func publicDestinationIP(ip net.IP) bool {

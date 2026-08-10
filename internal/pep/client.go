@@ -257,6 +257,10 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		c.cfg.Logger.Debug("SOCKS5 negotiation failed", "error", err)
 		return
 	}
+	if req.Command == socks5.CommandUDPAssociate {
+		c.handleUDPAssociate(ctx, inner)
+		return
+	}
 	flow, err := c.openFlow(ctx, req.Destination)
 	if err != nil {
 		_ = socks5.WriteReply(inner, socks5.ReplyHostUnreachable, nil)
