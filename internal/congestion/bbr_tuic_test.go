@@ -38,6 +38,25 @@ func TestTUICBandwidthUsesMinimumOfSendAndACKRates(t *testing.T) {
 	}
 }
 
+func TestTUICBandwidthAggregatesCoalescedAckBatch(t *testing.T) {
+	e := newTUICBandwidthEstimator()
+	start := monotime.Now()
+	// Send at 1 MiB/s for one RTT, then acknowledge a 64 KiB burst in one
+	// event. The aggregate event must produce a useful ACK slope; processing
+	// each packet with the same timestamp would only account for one packet.
+	for i := 0; i < 64; i++ {
+		e.onSent(start.Add(time.Duration(i)*time.Millisecond), 1024)
+	}
+	e.onAckEvent(start.Add(264*time.Millisecond), 64*1024, 1, false)
+	for i := 0; i < 64; i++ {
+		e.onSent(start.Add(264*time.Millisecond+time.Duration(i)*time.Millisecond), 1024)
+	}
+	e.onAckEvent(start.Add(528*time.Millisecond), 64*1024, 2, false)
+	if got := e.estimate(); got < 200*1024 {
+		t.Fatalf("coalesced ACK batch was underestimated: %d B/s", got)
+	}
+}
+
 func TestTUICRateArithmeticSaturates(t *testing.T) {
 	if got := rateFromDelta(^uint64(0), time.Nanosecond); got != ^uint64(0) {
 		t.Fatalf("rate arithmetic wrapped: %d", got)

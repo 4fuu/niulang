@@ -284,10 +284,11 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	b.bytesInFlight = saturatingRemaining(priorInFlight, ackedBytes, lostBytes)
 
 	appLimited := b.appLimited(eventTime, priorInFlight, ackedBytes)
-	for _, p := range acked {
-		if p.BytesAcked > 0 {
-			b.estimator.onAck(eventTime, uint64(p.BytesAcked), b.round, appLimited)
-		}
+	// Process the complete ACK batch as one sample. quic-go gives every packet
+	// in this callback the same receive/event time; updating the estimator once
+	// per packet would make all but the first packet have a zero ACK interval.
+	if ackedBytes > 0 {
+		b.estimator.onAckEvent(eventTime, ackedBytes, b.round, appLimited)
 	}
 	b.ackedBytes = satAddUint64(b.ackedBytes, ackedBytes)
 	if ackedBytes > 0 {

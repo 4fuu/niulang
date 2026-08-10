@@ -36,7 +36,16 @@ func (e *tuicBandwidthEstimator) onSent(now monotime.Time, bytes uint64) {
 	e.sentTime = now
 }
 
-func (e *tuicBandwidthEstimator) onAck(now monotime.Time, bytes, round uint64, appLimited bool) {
+// onAckEvent records one congestion-control ACK event. quic-go can report
+// many packets in one event (an ACK frame may cover an entire burst), so the
+// caller must pass the aggregate byte count and a single event timestamp.
+// Feeding those packets one at a time with the same timestamp creates zero
+// duration samples after the first packet and systematically underestimates
+// bandwidth on high-RTT paths.
+func (e *tuicBandwidthEstimator) onAckEvent(now monotime.Time, bytes, round uint64, appLimited bool) {
+	if bytes == 0 {
+		return
+	}
 	e.prevTotalAcked = e.totalAcked
 	e.totalAcked = satAddUint64(e.totalAcked, bytes)
 	e.prevAckedTime = e.ackedTime
@@ -59,6 +68,12 @@ func (e *tuicBandwidthEstimator) onAck(now monotime.Time, bytes, round uint64, a
 	if !appLimited {
 		e.maxFilter.updateMax(round, minUint64(sendRate, ackRate))
 	}
+}
+
+// onAck is retained as a small single-event convenience for package tests and
+// future callers that already have an aggregate byte count.
+func (e *tuicBandwidthEstimator) onAck(now monotime.Time, bytes, round uint64, appLimited bool) {
+	e.onAckEvent(now, bytes, round, appLimited)
 }
 
 func (e *tuicBandwidthEstimator) bytesAckedThisWindow() uint64 {
