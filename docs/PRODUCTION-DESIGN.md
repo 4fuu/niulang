@@ -158,6 +158,17 @@ The implementation now covers the basic bounded recovery path:
    both final directions; and
 5. an upper bound on recovery time, after which the flow is reset explicitly.
 
+For SOCKS5 UDP ASSOCIATE, the local UDP socket and its pinned peer survive a
+transport failure. The client cancels both workers for the dead lane, applies
+bounded exponential backoff, and opens a fresh authenticated association. The
+shared health machine suppresses QUIC after repeated failures, so `auto`
+selects TLS/TCP for the rescue. This deliberately does not pretend to be a
+lossless session resume: datagrams already in flight when the lane dies may be
+lost, and the old remote relay is released by its bounded idle timeout. A
+future protocol version should add an authenticated association-resume token
+and explicit packet replay/duplicate policy before loss-sensitive UDP is
+called production-grade.
+
 The controlled UDP-blackhole test transferred a complete 100 MiB response over
 a TCP rescue lane. This is development evidence, not a guarantee under all
 loss patterns: selective ACK ranges, path-independent resume tokens,

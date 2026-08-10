@@ -33,9 +33,10 @@ pilot remains in [`docs/MEASUREMENTS-20260809.md`](docs/MEASUREMENTS-20260809.md
 The prototype is still not safe to use as a general-purpose production
 tunnel: BBR has failed on the measured path and broader loss/soak campaigns
 remain outstanding. UDP is currently carried over reliable stream frames
-(native QUIC DATAGRAM and TUN/VLESS ingress are not yet implemented), lacks
-complete controller telemetry, and has not passed all controlled-loss/resource
-release gates in
+(native QUIC DATAGRAM and TUN/VLESS ingress are not yet implemented), and a
+mid-session rescue creates a fresh authenticated association rather than
+resuming the old remote relay. The project has not passed all
+controlled-loss/resource release gates in
 [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals
@@ -91,11 +92,12 @@ agent can bind the outer socket to the physical source IP:
 ```sh
 wanoptd --mode local --listen 127.0.0.1:12080 \
   --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
-  --local-address 192.168.3.66 --transport auto \
+  --local-address 172.20.10.2 --transport auto \
   --secret-file .dev/session.secret
 ```
 
-The source address is deployment-specific. Binding it is preferable to using
+The source address is deployment-specific; `172.20.10.2` was the address on
+the final measurement host. Binding it is preferable to using
 the Clash fake-DNS address, which would route the PEP through the tunnel being
 measured.
 
@@ -106,7 +108,7 @@ the path and reduced if loss or interactive tail latency rises:
 ```sh
 wanoptd --mode local --listen 127.0.0.1:12080 \
   --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
-  --local-address 192.168.3.66 --transport quic \
+  --local-address 172.20.10.2 --transport quic \
   --congestion brutal --brutal-bytes-per-sec 1048576 \
   --max-lanes 8 --secret-file .dev/session.secret
 ```

@@ -44,7 +44,11 @@ the local client never performs the destination DNS lookup. SOCKS5 UDP
 fragmentation is rejected, malformed datagrams are dropped locally, and an
 association is bounded by the configured idle timeout and maximum lifetime.
 The current implementation carries packets over reliable QUIC streams or
-TLS/TCP, preserving packet boundaries while allowing automatic TCP rescue.
+TLS/TCP, preserving packet boundaries while allowing automatic TCP rescue for
+new and failed in-session associations. An in-session rescue currently opens
+a fresh authenticated association while retaining the local SOCKS UDP socket;
+it does not resume the old remote UDP relay or retransmit datagrams lost during
+the transport transition.
 Native QUIC DATAGRAM mode is a planned optimization for loss-sensitive UDP.
 
 `CLOSE` with `FlagFin` is a directional half-close. A sender may later send

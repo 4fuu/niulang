@@ -1,11 +1,13 @@
 # Real-path measurements — 2026-08-10
 
 These measurements were run from the China client host to the fixed egress
-`icourses-dev` (`23.135.236.244:12443`, TLS SNI `icourses-dev.01.me`). The
-outer client was bound to the physical source address `192.168.3.66`, so the
-Clash TUN route did not capture the path being measured. The existing Xray,
-sing-box, Cloudflare, Nginx, WireGuard, and Clash configurations were not
-modified.
+`icourses-dev` (`23.135.236.244:12443`, TLS SNI `icourses-dev.01.me`). This
+document contains results from more than one measurement window. The earlier
+pilot sections used the then-valid physical source address `192.168.3.66`;
+the final matched TUIC/WANOPT campaign and the UDP smoke test used the current
+physical source address `172.20.10.2`, with the Clash TUN route excluded from
+the outer connection. The existing Xray, sing-box, Cloudflare, Nginx,
+WireGuard, and Clash configurations were not modified.
 
 The endpoint binary was built as Linux/amd64 from the checked-out source and
 verified by SHA-256 before each isolated systemd-run controller instance. The
@@ -228,9 +230,11 @@ single-stream upload matrix.
 ## Release status after this run
 
 The unbounded adaptive-join and tombstone FIN bugs are fixed and covered by
-integration tests. The project remains a development release: SOCKS5 ingress
-is still TCP CONNECT only (no UDP ASSOCIATE, destination UDP, TUN, or VLESS),
-HTTP/3 preservation is not implemented, BBR is unsafe on the measured path,
+integration tests. The project remains a development release: SOCKS5 UDP
+ASSOCIATE is implemented with bounded in-session rescue, but the rescue opens
+a fresh remote association and cannot recover datagrams lost during the
+transition. TUN/VLESS ingress and HTTP/3 preservation are not implemented,
+BBR is unsafe on the measured path,
 and controlled loss/reordering/MTU, prolonged-soak, and dedicated upload
 campaigns remain release gates. Flow-idle/lifetime limits and timeout metrics
 are now implemented, but their resource-pressure behavior still needs a
@@ -240,14 +244,83 @@ tests and remains the rollback path.
 
 ## Latest development deployment
 
-The latest checked-out commit, `5213dd9`, was built as Linux/amd64 and
+The latest checked-out commit, `4d93c03`, was built as Linux/amd64 and
 installed only as `/usr/local/bin/wanoptd` for `wanoptd-dev.service`; the
-previous binary is retained at `/usr/local/bin/wanoptd-rollback-fdcb1b0`.
+previous binary is retained at `/usr/local/bin/wanoptd-rollback-bd3cbd4`.
 The deployed SHA-256 is
-`672a1f0392177c3fc3ab575f0f01942053e0054f448019c3029355abe7875d38`.
+`afb550b53596fbfdd1bffd3e4aba5351818a56d434c589df72ecbb064ef5132d`.
 After restart, a fresh Google `generate_204` returned HTTP 204 in 1.043 s and
 a one-flow 10-MiB CacheFly smoke returned HTTP 200 with exactly 10,485,760
 bytes. Local and remote metrics both reported zero failed flows and zero flow
 timeouts. `wanoptd-dev`, Xray, sing-box, Cloudflare, Nginx, and the other
 pre-existing services were all active; no temporary `:12444` benchmark unit
 was left running.
+
+## Final current-window TUIC comparison and UDP smoke
+
+The following measurements were taken after the UDP-association hardening,
+using the final deployed source revision `4d93c03` (`wanoptd dev-4d93c03`,
+remote binary SHA-256
+`afb550b53596fbfdd1bffd3e4aba5351818a56d434c589df72ecbb064ef5132d`). The
+local outer socket was explicitly bound to `172.20.10.2`. These trials are a
+new, matched time window and must not be mixed with the older pilot numbers
+above.
+
+The workload was the exact 10 MiB CacheFly object
+`https://cachefly.cachefly.net/10mb.test`; a trial counted as complete only
+when HTTP returned 200, curl exited zero, and exactly 10,485,760 body bytes
+were received. Five trials were run for each profile:
+
+| Profile | Completion | Completion times (s) | Median completion | Median goodput |
+|---|---:|---|---:|---:|
+| TUIC, existing server inbound `:2444` | 5/5 | 5.763, 2.590, 8.405, 10.192, 7.282 | 7.282 s | 11.52 Mbps |
+| WANOPT safe default, one lane | 5/5 | 15.743, 18.233, 15.178, 31.863, 16.560 | 16.560 s | 5.07 Mbps |
+| WANOPT forced QUIC, one lane | 3/5 | 26.688, 14.747, 26.819, 88.897 partial, 10.002 no body | — | — |
+| WANOPT forced TLS/TCP, one lane | 3/5 | 12.708, 18.044, 23.144, 10.002 no body, 10.002 no body | — | — |
+
+The forced profiles are reported for diagnostic separation, not as competing
+production recommendations. On this window TUIC had the lower median
+completion time and higher median goodput. WANOPT's `auto` mode completed all
+five safe-default trials, while the forced QUIC and forced TCP runs each had
+two application failures. The path is sufficiently variable that a single
+five-trial median is not a capacity guarantee; longer repeated blocks, loss
+injection, and tail-percentile reporting are required before selecting an
+unattended controller.
+
+Three SOCKS5 UDP-associate DNS queries to `1.1.1.1:53` through WANOPT `auto`
+also completed with valid 71-byte replies and matching transaction IDs. Both
+local and remote metrics reported:
+
+```text
+wanopt_flows_started_total 3
+wanopt_flows_completed_total 3
+wanopt_flows_failed_total 0
+wanopt_bytes_up_total 87
+wanopt_bytes_down_total 183
+wanopt_lane_failures_total 0
+wanopt_lane_replacements_total 0
+```
+
+This validates bounded UDP framing, US-side resolution, peer pinning, graceful
+dissociation, and the code-level rescue path (the controlled fault test uses a
+local dual-stack server). It does not yet demonstrate recovery of every
+intermittent-loss pattern on the real China-US path; native QUIC DATAGRAM and
+loss/reordering campaign coverage remain release gates. The service was left
+active on `:12443` and the previous binary is available at
+`/usr/local/bin/wanoptd-rollback-bd3cbd4` on the server.
+
+## Final quality checks
+
+At the final revision the following checks passed:
+
+```text
+go test ./...
+go test -race ./...
+go vet ./...
+protocol decoder fuzz test (2 s)
+multipath reassembler fuzz test (2 s)
+bash -n scripts/bench_http.sh scripts/bench_single_flow.sh
+```
+
+These are software-quality gates only. They do not waive the real-path
+release gates in the interpretation above.
