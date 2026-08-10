@@ -360,7 +360,12 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	b.maybeProbeRTT(eventTime, isRoundStart, b.bytesInFlight, appLimited)
 	b.calculatePacingRate()
 	b.calculateCwnd(bytesAckedWindow, excessAcked)
-	b.calculateRecoveryWindow(bytesAckedWindow, lostBytes, b.bytesInFlight)
+	// RecoveryWindow is defined from the flight that existed when the ACK/loss
+	// event began. Feeding it the post-event remainder throws away the packets
+	// that were just acknowledged or declared lost and can initialize recovery
+	// at only a few datagrams on a lossy long-RTT path. TUIC's sender uses the
+	// pre-event in-flight value for this calculation.
+	b.calculateRecoveryWindow(bytesAckedWindow, lostBytes, priorInFlight)
 	if leastUnacked, ok := obsoletePacketNumber(acked, lost); ok {
 		b.estimator.removeObsolete(leastUnacked)
 	}

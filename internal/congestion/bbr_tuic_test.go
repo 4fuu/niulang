@@ -163,6 +163,32 @@ func TestTUICLossRecoveryPreservesRateModelAtQuarterLoss(t *testing.T) {
 	}
 }
 
+func TestTUICRecoveryWindowUsesPreEventFlight(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	sender.fullBandwidth = true
+	sender.mode = tuicBbrProbeBW
+	sender.recovery = tuicConservation
+	start := monotime.Now()
+	prior := quiccongestion.ByteCount(32 * 1200)
+	acked := make([]quiccongestion.AckedPacketInfo, 0, 24)
+	lost := make([]quiccongestion.LostPacketInfo, 0, 8)
+	for i := 0; i < 32; i++ {
+		pn := quiccongestion.PacketNumber(i)
+		sender.OnPacketSent(start.Add(time.Duration(i)*time.Millisecond), quiccongestion.ByteCount(i*1200), pn, 1200, true)
+		if i%4 == 0 {
+			lost = append(lost, quiccongestion.LostPacketInfo{PacketNumber: pn, BytesLost: 1200})
+		} else {
+			acked = append(acked, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
+		}
+	}
+	sender.OnCongestionEventEx(prior, start.Add(200*time.Millisecond), acked, lost)
+	wantMinimum := prior
+	if sender.recoveryWindow <= wantMinimum {
+		t.Fatalf("recovery window=%d, want it to retain pre-event flight above %d", sender.recoveryWindow, wantMinimum)
+	}
+}
+
 func TestTUICRateArithmeticSaturates(t *testing.T) {
 	if got := rateFromDelta(^uint64(0), time.Nanosecond); got != ^uint64(0) {
 		t.Fatalf("rate arithmetic wrapped: %d", got)
