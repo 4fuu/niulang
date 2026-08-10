@@ -109,6 +109,8 @@ type multipathFlow struct {
 	finalAck chan struct{}
 	sendDone chan struct{}
 	done     chan struct{}
+	ackWake  chan struct{}
+	ackErr   chan error
 
 	classifier        *classifier.Classifier
 	started           time.Time
@@ -123,6 +125,8 @@ type multipathFlow struct {
 	localClosed       atomic.Bool
 	remoteAbort       atomic.Bool
 	localAbortSent    atomic.Bool
+	ackSequence       atomic.Uint64
+	ackClosing        atomic.Bool
 	lastPayload       atomic.Int64
 	lastActivity      atomic.Int64
 	closeOnce         sync.Once
@@ -152,7 +156,7 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 		sendAckFlag: sendAckFlag, recvAckFlag: recvAckFlag,
 		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, maxLaneEvents), laneErr: make(chan laneFailure, maxLaneEvents),
 		finalAck: make(chan struct{}, 1), sendDone: make(chan struct{}),
-		done:       make(chan struct{}),
+		done: make(chan struct{}), ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1),
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
 		replay: make(map[uint64]protocol.Frame), replayNotify: make(chan struct{}, 1),
 	}
@@ -473,6 +477,8 @@ func (f *multipathFlow) chooseLane(bulk bool) (*mpLane, error) {
 }
 
 func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
+	ackCtx, cancelACKs := context.WithCancel(ctx)
+	go f.ackLoop(ackCtx)
 	telemetryStop := make(chan struct{})
 	go f.telemetryLoop(telemetryStop)
 	completionStop := make(chan struct{})
@@ -482,6 +488,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	go f.watchLimits(limitsStop, limitErr)
 	defer f.signalDone()
 	defer func() {
+		cancelACKs()
 		close(limitsStop)
 		close(completionStop)
 		close(telemetryStop)
@@ -549,6 +556,16 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
 			return stats, err
+		case err := <-f.ackErr:
+			if err == nil {
+				continue
+			}
+			f.closeAll()
+			stats.Ended = time.Now()
+			stats.BytesSent = f.bytesUp.Load()
+			stats.BytesRead = f.bytesDown.Load()
+			stats.LaneBytes = f.laneStats()
+			return stats, fmt.Errorf("cumulative acknowledgement: %w", err)
 		case failure := <-f.laneErr:
 			err := failure.err
 			// Both FIN directions have already been observed. The application
@@ -1057,16 +1074,125 @@ func (f *multipathFlow) writeACK(ctx context.Context, sequence uint64, direction
 	if final {
 		flags |= protocol.FlagAckFinal
 	}
-	return f.writeControl(ctx, protocol.Frame{Header: protocol.Header{
+	frame := protocol.Frame{Header: protocol.Header{
 		Version: protocol.Version, Type: protocol.TypeAck, Flags: flags,
 		SessionID: f.sessionID, FlowID: f.flowID, Sequence: sequence,
 		Class: protocol.Class(f.class.Load()),
-	}}, nil)
+	}}
+	// ACKs are cumulative and their state is replayable.  Do not wait for the
+	// full lane-replacement timeout when every current lane rejects one: the
+	// flow coordinator must observe the failure immediately so a replacement
+	// can be admitted and the latest ACK/FIN state replayed there.
+	lanes := f.healthyLanes()
+	if len(lanes) == 0 {
+		return errors.New("no healthy lane for acknowledgement")
+	}
+	var lastErr error
+	for _, lane := range lanes {
+		if err := lane.fc.WriteContext(ctx, frame); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			f.failLane(lane, fmt.Errorf("lane %d acknowledgement write: %w", lane.id, err))
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("all lanes rejected acknowledgement")
+	}
+	return lastErr
+}
+
+const ackCoalesceDelay = 2 * time.Millisecond
+
+// scheduleACK publishes the newest cumulative receive sequence without
+// blocking application delivery on a control-frame write. QUIC already
+// provides hop reliability; these protocol ACKs exist to bound the replay
+// window and support cross-lane resume, so they can be cumulative and
+// coalesced. A failed write transitions the lane and lets run's normal rescue
+// coordinator replace it; an independent error is reported through ackErr.
+func (f *multipathFlow) scheduleACK(sequence uint64) {
+	if sequence == 0 || f.ackClosing.Load() {
+		return
+	}
+	for {
+		old := f.ackSequence.Load()
+		if sequence <= old || f.ackSequence.CompareAndSwap(old, sequence) {
+			break
+		}
+	}
+	select {
+	case f.ackWake <- struct{}{}:
+	default:
+	}
+}
+
+func (f *multipathFlow) ackLoop(ctx context.Context) {
+	var sent uint64
+	for {
+		select {
+		case <-f.ackWake:
+		case <-ctx.Done():
+			return
+		case <-f.done:
+			return
+		}
+		// A tiny delay turns a burst of small TLS/application reads into one
+		// cumulative frame while staying far below a cross-Pacific RTT.
+		timer := time.NewTimer(ackCoalesceDelay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-f.done:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		}
+		for {
+			if f.ackClosing.Load() {
+				return
+			}
+			sequence := f.ackSequence.Load()
+			if sequence <= sent {
+				break
+			}
+			if err := f.writeACK(ctx, sequence, f.recvAckFlag, false); err != nil {
+				// A failed ACK write already transitions the affected lane and
+				// publishes laneErr. Let run perform its normal bounded rescue when
+				// no lane remains; only surface an independent write error while a
+				// healthy lane is still available.
+				if ctx.Err() == nil && !f.doneChanClosed() && len(f.healthyLanes()) > 0 {
+					select {
+					case f.ackErr <- err:
+					default:
+					}
+				}
+				return
+			}
+			sent = sequence
+			// If more bytes arrived during the write, immediately emit the
+			// newer cumulative value. Otherwise return to the wake channel.
+			if f.ackSequence.Load() <= sent {
+				break
+			}
+		}
+	}
 }
 
 func (f *multipathFlow) acknowledgeRemoteFIN(ctx context.Context, sequence uint64, abort bool) error {
 	f.remoteFinSequence.Store(sequence)
 	f.remoteFinSeen.Store(true)
+	f.ackClosing.Store(true)
 	if cw, ok := f.inner.(closeWriter); ok {
 		if err := cw.CloseWrite(); err != nil && !expectedHalfCloseError(err) {
 			return err
@@ -1141,9 +1267,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					f.observe(len(out), false)
 					f.bytesDown.Add(uint64(len(out)))
 					if next := reassembler.NextSequence(); next > lastAckSequence {
-						if err := f.writeACK(ctx, next, f.recvAckFlag, false); err != nil {
-							return err
-						}
+						f.scheduleACK(next)
 						lastAckSequence = next
 					}
 				}
