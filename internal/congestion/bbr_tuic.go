@@ -358,10 +358,20 @@ func (b *TUICBBRSender) appLimited(now monotime.Time, priorInFlight quiccongesti
 		return true
 	}
 	// The public quic-go API does not expose QUIC's application-limited marker.
-	// Treat a drained flight followed by a substantial idle gap as app-limited;
-	// continuous bulk traffic remains eligible for the max filter.
+	// Before a connection has sent an initial window, a drained flight followed
+	// by a short idle gap is a reasonable approximation for a one-shot flow.
+	// Once an initial window has been sent, however, a loss-limited bulk sender
+	// can also have one packet in flight for several hundred milliseconds.  The
+	// old RTT/2 threshold classified those ACKs as application-limited and
+	// permanently suppressed the only delivery samples available to recovery.
+	// Use a much longer hysteresis after bulk evidence exists; a genuinely idle
+	// application will still be recognized before the next ProbeRTT interval,
+	// while ACKs delayed by loss remain eligible to update the finite max filter.
 	idle := now.Sub(b.lastSend)
 	threshold := b.rtt() / 2
+	if b.estimator.totalSent >= uint64(b.initialCwnd) {
+		threshold = 4 * b.rtt()
+	}
 	if threshold < 20*time.Millisecond {
 		threshold = 20 * time.Millisecond
 	}
@@ -374,7 +384,16 @@ func (b *TUICBBRSender) updateRecoveryState(roundStart bool) {
 	}
 	switch b.recovery {
 	case tuicNotInRecovery:
-		if b.lossState.lostBytes > 0 {
+		// A loss during STARTUP is not enough evidence that the bottleneck
+		// model is complete.  QUIC can report reordering and ACK thinning as
+		// loss before the first useful delivery sample arrives.  Entering
+		// conservation here immediately marks the connection full-bandwidth
+		// and lets a sparse first ACK shrink both cwnd and recoveryWindow to a
+		// handful of packets.  Keep STARTUP ACK-clocked until the normal
+		// no-gain test exits it, matching the loss treatment used by the
+		// production BBR-shaped controller.  A timeout still resets STARTUP
+		// immediately through OnRetransmissionTimeout.
+		if b.lossState.lostBytes > 0 && (b.fullBandwidth || b.mode != tuicBbrStartup) {
 			b.recovery = tuicConservation
 			b.recoveryWindow = 0
 			b.roundEndPN = b.maxSentPN

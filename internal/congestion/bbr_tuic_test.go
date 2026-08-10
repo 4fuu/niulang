@@ -158,3 +158,57 @@ func TestTUICTelemetryReportsControllerLoss(t *testing.T) {
 		t.Fatalf("loss telemetry=%d bytes/%d packets, want 2400/2", got.BytesLost, got.PacketsLost)
 	}
 }
+
+func TestTUICStartupLossDoesNotCollapseBeforeBandwidthModel(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	start := monotime.Now()
+	var pn quiccongestion.PacketNumber
+	acked := make([]quiccongestion.AckedPacketInfo, 0, 5)
+	lost := make([]quiccongestion.LostPacketInfo, 0, 195)
+	for i := 0; i < 200; i++ {
+		sender.OnPacketSent(start.Add(time.Duration(i)*time.Millisecond), sender.bytesInFlight, pn, 1200, true)
+		if i%40 == 39 {
+			acked = append(acked, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
+		} else {
+			lost = append(lost, quiccongestion.LostPacketInfo{PacketNumber: pn, BytesLost: 1200})
+		}
+		pn++
+	}
+	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(200*time.Millisecond), acked, lost)
+	if sender.fullBandwidth {
+		t.Fatal("startup loss prematurely declared the bottleneck model complete")
+	}
+	if sender.InRecovery() {
+		t.Fatal("startup loss entered recovery before a delivery model existed")
+	}
+	if got := sender.GetCongestionWindow(); got <= sender.minCwnd {
+		t.Fatalf("startup loss collapsed cwnd to safety floor: %d", got)
+	}
+
+	// Once the model is known, the same loss must still enter bounded
+	// recovery; this guard prevents the startup exception from becoming an
+	// unlimited loss-ignoring mode.
+	sender.fullBandwidth = true
+	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(400*time.Millisecond), nil, []quiccongestion.LostPacketInfo{{PacketNumber: pn, BytesLost: 1200}})
+	if !sender.InRecovery() {
+		t.Fatal("loss after startup did not enter recovery")
+	}
+}
+
+func TestTUICAppLimitedHysteresisPreservesBulkSamples(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	start := monotime.Now()
+	sender.lastSend = start
+	if !sender.appLimited(start.Add(150*time.Millisecond), sender.maxDatagramSize, 1200) {
+		t.Fatal("small pre-bulk burst was not classified as application-limited")
+	}
+	sender.estimator.totalSent = uint64(sender.initialCwnd)
+	if sender.appLimited(start.Add(150*time.Millisecond), sender.maxDatagramSize, 1200) {
+		t.Fatal("short loss-limited bulk ACK was incorrectly classified as application-limited")
+	}
+	if !sender.appLimited(start.Add(5*time.Second), sender.maxDatagramSize, 1200) {
+		t.Fatal("long idle gap was not classified as application-limited")
+	}
+}
