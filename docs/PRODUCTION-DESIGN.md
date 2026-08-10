@@ -57,6 +57,14 @@ one bounded QUIC connection and one congestion controller, while bulk lane
 joins remain independent connections. This improves the short-flow handshake
 amortization characteristic of TUIC, but it is not the default: the measured
 path still needs a controller and queue policy that preserve bulk goodput.
+The first pooled stream performs the PSK `HELLO`; later streams on a capable
+peer use one `OPEN_FAST` frame, saving one China-US request/response exchange.
+Authentication is scoped to the TLS/QUIC connection, and each fast stream
+retains fresh session/flow identities plus normal destination-policy and
+admission checks. Capability negotiation keeps the original 24-byte
+`HELLO_OK` wire shape for two-way rolling upgrades. A pool reconnect clears
+all learned authentication/capability state, and capability-free peers retain
+the per-stream legacy handshake.
 
 The scheduler must never wait for eight handshakes before acknowledging a
 short request. The unattended-safe default starts one lane and grows only

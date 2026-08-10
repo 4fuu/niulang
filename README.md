@@ -66,7 +66,11 @@ experiments; adaptive growth still requires positive marginal gain.
 initial/control streams and lets multiple short flows share its congestion
 controller; configured bulk lane joins remain independent. These modes must
 be validated with the supplied single-flow and concurrent-flow harnesses
-before being enabled in a live Clash profile.
+before being enabled in a live Clash profile. The first pooled stream performs
+the authenticated `HELLO`; subsequent streams on a capable peer use a
+connection-scoped fast open while retaining independent flow identities and
+US-side destination-policy checks. Capability-free peers automatically keep
+the legacy per-stream handshake.
 
 ## Non-goals
 

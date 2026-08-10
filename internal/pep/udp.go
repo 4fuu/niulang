@@ -325,8 +325,12 @@ func (c *Client) openUDPAssociation(ctx context.Context) (*authenticatedLane, ui
 		return nil, 0, err
 	}
 	_ = lane.outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	openType := protocol.TypeOpen
+	if lane.fastOpen {
+		openType = protocol.TypeOpenFast
+	}
 	if err := lane.fc.Write(protocol.Frame{Header: protocol.Header{
-		Version: protocol.Version, Type: protocol.TypeOpen, SessionID: lane.sessionID,
+		Version: protocol.Version, Type: openType, SessionID: lane.sessionID,
 		FlowID: flowID, Class: protocol.ClassInteractive,
 	}, Payload: session.UDPAssociationMarker}); err != nil {
 		_ = lane.fc.Close()

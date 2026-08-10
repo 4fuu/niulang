@@ -28,35 +28,64 @@ func clientAuthenticate(fc *frameConn, secret []byte, sessionID [16]byte, now ti
 }
 
 func clientAuthenticateKind(fc *frameConn, secret []byte, sessionID [16]byte, laneID uint64, kind session.HelloKind, now time.Time) error {
+	_, err := clientAuthenticateKindResult(fc, secret, sessionID, laneID, kind, now)
+	return err
+}
+
+func clientAuthenticateKindResult(fc *frameConn, secret []byte, sessionID [16]byte, laneID uint64, kind session.HelloKind, now time.Time) (session.HelloOK, error) {
 	hello, err := session.NewHello(secret, sessionID, laneID, kind, now)
 	if err != nil {
-		return err
+		return session.HelloOK{}, err
 	}
 	if err := fc.Write(protocol.Frame{
 		Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeHello, SessionID: sessionID, Class: protocol.ClassNew},
 		Payload: hello.MarshalBinary(),
 	}); err != nil {
-		return fmt.Errorf("send session hello: %w", err)
+		return session.HelloOK{}, fmt.Errorf("send session hello: %w", err)
 	}
 	f, err := fc.Read()
 	if err != nil {
-		return fmt.Errorf("read session acknowledgement: %w", err)
+		return session.HelloOK{}, fmt.Errorf("read session acknowledgement: %w", err)
 	}
 	if f.Header.Type == protocol.TypeReset {
-		return errors.New("server rejected session authentication")
+		return session.HelloOK{}, errors.New("server rejected session authentication")
 	}
 	if f.Header.Type != protocol.TypeHelloOK || f.Header.SessionID != sessionID || f.Header.FlowID != 0 {
-		return errors.New("invalid session acknowledgement")
+		return session.HelloOK{}, errors.New("invalid session acknowledgement")
 	}
 	var ok session.HelloOK
 	if err := ok.UnmarshalBinary(f.Payload); err != nil {
-		return fmt.Errorf("decode session acknowledgement: %w", err)
+		return session.HelloOK{}, fmt.Errorf("decode session acknowledgement: %w", err)
 	}
-	return nil
+	return ok, nil
 }
 
 func serverAuthenticateHello(fc *frameConn, secret []byte, guard *session.ReplayGuard, now time.Time) (session.Hello, error) {
-	f, err := fc.Read()
+	return serverAuthenticateHelloWithCapabilities(fc, secret, guard, now, 0)
+}
+
+func serverAuthenticateHelloWithCapabilities(fc *frameConn, secret []byte, guard *session.ReplayGuard, now time.Time, capabilities uint64) (session.Hello, error) {
+	return serverAuthenticateHelloFrame(fc, secret, guard, now, capabilities, nil)
+}
+
+func serverAuthenticateHelloFrame(fc *frameConn, secret []byte, guard *session.ReplayGuard, now time.Time, capabilities uint64, prefetched *protocol.Frame) (session.Hello, error) {
+	return serverAuthenticateHelloFrameCallback(fc, secret, guard, now, capabilities, prefetched, nil)
+}
+
+// serverAuthenticateHelloFrameCallback is the handshake implementation used
+// by pooled QUIC streams. The callback runs after the PSK, timestamp, and
+// replay checks have succeeded but before HelloOK is written. Marking the
+// connection authenticated at this point closes the small race in which the
+// client receives HelloOK and opens an OPEN_FAST stream before the original
+// stream has finished its handler.
+func serverAuthenticateHelloFrameCallback(fc *frameConn, secret []byte, guard *session.ReplayGuard, now time.Time, capabilities uint64, prefetched *protocol.Frame, onAccepted func(session.Hello)) (session.Hello, error) {
+	var f protocol.Frame
+	var err error
+	if prefetched != nil {
+		f = *prefetched
+	} else {
+		f, err = fc.Read()
+	}
 	if err != nil {
 		return session.Hello{}, fmt.Errorf("read session hello: %w", err)
 	}
@@ -76,7 +105,10 @@ func serverAuthenticateHello(fc *frameConn, secret []byte, guard *session.Replay
 	if err := guard.Accept(hello.Nonce, now); err != nil {
 		return session.Hello{}, err
 	}
-	ok, err := session.NewHelloOK(now)
+	if onAccepted != nil {
+		onAccepted(hello)
+	}
+	ok, err := session.NewHelloOKWithCapabilities(now, capabilities)
 	if err != nil {
 		return session.Hello{}, err
 	}

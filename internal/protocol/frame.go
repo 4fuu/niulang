@@ -49,9 +49,14 @@ const (
 	// distinct from TypeData: packet payloads preserve datagram boundaries and
 	// are not inserted into the byte-stream reassembler.
 	TypePacket
+	// TypeOpenFast opens a new logical flow on a QUIC connection whose first
+	// stream has already completed the PSK handshake. It is accepted only by
+	// the connection-level authenticated stream pool; independent lanes and
+	// TLS/TCP continue to use TypeHello followed by TypeOpen.
+	TypeOpenFast
 )
 
-func (t Type) valid() bool { return t >= TypeHello && t <= TypePacket }
+func (t Type) valid() bool { return t >= TypeHello && t <= TypeOpenFast }
 
 type Class byte
 

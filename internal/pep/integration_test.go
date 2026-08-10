@@ -224,7 +224,7 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: transport, Logger: logger,
+		Secret: secret, RootCAs: roots, Transport: transport, EnableQUICPool: transport == TransportQUIC, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)

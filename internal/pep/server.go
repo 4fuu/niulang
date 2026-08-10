@@ -57,6 +57,10 @@ type Server struct {
 	maxObservedLanes atomic.Int64
 	budget           *limiter.Budget
 	metrics          *metrics.Registry
+	// quicCapabilities is kept on the server instance so capability negotiation
+	// is consistent for every stream on a connection. It is initialized to the
+	// current capability set; tests may set it to zero to model an older peer.
+	quicCapabilities uint64
 }
 
 type serverFlow struct {
@@ -66,6 +70,13 @@ type serverFlow struct {
 	tombstone sync.Once
 	mu        sync.Mutex
 }
+
+// quicAuthState records authentication of the QUIC connection itself. The
+// first pooled stream still uses the normal nonce/HMAC Hello exchange. Once
+// that succeeds, later streams may use TypeOpenFast; they remain isolated by
+// their own random session and flow IDs. Dedicated lanes never share this
+// state with another QUIC connection.
+type quicAuthState struct{ authenticated atomic.Bool }
 
 func (s *serverFlow) addLane(lane *mpLane) error {
 	s.mu.Lock()
@@ -159,12 +170,13 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.EnableTCP = true
 	}
 	return &Server{
-		cfg:       cfg,
-		replay:    session.NewReplayGuard(10*time.Minute, cfg.MaxSessions*4),
-		semaphore: make(chan struct{}, cfg.MaxSessions),
-		sessions:  make(map[[16]byte]*serverFlow),
-		budget:    limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
-		metrics:   cfg.Metrics,
+		cfg:              cfg,
+		replay:           session.NewReplayGuard(10*time.Minute, cfg.MaxSessions*4),
+		semaphore:        make(chan struct{}, cfg.MaxSessions),
+		sessions:         make(map[[16]byte]*serverFlow),
+		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
+		metrics:          cfg.Metrics,
+		quicCapabilities: session.CapabilityFastStreams,
 	}, nil
 }
 
@@ -254,7 +266,7 @@ func (s *Server) handleTCP(ctx context.Context, conn *tls.Conn) {
 	if conn.ConnectionState().NegotiatedProtocol != defaultALPN {
 		return
 	}
-	s.handleSession(ctx, conn)
+	s.handleSession(ctx, conn, nil)
 }
 
 func (s *Server) serveQUIC(ctx context.Context) error {
@@ -315,11 +327,13 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	if conn.ConnectionState().TLS.NegotiatedProtocol != defaultALPN {
 		return
 	}
-	// A single QUIC connection is a bounded stream pool. Each stream still
-	// performs its own authenticated wanopt hello and owns one logical flow,
-	// while QUIC supplies one shared congestion controller and packet-loss
-	// state. This is the same multiplexing property that makes TUIC effective
-	// for short flows, without sharing application/session framing state.
+	auth := &quicAuthState{}
+	// A single QUIC connection is a bounded stream pool. Its first stream
+	// authenticates the connection; later capable streams use OPEN_FAST. Every
+	// stream still owns an independent random logical-flow identity, while QUIC
+	// supplies one shared congestion controller and packet-loss state. This is
+	// the same multiplexing property that makes TUIC effective for short flows,
+	// without sharing application/session framing state.
 	for {
 		// Waiting for another stream is not a handshake operation. Applying the
 		// per-stream authentication timeout here used to close the entire QUIC
@@ -340,7 +354,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 			go func(stream streamConn) {
 				defer wg.Done()
 				defer func() { <-s.semaphore }()
-				s.handleSession(ctx, stream)
+				s.handleSession(ctx, stream, auth)
 			}(stream)
 		default:
 			_ = stream.Close()
@@ -349,28 +363,88 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	}
 }
 
-func (s *Server) handleSession(ctx context.Context, conn streamConn) {
+func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicAuthState) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
 	fc := newFrameConn(conn, s.cfg.MaxPayload)
-	hello, err := serverAuthenticateHello(fc, s.cfg.Secret, s.replay, time.Now())
-	if err != nil {
-		s.cfg.Logger.Warn("session authentication failed", "error", err)
-		return
+	var (
+		hello      session.Hello
+		sessionID  [16]byte
+		laneID     uint64
+		open       protocol.Frame
+		fastOpen   bool
+		helloReady bool
+	)
+	// A capable pooled connection can authenticate a new stream with one
+	// OPEN_FAST frame. If the stream starts with the legacy HELLO frame, retain
+	// full backward compatibility with older clients and peers.
+	if auth != nil && auth.authenticated.Load() {
+		first, readErr := fc.Read()
+		if readErr != nil {
+			return
+		}
+		if first.Header.Type == protocol.TypeOpenFast {
+			if session.IsZeroSessionID(first.Header.SessionID) || first.Header.FlowID == 0 || first.Header.Sequence != 0 {
+				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "invalid fast flow open")})
+				return
+			}
+			fastOpen = true
+			sessionID = first.Header.SessionID
+			open = first
+			laneID = 0
+		} else {
+			hello, readErr = serverAuthenticateHelloFrameCallback(fc, s.cfg.Secret, s.replay, time.Now(), s.quicCapabilities, &first, func(h session.Hello) {
+				if h.Kind == session.HelloNew && h.LaneID == 0 {
+					auth.authenticated.Store(true)
+				}
+			})
+			if readErr != nil {
+				s.cfg.Logger.Warn("session authentication failed", "error", readErr)
+				return
+			}
+			helloReady = true
+		}
 	}
-	if hello.Kind == session.HelloJoin {
-		s.handleLaneJoin(ctx, conn, fc, hello)
-		return
+	if !fastOpen && !helloReady {
+		var err error
+		if auth != nil {
+			hello, err = serverAuthenticateHelloFrameCallback(fc, s.cfg.Secret, s.replay, time.Now(), s.quicCapabilities, nil, func(h session.Hello) {
+				if h.Kind == session.HelloNew && h.LaneID == 0 {
+					auth.authenticated.Store(true)
+				}
+			})
+		} else {
+			hello, err = serverAuthenticateHello(fc, s.cfg.Secret, s.replay, time.Now())
+		}
+		if err != nil {
+			s.cfg.Logger.Warn("session authentication failed", "error", err)
+			return
+		}
 	}
-	if hello.Kind != session.HelloNew || hello.LaneID != 0 {
-		return
+	if !fastOpen {
+		if hello.Kind == session.HelloJoin {
+			s.handleLaneJoin(ctx, conn, fc, hello)
+			return
+		}
+		if hello.Kind != session.HelloNew || hello.LaneID != 0 {
+			return
+		}
+		sessionID = hello.SessionID
+		laneID = hello.LaneID
+		if auth != nil {
+			auth.authenticated.Store(true)
+		}
+		var err error
+		open, err = fc.Read()
+		if err != nil {
+			return
+		}
 	}
-	sessionID := hello.SessionID
-	open, err := fc.Read()
-	if err != nil {
-		return
+	expectedOpenType := protocol.TypeOpen
+	if fastOpen {
+		expectedOpenType = protocol.TypeOpenFast
 	}
-	if open.Header.Type != protocol.TypeOpen || open.Header.SessionID != sessionID || open.Header.FlowID == 0 || open.Header.Sequence != 0 {
+	if open.Header.Type != expectedOpenType || open.Header.SessionID != sessionID || open.Header.FlowID == 0 || open.Header.Sequence != 0 {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "invalid flow open")})
 		return
 	}
@@ -394,7 +468,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn) {
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	serverSession := &serverFlow{flow: flow, maxLanes: s.cfg.MaxLanes}
-	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
+	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
 		flow.closeAll()
 		return
 	}

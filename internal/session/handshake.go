@@ -3,6 +3,7 @@
 package session
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,9 +18,19 @@ const (
 	// helloPayloadSize is deliberately fixed. A fixed authenticated envelope
 	// avoids parser ambiguity before a session has been established.
 	helloPayloadSize = 8 + 16 + 16 + 8 + 1 + 32
-	helloOKSize      = 8 + 16 + 8
-	maxClockSkew     = 5 * time.Minute
+	// HelloOK remains byte-for-byte compatible with the original version-1
+	// acknowledgement. Capable peers reserve its opaque nonce rather than
+	// lengthening the payload, so old clients and servers continue to interoperate.
+	helloOKSize  = 8 + 16
+	maxClockSkew = 5 * time.Minute
+	// CapabilityFastStreams allows a client to skip a repeated Hello exchange
+	// on a QUIC connection after the first stream has authenticated it. The
+	// capability is scoped to that TLS connection and never authorizes a
+	// standalone lane.
+	CapabilityFastStreams uint64 = 1 << 0
 )
+
+var helloOKCapabilityMarker = [8]byte{'W', 'O', 'C', 'A', 'P', '0', '0', '1'}
 
 type HelloKind byte
 
@@ -113,8 +124,10 @@ func macHello(secret []byte, h Hello) [32]byte {
 	return out
 }
 
-// HelloOK confirms that the server accepted the session and supplies a
-// random value which is useful for diagnostics and future key derivation.
+// HelloOK confirms that the server accepted the session. Capability-free
+// acknowledgements retain the original random nonce. A capable server places
+// an eight-byte marker and eight capability bytes in that otherwise opaque
+// field, which old peers safely continue to ignore.
 type HelloOK struct {
 	Timestamp    int64
 	Nonce        [16]byte
@@ -122,10 +135,19 @@ type HelloOK struct {
 }
 
 func NewHelloOK(now time.Time) (HelloOK, error) {
+	return NewHelloOKWithCapabilities(now, 0)
+}
+
+func NewHelloOKWithCapabilities(now time.Time, capabilities uint64) (HelloOK, error) {
 	var ok HelloOK
 	ok.Timestamp = now.Unix()
+	ok.Capabilities = capabilities
 	if _, err := rand.Read(ok.Nonce[:]); err != nil {
 		return HelloOK{}, fmt.Errorf("generate hello acknowledgement nonce: %w", err)
+	}
+	if capabilities != 0 {
+		copy(ok.Nonce[:8], helloOKCapabilityMarker[:])
+		binary.BigEndian.PutUint64(ok.Nonce[8:16], capabilities)
 	}
 	return ok, nil
 }
@@ -133,8 +155,12 @@ func NewHelloOK(now time.Time) (HelloOK, error) {
 func (h HelloOK) MarshalBinary() []byte {
 	b := make([]byte, helloOKSize)
 	binary.BigEndian.PutUint64(b[0:8], uint64(h.Timestamp))
-	copy(b[8:24], h.Nonce[:])
-	binary.BigEndian.PutUint64(b[24:32], h.Capabilities)
+	nonce := h.Nonce
+	if h.Capabilities != 0 {
+		copy(nonce[:8], helloOKCapabilityMarker[:])
+		binary.BigEndian.PutUint64(nonce[8:16], h.Capabilities)
+	}
+	copy(b[8:24], nonce[:])
 	return b
 }
 
@@ -144,7 +170,10 @@ func (h *HelloOK) UnmarshalBinary(b []byte) error {
 	}
 	h.Timestamp = int64(binary.BigEndian.Uint64(b[0:8]))
 	copy(h.Nonce[:], b[8:24])
-	h.Capabilities = binary.BigEndian.Uint64(b[24:32])
+	h.Capabilities = 0
+	if bytes.Equal(h.Nonce[:8], helloOKCapabilityMarker[:]) {
+		h.Capabilities = binary.BigEndian.Uint64(h.Nonce[8:16])
+	}
 	return nil
 }
 

@@ -26,7 +26,27 @@ maximum before allocating memory. Sequence numbers count bytes within a flow,
 not frames. A receiver acknowledges contiguous bytes plus selective ranges.
 
 Frame types are `HELLO`, `HELLO_OK`, `OPEN`, `OPEN_OK`, `DATA`, `ACK`,
-`WINDOW`, `CLOSE`, `RESET`, `PING`, `PONG`, and `PACKET`.
+`WINDOW`, `CLOSE`, `RESET`, `PING`, `PONG`, `PACKET`, and `OPEN_FAST`.
+
+### Pooled QUIC authentication
+
+The first stream on a pooled QUIC connection performs the normal PSK/HMAC
+`HELLO` exchange and opens its flow with `OPEN`. A capable server advertises
+`CapabilityFastStreams` inside the otherwise opaque 16-byte `HELLO_OK` nonce:
+the first eight bytes are `WOCAP001` and the remaining eight bytes are the
+big-endian capability bitmap. The payload remains the original 24 bytes, so
+old clients accept a new server and new clients treat an old server's random
+nonce as a zero capability set.
+
+After that acknowledgement, a new stream on the same TLS/QUIC connection may
+start with `OPEN_FAST`. It still carries a fresh random `session_id`, non-zero
+`flow_id`, destination or UDP-association marker, and the normal class. The
+server performs all destination decoding, policy, admission, and resource
+checks exactly as for `OPEN`; only the repeated `HELLO` round trip is removed.
+`OPEN_FAST` is rejected on an unauthenticated connection, on TLS/TCP, and on
+independent join/recovery lanes. A reconnected QUIC pool must authenticate and
+negotiate capabilities again. If the capability is absent, every stream keeps
+the legacy `HELLO` plus `OPEN` sequence.
 
 `PACKET` is used only by a SOCKS5 UDP-associate session. The `OPEN` payload
 for that session is the versioned `WOUD1` association marker rather than a
