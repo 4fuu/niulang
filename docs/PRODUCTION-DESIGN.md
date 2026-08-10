@@ -174,6 +174,15 @@ a TCP rescue lane. This is development evidence, not a guarantee under all
 loss patterns: selective ACK ranges, path-independent resume tokens,
 intermittent blocking, and a broader fault matrix remain release gates.
 
+A second real-path blackhole test covered SOCKS5 UDP ASSOCIATE itself. After a
+valid DNS reply on QUIC, the server dropped only inbound UDP/12443. The same
+local SOCKS UDP endpoint obtained another valid reply over a freshly
+authenticated TCP association after 9.51 s, with one reconnect, one lane
+replacement, one fallback, and zero rescue-attempt failures. The exact
+firewall rule was removed and verified absent afterward. This establishes the
+bounded fallback behavior but not lossless UDP resume; in-flight datagrams may
+still be lost during the transition.
+
 ## Clash Verge integration
 
 The safe first integration is a local SOCKS5 node, for example

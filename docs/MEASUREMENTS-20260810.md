@@ -319,6 +319,34 @@ loss/reordering campaign coverage remain release gates. The service was left
 active on `:12443` and the previous binary is available at
 `/usr/local/bin/wanoptd-rollback-fd2ffac` on the server.
 
+## Real-path mid-session UDP-to-TCP rescue
+
+With the deployed `55363f9` client and server, a temporary local client used
+`--transport auto`, `--fallback-delay 2s`, `--local-address auto`, and one
+SOCKS UDP association. A 71-byte DNS reply through the initial QUIC lane was
+verified first. The server then installed exactly one temporary firewall rule,
+`INPUT -p udp --dport 12443 -j DROP`, leaving TLS/TCP/SSH untouched. After
+QUIC dead-path detection and one bounded rescue attempt, a second DNS query
+through the unchanged local SOCKS UDP endpoint completed in 9.51 s. The local
+metrics at recovery were:
+
+```text
+wanopt_lane_failures_total 1
+wanopt_lane_replacements_total 1
+wanopt_fallbacks_total 1
+wanopt_udp_association_reconnects_total 1
+wanopt_udp_association_rescue_failures_total 0
+```
+
+The local association then closed cleanly with one completed and zero failed
+flows. On the server, the dead original relay was counted as one failed flow
+and the fresh TCP association as one completed flow (three total UDP
+associations in the process, two completed and one failed). The firewall rule
+was removed in the test's cleanup path and independently verified absent. This
+is evidence of bounded same-SOCKS-endpoint rescue, not lossless datagram
+resumption: packets in flight at the QUIC transition can still be lost, and
+the old remote relay is reclaimed by its idle bound.
+
 ## Final quality checks
 
 At the final revision the following checks passed:
