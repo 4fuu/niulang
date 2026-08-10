@@ -62,3 +62,19 @@ func TestHelloOKAcceptsLegacyCapabilityFreeEnvelope(t *testing.T) {
 		t.Fatalf("legacy acknowledgement decoded as %#v", got)
 	}
 }
+
+func TestHelloOKAcceptsInterimExtendedEnvelope(t *testing.T) {
+	want, err := NewHelloOK(time.Unix(1_700_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := want.MarshalBinary()
+	extended := append(append([]byte(nil), legacy...), 0, 0, 0, 0, 0, 0, 0, 1)
+	var got HelloOK
+	if err := got.UnmarshalBinary(extended); err != nil {
+		t.Fatalf("interim acknowledgement rejected: %v", err)
+	}
+	if got.Capabilities != CapabilityFastStreams {
+		t.Fatalf("interim capability = %#x, want %#x", got.Capabilities, CapabilityFastStreams)
+	}
+}

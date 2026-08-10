@@ -21,8 +21,9 @@ const (
 	// HelloOK remains byte-for-byte compatible with the original version-1
 	// acknowledgement. Capable peers reserve its opaque nonce rather than
 	// lengthening the payload, so old clients and servers continue to interoperate.
-	helloOKSize  = 8 + 16
-	maxClockSkew = 5 * time.Minute
+	helloOKSize         = 8 + 16
+	helloOKExtendedSize = helloOKSize + 8 // interim capability draft, receive-only
+	maxClockSkew        = 5 * time.Minute
 	// CapabilityFastStreams allows a client to skip a repeated Hello exchange
 	// on a QUIC connection after the first stream has authenticated it. The
 	// capability is scoped to that TLS connection and never authorizes a
@@ -165,12 +166,18 @@ func (h HelloOK) MarshalBinary() []byte {
 }
 
 func (h *HelloOK) UnmarshalBinary(b []byte) error {
-	if len(b) != helloOKSize {
+	if len(b) != helloOKSize && len(b) != helloOKExtendedSize {
 		return fmt.Errorf("invalid hello acknowledgement length %d", len(b))
 	}
 	h.Timestamp = int64(binary.BigEndian.Uint64(b[0:8]))
 	copy(h.Nonce[:], b[8:24])
 	h.Capabilities = 0
+	if len(b) == helloOKExtendedSize {
+		// Accept the short-lived 32-byte capability draft emitted by the
+		// development service before the wire-compatible marker format landed.
+		h.Capabilities = binary.BigEndian.Uint64(b[24:32])
+		return nil
+	}
 	if bytes.Equal(h.Nonce[:8], helloOKCapabilityMarker[:]) {
 		h.Capabilities = binary.BigEndian.Uint64(h.Nonce[8:16])
 	}
