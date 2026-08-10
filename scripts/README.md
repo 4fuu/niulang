@@ -35,3 +35,22 @@ For a fixed-topology comparison, set `--initial-lanes=N --max-lanes=N` on the
 client. The default client remains independent-lane mode; `--quic-pool` is an
 explicit opt-in for a persistent multiplexed QUIC control connection and
 should be enabled only after path-specific latency/throughput validation.
+
+## Dedicated upload sink
+
+Public upload endpoints are unsuitable throughput oracles. For a controlled
+US-side upload measurement, run the bounded test-only sink on the fixed-egress
+host, expose it only for the duration of the trial, and stop it afterward:
+
+```sh
+python3 scripts/upload_sink.py --listen 0.0.0.0:28080 --max-bytes 67108864
+dd if=/dev/zero bs=1m count=10 2>/dev/null |
+  curl --socks5-hostname 127.0.0.1:12081 --data-binary @- \
+       --write-out '%{http_code}\t%{size_upload}\t%{time_total}\n' \
+       http://23.135.236.244:28080/
+```
+
+The sink requires an explicit bounded `Content-Length`, accepts one request by
+default, and exits after that request. It must not be left as a public
+service; use a temporary systemd unit or process supervisor and verify that
+the listener is gone after the measurement.

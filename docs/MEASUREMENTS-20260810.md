@@ -546,3 +546,23 @@ is expected because each QUIC endpoint controls its own send direction; it is
 also precisely the information needed to distinguish a sender-controller
 problem from a receiver-side or path bottleneck. This smoke is observability
 evidence, not a performance claim.
+
+## Dedicated US-side upload sink
+
+To avoid public-service shaping and application limits, a temporary bounded
+HTTP POST sink was run on `23.135.236.244:28080`. It accepted a fixed number
+of requests, required an exact `Content-Length`, and was stopped immediately
+after each block; the port was verified closed afterward. Each request sent
+exactly 10,485,760 zero bytes from China through one QUIC lane.
+
+| Profile | Completion | Upload times (s) | Median goodput |
+|---|---:|---|---:|
+| TUIC control | 5/5 | 12.845, 14.935, 11.961, 12.440, 13.411 | 6.53 Mb/s |
+| WANOPT live safe default (Reno/auto) | 5/5 | 26.696, 13.945, 16.410, 39.882, 22.101 | 3.79 Mb/s |
+| WANOPT BBR-shaped, isolated `:12444` | 5/5 | 54.431, 61.711, 30.195, 29.500, 39.423 | 2.13 Mb/s |
+
+The sink confirms that the upload direction is also materially weaker than
+TUIC in this measurement window. BBR completed the logical request but was
+slower and more variable; it remains experimental. The script is
+[`scripts/upload_sink.py`](../scripts/upload_sink.py), deliberately bounded
+and intended only for a temporary operator-controlled listener.
