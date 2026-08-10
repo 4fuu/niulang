@@ -126,11 +126,15 @@ add the same aggregate budget at both endpoints, for example:
 ```
 
 `adaptive` is the safer experimental choice when no target is known; `reno`
-is the correctness baseline. `bbr` is path-specific experimental code and
-must pass the same loss, queue-delay, and application-tail campaign before it
-is selected. Brutal remains an operator-supplied measurement mode, not a safe
-unattended default. These modes are not a recommendation to change a live
-Clash profile without a rollback plan.
+is the correctness baseline. `bbr` is the original path-specific experimental
+controller. `bbr-tuic` is a separate, opt-in Go port of TUIC's
+`quinn-congestions` BBR model; it adds ACK aggregation, a round-based
+bandwidth filter, TUIC-style recovery, and ProbeRTT behavior, but it is not a
+claim that the controller is faster on every path. Both BBR variants must pass
+the same loss, queue-delay, and application-tail campaign before selection.
+Brutal remains an operator-supplied measurement mode, not a safe unattended
+default. These modes are not a recommendation to change a live Clash profile
+without a rollback plan.
 
 For an operator-only health endpoint, bind metrics to loopback and keep it off
 the public listener:

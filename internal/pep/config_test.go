@@ -34,6 +34,16 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 	}
 }
 
+func TestTUICAlignedCongestionConfigurationIsAccepted(t *testing.T) {
+	base := ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "wanopt.test",
+		Secret: []byte("0123456789abcdef"), Congestion: CongestionBBRTUIC,
+	}
+	if _, err := NewClient(base); err != nil {
+		t.Fatalf("bbr-tuic configuration rejected: %v", err)
+	}
+}
+
 func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 	certificate, _ := testCertificate(t)
 	base := ServerConfig{ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: []byte("0123456789abcdef")}
