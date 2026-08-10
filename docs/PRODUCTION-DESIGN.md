@@ -169,10 +169,12 @@ The safe first integration is a local SOCKS5 node, for example
 to that node. The live profile remains untouched and can be restored by
 removing that one node/rule.
 
-The current client accepts only TCP CONNECT. A production Clash integration
-needs a TUN or UDP-associate ingress for destination UDP and HTTP/3; without
-it, QUIC from the application is either rejected or downgraded by the
-application. No HTTPS MITM is needed for either mode.
+The current client accepts TCP CONNECT and bounded UDP ASSOCIATE. A production
+Clash integration still needs a TUN/VLESS ingress for transparent capture and
+full HTTP/3 behavior; a SOCKS profile can use UDP ASSOCIATE for applications
+that support SOCKS5 UDP. The current packet mode uses reliable stream frames,
+so native QUIC DATAGRAM remains a performance release gate for loss-sensitive
+UDP. No HTTPS MITM is needed for either mode.
 
 On a host where Clash TUN installs a default route through `198.18.0.1`, the
 outer dev endpoint must be explicitly excluded from that route or the client

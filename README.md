@@ -19,8 +19,9 @@ not HTTPS decryption or MITM.
 
 The repository now contains an authenticated SOCKS-to-PEP prototype with
 TLS/TCP, QUIC, lane joins, cross-lane reassembly, PIAS-inspired
-classification, new-flow UDP/TCP racing, bounded lane recovery, completion
-tombstones, aggregate pacing, and opt-in QUIC controllers. The stock apNet
+classification, SOCKS5 TCP CONNECT and bounded UDP ASSOCIATE, new-flow
+UDP/TCP racing, bounded lane recovery, completion tombstones, aggregate
+pacing, and opt-in QUIC controllers. The stock apNet
 QUIC controller is retained as the control; an independently implemented
 BBRv1-shaped controller, an adaptive controller, and a Hysteria-style
 fixed-rate (Brutal) controller can be selected for measurement.
@@ -31,9 +32,10 @@ pilot remains in [`docs/MEASUREMENTS-20260809.md`](docs/MEASUREMENTS-20260809.md
 
 The prototype is still not safe to use as a general-purpose production
 tunnel: BBR has failed on the measured path and broader loss/soak campaigns
-remain outstanding. It accepts TCP CONNECT only (no destination UDP/TUN),
-lacks complete controller telemetry, and has not passed all controlled-
-loss/resource release gates in
+remain outstanding. UDP is currently carried over reliable stream frames
+(native QUIC DATAGRAM and TUN/VLESS ingress are not yet implemented), lacks
+complete controller telemetry, and has not passed all controlled-loss/resource
+release gates in
 [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals

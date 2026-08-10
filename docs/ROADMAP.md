@@ -11,6 +11,7 @@
 
 - Local SOCKS5 ingress.
 - US destination dialer.
+- SOCKS5 UDP ASSOCIATE with bounded packet framing and US-side DNS/policy.
 - Authenticated TLS/QUIC transport.
 - Bounded sequence frames and backpressure.
 - Metrics and graceful close/reset.
@@ -51,7 +52,7 @@ within a measured bound without exposing duplicate application bytes.
 ## Stage 5 — TUN and release hardening
 
 - TUN integration and Clash Verge setup guide.
+- Native QUIC DATAGRAM mode for UDP, retaining stream/TCP fallback.
 - Cross-platform packaging.
 - Fuzzing, race tests, resource limits, and security review.
 - Reproducible benchmark reports and rollback instructions.
-

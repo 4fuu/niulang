@@ -26,7 +26,26 @@ maximum before allocating memory. Sequence numbers count bytes within a flow,
 not frames. A receiver acknowledges contiguous bytes plus selective ranges.
 
 Frame types are `HELLO`, `HELLO_OK`, `OPEN`, `OPEN_OK`, `DATA`, `ACK`,
-`WINDOW`, `CLOSE`, `RESET`, `PING`, and `PONG`.
+`WINDOW`, `CLOSE`, `RESET`, `PING`, `PONG`, and `PACKET`.
+
+`PACKET` is used only by a SOCKS5 UDP-associate session. The `OPEN` payload
+for that session is the versioned `WOUD1` association marker rather than a
+TCP `host:port`. Each packet payload is bounded and contains:
+
+```text
+destination_length(2) canonical_destination(destination_length)
+udp_payload(remaining bytes)
+```
+
+The frame sequence is a packet sequence (starting at zero) and must increase
+by one in each direction. The server resolves and validates the destination
+at the fixed US egress using the same public/private-address policy as TCP;
+the local client never performs the destination DNS lookup. SOCKS5 UDP
+fragmentation is rejected, malformed datagrams are dropped locally, and an
+association is bounded by the configured idle timeout and maximum lifetime.
+The current implementation carries packets over reliable QUIC streams or
+TLS/TCP, preserving packet boundaries while allowing automatic TCP rescue.
+Native QUIC DATAGRAM mode is a planned optimization for loss-sensitive UDP.
 
 `CLOSE` with `FlagFin` is a directional half-close. A sender may later send
 the same final sequence with `FlagCloseAbort` when its application socket has
