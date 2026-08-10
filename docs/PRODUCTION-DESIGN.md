@@ -99,9 +99,12 @@ Before release, compare:
 
 1. the opt-in independently implemented BBRv1-shaped controller with
    explicit loss and queue-delay limits;
-2. a Hysteria 2/TUIC-style rate-based controller (including a Brutal-style
+2. the separate `bbr-tuic` controller, which ports TUIC's
+   `quinn-congestions` estimator/state machine into Go, including its
+   ACK-aggregation filter and recovery phases;
+3. a Hysteria 2/TUIC-style rate-based controller (including a Brutal-style
    mode where the operator supplies a tested target rate); and
-3. stock CUBIC/New Reno as the TCP-fallback control.
+4. stock CUBIC/New Reno as the TCP-fallback control.
 
 The BBR implementation must treat the QUIC fork's signed `ByteCount` as a
 signed type when saturating counters, and its delivery sampler must use
@@ -114,19 +117,24 @@ pending.
 
 The project uses the maintained apNet QUIC fork and keeps the stock controller
 available. It does not import Hysteria's `internal/` packages or fork
-cryptography. The BBR mode is an original implementation of the public BBR
-model, not a claim that apNet quic-go itself provides BBR. A per-lane controller alone is unsafe: eight controllers can
+cryptography. Both BBR modes are opt-in: the original wanopt mode is an
+independent implementation of the public BBR model, while `bbr-tuic` is a
+separate Go implementation aligned with TUIC's public behavior. Neither is a
+claim that apNet quic-go itself provides BBR. A per-lane controller alone is unsafe: eight controllers can
 overrun the path and starve SSH. The aggregate token bucket is now implemented
 above all lanes, with a reserved interactive share; an 8 MiB/s budget plus a
 512 KiB/s reserve preserved 10/10 Google requests during eight bulk downloads.
 It remains opt-in until queue-delay and retransmission guardrails are exposed
 as telemetry.
 
-The endpoint now exposes aggregate active-QUIC lane count, latest/worst
-smoothed RTT, bytes sent/received, and QUIC loss counters through the
-loopback-only metrics listener. The controller still does not expose bytes in
-flight, pacing rate, congestion window, or delivery rate; those remain a
-release gate before automatic lane-growth decisions are enabled by default.
+The endpoint exposes aggregate active-QUIC lane count, latest/worst smoothed
+RTT, bytes sent/received, QUIC loss counters, and (for the optional controllers)
+bytes in flight, pacing rate, congestion window, minimum RTT, recovery state,
+and delivery-rate estimates through the loopback-only metrics listener. These
+signals are now available for validation, but they remain a release gate for
+automatic lane-growth decisions: telemetry must be retained across lane
+replacement and tied to statistically valid marginal-gain samples before a
+non-default policy is enabled.
 
 ## PIAS-inspired workload policy
 
