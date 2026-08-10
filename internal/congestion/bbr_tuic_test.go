@@ -139,6 +139,18 @@ func TestTUICAppLimitedMarkerIsPacketScoped(t *testing.T) {
 	}
 }
 
+func TestTUICAppLimitedSampleCanRaiseBandwidth(t *testing.T) {
+	e := newTUICBandwidthEstimator()
+	e.maxFilter.updateMax(1, 100)
+	start := monotime.Now()
+	e.markAppLimited()
+	e.onSentPacket(start, 0, 1200, 0, true)
+	e.onAckBatch(start.Add(100*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}}, 2)
+	if got := e.estimate(); got <= 100 {
+		t.Fatalf("higher app-limited sample did not raise bandwidth: %d", got)
+	}
+}
+
 func TestTUICFirstPacketStartsFirstRound(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 100 * time.Millisecond})
@@ -181,7 +193,7 @@ func TestTUICLossRecoveryPreservesRateModelAtQuarterLoss(t *testing.T) {
 	}
 }
 
-func TestTUICRecoveryWindowUsesPreEventFlight(t *testing.T) {
+func TestTUICRecoveryWindowUsesPostEventFlight(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
 	sender.fullBandwidth = true
@@ -201,9 +213,9 @@ func TestTUICRecoveryWindowUsesPreEventFlight(t *testing.T) {
 		}
 	}
 	sender.OnCongestionEventEx(prior, start.Add(200*time.Millisecond), acked, lost)
-	wantMinimum := prior
-	if sender.recoveryWindow <= wantMinimum {
-		t.Fatalf("recovery window=%d, want it to retain pre-event flight above %d", sender.recoveryWindow, wantMinimum)
+	want := prior - quiccongestion.ByteCount(len(lost))*1200
+	if sender.recoveryWindow != want {
+		t.Fatalf("recovery window=%d, want post-event flight plus ACKs = %d", sender.recoveryWindow, want)
 	}
 }
 
@@ -256,6 +268,11 @@ func TestTUICBBRSenderStartupAndRecovery(t *testing.T) {
 	if sender.bandwidth() < quiccongestion.ByteCount(tuicDefaultMinRate) {
 		t.Fatalf("pacing rate below safety floor: %d", sender.bandwidth())
 	}
+	// The synthetic sender above emits only half of its grown congestion
+	// window, so TUIC correctly classifies later rounds as application-limited.
+	// Establish a completed model explicitly before testing recovery behavior.
+	sender.fullBandwidth = true
+	sender.mode = tuicBbrProbeBW
 	before := sender.GetCongestionWindow()
 	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(3*time.Second), nil, []quiccongestion.LostPacketInfo{{PacketNumber: pn - 1, BytesLost: 1200}})
 	if !sender.InRecovery() || sender.GetCongestionWindow() > before {
@@ -263,18 +280,31 @@ func TestTUICBBRSenderStartupAndRecovery(t *testing.T) {
 	}
 }
 
-func TestTUICBBRTimeoutReturnsToSafeStartup(t *testing.T) {
+func TestTUICBBRTimeoutPreservesDeliveryModel(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.fullBandwidth = true
 	sender.mode = tuicBbrProbeBW
 	sender.pacingRate = 10 * 1024 * 1024
 	sender.cwnd = 2 * 1024 * 1024
 	sender.OnRetransmissionTimeout(true)
-	if sender.mode != tuicBbrStartup || sender.fullBandwidth || sender.pacingRate != 0 {
-		t.Fatalf("timeout did not reset controller: mode=%v full=%v rate=%d", sender.mode, sender.fullBandwidth, sender.pacingRate)
+	if sender.mode != tuicBbrProbeBW || !sender.fullBandwidth || sender.pacingRate != 10*1024*1024 {
+		t.Fatalf("PTO destroyed controller model: mode=%v full=%v rate=%d", sender.mode, sender.fullBandwidth, sender.pacingRate)
 	}
-	if sender.GetCongestionWindow() != sender.minCwnd {
-		t.Fatalf("timeout cwnd=%d, want %d", sender.GetCongestionWindow(), sender.minCwnd)
+	if sender.GetCongestionWindow() != 2*1024*1024 {
+		t.Fatalf("PTO window=%d, want preserved model", sender.GetCongestionWindow())
+	}
+}
+
+func TestTUICDatagramResizePreservesPacketSizedWindows(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.cwnd = sender.initialCwnd
+	sender.recoveryWindow = 64 * 1200
+	sender.SetMaxDatagramSize(1400)
+	if sender.initialCwnd != 32*1400 || sender.cwnd != sender.initialCwnd {
+		t.Fatalf("initial window resize mismatch: initial=%d cwnd=%d", sender.initialCwnd, sender.cwnd)
+	}
+	if sender.minCwnd != 4*1400 || sender.recoveryWindow != 64*1400 {
+		t.Fatalf("packet-sized window resize mismatch: min=%d recovery=%d", sender.minCwnd, sender.recoveryWindow)
 	}
 }
 
@@ -354,22 +384,89 @@ func TestTUICStartupDoesNotExitOnOnePostModelLoss(t *testing.T) {
 	}
 }
 
-func TestTUICAppLimitedHysteresisPreservesBulkSamples(t *testing.T) {
+func TestTUICAppLimitedUsesCongestionWindowHeadroom(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	window := sender.GetCongestionWindow()
+	if sender.appLimited(window) {
+		t.Fatal("full congestion window was classified as application-limited")
+	}
+	if !sender.appLimited(window - sender.maxDatagramSize) {
+		t.Fatal("non-drain headroom was not classified as application-limited")
+	}
+	sender.mode = tuicBbrDrain
+	if sender.appLimited(window - sender.maxDatagramSize) {
+		t.Fatal("small headroom in DRAIN was incorrectly classified as application-limited")
+	}
+	sender.cwnd = 64 * sender.maxDatagramSize
+	window = sender.GetCongestionWindow()
+	if !sender.appLimited(window - 11*sender.maxDatagramSize) {
+		t.Fatal("large DRAIN headroom was not classified as application-limited")
+	}
+}
+
+func TestTUICProbeBWInitialOffsetSkipsDrain(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	for seed := uint64(1); seed <= 1024; seed++ {
+		sender.randomState = seed
+		if offset := sender.nextCycleOffset(); offset == 1 || offset >= uint8(len(tuicPacingGains)) {
+			t.Fatalf("invalid initial ProbeBW offset %d for seed %d", offset, seed)
+		}
+	}
+}
+
+func TestTUICProbeBWLowGainDoesNotStickAboveTarget(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	sender.mode = tuicBbrProbeBW
+	sender.pacingGain = tuicPacingGains[1]
+	sender.cycleOffset = 1
+	sender.estimator.maxFilter.updateMax(1, 1024*1024)
 	start := monotime.Now()
-	sender.lastSend = start
-	if !sender.appLimited(start.Add(150*time.Millisecond), sender.maxDatagramSize, 1200) {
-		t.Fatal("small pre-bulk burst was not classified as application-limited")
+	sender.lastCycle = start
+	inFlight := sender.targetCwnd(1) + sender.maxDatagramSize
+	sender.updateGainCycle(start.Add(201*time.Millisecond), inFlight, inFlight, false)
+	if sender.pacingGain != 1 || sender.cycleOffset != 2 {
+		t.Fatalf("low-gain cycle remained stuck: gain=%v offset=%d", sender.pacingGain, sender.cycleOffset)
 	}
-	sender.estimator.totalSent = uint64(sender.initialCwnd)
-	if sender.appLimited(start.Add(150*time.Millisecond), sender.maxDatagramSize, 1200) {
-		t.Fatal("short loss-limited bulk ACK was incorrectly classified as application-limited")
+}
+
+func TestTUICProbeRTTPreservesModelAndExitsAfterPriorRound(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.fullBandwidth = true
+	sender.mode = tuicBbrProbeBW
+	sender.cwnd = 512 * 1024
+	sender.estimator.maxFilter.updateMax(1, 2*1024*1024)
+	start := monotime.Now()
+	sender.maybeProbeRTT(start, false, 0, false, true)
+	if sender.mode != tuicBbrProbeRTT || sender.GetCongestionWindow() != sender.minCwnd || !sender.estimator.appLimited {
+		t.Fatalf("ProbeRTT entry mismatch: mode=%v window=%d app_limited=%v", sender.mode, sender.GetCongestionWindow(), sender.estimator.appLimited)
 	}
-	if !sender.appLimited(start.Add(5*time.Second), sender.maxDatagramSize, 1200) {
-		t.Fatal("long idle gap was not classified as application-limited")
+	sender.calculateCwnd(64*1024, 0)
+	if sender.cwnd != 512*1024 {
+		t.Fatalf("ProbeRTT destroyed saved congestion window: %d", sender.cwnd)
 	}
-	if sender.appLimited(start.Add(150*time.Millisecond), sender.initialCwnd, 0) {
-		t.Fatal("loss-only full bulk flight was incorrectly marked application-limited")
+	// A round can pass before the 200-ms timer. Native TUIC remembers it and
+	// exits as soon as the timer expires; it does not wait for another round.
+	sender.maybeProbeRTT(start.Add(100*time.Millisecond), true, 0, true, false)
+	sender.maybeProbeRTT(start.Add(201*time.Millisecond), false, 0, true, false)
+	if sender.mode != tuicBbrProbeBW {
+		t.Fatalf("ProbeRTT did not exit after timer and prior round: mode=%v", sender.mode)
+	}
+}
+
+func TestTUICTargetWindowUsesStartupGainWithoutBandwidth(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	if got, want := sender.targetCwnd(2), 2*sender.initialCwnd; got != want {
+		t.Fatalf("startup target=%d, want gain*IW=%d", got, want)
+	}
+}
+
+func TestTUICStartupGrowthPreservesAckHeight(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.ackAgg.maxAckHeight.updateMax(1, 24*1200)
+	sender.estimator.maxFilter.updateMax(1, 1024*1024)
+	sender.checkFullBandwidth(false)
+	if got := sender.ackAgg.maxAckHeight.get(); got != 24*1200 {
+		t.Fatalf("startup bandwidth growth discarded ACK height: %d", got)
 	}
 }

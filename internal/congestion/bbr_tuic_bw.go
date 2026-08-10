@@ -206,7 +206,10 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 		} else {
 			e.zeroSamples = satAddUint64(e.zeroSamples, 1)
 		}
-		if sample > 0 && !state.appLimited {
+		// App-limited samples cannot safely lower the path model, but a sample
+		// above the current maximum is still proof of higher deliverable rate.
+		// Native TUIC permits exactly that one-way update.
+		if sample > 0 && (!state.appLimited || sample > e.maxFilter.get()) {
 			e.maxFilter.updateMax(round, sample)
 		}
 		if !haveLargest || packet.PacketNumber > largestPN {
