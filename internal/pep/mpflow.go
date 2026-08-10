@@ -60,9 +60,13 @@ var (
 )
 
 type mpLane struct {
-	id        uint64
-	kind      TransportKind
-	fc        *frameConn
+	id   uint64
+	kind TransportKind
+	fc   *frameConn
+	// writeHook is an internal deterministic fault-injection point used by
+	// integration tests. Production lanes leave it nil, so the data path has
+	// only one predictable nil check before the real framed write.
+	writeHook func(protocol.Frame) error
 	writeQ    chan protocol.Frame
 	writeDone chan struct{}
 	closed    atomic.Bool
@@ -207,6 +211,12 @@ func (f *multipathFlow) writeLane(lane *mpLane) {
 			return
 		case <-f.ctx.Done():
 			return
+		}
+		if lane.writeHook != nil {
+			if err := lane.writeHook(frame); err != nil {
+				f.failLane(lane, fmt.Errorf("lane %d injected write failure: %w", lane.id, err))
+				return
+			}
 		}
 		if err := lane.fc.WriteContext(f.ctx, frame); err != nil {
 			f.failLane(lane, fmt.Errorf("lane %d write: %w", lane.id, err))
@@ -810,10 +820,15 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 			if err := f.recordReplayContext(ctx, fin); err != nil {
 				return err
 			}
+			// Publish the logical FIN before enqueueing it. A lane writer can
+			// fail immediately (or a test/fault injector can drop the frame), and
+			// a replacement lane may be admitted before this goroutine resumes.
+			// Recovery must then know that the FIN is pending and replay it rather
+			// than treating the flow as one-sided and opening another rescue.
+			f.finSent.Store(true)
 			if err := f.enqueueOnHealthyLane(ctx, fin, false); err != nil {
 				return err
 			}
-			f.finSent.Store(true)
 			select {
 			case <-f.finalAck:
 				return nil

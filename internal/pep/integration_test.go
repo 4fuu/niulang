@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -844,6 +845,131 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	}
 	if fin.Header.Type != protocol.TypeClose || fin.Header.Flags&protocol.FlagFin == 0 {
 		t.Fatalf("unexpected tombstone FIN: type=%d flags=%x", fin.Header.Type, fin.Header.Flags)
+	}
+
+	cancel()
+	for range 2 {
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("service shutdown: %v", err)
+		}
+	}
+}
+
+func TestLostFinalFINUsesOneTombstoneRescueWithoutStorm(t *testing.T) {
+	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destinationListener.Close()
+	response := bytes.Repeat([]byte("completed-before-fin-loss-"), 4096)
+	releaseDestinationClose := make(chan struct{})
+	destinationReady := make(chan struct{})
+	go func() {
+		conn, acceptErr := destinationListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		request := make([]byte, len("request"))
+		if _, readErr := io.ReadFull(conn, request); readErr != nil {
+			return
+		}
+		if writeErr := writeFull(conn, response); writeErr != nil {
+			return
+		}
+		close(destinationReady)
+		<-releaseDestinationClose
+	}()
+
+	certificate, roots := testCertificate(t)
+	secret := []byte("integration-test-secret-value-32bytes")
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dropFirstServerFIN atomic.Bool
+	dropFirstServerFIN.Store(true)
+	serverMetrics := metrics.New()
+	server, err := NewServer(ServerConfig{
+		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true,
+		MaxLanes: 1, Logger: logger, Metrics: serverMetrics,
+		testLaneWriteHook: func(frame protocol.Frame) error {
+			if frame.Header.Type == protocol.TypeClose && frame.Header.Flags&protocol.FlagFin != 0 && dropFirstServerFIN.CompareAndSwap(true, false) {
+				return errors.New("injected final FIN loss")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientMetrics := metrics.New()
+	client, err := NewClient(ClientConfig{
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, InitialLanes: 1, MaxLanes: 1,
+		Logger: logger, Metrics: clientMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errorsCh := make(chan error, 2)
+	go func() { errorsCh <- server.ServePacketConn(ctx, packetConn) }()
+	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
+
+	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
+	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-destinationReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("destination did not write response")
+	}
+	got := make([]byte, len(response))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, response) {
+		t.Fatalf("response mismatch: got %d bytes, want %d", len(got), len(response))
+	}
+	// Closing the destination makes the server enqueue its final logical FIN.
+	// The hook drops exactly that frame and fails the original QUIC lane after
+	// every response byte is already at the application. Deliberately wait for
+	// that failure before fully closing the application socket: this reproduces
+	// the real curl race where Content-Length is complete, the final transport
+	// close is lost, and only then does the local application close.
+	close(releaseDestinationClose)
+	faultDeadline := time.Now().Add(3 * time.Second)
+	for dropFirstServerFIN.Load() && time.Now().Before(faultDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if dropFirstServerFIN.Load() {
+		t.Fatal("final FIN fault was not exercised")
+	}
+	_ = conn.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if serverMetrics.Snapshot().ActiveFlows == 0 && clientMetrics.Snapshot().ActiveFlows == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := clientMetrics.Snapshot(); got.ActiveFlows != 0 || got.FlowsCompleted != 1 || got.FlowsFailed != 0 || got.LaneReplacements != 1 {
+		t.Fatalf("client final-FIN recovery = active:%d completed:%d failed:%d replacements:%d, want 0/1/0/1; logs:\n%s", got.ActiveFlows, got.FlowsCompleted, got.FlowsFailed, got.LaneReplacements, logBuf.String())
+	}
+	if got := serverMetrics.Snapshot(); got.ActiveFlows != 0 || got.FlowsCompleted != 1 || got.FlowsFailed != 0 {
+		t.Fatalf("server final-FIN recovery = active:%d completed:%d failed:%d", got.ActiveFlows, got.FlowsCompleted, got.FlowsFailed)
 	}
 
 	cancel()

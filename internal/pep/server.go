@@ -46,6 +46,10 @@ type ServerConfig struct {
 	Metrics                       *metrics.Registry
 	MaxLanes                      int
 	Logger                        *slog.Logger
+	// testLaneWriteHook is intentionally unexported and nil in production. It
+	// lets package integration tests reproduce loss of a specific logical
+	// frame without depending on encrypted QUIC packet layout.
+	testLaneWriteHook func(protocol.Frame) error
 }
 
 type Server struct {
@@ -491,7 +495,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	serverSession := &serverFlow{flow: flow, maxLanes: s.cfg.MaxLanes}
-	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
+	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
 		flow.closeAll()
 		return
 	}
@@ -628,13 +632,40 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 		}
 		return
 	}
-	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc}); err != nil {
+	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetFlowLimit, "lane unavailable")})
 		return
 	}
 	s.observeLanes(serverSession.flow.laneCount())
 	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
 		return
+	}
+	// A replacement can arrive after the destination has already reached EOF
+	// but before the original lane carried the logical FIN. Replay any known
+	// close state on this active lane immediately. Without this, the first
+	// rescue only lets the peer's FIN reach the server; the server then marks a
+	// tombstone and the client needs a second rescue merely to learn the FIN it
+	// had already received as application bytes. FIN/ACK frames are
+	// idempotent at the reassembler and cumulative-ACK state, so replaying them
+	// is safe even when the original frame was merely delayed.
+	if serverSession.flow.remoteFinSeen.Load() {
+		_ = fc.Write(protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeAck,
+			Flags:     protocol.FlagAckFinal | serverSession.flow.recvAckFlag,
+			SessionID: hello.SessionID, FlowID: open.Header.FlowID,
+			Sequence: serverSession.flow.remoteFinSequence.Load(), Class: protocol.ClassBulk,
+		}})
+	}
+	if serverSession.flow.finSent.Load() {
+		flags := uint16(protocol.FlagFin)
+		if serverSession.flow.localAbortSent.Load() {
+			flags |= protocol.FlagCloseAbort
+		}
+		_ = fc.Write(protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeClose, Flags: flags,
+			SessionID: hello.SessionID, FlowID: open.Header.FlowID,
+			Sequence: serverSession.flow.finSequence.Load(), Class: protocol.ClassBulk,
+		}})
 	}
 	select {
 	case <-serverSession.flow.doneChan():
