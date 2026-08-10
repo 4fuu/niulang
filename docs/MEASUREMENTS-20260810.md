@@ -244,11 +244,11 @@ tests and remains the rollback path.
 
 ## Latest development deployment
 
-The latest checked-out commit, `55363f9`, was built as Linux/amd64 and
-installed only as `/usr/local/bin/wanoptd` for `wanoptd-dev.service`; the
-previous binary is retained at `/usr/local/bin/wanoptd-rollback-fd2ffac`.
-The deployed SHA-256 is
-`0de7071fee1601d8b28ffaebe7b6c902b5b70d99b3d088ecfb2342f7a5949113`.
+The lifecycle-hardening commit `efa358a` was built as Linux/amd64 and
+installed as `/usr/local/bin/wanoptd` for `wanoptd-dev.service`; the pre-fix
+binary is retained at `/usr/local/bin/wanoptd-rollback-pre-efa358a` (and the
+older documented rollback remains available). The deployed SHA-256 is
+`a7b183ffb2891d2495056fa6adaa4697d3cefd0c6e0700d7a2b678bb52180475`.
 After restart, a fresh Google `generate_204` returned HTTP 204 in 1.043 s and
 a one-flow 10-MiB CacheFly smoke returned HTTP 200 with exactly 10,485,760
 bytes. Local and remote metrics both reported zero failed flows and zero flow
@@ -389,3 +389,48 @@ present, every outer dial fails locally with `bind: can't assign requested
 address`. A production client must discover the physical egress binding or
 receive a configuration update on DHCP change rather than silently retaining
 an obsolete address.
+
+## QUIC stream-accept timeout regression and current loss window
+
+Commit `efa358a` also fixes a server lifecycle bug found by a debug-log
+campaign. The QUIC server used the per-stream `HandshakeTimeout` while waiting
+for the next stream on an already-established connection. With the default
+10-second value, a long transfer with no new stream caused the server to close
+the entire active connection with `wanopt session complete`. This produced
+repeated lane failures and replacements at approximately ten-second
+intervals. The fix waits for the next stream with the server context instead;
+the accepted stream still has its bounded authentication deadline, and the
+connection remains bounded by QUIC idle timeout and shutdown. A regression
+test holds an established pooled flow idle for 750 ms while the server
+handshake timeout is 300 ms, then verifies a successful transfer.
+
+The fix was deployed only to the existing development service on `:12443`;
+the service stayed active and the previous binary was copied to
+`/usr/local/bin/wanoptd-rollback-pre-efa358a`. It does not select BBR or alter
+the existing Clash, Xray, sing-box, Cloudflare, Nginx, or WireGuard services.
+
+Immediately after deployment, a five-trial one-lane 10-MiB CacheFly block was
+run through the existing local node on `127.0.0.1:12081` (60-second timeout,
+exact-body completion rule). All five trials returned HTTP 200 but timed out
+with partial bodies: 2,703,324; 2,571,560; 2,473,256; 2,162,652; and 2,653,480
+bytes. Completion was 0/5; median delivered bytes were 2,571,560 (about
+0.343 Mb/s over the timeout). The remote metrics recorded five failed flows
+and five lane failures. This is a valid current-window loss result, not an
+accept-timeout artifact: the server logs show packet loss and no artificial
+ten-second connection close.
+
+For a matched isolated comparison on `:12444`, the corrected server was run
+once with stock Reno and once with the experimental BBR controller. Reno
+completed 0/5, with a median 2,571,560 bytes delivered in 60 seconds (about
+0.343 Mb/s). BBR completed 0/5, with a median 2,161,960 bytes (about 0.288
+Mb/s); it was slightly worse and remains disabled for production. The BBR
+block had zero QUIC loss counters on the surviving server connection but did
+not establish a useful delivery rate; that is evidence against automatic BBR
+selection, not evidence that the controller is correct under all paths.
+
+A fresh five-trial TUIC control through the existing `127.0.0.1:12086` node
+completed 5/5 in 49.262, 24.309, 12.089, 7.969, and 8.301 seconds (median
+12.089 s, about 6.94 Mb/s). The wide within-window spread confirms that the
+China-to-US path is currently highly variable; the WANOPT result still fails
+the bulk reliability bar, and no production performance claim is made from a
+single block.

@@ -69,6 +69,16 @@ observable. This is an important resource invariant: a session that is
 already completing must not turn a rejected join into an unbounded stream of
 zero-byte lanes.
 
+The server’s stream-pool accept loop has a separate lifecycle invariant: the
+per-stream handshake deadline must never be applied while waiting for another
+stream on an established QUIC connection. A pooled or single-flow connection
+may legitimately carry a transfer longer than the authentication timeout.
+Each accepted stream gets its own authentication deadline; the outer
+connection is bounded by QUIC idle timeout, keepalives, admission limits, and
+server shutdown. Violating this invariant caused the development server to
+close active long transfers after ten seconds and masqueraded as congestion
+controller failure.
+
 ### Congestion control and pacing
 
 Each QUIC lane needs a loss-aware controller with a conservative initial
