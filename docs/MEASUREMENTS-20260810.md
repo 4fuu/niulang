@@ -442,3 +442,38 @@ As a separate post-deployment latency smoke, ten fresh Google
 2.263 s). This is a small availability check rather than a latency campaign;
 it confirms that the server lifecycle change did not break short API/web
 requests while the bulk block was loss-limited.
+
+## Corrected BBR sampler and bounded recovery follow-up
+
+The first corrected-BBR block above still contained two controller defects.
+`quic-go` defines `ByteCount` as signed `int64`, while the overflow guards
+used an unsigned all-bits-one value; positive ACK and send accounting could
+therefore saturate to `-1`. In addition, the delivery sample was too dependent
+on packet-to-ACK RTT. Commit `8b75465` uses signed-safe saturation and a
+cumulative packet-level ACK slope capped by the send slope. A synthetic
+200-ms delayed-ACK test now rejects the old one-packet-per-RTT estimate.
+
+The corrected controller was then tested only on the isolated `:12444`
+listener, with BBR on the US server and one client lane. The five exact-body
+CacheFly trials were:
+
+```text
+19.451104 s, 16.076927 s, 6.955731 s, 16.691376 s, 8.812488 s
+```
+
+Completion was 5/5; median completion was 16.077 s (about 5.22 Mb/s). Both
+client and server reported six completed flows, zero failed flows, zero lane
+failures, and zero lane replacements (the client block included one preceding
+smoke). Five fresh Google `generate_204` requests through the same corrected
+BBR node were also 5/5 HTTP 204, with times 1.299, 1.276, 2.341, 1.661, and
+1.318 s (median 1.318 s).
+
+The prior corrected-sampler block without the recovery budget had matched
+bulk rates but produced 38 lane failures and 37 replacements, including a
+post-body replacement storm. Commit `bd1b808` bounds recovery to eight
+attempts and applies exponential backoff after successful-but-immediately-
+closed joins as well as failed handshakes. The follow-up block is evidence
+that this guard prevents churn, not proof of lossless resume or universal BBR
+stability. BBR remains opt-in and is not selected by `wanoptd-dev.service`;
+controlled loss/reordering, interactive-under-bulk, upload, soak, and
+multi-path campaigns remain release gates.

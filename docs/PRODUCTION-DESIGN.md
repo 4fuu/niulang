@@ -103,6 +103,15 @@ Before release, compare:
    mode where the operator supplies a tested target rate); and
 3. stock CUBIC/New Reno as the TCP-fallback control.
 
+The BBR implementation must treat the QUIC fork's signed `ByteCount` as a
+signed type when saturating counters, and its delivery sampler must use
+cumulative ACK and send slopes rather than dividing an individual delayed ACK
+by the full path RTT. The development tests now cover both invariants. Even
+with those corrections, lane recovery has a finite attempt budget and
+exponential backoff: a peer that accepts and immediately closes replacement
+streams must not create an unbounded stream/dial storm while a final FIN is
+pending.
+
 The project uses the maintained apNet QUIC fork and keeps the stock controller
 available. It does not import Hysteria's `internal/` packages or fork
 cryptography. The BBR mode is an original implementation of the public BBR
