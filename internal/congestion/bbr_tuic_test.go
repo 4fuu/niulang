@@ -83,6 +83,24 @@ func TestTUICPacketSamplerUsesPerPacketSendState(t *testing.T) {
 	}
 }
 
+func TestTUICPacketSamplerKeepsPerPacketSendBaseline(t *testing.T) {
+	e := newTUICBandwidthEstimator()
+	start := monotime.Now()
+	e.onSentPacket(start, 0, 1200, 0, true)
+	e.onAckBatch(start.Add(100*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}}, 1)
+	// Keep one flight open. ACK packet 1 before packet 2 so the estimator's
+	// global last-ACK point advances while packet 2 still needs the older A0/S0
+	// baseline captured at its send time.
+	e.onSentPacket(start.Add(10*time.Millisecond), 1, 1200, 1200, true)
+	e.onSentPacket(start.Add(20*time.Millisecond), 2, 1200, 2400, true)
+	e.onAckBatch(start.Add(100*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 1, BytesAcked: 1200}}, 2)
+	e.onAckBatch(start.Add(200*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 2, BytesAcked: 1200}}, 3)
+	want := rateFromDelta(2400, 20*time.Millisecond)
+	if e.latestSendRate != want {
+		t.Fatalf("send slope used a later global ACK baseline: got %d, want %d", e.latestSendRate, want)
+	}
+}
+
 func TestTUICPacketSamplerRetainsSpuriousLossState(t *testing.T) {
 	e := newTUICBandwidthEstimator()
 	start := monotime.Now()

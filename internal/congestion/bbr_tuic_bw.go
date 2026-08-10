@@ -52,6 +52,7 @@ type tuicBandwidthEstimator struct {
 type tuicPacketState struct {
 	sentTime          monotime.Time
 	totalSentAtSend   uint64
+	totalSentAtAck    uint64
 	totalAckedAtSend  uint64
 	lastAckedSentTime monotime.Time
 	lastAckedAckTime  monotime.Time
@@ -107,6 +108,7 @@ func (e *tuicBandwidthEstimator) onSentPacket(now monotime.Time, number quiccong
 	e.packetStates[number] = tuicPacketState{
 		sentTime:          now,
 		totalSentAtSend:   e.totalSent,
+		totalSentAtAck:    e.totalSentAtAck,
 		totalAckedAtSend:  e.totalAcked,
 		lastAckedSentTime: e.lastAckedSentTime,
 		lastAckedAckTime:  e.lastAckedAckTime,
@@ -138,6 +140,7 @@ func (e *tuicBandwidthEstimator) removeObsolete(leastUnacked quiccongestion.Pack
 type tuicAckSample struct {
 	lastAppLimited bool
 	hasSample      bool
+	minRTT         time.Duration
 }
 
 // onAckBatch consumes one congestion event. ACK packets are processed in the
@@ -171,13 +174,19 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 		if !packet.ReceivedTime.IsZero() {
 			ackTime = packet.ReceivedTime
 		}
+		if ackTime.After(state.sentTime) {
+			rtt := ackTime.Sub(state.sentTime)
+			if result.minRTT <= 0 || rtt < result.minRTT {
+				result.minRTT = rtt
+			}
+		}
 		ackRate := uint64(0)
 		if !state.lastAckedAckTime.IsZero() && ackTime.After(state.lastAckedAckTime) && e.totalAcked >= state.totalAckedAtSend {
 			ackRate = rateFromDelta(e.totalAcked-state.totalAckedAtSend, ackTime.Sub(state.lastAckedAckTime))
 		}
 		sendRate := uint64(0)
-		if !state.lastAckedSentTime.IsZero() && state.sentTime.After(state.lastAckedSentTime) && state.totalSentAtSend >= e.totalSentAtAck {
-			sendRate = rateFromDelta(state.totalSentAtSend-e.totalSentAtAck, state.sentTime.Sub(state.lastAckedSentTime))
+		if !state.lastAckedSentTime.IsZero() && state.sentTime.After(state.lastAckedSentTime) && state.totalSentAtSend >= state.totalSentAtAck {
+			sendRate = rateFromDelta(state.totalSentAtSend-state.totalSentAtAck, state.sentTime.Sub(state.lastAckedSentTime))
 		}
 		sample := ackRate
 		e.latestAckRate = ackRate
