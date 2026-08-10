@@ -20,6 +20,12 @@ import (
 	"github.com/icourses-dev/wanopt/internal/socks5"
 )
 
+// A peer that accepts a replacement stream and immediately closes it must not
+// cause an endless replacement storm while the application waits for a final
+// FIN. Recovery is deliberately finite; the logical flow then fails closed
+// and the caller can retry.
+const maxLaneRecoveryAttempts = 8
+
 type ClientConfig struct {
 	ListenAddr       string
 	RemoteAddr       string
@@ -558,6 +564,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	var lastDecision time.Time
 	var recoveryBackoff time.Duration
 	var nextRecovery time.Time
+	recoveryAttempts := 0
 	for {
 		select {
 		case <-flow.doneChan():
@@ -575,10 +582,14 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			}
 			snapshot := flow.snapshot()
 			if snapshot.HealthyLanes == 0 {
+				if flow.doneChanClosed() || recoveryAttempts >= maxLaneRecoveryAttempts {
+					return
+				}
 				now := time.Now()
 				if !nextRecovery.IsZero() && now.Before(nextRecovery) {
 					continue
 				}
+				recoveryAttempts++
 				if err := c.openRecoveryLane(manageCtx, flow, sessionID, flowID); err != nil {
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 						c.cfg.Logger.Warn("lane recovery unavailable", "error", err)
@@ -593,11 +604,28 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					}
 					nextRecovery = now.Add(recoveryBackoff)
 				} else {
-					recoveryBackoff = 0
-					nextRecovery = time.Time{}
+					// A replacement that succeeds its handshake can still fail
+					// immediately. Keep a bounded exponential delay between all
+					// attempts, not only failed handshakes.
+					if recoveryBackoff == 0 {
+						recoveryBackoff = time.Second
+					}
+					nextRecovery = now.Add(recoveryBackoff)
+					if recoveryBackoff < 15*time.Second {
+						recoveryBackoff *= 2
+						if recoveryBackoff > 15*time.Second {
+							recoveryBackoff = 15 * time.Second
+						}
+					}
 				}
 				continue
 			}
+			// A stable lane resets the finite recovery budget. This permits a
+			// later independent failure without making a healthy flow consume
+			// its entire lifetime budget.
+			recoveryAttempts = 0
+			recoveryBackoff = 0
+			nextRecovery = time.Time{}
 			// Once a TCP rescue lane is installed, keep the session on that
 			// reliable lane. TCP/QUIC striping compounds head-of-line blocking
 			// and would make the fallback less predictable.
