@@ -20,13 +20,24 @@ import (
 // benefits from per-packet receive times when a future fork supplies them.
 // Memory is bounded even if a peer stops acknowledging packets.
 type tuicBandwidthEstimator struct {
-	totalAcked uint64
-	totalSent  uint64
+	totalAcked     uint64
+	totalSent      uint64
+	latestSample   uint64
+	latestAckRate  uint64
+	latestSendRate uint64
+	samples        uint64
+	nonAppSamples  uint64
+	appSamples     uint64
+	stateMisses    uint64
+	zeroSamples    uint64
 
 	lastAckedSentTime  monotime.Time
 	lastAckedAckTime   monotime.Time
 	totalSentAtAck     uint64
 	lastAckedPacket    quiccongestion.PacketNumber
+	lastSentPacket     quiccongestion.PacketNumber
+	appLimited         bool
+	endAppLimitedAt    quiccongestion.PacketNumber
 	maxFilter          tuicMinMax
 	ackedAtWindow      uint64
 	packetStates       map[quiccongestion.PacketNumber]tuicPacketState
@@ -44,21 +55,37 @@ type tuicPacketState struct {
 	totalAckedAtSend  uint64
 	lastAckedSentTime monotime.Time
 	lastAckedAckTime  monotime.Time
+	appLimited        bool
 }
 
 const tuicMaxSendStates = 8192
 
 func newTUICBandwidthEstimator() tuicBandwidthEstimator {
 	return tuicBandwidthEstimator{
-		maxFilter:    newTUICMinMax(),
-		packetStates: make(map[quiccongestion.PacketNumber]tuicPacketState),
+		lastAckedPacket: quiccongestion.PacketNumber(-1),
+		lastSentPacket:  quiccongestion.PacketNumber(-1),
+		endAppLimitedAt: quiccongestion.PacketNumber(-1),
+		maxFilter:       newTUICMinMax(),
+		packetStates:    make(map[quiccongestion.PacketNumber]tuicPacketState),
 	}
+}
+
+// markAppLimited starts the same packet-scoped app-limited phase used by
+// TUIC's sampler. Packets already in flight remain ordinary samples; packets
+// sent after this point carry the marker until an ACK for a later packet ends
+// the phase. This is more precise than classifying an entire congestion event
+// from its wall-clock gap, and it avoids suppressing samples after loss merely
+// because only one packet was left in flight.
+func (e *tuicBandwidthEstimator) markAppLimited() {
+	e.appLimited = true
+	e.endAppLimitedAt = e.lastSentPacket
 }
 
 // onSentPacket records the cumulative state at the time a congestion
 // controlled packet is sent. Non-retransmittable packets are intentionally
 // excluded from delivery-rate samples, matching QUIC BBR practice.
 func (e *tuicBandwidthEstimator) onSentPacket(now monotime.Time, number quiccongestion.PacketNumber, bytes, bytesInFlight uint64, retransmittable bool) {
+	e.lastSentPacket = number
 	if !retransmittable || bytes == 0 {
 		return
 	}
@@ -83,14 +110,34 @@ func (e *tuicBandwidthEstimator) onSentPacket(now monotime.Time, number quiccong
 		totalAckedAtSend:  e.totalAcked,
 		lastAckedSentTime: e.lastAckedSentTime,
 		lastAckedAckTime:  e.lastAckedAckTime,
+		appLimited:        e.appLimited,
 	}
 }
 
-// onLost removes packet state as soon as QUIC declares the packet lost. The
-// loss callback is deliberately observational here; recovery and pacing are
-// owned by the controller state machine.
+// onLost deliberately retains packet state. QUIC can report a packet lost and
+// later receive it (spurious loss/reordering), and TUIC uses that ACK to keep
+// the delivery sampler's cumulative curves consistent. Obsolete states are
+// removed by removeObsolete after each congestion event; the bounded prune is
+// only a final memory guard.
 func (e *tuicBandwidthEstimator) onLost(number quiccongestion.PacketNumber) {
-	delete(e.packetStates, number)
+	_ = number
+}
+
+// removeObsolete drops states that are below the oldest packet QUIC is likely
+// to retain. The extended quic-go callback does not expose FirstOutstanding,
+// so callers pass the same bounded packet-threshold approximation used by the
+// upstream TUIC controller.
+func (e *tuicBandwidthEstimator) removeObsolete(leastUnacked quiccongestion.PacketNumber) {
+	for number := range e.packetStates {
+		if number < leastUnacked {
+			delete(e.packetStates, number)
+		}
+	}
+}
+
+type tuicAckSample struct {
+	lastAppLimited bool
+	hasSample      bool
 }
 
 // onAckBatch consumes one congestion event. ACK packets are processed in the
@@ -98,10 +145,11 @@ func (e *tuicBandwidthEstimator) onLost(number quiccongestion.PacketNumber) {
 // A packet's captured state supplies the preceding A0/S0 points, avoiding the
 // zero-duration samples caused by calling an estimator once per packet at one
 // event timestamp.
-func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []quiccongestion.AckedPacketInfo, round uint64, appLimited bool) {
+func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []quiccongestion.AckedPacketInfo, round uint64) tuicAckSample {
 	if eventTime.IsZero() {
 		eventTime = monotime.Now()
 	}
+	result := tuicAckSample{}
 	var largestState tuicPacketState
 	var largestPN quiccongestion.PacketNumber
 	var haveLargest bool
@@ -109,11 +157,15 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 		if packet.BytesAcked <= 0 {
 			continue
 		}
-		bytes := uint64(packet.BytesAcked)
-		e.totalAcked = satAddUint64(e.totalAcked, bytes)
 		state, ok := e.packetStates[packet.PacketNumber]
 		if !ok {
+			e.stateMisses = satAddUint64(e.stateMisses, 1)
 			continue
+		}
+		bytes := uint64(packet.BytesAcked)
+		e.totalAcked = satAddUint64(e.totalAcked, bytes)
+		if e.appLimited && (e.endAppLimitedAt < 0 || packet.PacketNumber > e.endAppLimitedAt) {
+			e.appLimited = false
 		}
 		ackTime := eventTime
 		if !packet.ReceivedTime.IsZero() {
@@ -128,10 +180,24 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 			sendRate = rateFromDelta(state.totalSentAtSend-e.totalSentAtAck, state.sentTime.Sub(state.lastAckedSentTime))
 		}
 		sample := ackRate
+		e.latestAckRate = ackRate
+		e.latestSendRate = sendRate
 		if sendRate > 0 && (sample == 0 || sendRate < sample) {
 			sample = sendRate
 		}
-		if sample > 0 && !appLimited {
+		e.latestSample = sample
+		if sample > 0 {
+			result.hasSample = true
+			e.samples = satAddUint64(e.samples, 1)
+			if state.appLimited {
+				e.appSamples = satAddUint64(e.appSamples, 1)
+			} else {
+				e.nonAppSamples = satAddUint64(e.nonAppSamples, 1)
+			}
+		} else {
+			e.zeroSamples = satAddUint64(e.zeroSamples, 1)
+		}
+		if sample > 0 && !state.appLimited {
 			e.maxFilter.updateMax(round, sample)
 		}
 		if !haveLargest || packet.PacketNumber > largestPN {
@@ -151,7 +217,9 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 		e.lastAckedAckTime = ackTime
 		e.totalSentAtAck = largestState.totalSentAtSend
 		e.lastAckedPacket = largestPN
+		result.lastAppLimited = largestState.appLimited
 	}
+	return result
 }
 
 // onSent and onAck are retained as aggregate helpers for deterministic unit

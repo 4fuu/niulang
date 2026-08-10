@@ -67,7 +67,7 @@ func TestTUICPacketSamplerUsesPerPacketSendState(t *testing.T) {
 		first = append(first, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
 		pn++
 	}
-	e.onAckBatch(start.Add(100*time.Millisecond), first, 1, false)
+	e.onAckBatch(start.Add(100*time.Millisecond), first, 1)
 	if got := e.estimate(); got == 0 {
 		t.Fatal("the initial flight did not seed a delivery-rate sample")
 	}
@@ -77,9 +77,89 @@ func TestTUICPacketSamplerUsesPerPacketSendState(t *testing.T) {
 		second = append(second, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
 		pn++
 	}
-	e.onAckBatch(start.Add(200*time.Millisecond), second, 2, false)
+	e.onAckBatch(start.Add(200*time.Millisecond), second, 2)
 	if got := e.estimate(); got < 500*1024 {
 		t.Fatalf("packet-state sampler underestimated ACK batch: %d B/s", got)
+	}
+}
+
+func TestTUICPacketSamplerRetainsSpuriousLossState(t *testing.T) {
+	e := newTUICBandwidthEstimator()
+	start := monotime.Now()
+	e.onSentPacket(start, 0, 1200, 0, true)
+	e.onSentPacket(start.Add(time.Millisecond), 1, 1200, 1200, true)
+	e.onLost(0)
+	if _, ok := e.packetStates[0]; !ok {
+		t.Fatal("loss discarded delivery state before a possible spurious ACK")
+	}
+	result := e.onAckBatch(start.Add(100*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}}, 1)
+	if !result.hasSample || e.estimate() == 0 || e.totalAcked != 1200 {
+		t.Fatalf("spurious ACK did not repair the delivery model: sample=%v estimate=%d acked=%d", result.hasSample, e.estimate(), e.totalAcked)
+	}
+}
+
+func TestTUICAppLimitedMarkerIsPacketScoped(t *testing.T) {
+	e := newTUICBandwidthEstimator()
+	start := monotime.Now()
+	e.onSentPacket(start, 0, 1200, 0, true)
+	e.markAppLimited()
+	e.onSentPacket(start.Add(time.Millisecond), 1, 1200, 1200, true)
+	if e.packetStates[0].appLimited || !e.packetStates[1].appLimited {
+		t.Fatal("app-limited marker was not captured at packet send time")
+	}
+	e.onAckBatch(start.Add(100*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}}, 1)
+	if !e.appLimited {
+		t.Fatal("ACK of a pre-marker packet ended the app-limited phase")
+	}
+	result := e.onAckBatch(start.Add(200*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 1, BytesAcked: 1200}}, 2)
+	if !result.lastAppLimited || e.appLimited {
+		t.Fatalf("phase boundary was not preserved: sample_app_limited=%v phase=%v", result.lastAppLimited, e.appLimited)
+	}
+	e.onSentPacket(start.Add(201*time.Millisecond), 2, 1200, 0, true)
+	if e.packetStates[2].appLimited {
+		t.Fatal("packet after the phase boundary remained app-limited")
+	}
+}
+
+func TestTUICFirstPacketStartsFirstRound(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 100 * time.Millisecond})
+	start := monotime.Now()
+	sender.OnPacketSent(start, 0, 0, 1200, true)
+	sender.OnCongestionEventEx(1200, start.Add(100*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}}, nil)
+	if sender.round != 1 {
+		t.Fatalf("packet zero did not start the first BBR round: %d", sender.round)
+	}
+}
+
+func TestTUICLossRecoveryPreservesRateModelAtQuarterLoss(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	start := monotime.Now()
+	var pn quiccongestion.PacketNumber
+	for round := 0; round < 12; round++ {
+		flightStart := start.Add(time.Duration(round) * 200 * time.Millisecond)
+		var inFlight quiccongestion.ByteCount
+		acked := make([]quiccongestion.AckedPacketInfo, 0, 24)
+		lost := make([]quiccongestion.LostPacketInfo, 0, 8)
+		for i := 0; i < 32; i++ {
+			sent := flightStart.Add(time.Duration(i) * time.Millisecond)
+			sender.OnPacketSent(sent, inFlight, pn, 1200, true)
+			inFlight += 1200
+			if i%4 == 0 {
+				lost = append(lost, quiccongestion.LostPacketInfo{PacketNumber: pn, BytesLost: 1200})
+			} else {
+				acked = append(acked, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
+			}
+			pn++
+		}
+		sender.OnCongestionEventEx(inFlight, flightStart.Add(200*time.Millisecond), acked, lost)
+	}
+	if got := sender.estimator.estimate(); got < 100*1024 {
+		t.Fatalf("quarter-loss recovery collapsed the delivery model: %d B/s", got)
+	}
+	if got := sender.GetCongestionWindow(); got <= sender.minCwnd {
+		t.Fatalf("quarter-loss recovery collapsed cwnd to floor: %d", got)
 	}
 }
 
@@ -165,6 +245,21 @@ func TestTUICTelemetryReportsControllerLoss(t *testing.T) {
 	}
 }
 
+func TestTUICTelemetryReportsSamplerDiagnostics(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 100 * time.Millisecond})
+	start := monotime.Now()
+	sender.OnPacketSent(start, 0, 0, 1200, true)
+	sender.OnCongestionEventEx(1200, start.Add(100*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}}, nil)
+	got := sender.Telemetry()
+	if got.LatestSample == 0 || got.LatestAckRate == 0 || got.Samples == 0 || got.NonAppSamples == 0 || got.Round != 1 {
+		t.Fatalf("incomplete sampler telemetry: %+v", got)
+	}
+	if got.AppSamples != 0 || got.StateMisses != 0 {
+		t.Fatalf("unexpected sampler diagnostics: %+v", got)
+	}
+}
+
 func TestTUICStartupLossDoesNotCollapseBeforeBandwidthModel(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
@@ -229,5 +324,8 @@ func TestTUICAppLimitedHysteresisPreservesBulkSamples(t *testing.T) {
 	}
 	if !sender.appLimited(start.Add(5*time.Second), sender.maxDatagramSize, 1200) {
 		t.Fatal("long idle gap was not classified as application-limited")
+	}
+	if sender.appLimited(start.Add(150*time.Millisecond), sender.initialCwnd, 0) {
+		t.Fatal("loss-only full bulk flight was incorrectly marked application-limited")
 	}
 }
