@@ -58,11 +58,22 @@ func newTUICBandwidthEstimator() tuicBandwidthEstimator {
 // onSentPacket records the cumulative state at the time a congestion
 // controlled packet is sent. Non-retransmittable packets are intentionally
 // excluded from delivery-rate samples, matching QUIC BBR practice.
-func (e *tuicBandwidthEstimator) onSentPacket(now monotime.Time, number quiccongestion.PacketNumber, bytes uint64, retransmittable bool) {
+func (e *tuicBandwidthEstimator) onSentPacket(now monotime.Time, number quiccongestion.PacketNumber, bytes, bytesInFlight uint64, retransmittable bool) {
 	if !retransmittable || bytes == 0 {
 		return
 	}
 	e.totalSent = satAddUint64(e.totalSent, bytes)
+	// TUIC's sampler establishes an A0/S0 point whenever a new flight starts.
+	// Without this point the entire first congestion window produces no
+	// delivery sample. On a lossy long-RTT path the second flight may already
+	// be recovery-limited, permanently seeding BBR at only a few packets per
+	// RTT. The first packet itself has a zero send interval and therefore uses
+	// the ACK slope; later packets in the same flight obtain both slopes.
+	if bytesInFlight == 0 {
+		e.lastAckedAckTime = now
+		e.lastAckedSentTime = now
+		e.totalSentAtAck = e.totalSent
+	}
 	if len(e.packetStates) >= tuicMaxSendStates {
 		e.pruneStates()
 	}

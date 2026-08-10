@@ -90,14 +90,19 @@ type tuicAckAggregation struct {
 }
 
 const (
-	tuicHighGain                     = 2.885
-	tuicDrainGain                    = 1 / tuicHighGain
-	tuicCwndGain                     = 2.0
-	tuicProbeRTTInterval             = 10 * time.Second
-	tuicProbeRTTDuration             = 200 * time.Millisecond
-	tuicStartupGrowth                = 1.25
-	tuicStartupNoGainRounds          = 3
-	tuicMaxInitialPackets            = 200
+	tuicHighGain            = 2.885
+	tuicDrainGain           = 1 / tuicHighGain
+	tuicCwndGain            = 2.0
+	tuicProbeRTTInterval    = 10 * time.Second
+	tuicProbeRTTDuration    = 200 * time.Millisecond
+	tuicStartupGrowth       = 1.25
+	tuicStartupNoGainRounds = 3
+	// sing-quic's TUIC BBR uses the standard 32-packet initial window.
+	// A previous port accidentally used 200 packets, creating a burst roughly
+	// six times larger than TUIC's IW on a 200-ms path.  That burst is
+	// especially damaging on the measured lossy China-US path: the first loss
+	// event then dominates the delivery estimator and recovery window.
+	tuicInitialPackets               = 32
 	tuicProbeRTTBDPMultiplier        = 0.75
 	tuicDefaultMinRate        uint64 = 64 * 1024
 	tuicMaxRate               uint64 = 2 * 1024 * 1024 * 1024
@@ -111,7 +116,7 @@ func NewTUICBBRSender(initialPacketSize quiccongestion.ByteCount) *TUICBBRSender
 	if initialPacketSize < quiccongestion.MinInitialPacketSize {
 		initialPacketSize = quiccongestion.InitialPacketSize
 	}
-	initial := quiccongestion.ByteCount(tuicMaxInitialPackets) * initialPacketSize
+	initial := quiccongestion.ByteCount(tuicInitialPackets) * initialPacketSize
 	minCwnd := 4 * initialPacketSize
 	if initial < minCwnd {
 		initial = minCwnd
@@ -130,12 +135,15 @@ func NewTUICBBRSender(initialPacketSize quiccongestion.ByteCount) *TUICBBRSender
 		pacingGain:      tuicHighGain,
 		highGain:        tuicHighGain,
 		drainGain:       tuicDrainGain,
-		cwndGain:        tuicHighGain,
-		highCwndGain:    tuicCwndGain,
-		estimator:       newTUICBandwidthEstimator(),
-		ackAgg:          tuicAckAggregation{maxAckHeight: newTUICMinMax()},
-		randomState:     uint64(monotime.Now()) ^ uint64(initialPacketSize)<<17,
-		telemetry:       newTelemetryState("bbr-tuic"),
+		// TUIC uses a 2.0 congestion-window gain in STARTUP.  The pacing gain
+		// remains highGain; applying that factor to cwnd as well overfills the
+		// initial flight before a delivery model exists.
+		cwndGain:     tuicCwndGain,
+		highCwndGain: tuicCwndGain,
+		estimator:    newTUICBandwidthEstimator(),
+		ackAgg:       tuicAckAggregation{maxAckHeight: newTUICMinMax()},
+		randomState:  uint64(monotime.Now()) ^ uint64(initialPacketSize)<<17,
+		telemetry:    newTelemetryState("bbr-tuic"),
 	}
 	b.pacer = newPacer(b.bandwidth)
 	b.publishTelemetry()
@@ -210,7 +218,12 @@ func (b *TUICBBRSender) initialPacingRate() uint64 {
 	if rtt <= 0 {
 		return tuicDefaultMinRate
 	}
-	rate := uint64(float64(b.initialCwnd) / rtt.Seconds())
+	// TUIC's BBR starts at high_gain * IW / RTT.  The prior port omitted
+	// high_gain, so after correcting IW from 200 packets to 32 it would seed
+	// the delivery model at only one-third of TUIC's startup rate.  STARTUP
+	// never decreases this value; the normal full-bandwidth and loss tests
+	// still bound the transition to DRAIN/ProbeBW.
+	rate := uint64(float64(b.initialCwnd) * b.highGain / rtt.Seconds())
 	if rate < tuicDefaultMinRate {
 		return tuicDefaultMinRate
 	}
@@ -236,7 +249,7 @@ func (b *TUICBBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quicc
 	} else {
 		b.bytesInFlight = bytesInFlight + bytes
 	}
-	b.estimator.onSentPacket(sentTime, number, uint64(maxByteCount(0, bytes)), retransmittable)
+	b.estimator.onSentPacket(sentTime, number, uint64(maxByteCount(0, bytes)), uint64(maxByteCount(0, bytesInFlight)), retransmittable)
 	b.pacer.sentPacket(sentTime, bytes)
 	b.publishTelemetry()
 }
@@ -473,7 +486,13 @@ func (b *TUICBBRSender) checkFullBandwidth(appLimited bool) {
 		return
 	}
 	b.roundsNoGain++
-	if b.roundsNoGain >= tuicStartupNoGainRounds || b.recovery.inRecovery() {
+	// A single loss event is not proof that STARTUP has found the bottleneck.
+	// In particular, an isolated reordered/lost packet is common on the
+	// China-US path. Leaving STARTUP on any recovery transition immediately
+	// made the first sparse delivery sample control pacing and cwnd. TUIC's
+	// current BBR waits for the normal no-gain rounds (or a separately bounded
+	// excessive-loss test); keep that distinction here as well.
+	if b.roundsNoGain >= tuicStartupNoGainRounds {
 		b.fullBandwidth = true
 	}
 }

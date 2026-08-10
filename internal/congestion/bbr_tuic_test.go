@@ -63,14 +63,17 @@ func TestTUICPacketSamplerUsesPerPacketSendState(t *testing.T) {
 	var pn quiccongestion.PacketNumber
 	first := make([]quiccongestion.AckedPacketInfo, 0, 50)
 	for i := 0; i < 50; i++ {
-		e.onSentPacket(start.Add(time.Duration(i)*time.Millisecond), pn, 1200, true)
+		e.onSentPacket(start.Add(time.Duration(i)*time.Millisecond), pn, 1200, uint64(i)*1200, true)
 		first = append(first, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
 		pn++
 	}
 	e.onAckBatch(start.Add(100*time.Millisecond), first, 1, false)
+	if got := e.estimate(); got == 0 {
+		t.Fatal("the initial flight did not seed a delivery-rate sample")
+	}
 	second := make([]quiccongestion.AckedPacketInfo, 0, 50)
 	for i := 0; i < 50; i++ {
-		e.onSentPacket(start.Add(101*time.Millisecond+time.Duration(i)*time.Millisecond), pn, 1200, true)
+		e.onSentPacket(start.Add(101*time.Millisecond+time.Duration(i)*time.Millisecond), pn, 1200, uint64(50+i)*1200, true)
 		second = append(second, quiccongestion.AckedPacketInfo{PacketNumber: pn, BytesAcked: 1200})
 		pn++
 	}
@@ -102,13 +105,16 @@ func TestTUICRecoverySaturatesOversizedLoss(t *testing.T) {
 func TestTUICBBRSenderStartupAndRecovery(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
-	if sender.initialCwnd != 200*1200 {
+	if sender.initialCwnd != tuicInitialPackets*1200 {
 		t.Fatalf("unexpected TUIC initial window: %d", sender.initialCwnd)
 	}
-	if got, want := sender.bandwidth(), quiccongestion.ByteCount(float64(sender.initialCwnd)/0.2); got != want {
-		// With a 200-ms RTT, TUIC startup pacing is exactly IW/RTT. A
-		// high-gain multiplication here would create an avoidable queue.
-		t.Fatalf("startup pacing=%d, want IW/RTT=%d", got, want)
+	if sender.cwndGain != tuicCwndGain {
+		t.Fatalf("unexpected TUIC startup cwnd gain: %v", sender.cwndGain)
+	}
+	if got, want := sender.bandwidth(), quiccongestion.ByteCount(float64(sender.initialCwnd)*tuicHighGain/0.2); got != want {
+		// TUIC startup pacing is high_gain*IW/RTT. The high gain is applied
+		// exactly once; the startup cwnd gain remains 2.0.
+		t.Fatalf("startup pacing=%d, want high_gain*IW/RTT=%d", got, want)
 	}
 	start := monotime.Now()
 	var pn quiccongestion.PacketNumber
@@ -193,6 +199,19 @@ func TestTUICStartupLossDoesNotCollapseBeforeBandwidthModel(t *testing.T) {
 	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(400*time.Millisecond), nil, []quiccongestion.LostPacketInfo{{PacketNumber: pn, BytesLost: 1200}})
 	if !sender.InRecovery() {
 		t.Fatal("loss after startup did not enter recovery")
+	}
+}
+
+func TestTUICStartupDoesNotExitOnOnePostModelLoss(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.fullBandwidth = false
+	sender.recovery = tuicConservation
+	sender.roundsNoGain = 0
+	sender.bwAtLastRound = 1
+	sender.estimator.maxFilter.updateMax(1, 1)
+	sender.checkFullBandwidth(false)
+	if sender.fullBandwidth {
+		t.Fatal("one recovery event prematurely exited startup")
 	}
 }
 
