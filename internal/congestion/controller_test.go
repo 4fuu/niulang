@@ -93,6 +93,9 @@ func TestBBRSenderBuildsDeliveryModelAndRecovers(t *testing.T) {
 	for round := 0; round < 8; round++ {
 		for i := 0; i < 32; i++ {
 			sender.OnPacketSent(start.Add(time.Duration(round)*200*time.Millisecond), sender.bytesInFlight, pn, 1200, true)
+			if sender.bytesInFlight < 0 {
+				t.Fatal("BBR bytes-in-flight arithmetic became negative")
+			}
 			pn++
 		}
 		sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(time.Duration(round+1)*200*time.Millisecond), []quiccongestion.AckedPacketInfo{{PacketNumber: pn - 1, BytesAcked: 32 * 1200}}, nil)
@@ -124,6 +127,28 @@ func TestBBRSenderBuildsDeliveryModelAndRecovers(t *testing.T) {
 	sender.OnCongestionEventEx(sender.bytesInFlight, start.Add(4*time.Second), []quiccongestion.AckedPacketInfo{{PacketNumber: pn + 1, BytesAcked: 1200}}, nil)
 	if sender.GetCongestionWindow() < sender.minCwnd {
 		t.Fatalf("window below minimum after recovery: %d", sender.GetCongestionWindow())
+	}
+}
+
+func TestBBRSenderDoesNotDivideIndividualACKsByFullRTT(t *testing.T) {
+	sender := NewBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	start := monotime.Now()
+	var pn quiccongestion.PacketNumber
+	// Keep a 200-packet flight in the path. ACK one packet every millisecond
+	// after a 200-ms delivery delay. A packet/RTT estimator sees roughly 6 KB/s;
+	// the ACK and send slopes correctly see the 1.2 MB/s ACK clock.
+	for i := 0; i < 400; i++ {
+		sent := start.Add(time.Duration(i) * time.Millisecond)
+		sender.OnPacketSent(sent, sender.bytesInFlight, pn, 1200, true)
+		if i >= 200 {
+			acked := pn - 200
+			sender.OnCongestionEventEx(sender.bytesInFlight, sent, []quiccongestion.AckedPacketInfo{{PacketNumber: acked, BytesAcked: 1200}}, nil)
+		}
+		pn++
+	}
+	if sender.maxBandwidth < 256*1024 {
+		t.Fatalf("delivery sampler underestimated ACK clock: %d B/s", sender.maxBandwidth)
 	}
 }
 

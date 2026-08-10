@@ -53,6 +53,15 @@ type BBRSender struct {
 	// long-haul path makes the latter estimator wildly noisy.
 	sendStates     map[quiccongestion.PacketNumber]bbrSendState
 	deliveredBytes uint64
+	totalSentBytes uint64
+
+	// Cumulative ACK points used by the delivery-rate sampler. A sample is
+	// bounded by both the ACK slope and the send slope, which avoids treating
+	// one delayed ACK divided by a full RTT as the bottleneck rate.
+	lastAckPointTime      monotime.Time
+	lastAckPointDelivered uint64
+	lastAckPointSentTime  monotime.Time
+	lastAckPointSentBytes uint64
 
 	bwAtLastRound uint64
 	roundsNoGain  uint8
@@ -87,6 +96,7 @@ type bbrSendState struct {
 	sentTime          monotime.Time
 	deliveredAtSend   uint64
 	deliveredTimeSend monotime.Time
+	sentBytesAtSend   uint64
 }
 
 const (
@@ -104,7 +114,8 @@ const (
 	// per-packet state into an unbounded allocation. QUIC's own outstanding
 	// packet limit is much lower during normal operation; this cap is a final
 	// defense for long-lived or adversarial sessions.
-	bbrMaxSendStates = 8192
+	bbrMaxSendStates       = 8192
+	maxCongestionByteCount = quiccongestion.ByteCount(1<<63 - 1)
 )
 
 var bbrPacingGains = [...]float64{1.25, 0.75, 1, 1, 1, 1, 1, 1}
@@ -222,8 +233,8 @@ func (b *BBRSender) HasPacingBudget(now monotime.Time) bool {
 func (b *BBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quiccongestion.ByteCount, number quiccongestion.PacketNumber, bytes quiccongestion.ByteCount, _ bool) {
 	b.lastSent = number
 	// bytesInFlight is the value before this packet is accounted for.
-	if bytesInFlight > ^quiccongestion.ByteCount(0)-bytes {
-		b.bytesInFlight = ^quiccongestion.ByteCount(0)
+	if bytes < 0 || bytesInFlight < 0 || bytes > maxCongestionByteCount-bytesInFlight {
+		b.bytesInFlight = maxCongestionByteCount
 	} else {
 		b.bytesInFlight = bytesInFlight + bytes
 	}
@@ -239,9 +250,22 @@ func (b *BBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quicconge
 	}
 	b.sendStates[number] = bbrSendState{
 		sentTime: sentTime, deliveredAtSend: b.deliveredBytes,
-		deliveredTimeSend: deliveredTime,
+		deliveredTimeSend: deliveredTime, sentBytesAtSend: b.addSentBytes(bytes),
 	}
 	b.pacer.sentPacket(sentTime, bytes)
+}
+
+func (b *BBRSender) addSentBytes(bytes quiccongestion.ByteCount) uint64 {
+	if bytes <= 0 {
+		return b.totalSentBytes
+	}
+	value := uint64(bytes)
+	if value > ^uint64(0)-b.totalSentBytes {
+		b.totalSentBytes = ^uint64(0)
+	} else {
+		b.totalSentBytes += value
+	}
+	return b.totalSentBytes
 }
 
 // pruneSendStates removes the oldest quarter of samples when the hard cap is
@@ -297,8 +321,8 @@ func (b *BBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, 
 	var ackedBytes quiccongestion.ByteCount
 	var largestAck quiccongestion.PacketNumber
 	for _, p := range acked {
-		if p.BytesAcked > ^quiccongestion.ByteCount(0)-ackedBytes {
-			ackedBytes = ^quiccongestion.ByteCount(0)
+		if p.BytesAcked < 0 || ackedBytes > maxCongestionByteCount-p.BytesAcked {
+			ackedBytes = maxCongestionByteCount
 		} else {
 			ackedBytes += p.BytesAcked
 		}
@@ -355,8 +379,8 @@ func (b *BBRSender) noteLoss(number quiccongestion.PacketNumber, lostBytes quicc
 	} else {
 		b.recoveryWindow = b.minCwnd
 	}
-	if ^quiccongestion.ByteCount(0)-b.recoveryLosses < lostBytes {
-		b.recoveryLosses = ^quiccongestion.ByteCount(0)
+	if lostBytes < 0 || b.recoveryLosses > maxCongestionByteCount-lostBytes {
+		b.recoveryLosses = maxCongestionByteCount
 	} else {
 		b.recoveryLosses += lostBytes
 	}
@@ -374,27 +398,51 @@ func (b *BBRSender) updateBandwidthFromPackets(now monotime.Time, acked []quicco
 	}
 	var best uint64
 	deliveredNow := b.deliveredBytes + bytes
+	var ackRate uint64
+	if !b.lastAckPointTime.IsZero() && deliveredNow > b.lastAckPointDelivered {
+		ackElapsed := now.Sub(b.lastAckPointTime)
+		if ackElapsed < time.Millisecond {
+			ackElapsed = time.Millisecond
+		}
+		ackRate = uint64(float64(deliveredNow-b.lastAckPointDelivered) / ackElapsed.Seconds())
+	}
+	var largestState bbrSendState
+	var largestPN quiccongestion.PacketNumber
+	var haveLargest bool
 	for _, packet := range acked {
 		state, ok := b.sendStates[packet.PacketNumber]
 		if !ok {
 			continue
 		}
+		if !haveLargest || packet.PacketNumber > largestPN {
+			largestPN, largestState, haveLargest = packet.PacketNumber, state, true
+		}
 		if deliveredNow <= state.deliveredAtSend {
 			continue
 		}
-		ackElapsed := now.Sub(state.deliveredTimeSend)
-		sendElapsed := now.Sub(state.sentTime)
-		interval := ackElapsed
-		if sendElapsed > interval {
-			interval = sendElapsed
+		// Bound the ACK arrival slope with the actual send slope. The old
+		// state.deliveredAtSend/RTT estimate interpreted a stream of individual
+		// delayed ACKs as one packet per RTT and forced BBR to its minimum rate.
+		sample := ackRate
+		if !b.lastAckPointSentTime.IsZero() && state.sentTime.After(b.lastAckPointSentTime) && state.sentBytesAtSend > b.lastAckPointSentBytes {
+			sendElapsed := state.sentTime.Sub(b.lastAckPointSentTime)
+			if sendElapsed < time.Millisecond {
+				sendElapsed = time.Millisecond
+			}
+			sendRate := uint64(float64(state.sentBytesAtSend-b.lastAckPointSentBytes) / sendElapsed.Seconds())
+			if sample == 0 || sendRate < sample {
+				sample = sendRate
+			}
 		}
-		if interval < time.Millisecond {
-			interval = time.Millisecond
-		}
-		sample := uint64(float64(deliveredNow-state.deliveredAtSend) / interval.Seconds())
 		if sample > best {
 			best = sample
 		}
+	}
+	if haveLargest {
+		b.lastAckPointTime = now
+		b.lastAckPointDelivered = deliveredNow
+		b.lastAckPointSentTime = largestState.sentTime
+		b.lastAckPointSentBytes = largestState.sentBytesAtSend
 	}
 	if best > 0 {
 		b.bwSamples[b.round%uint64(len(b.bwSamples))] = bwSample{round: b.round, bps: best}
@@ -529,8 +577,8 @@ func (b *BBRSender) updateWindow(acked quiccongestion.ByteCount) {
 		b.cwnd = minByteCount(b.maxCwnd, maxByteCount(b.minCwnd, b.cwnd+acked))
 	}
 	if b.inRecovery && acked > 0 {
-		if ^quiccongestion.ByteCount(0)-b.recoveryWindow < acked {
-			b.recoveryWindow = ^quiccongestion.ByteCount(0)
+		if acked < 0 || b.recoveryWindow > maxCongestionByteCount-acked {
+			b.recoveryWindow = maxCongestionByteCount
 		} else {
 			b.recoveryWindow += acked
 		}
@@ -561,6 +609,11 @@ func (b *BBRSender) OnRetransmissionTimeout(retransmitted bool) {
 	b.cwndGain = bbrStartupCwndGain
 	b.lastDelivery = 0
 	b.deliveredBytes = 0
+	b.totalSentBytes = 0
+	b.lastAckPointTime = 0
+	b.lastAckPointDelivered = 0
+	b.lastAckPointSentTime = 0
+	b.lastAckPointSentBytes = 0
 	b.sendStates = make(map[quiccongestion.PacketNumber]bbrSendState)
 	b.pacer = newPacer(b.bandwidth)
 	b.pacer.setMaxDatagramSize(b.maxDatagramSize)
