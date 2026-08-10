@@ -530,3 +530,19 @@ without a path-health gate.
 
 All temporary `:12444`, `:19093`, and `:19094` resources were stopped after
 the campaign. The fixed-egress development service was verified active.
+
+## Controller-telemetry smoke
+
+The same `995e5c2` Linux/amd64 build was used for a non-comparative 100 MiB
+BBR telemetry smoke. The response was intentionally allowed to run for 120 s
+and returned HTTP 200 with 40,189,185 bytes before curl timed out. At a
+three-second scrape, the client-side sender reported smoothed RTT 183 ms,
+maximum delivery estimate 334,837 B/s, pacing 334,837 B/s, congestion window
+6,099 bytes, 43 bytes in flight, and no recovery. The US-side sender reported
+smoothed RTT 195 ms, maximum delivery estimate 15,657,553 B/s, pacing
+19,571,941 B/s, congestion window 106,355 bytes, 108,789 bytes in flight,
+1,200 bytes/one packet lost, and recovery active. The directional difference
+is expected because each QUIC endpoint controls its own send direction; it is
+also precisely the information needed to distinguish a sender-controller
+problem from a receiver-side or path bottleneck. This smoke is observability
+evidence, not a performance claim.
