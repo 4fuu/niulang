@@ -445,10 +445,25 @@ func (b *BBRSender) updateBandwidthFromPackets(now monotime.Time, acked []quicco
 		b.lastAckPointSentBytes = largestState.sentBytesAtSend
 	}
 	if best > 0 {
-		b.bwSamples[b.round%uint64(len(b.bwSamples))] = bwSample{round: b.round, bps: best}
-		b.recomputeBandwidth()
+		b.recordBandwidthSample(best)
 	}
 	b.lastDelivery = now
+}
+
+func (b *BBRSender) recordBandwidthSample(sample uint64) {
+	if sample == 0 {
+		return
+	}
+	index := b.round % uint64(len(b.bwSamples))
+	current := b.bwSamples[index]
+	// Multiple ACK events belong to one packet-timed round. The BBR filter is
+	// a max filter over rounds, not a last-sample filter: a delayed ACK or an
+	// app-idle tail sample must not erase the useful delivery peak learned
+	// earlier in the same round.
+	if current.bps == 0 || current.round != b.round || sample > current.bps {
+		b.bwSamples[index] = bwSample{round: b.round, bps: sample}
+	}
+	b.recomputeBandwidth()
 }
 
 // recomputeBandwidth gives the delivery estimator a finite memory. Keeping a

@@ -152,6 +152,23 @@ func TestBBRSenderDoesNotDivideIndividualACKsByFullRTT(t *testing.T) {
 	}
 }
 
+func TestBBRSenderKeepsRoundPeakWhenLaterACKIsAppIdle(t *testing.T) {
+	sender := NewBBRSender(1200)
+	sender.round = 7
+	sender.recordBandwidthSample(2 * 1024 * 1024)
+	sender.recordBandwidthSample(64 * 1024)
+	if sender.maxBandwidth != 2*1024*1024 {
+		t.Fatalf("round peak was overwritten by tail sample: got %d", sender.maxBandwidth)
+	}
+	// A new round is allowed to install a lower estimate; the finite filter
+	// then decides when the old peak expires.
+	sender.round = 8
+	sender.recordBandwidthSample(128 * 1024)
+	if sender.maxBandwidth < 2*1024*1024 {
+		t.Fatalf("windowed max unexpectedly discarded prior round: %d", sender.maxBandwidth)
+	}
+}
+
 func TestBBRSenderTimeoutResetsToSafeStartup(t *testing.T) {
 	sender := NewBBRSender(1200)
 	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 100 * time.Millisecond})
