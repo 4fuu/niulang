@@ -15,8 +15,8 @@ func TestPlannerProtectsInteractiveFlows(t *testing.T) {
 	}
 }
 
-func TestPlannerStartsBulkWithTwoLanes(t *testing.T) {
-	p := New(DefaultConfig())
+func TestPlannerStartsBulkWithConfiguredLanes(t *testing.T) {
+	p := New(Config{MaxLanes: 8, InteractiveLanes: 1, BulkStartLanes: 2, MinimumMarginalGain: 0.10, InteractiveRTTBudget: 40 * time.Millisecond})
 	d := p.Decide(classifier.ClassBulk, Metrics{CurrentLanes: 1, HealthyLanes: 8, UDPHealthy: true})
 	if d.TargetLanes != 2 {
 		t.Fatalf("target lanes = %d, want 2", d.TargetLanes)

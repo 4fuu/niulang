@@ -162,7 +162,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, errors.New("initial lane count cannot exceed maximum lane count")
 	}
 	if cfg.BulkStartLanes <= 0 {
-		cfg.BulkStartLanes = 2
+		cfg.BulkStartLanes = 1
 	}
 	if cfg.BulkStartLanes > cfg.MaxLanes {
 		cfg.BulkStartLanes = cfg.MaxLanes

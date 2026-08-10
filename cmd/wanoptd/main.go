@@ -188,7 +188,7 @@ func parseOptions(args []string) (options, error) {
 	fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "how long to suppress UDP after repeated failures")
 	fs.IntVar(&opts.initialLanes, "initial-lanes", 1, "number of QUIC lanes to open after a flow is established (1-8)")
 	fs.IntVar(&opts.maxLanes, "max-lanes", 8, "maximum QUIC lanes per logical flow (1-8)")
-	fs.IntVar(&opts.bulkStartLanes, "bulk-start-lanes", 2, "target lane count when a flow becomes bulk")
+	fs.IntVar(&opts.bulkStartLanes, "bulk-start-lanes", 1, "target lane count when a flow becomes bulk (growth requires measured gain)")
 	fs.BoolVar(&opts.allowPrivate, "allow-private-destinations", false, "allow the server to reach private/link-local destinations")
 	fs.StringVar(&opts.logLevel, "log-level", "info", "debug, info, warn, or error")
 	fs.BoolVar(&opts.jsonLogs, "json-logs", false, "write structured JSON logs")
