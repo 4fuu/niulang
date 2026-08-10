@@ -162,7 +162,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.mode, "mode", "", "agent mode: local or server")
 	fs.StringVar(&opts.listen, "listen", "", "local SOCKS5 or remote agent listen address")
 	fs.StringVar(&opts.remote, "remote", "", "remote agent host:port in local mode")
-	fs.StringVar(&opts.localAddress, "local-address", "", "optional local source IP for outer lanes (useful to bypass a host TUN route)")
+	fs.StringVar(&opts.localAddress, "local-address", "", "optional local source IP, auto, or if:NAME for outer lanes (bypasses a host TUN route)")
 	fs.StringVar(&opts.serverName, "server-name", "", "verified TLS DNS name in local mode")
 	fs.StringVar(&opts.secretFile, "secret-file", "", "path to pre-shared session secret")
 	fs.StringVar(&opts.certFile, "tls-cert", "", "server TLS certificate path")

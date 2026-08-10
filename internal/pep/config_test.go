@@ -8,8 +8,10 @@ import (
 func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 	base := ClientConfig{ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "wanopt.test", Secret: []byte("0123456789abcdef")}
 	for name, mutate := range map[string]func(*ClientConfig){
-		"too many sessions": func(c *ClientConfig) { c.MaxSessions = maxConfiguredSessions + 1 },
-		"adaptive bounds":   func(c *ClientConfig) { c.AdaptiveMinBytesSec = 2; c.AdaptiveMaxBytesSec = 1 },
+		"too many sessions":     func(c *ClientConfig) { c.MaxSessions = maxConfiguredSessions + 1 },
+		"invalid local address": func(c *ClientConfig) { c.LocalAddress = "not-an-address" },
+		"empty local interface": func(c *ClientConfig) { c.LocalAddress = "if:" },
+		"adaptive bounds":       func(c *ClientConfig) { c.AdaptiveMinBytesSec = 2; c.AdaptiveMaxBytesSec = 1 },
 		"reserve without budget": func(c *ClientConfig) {
 			c.InteractiveReserveBytesPerSec = 1
 		},

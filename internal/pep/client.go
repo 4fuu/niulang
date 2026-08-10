@@ -77,6 +77,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.ListenAddr == "" || cfg.RemoteAddr == "" || cfg.ServerName == "" {
 		return nil, errors.New("client listen, remote, and TLS server name are required")
 	}
+	if err := validateLocalAddressSpec(cfg.LocalAddress); err != nil {
+		return nil, err
+	}
 	if len(cfg.Secret) < 16 {
 		return nil, errors.New("client secret must contain at least 16 bytes")
 	}

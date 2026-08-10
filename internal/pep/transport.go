@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -171,9 +173,9 @@ func tlsClientConfig(serverName string, roots *x509.CertPool) *tls.Config {
 func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string) (streamConn, error) {
 	var localAddr net.Addr
 	if localAddress != "" {
-		ip, err := netip.ParseAddr(localAddress)
+		ip, err := resolveLocalAddress(localAddress)
 		if err != nil {
-			return nil, fmt.Errorf("parse local address %q: %w", localAddress, err)
+			return nil, err
 		}
 		localAddr = &net.TCPAddr{IP: ip.AsSlice()}
 	}
@@ -247,9 +249,9 @@ func dialQUICConnection(ctx context.Context, remote, serverName string, roots *x
 	}
 	tlsCfg := tlsClientConfig(serverName, roots)
 	if localAddress != "" {
-		ip, parseErr := netip.ParseAddr(localAddress)
+		ip, parseErr := resolveLocalAddress(localAddress)
 		if parseErr != nil {
-			return nil, nil, fmt.Errorf("parse local address %q: %w", localAddress, parseErr)
+			return nil, nil, parseErr
 		}
 		remoteAddr, resolveErr := net.ResolveUDPAddr("udp", remote)
 		if resolveErr != nil {
@@ -271,6 +273,98 @@ func dialQUICConnection(ctx context.Context, remote, serverName string, roots *x
 		return nil, nil, err
 	}
 	return conn, nil, nil
+}
+
+// validateLocalAddressSpec checks syntax without requiring the address or
+// interface to be present at process startup. DHCP and interface state can
+// change after startup; resolution is therefore repeated for every outer
+// dial by resolveLocalAddress.
+func validateLocalAddressSpec(spec string) error {
+	if spec == "" || spec == "auto" {
+		return nil
+	}
+	if strings.HasPrefix(spec, "if:") {
+		if strings.TrimSpace(strings.TrimPrefix(spec, "if:")) == "" {
+			return errors.New("local interface name must not be empty")
+		}
+		return nil
+	}
+	if _, err := netip.ParseAddr(spec); err != nil {
+		return fmt.Errorf("parse local address %q: %w", spec, err)
+	}
+	return nil
+}
+
+type localAddressCandidate struct {
+	interfaceName string
+	address       netip.Addr
+}
+
+// resolveLocalAddress supports a literal IP, `if:NAME`, or `auto`. Interface
+// and automatic modes deliberately consider only IPv4 addresses on active,
+// non-loopback, non-point-to-point interfaces: the fixed deployment endpoint
+// is IPv4, and excluding point-to-point links prevents selecting the Clash
+// TUN itself. Ambiguity is an error rather than silently routing the optimizer
+// through an unintended NIC.
+func resolveLocalAddress(spec string) (netip.Addr, error) {
+	if err := validateLocalAddressSpec(spec); err != nil {
+		return netip.Addr{}, err
+	}
+	if spec != "auto" && !strings.HasPrefix(spec, "if:") {
+		return netip.ParseAddr(spec)
+	}
+
+	wantedInterface := ""
+	if strings.HasPrefix(spec, "if:") {
+		wantedInterface = strings.TrimSpace(strings.TrimPrefix(spec, "if:"))
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("enumerate local interfaces: %w", err)
+	}
+	candidates := make([]localAddressCandidate, 0, 2)
+	for _, iface := range interfaces {
+		if wantedInterface != "" && iface.Name != wantedInterface {
+			continue
+		}
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&(net.FlagLoopback|net.FlagPointToPoint) != 0 {
+			continue
+		}
+		addresses, addressErr := iface.Addrs()
+		if addressErr != nil {
+			continue
+		}
+		for _, raw := range addresses {
+			prefix, parseErr := netip.ParsePrefix(raw.String())
+			if parseErr != nil {
+				continue
+			}
+			address := prefix.Addr().Unmap()
+			if !address.Is4() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
+				continue
+			}
+			candidates = append(candidates, localAddressCandidate{interfaceName: iface.Name, address: address})
+		}
+	}
+	if len(candidates) == 0 {
+		if wantedInterface != "" {
+			return netip.Addr{}, fmt.Errorf("local interface %q has no active IPv4 address", wantedInterface)
+		}
+		return netip.Addr{}, errors.New("no active non-tunnel IPv4 address found")
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].interfaceName != candidates[j].interfaceName {
+			return candidates[i].interfaceName < candidates[j].interfaceName
+		}
+		return candidates[i].address.Less(candidates[j].address)
+	})
+	first := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if candidate.address != first.address {
+			return netip.Addr{}, fmt.Errorf("multiple physical IPv4 addresses found (%s on %s and %s on %s); use a literal IP or if:NAME", first.address, first.interfaceName, candidate.address, candidate.interfaceName)
+		}
+	}
+	return first.address, nil
 }
 
 func configureQUICController(conn *quic.Conn, cfg congestionConfig) {
