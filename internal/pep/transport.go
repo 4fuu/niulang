@@ -216,16 +216,26 @@ func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPoo
 // goodput against an otherwise identical TUIC-shaped reference.
 //
 // TUIC (via quinn) instead uses a fixed 8 MiB stream receive window and a
-// 16 MiB connection send window with no ramp at all. These defaults start at
-// that parity point and additionally allow auto-tuning upward for paths whose
-// bandwidth-delay product exceeds it. The connection window is what bounds
-// per-connection receive memory: it caps the aggregate across all streams, so
-// a large per-stream window does not multiply by the stream limit.
+// 16 MiB connection send window with no ramp at all. These constants match it
+// exactly, initial and maximum alike, so no ramp remains.
+//
+// Allowing the window to auto-tune *above* that point was measured and
+// rejected. It bought a little bulk goodput (58.5--64.8 against 55.4--58.5
+// Mbit/s on a 50 MiB transfer) by letting the sender hold a deeper standing
+// queue at the bottleneck, and it cost far more than it bought at the tail:
+// interactive requests issued during that transfer went from a 489--701 ms
+// 95th percentile to 976--1062 ms, and from an 883 ms worst case to 1339 ms.
+// Protecting interactive latency under bulk load is the point of this
+// transport, so the ceiling stays where TUIC puts it.
+//
+// The connection window is what bounds per-connection receive memory: it caps
+// the aggregate across all streams, so a large per-stream window does not
+// multiply by the stream limit.
 const (
 	initialStreamReceiveWindow     = 8 * 1024 * 1024
-	maxStreamReceiveWindow         = 32 * 1024 * 1024
+	maxStreamReceiveWindow         = 8 * 1024 * 1024
 	initialConnectionReceiveWindow = 16 * 1024 * 1024
-	maxConnectionReceiveWindow     = 64 * 1024 * 1024
+	maxConnectionReceiveWindow     = 16 * 1024 * 1024
 	// A bounded stream fan-out lets one QUIC connection carry multiple
 	// independent PEP flows, like TUIC, without an unbounded stream commitment.
 	maxIncomingStreams = 128

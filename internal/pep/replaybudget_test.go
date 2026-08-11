@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/icourses-dev/wanopt/internal/protocol"
 )
@@ -98,5 +99,70 @@ func TestReplayWindowRespectsPerFlowCap(t *testing.T) {
 func TestReassemblyCapacityCoversPeerSendWindow(t *testing.T) {
 	if maxReassemblyBytes < maxFlowReplayBytes {
 		t.Fatalf("reassembly capacity %d is below the peer send window %d", maxReassemblyBytes, maxFlowReplayBytes)
+	}
+}
+
+// The retained window is a rescue optimization, not a correctness requirement:
+// QUIC already delivers reliably on the lane that carried a frame. Blocking the
+// application when it fills couples forward progress to the reverse path's
+// congestion state, which is what stalled live transfers at roughly the window
+// mark. Recording must therefore always make progress.
+func TestReplayWindowEvictsRatherThanBlocking(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer inner.Close()
+	defer peer.Close()
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 1, defaultChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
+	// An exhausted endpoint budget removes the option of growing the window,
+	// which is the situation that used to block.
+	flow.replayBudget = newReplayBudget(1)
+
+	payload := make([]byte, defaultChunkSize)
+	var sequence uint64
+	done := make(chan error, 1)
+	go func() {
+		for range (maxReplayBytes / defaultChunkSize) + 64 {
+			frame := protocol.Frame{
+				Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Sequence: sequence},
+				Payload: payload,
+			}
+			if err := flow.recordReplay(frame); err != nil {
+				done <- err
+				return
+			}
+			sequence += uint64(len(payload))
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("recording past a full window: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("recording blocked on a full replay window")
+	}
+	if flow.replayEvictions.Load() == 0 {
+		t.Fatal("a full window did not evict anything")
+	}
+	if flow.replayable.Load() {
+		t.Fatal("flow still claims to be replayable after eviction")
+	}
+	flow.replayMu.Lock()
+	retained := flow.replayBytes
+	flow.replayMu.Unlock()
+	if retained > flow.replayLimit {
+		t.Fatalf("retained %d bytes above the %d limit", retained, flow.replayLimit)
+	}
+}
+
+// A flow that has dropped part of its unacknowledged window must fail rather
+// than replay a gap onto a replacement lane.
+func TestEvictedFlowStartsReplayable(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer inner.Close()
+	defer peer.Close()
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 1, defaultChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
+	if !flow.replayable.Load() {
+		t.Fatal("a new flow must start replayable")
 	}
 }

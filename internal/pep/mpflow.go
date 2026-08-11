@@ -255,8 +255,12 @@ type multipathFlow struct {
 	idleTimeout     time.Duration
 	maxLifetime     time.Duration
 
-	replayStalls  atomic.Uint64
-	replayStalled atomic.Int64
+	replayStalls    atomic.Uint64
+	replayStalled   atomic.Int64
+	replayEvictions atomic.Uint64
+	// replayable is cleared once any retained frame has been evicted, after
+	// which the flow can no longer be moved onto a replacement lane.
+	replayable atomic.Bool
 
 	replayMu     sync.Mutex
 	replay       map[uint64]protocol.Frame
@@ -290,6 +294,7 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 	if len(loggers) > 0 && loggers[0] != nil {
 		f.logger = loggers[0]
 	}
+	f.replayable.Store(true)
 	f.idleTimeout = defaultFlowIdleTimeout
 	f.maxLifetime = defaultFlowMaxLifetime
 	f.lastActivity.Store(f.started.UnixNano())
@@ -912,7 +917,13 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				return stats, nil
 			}
 			if len(f.healthyLanes()) > 0 {
-				if replayErr := f.replayPending(ctx); replayErr == nil {
+				if !f.replayable.Load() {
+					// Part of the unacknowledged window was released to keep
+					// the application moving, so the replacement lane cannot be
+					// given a complete byte stream. Failing closed is required:
+					// replaying a gap would silently corrupt the flow.
+					err = fmt.Errorf("lane failed (%v): flow is no longer replayable", err)
+				} else if replayErr := f.replayPending(ctx); replayErr == nil {
 					continue
 				} else {
 					err = fmt.Errorf("lane failed (%v), replay failed: %w", err, replayErr)
@@ -1385,17 +1396,47 @@ func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.
 			f.replayMu.Unlock()
 			return nil
 		}
+		// The window is full and cannot grow. Waiting here throttles the
+		// application, and on a lossy path that is exactly the wrong
+		// behaviour: these frames are released by the peer's protocol
+		// acknowledgements, which travel as ordinary stream data on the
+		// reverse direction and are therefore subject to the reverse path's
+		// congestion window. When that window collapses under heavy loss the
+		// acknowledgements stall, the window fills, and a transfer that QUIC
+		// is still delivering perfectly well grinds to a halt. Measured on the
+		// live 30-50% loss path, this is what stopped transfers at roughly the
+		// 8 MiB window mark.
+		//
+		// The retained window is a rescue optimization, not a correctness
+		// requirement: QUIC already delivers reliably on the lane that carried
+		// the frame. Drop the oldest entries instead and record that the flow
+		// can no longer be replayed onto a replacement lane. A lane failure
+		// then fails the flow, which is the same outcome an unreplayable flow
+		// already had, without the throughput coupling.
+		f.evictOldestReplayLocked(uint64(len(frame.Payload)))
 		f.replayMu.Unlock()
-		stallStarted := time.Now()
-		select {
-		case <-f.replayNotify:
-		case <-f.done:
-			return errors.New("flow closed while waiting for replay space")
-		case <-ctx.Done():
-			return ctx.Err()
+	}
+}
+
+// evictOldestReplayLocked frees at least needed bytes by discarding the
+// lowest-sequence retained frames. It must be called with replayMu held.
+func (f *multipathFlow) evictOldestReplayLocked(needed uint64) {
+	sequences := make([]uint64, 0, len(f.replay))
+	for sequence := range f.replay {
+		sequences = append(sequences, sequence)
+	}
+	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
+	freed := uint64(0)
+	for _, sequence := range sequences {
+		if freed >= needed && len(f.replay)+1 <= maxReplayFrames {
+			break
 		}
-		f.replayStalls.Add(1)
-		f.replayStalled.Add(int64(time.Since(stallStarted)))
+		entry := f.replay[sequence]
+		delete(f.replay, sequence)
+		f.replayBytes -= uint64(len(entry.Payload))
+		freed += uint64(len(entry.Payload))
+		f.replayEvictions.Add(1)
+		f.replayable.Store(false)
 	}
 }
 
@@ -1947,6 +1988,7 @@ func (f *multipathFlow) closeAll() {
 func (f *multipathFlow) recordSendStalls(stats *FlowStats) {
 	stats.SendStalls = f.replayStalls.Load()
 	stats.SendStalled = time.Duration(f.replayStalled.Load())
+	stats.ReplayEvictions = f.replayEvictions.Load()
 }
 
 // growReplayLimitLocked raises this flow's send window so it can cover the

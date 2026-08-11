@@ -61,6 +61,7 @@ type options struct {
 	cpuProfile   string
 	verbose      bool
 	latency      bool
+	interactive  bool
 }
 
 func main() {
@@ -94,6 +95,7 @@ func run(args []string) error {
 	fs.StringVar(&opts.cpuProfile, "cpuprofile", "", "write a CPU profile to this path")
 	fs.BoolVar(&opts.verbose, "verbose", false, "log transport diagnostics")
 	fs.BoolVar(&opts.latency, "latency", false, "also measure small-request latency")
+	fs.BoolVar(&opts.interactive, "interactive", false, "issue small requests during the bulk transfer and report their latency")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -195,6 +197,14 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	var wg sync.WaitGroup
 	results := make([]int64, flows)
 	errs := make([]error, flows)
+	// The scheduler's whole purpose is that a bulk transfer must not push
+	// interactive latency past its budget, so measure that directly rather
+	// than inferring it from throughput.
+	probeStop := make(chan struct{})
+	probeDone := make(chan []time.Duration, 1)
+	if opts.interactive {
+		go func() { probeDone <- probeInteractive(ctx, harness.socks, origin, probeStop) }()
+	}
 	started := time.Now()
 	for i := range flows {
 		wg.Add(1)
@@ -206,6 +216,11 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	}
 	wg.Wait()
 	elapsed := time.Since(started)
+	var probes []time.Duration
+	if opts.interactive {
+		close(probeStop)
+		probes = <-probeDone
+	}
 
 	var total int64
 	complete := true
@@ -228,12 +243,54 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	if note == "" {
 		note = fmt.Sprintf("udp_up=%d/%d udp_down=%d/%d", up.PacketsOut, up.PacketsIn, down.PacketsOut, down.PacketsIn)
 	}
+	if opts.interactive {
+		note = summarizeProbes(probes) + " " + note
+	}
 	return trialResult{
 		seconds:     elapsed.Seconds(),
 		mbitsPerSec: float64(total) * 8 / elapsed.Seconds() / 1e6,
 		complete:    complete,
 		note:        note,
 	}
+}
+
+// probeInteractive issues one small request at a time until stopped, and
+// returns each request's latency. Failures are recorded as the elapsed time so
+// a stalled probe cannot be silently dropped from the distribution.
+func probeInteractive(ctx context.Context, socksAddr string, o *origin, stop <-chan struct{}) []time.Duration {
+	var samples []time.Duration
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return samples
+		case <-ctx.Done():
+			return samples
+		case <-ticker.C:
+		}
+		started := time.Now()
+		_, err := fetch(ctx, socksAddr, o.smallAddr, o.smallSize)
+		elapsed := time.Since(started)
+		if err != nil && ctx.Err() != nil {
+			return samples
+		}
+		samples = append(samples, elapsed)
+	}
+}
+
+func summarizeProbes(samples []time.Duration) string {
+	if len(samples) == 0 {
+		return "interactive=none"
+	}
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	pick := func(q float64) float64 {
+		index := int(q * float64(len(sorted)-1))
+		return float64(sorted[index].Microseconds()) / 1000
+	}
+	return fmt.Sprintf("interactive_n=%d p50=%.0fms p95=%.0fms max=%.0fms",
+		len(sorted), pick(0.5), pick(0.95), float64(sorted[len(sorted)-1].Microseconds())/1000)
 }
 
 func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) error {

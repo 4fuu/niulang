@@ -32,6 +32,10 @@ type FlowStats struct {
 	// part of the normal completion record rather than a debug-only counter.
 	SendStalls  uint64
 	SendStalled time.Duration
+	// ReplayEvictions counts frames dropped from the rescue window to keep the
+	// application moving. A non-zero value means the flow could not have been
+	// moved onto a replacement lane.
+	ReplayEvictions uint64
 }
 
 type LaneStats struct {
