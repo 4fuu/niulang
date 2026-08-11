@@ -228,7 +228,13 @@ type ClientConfig struct {
 	Token      []byte
 	Transport  Transport
 	Congestion CongestionKind
-	Logger     *slog.Logger
+	// LocalAddress binds the outer UDP socket to a specific local IP. On a
+	// host running a TUN-mode proxy, an unbound socket is captured by the TUN
+	// and the measurement would run through that tunnel rather than the path
+	// under test. wanopt has the same option, and a comparison is only valid
+	// when both sides use it identically.
+	LocalAddress string
+	Logger       *slog.Logger
 }
 
 type Client struct {
@@ -341,13 +347,37 @@ func (c *Client) connection(ctx context.Context) (*quic.Conn, bool, error) {
 		MinVersion: tls.VersionTLS13, ServerName: c.cfg.ServerName,
 		NextProtos: []string{ALPN}, RootCAs: c.cfg.RootCAs,
 	}
-	conn, err := quic.DialAddr(ctx, c.cfg.RemoteAddr, tlsCfg, c.cfg.Transport.quicConfig())
+	conn, err := c.dial(ctx, tlsCfg)
 	if err != nil {
 		return nil, false, err
 	}
 	applyCongestion(conn, c.cfg.Congestion)
 	c.conn = conn
 	return conn, true, nil
+}
+
+func (c *Client) dial(ctx context.Context, tlsCfg *tls.Config) (*quic.Conn, error) {
+	if c.cfg.LocalAddress == "" {
+		return quic.DialAddr(ctx, c.cfg.RemoteAddr, tlsCfg, c.cfg.Transport.quicConfig())
+	}
+	local, err := net.ResolveUDPAddr("udp", net.JoinHostPort(c.cfg.LocalAddress, "0"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve local address: %w", err)
+	}
+	remote, err := net.ResolveUDPAddr("udp", c.cfg.RemoteAddr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve remote address: %w", err)
+	}
+	packet, err := net.ListenUDP("udp", local)
+	if err != nil {
+		return nil, fmt.Errorf("bind local address: %w", err)
+	}
+	conn, err := quic.Dial(ctx, packet, remote, tlsCfg, c.cfg.Transport.quicConfig())
+	if err != nil {
+		_ = packet.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (c *Client) discard(conn *quic.Conn) {

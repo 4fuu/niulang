@@ -269,8 +269,8 @@ type multipathFlow struct {
 	replayLimit   uint64
 	replayGranted uint64
 	replayBudget  *replayBudget
-	acked        uint64
-	highestSent  uint64
+	acked         uint64
+	highestSent   uint64
 }
 
 func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget, registry *metrics.Registry, loggers ...*slog.Logger) *multipathFlow {
@@ -1524,7 +1524,29 @@ func (f *multipathFlow) writeACK(ctx context.Context, sequence uint64, direction
 	return lastErr
 }
 
-const ackCoalesceDelay = 2 * time.Millisecond
+// A protocol ACK is a window-release message layered above a reliable
+// transport, not a loss-recovery signal: QUIC already retransmits. Its rate
+// should therefore follow how fast the sender's replay window is being
+// consumed, not how often the receiver happens to read.
+//
+// Acknowledging every 2 ms sent thousands of tiny frames up the reverse
+// direction of a download. On a path losing 40% of packets that is actively
+// harmful: the reverse stream is ordered, so a lost ACK frame blocks the ones
+// behind it, and the retransmissions consume the client's congestion window
+// and delay QUIC's own acknowledgements, which is the feedback the sender's
+// congestion controller runs on.
+//
+// Acknowledge instead once a meaningful part of the window has been consumed,
+// or after a bounded delay, whichever comes first. The delay stays far below
+// one long-haul round trip, and it cannot hold up application bytes in any
+// case: a half-close is acknowledged by the separate immediate final-ACK path,
+// so this delay only defers releasing replay-window space. The byte threshold
+// stays far below the smallest replay window so a sender never runs out of
+// window waiting for one.
+const (
+	ackCoalesceDelay  = 50 * time.Millisecond
+	ackBytesThreshold = 256 * 1024
+)
 
 // scheduleACK publishes the newest cumulative receive sequence without
 // blocking application delivery on a control-frame write. QUIC already
@@ -1558,27 +1580,29 @@ func (f *multipathFlow) ackLoop(ctx context.Context) {
 		case <-f.done:
 			return
 		}
-		// A tiny delay turns a burst of small TLS/application reads into one
-		// cumulative frame while staying far below a cross-Pacific RTT.
-		timer := time.NewTimer(ackCoalesceDelay)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
+		// Coalesce unless the sender's window is already being consumed fast
+		// enough that waiting could stall it.
+		if f.ackSequence.Load() < sent+ackBytesThreshold {
+			timer := time.NewTimer(ackCoalesceDelay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
-			}
-			return
-		case <-f.done:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
+				return
+			case <-f.done:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
+				return
 			}
-			return
 		}
 		for {
 			if f.ackClosing.Load() {

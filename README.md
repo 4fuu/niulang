@@ -30,13 +30,37 @@ tunnels. The latest five-block real-link evidence is recorded in
 [`docs/MEASUREMENTS-20260810.md`](docs/MEASUREMENTS-20260810.md); the earlier
 pilot remains in [`docs/MEASUREMENTS-20260809.md`](docs/MEASUREMENTS-20260809.md).
 
+### Measuring against a reference
+
+The live China-US link moves between roughly 0% and 50% packet loss within
+minutes, so running one transport's trials and then another's compares two
+different paths rather than two transports. Two controls exist for this:
+
+- `internal/pathsim` is a deterministic UDP path emulator — fixed delay, seeded
+  loss, a bottleneck with tail-drop queueing, and an optional per-source-address
+  policer. One seed reproduces one loss pattern.
+- `internal/baseline` (runnable as `cmd/wanoptref`) is a TUIC-shaped reference
+  proxy: one authenticated QUIC connection, one stream per relayed TCP
+  connection, unframed copying, TUIC's published transport windows — built on
+  the same QUIC stack and controllers wanopt uses, so a measured gap is
+  attributable to the transport design rather than to the language or library.
+
+`cmd/wanoptbench` runs both over one emulated path; `scripts/bench_matrix.sh`
+is the standard matrix and `scripts/bench_live_matched.sh` alternates trials
+between two running proxies on a real link. On the emulated matrix, wanopt is
+at or above the reference for single-flow goodput at 0-20% loss, for 4 and 8
+concurrent flows, for cold and warm request latency, and for CPU-bound datapath
+cost; see [`docs/PERFORMANCE-20260812.md`](docs/PERFORMANCE-20260812.md) for
+the numbers, the defects they exposed, and the limits of that evidence.
+
 The prototype is still not safe to use as a general-purpose production
-tunnel: BBR has failed on the measured path and broader loss/soak campaigns
-remain outstanding. UDP is currently carried over reliable stream frames
-(native QUIC DATAGRAM and TUN/VLESS ingress are not yet implemented), and a
-mid-session rescue creates a fresh authenticated association rather than
-resuming the old remote relay. The project has not passed all
-controlled-loss/resource release gates in
+tunnel. Broader loss/soak campaigns remain outstanding, and a live campaign at
+33-40% measured loss still shows worse and less predictable completion than the
+reference — a regime the emulator's independent-loss model does not reproduce.
+UDP is currently carried over reliable stream frames (native QUIC DATAGRAM and
+TUN/VLESS ingress are not yet implemented), and a mid-session rescue creates a
+fresh authenticated association rather than resuming the old remote relay. The
+project has not passed all controlled-loss/resource release gates in
 [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals
