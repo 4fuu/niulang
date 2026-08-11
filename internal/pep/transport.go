@@ -202,6 +202,35 @@ func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPoo
 	return tlsConn, nil
 }
 
+// Flow-control windows are the single largest measured determinant of
+// long-haul goodput for this transport, so they are named constants rather
+// than inline literals.
+//
+// quic-go auto-tunes its receive windows upward from an initial value, but the
+// growth heuristic requires the receiver to consume a large fraction of the
+// window within a small multiple of the RTT. On a 200 ms path with a few
+// percent packet loss, loss recovery delays consumption enough that the
+// window stops growing, and the *receive window* rather than congestion
+// control becomes the binding constraint. Measured with cmd/wanoptbench at
+// 200 ms RTT and 1--5% loss, a 512 KiB initial stream window cost 30--40%
+// goodput against an otherwise identical TUIC-shaped reference.
+//
+// TUIC (via quinn) instead uses a fixed 8 MiB stream receive window and a
+// 16 MiB connection send window with no ramp at all. These defaults start at
+// that parity point and additionally allow auto-tuning upward for paths whose
+// bandwidth-delay product exceeds it. The connection window is what bounds
+// per-connection receive memory: it caps the aggregate across all streams, so
+// a large per-stream window does not multiply by the stream limit.
+const (
+	initialStreamReceiveWindow     = 8 * 1024 * 1024
+	maxStreamReceiveWindow         = 32 * 1024 * 1024
+	initialConnectionReceiveWindow = 16 * 1024 * 1024
+	maxConnectionReceiveWindow     = 64 * 1024 * 1024
+	// A bounded stream fan-out lets one QUIC connection carry multiple
+	// independent PEP flows, like TUIC, without an unbounded stream commitment.
+	maxIncomingStreams = 128
+)
+
 func quicConfig() *quic.Config {
 	return &quic.Config{
 		HandshakeIdleTimeout: 10 * time.Second,
@@ -210,15 +239,12 @@ func quicConfig() *quic.Config {
 		// request timeouts while allowing several PTOs on a 200 ms WAN.
 		MaxIdleTimeout:                 15 * time.Second,
 		KeepAlivePeriod:                5 * time.Second,
-		InitialStreamReceiveWindow:     512 * 1024,
-		MaxStreamReceiveWindow:         8 * 1024 * 1024,
-		InitialConnectionReceiveWindow: 1 * 1024 * 1024,
-		MaxConnectionReceiveWindow:     64 * 1024 * 1024,
-		// A bounded stream fan-out lets one QUIC connection carry multiple
-		// independent PEP flows, like TUIC, without allowing an unbounded
-		// stream/receive-window memory commitment.
-		MaxIncomingStreams:    128,
-		MaxIncomingUniStreams: 0,
+		InitialStreamReceiveWindow:     initialStreamReceiveWindow,
+		MaxStreamReceiveWindow:         maxStreamReceiveWindow,
+		InitialConnectionReceiveWindow: initialConnectionReceiveWindow,
+		MaxConnectionReceiveWindow:     maxConnectionReceiveWindow,
+		MaxIncomingStreams:             maxIncomingStreams,
+		MaxIncomingUniStreams:          0,
 		// The China path has a smaller effective UDP MTU than this host's
 		// interface. Disable probing until path-specific MTU discovery is
 		// available; otherwise a successful probe can raise packets above the
