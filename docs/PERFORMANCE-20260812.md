@@ -40,8 +40,10 @@ comparisons against native TUIC remain worthwhile and are not replaced by it.
 
 ## What was actually wrong
 
-Five defects were found. Each was located by measurement, not inspection, and
-each is individually confirmed by a before/after number.
+Seven defects were found. Each was located by measurement, not inspection, and
+each is individually confirmed by a before/after number. The first five were
+found with the emulator; the sixth only appeared on the live link and is the
+one that made wanopt fail where the reference did not.
 
 ### 1. Flow-control windows never reached the path
 
@@ -122,6 +124,49 @@ blocks those behind it, and the retransmissions consume the client's congestion
 window and delay QUIC's own acknowledgements — the feedback the sender's
 congestion controller runs on. Acknowledgement is now driven by consumed window
 bytes with a bounded delay.
+
+### 6. The rescue window throttled the data path
+
+This was the defect behind the live-path stalls, and it is the most important
+one, because it made wanopt fail where the reference did not.
+
+The replay window is released by the peer's protocol acknowledgements. Those
+travel as ordinary stream data on the reverse direction, so they are subject to
+the reverse path's congestion window. When that window collapses under heavy
+loss the acknowledgements stall, the window fills, and the sender blocks — a
+transfer that QUIC is still delivering perfectly well grinds to a halt. On the
+live link at 30–50% loss this stopped transfers at roughly the 8 MiB window
+mark: wanopt completed 1 of 6 trials where the reference completed 6 of 6. The
+mechanism was confirmed by changing only the *client's* controller to one whose
+congestion window does not collapse, which took the same transfers from
+0.48 to 5.7 Mbit/s without touching the forward direction at all.
+
+TUIC has no such reverse-path dependency, because it has no application-level
+reliability layer to release.
+
+The window is a rescue optimization, not a correctness requirement: QUIC
+already delivers reliably on the lane that carried the frame. When it is full
+and cannot grow, the oldest entries are now dropped and the flow is marked
+unreplayable; a later lane failure then fails the flow closed, which is the
+same outcome an unreplayable flow already had, without coupling forward
+progress to the reverse path.
+
+### 7. Larger receive windows traded the interactive tail for bulk goodput
+
+Letting the receive windows auto-tune above TUIC's fixed values bought a little
+bulk goodput by holding a deeper standing queue at the bottleneck, and cost far
+more at the tail. Measured with `--interactive`, which issues small requests
+during a 50 MiB transfer:
+
+| Windows | Bulk Mbit/s | Interactive p50 | p95 | max |
+| --- | ---: | ---: | ---: | ---: |
+| auto-tune to 32/64 MiB | 58.5–64.8 | 208–222 ms | 976–1062 ms | 1114–1339 ms |
+| fixed at TUIC's 8/16 MiB | 55.4–58.5 | 259–338 ms | 489–701 ms | 527–883 ms |
+| reference (TUIC's own) | 56.0–58.3 | 254–338 ms | 373–540 ms | 526–767 ms |
+
+Protecting interactive latency under bulk load is the point of this transport,
+so the ceiling stays where TUIC puts it. wanopt's p95 is still somewhat above
+the reference's; that gap is an open item.
 
 ## Emulated-path results
 
@@ -231,14 +276,33 @@ because each produced a confident but wrong result:
   measured 1.19 Mbit/s against the reference's 4.52; with a threaded oracle and
   nothing else changed, the two measured 0.478 and 0.522.
 
-With all three corrected, in a window where 20 ICMP probes showed 30% loss and
-178 ms RTT, 17 alternating 4 MiB trials gave: reference 8/8 complete at a
-0.522 Mbit/s median, wanopt 9/9 complete at 0.478. Both transports delivered
-every byte; the path itself was delivering about half a megabit.
+With all three corrected, the live link then exposed the sixth defect above.
+In a window at 30–50% loss, wanopt completed 1 of 6 trials — stalling at
+roughly the 8 MiB replay window each time — while the reference completed 6 of
+6. Changing only the wanopt client's controller to one whose congestion window
+does not collapse took the same transfers from 0.478 to 5.7 Mbit/s, which
+identified the reverse-path coupling; the fix was to stop the rescue window
+blocking the sender.
 
-That window is not evidence of parity at useful throughput — it is evidence
-that the two behave the same on a badly degraded path. The emulated matrix is
-the stronger evidence, and the live link's variance is exactly why it exists.
+After that fix, with both stacks on `bbr-tuic` and 10 ICMP probes showing 33%
+loss at 178 ms, 20 alternating 4 MiB trials gave:
+
+| | Complete | Median Mbit/s | Paired rounds won |
+| --- | ---: | ---: | ---: |
+| Reference (TUIC-shaped) | 10/10 | 5.42 | 1 |
+| wanopt | 10/10 | 6.67 | 9 |
+
+No trial on either side failed, against 1-of-6 completions for wanopt before
+the fix. Held to the same controller on the same path, wanopt is 23% ahead on
+the median and ahead in 9 of 10 paired rounds.
+
+A separate 10-round campaign with both stacks on the fixed-rate controller gave
+the reference 3.08 Mbit/s and wanopt 5.88, with wanopt ahead in all 10 rounds.
+
+These are single windows on a link whose loss rate moves by tens of percent
+within minutes, so they should be read as "the stall is gone and wanopt is at
+least competitive", not as a precise ratio. The emulated matrix remains the
+controlled evidence.
 
 ## Reproducing
 
@@ -249,16 +313,39 @@ go test ./...
 # One cell, both stacks, on a per-flow-policed path:
 go run ./cmd/wanoptbench --rtt 200 --loss 1 --rate 400 --per-flow-rate 25 \
     --bytes 104857600 --lanes 4 --initial-lanes 4 --trials 3
+
+# Interactive latency during a bulk transfer (the Stage 2 roadmap gate):
+go run ./cmd/wanoptbench --rtt 200 --loss 1 --rate 100 \
+    --bytes 52428800 --interactive --trials 3
+
+# Correlated loss, controller held constant:
+go run ./cmd/wanoptbench --rtt 178 --loss 35 --loss-burst 10 --rate 50 \
+    --bytes 4194304 --congestion brutal --brutal-rate 12 --trials 5
 ```
 
 ## Limits of this evidence
 
-The emulator models independent per-packet loss. Real long-haul loss is bursty
-and correlated, and the live campaign below found a failure mode the emulator
-did not reproduce. It also models one bottleneck queue per direction plus an
-optional per-source policer; it does not model reordering, variable delay, or
-middlebox behavior. It runs both endpoints on one machine, so it cannot expose
-a defect that only appears with a real NIC, a real scheduler, or a real MTU.
+The emulator's per-packet loss is either independent or a two-state Gilbert
+chain. Real long-haul loss is neither exactly; the live link found a failure
+mode (defect 6) that the emulator did not reproduce until the mechanism was
+already understood. It models one bottleneck queue per direction plus an
+optional per-source policer, and does not model reordering, variable delay,
+asymmetric loss, or middlebox behavior. It runs both endpoints on one machine,
+so it cannot expose a defect that only appears with a real NIC, a real
+scheduler, or a real MTU.
+
+Asymmetric loss is the most valuable missing feature: defect 6 was a
+reverse-path dependency, and a model that can make one direction much worse
+than the other would have caught it and would guard against its return.
+
+The live campaigns are single windows on a link whose loss rate moves by tens
+of percent within minutes. They support "the stall is gone" and "wanopt is at
+least competitive"; they do not support a precise ratio.
+
+Two results are open items rather than wins: under extreme correlated loss
+(35% in 10-packet bursts) wanopt trails the reference on median goodput at an
+equal controller, and its interactive tail under bulk load is still above the
+reference's.
 
 None of these results say anything about correctness under lane failure, UDP
 blocking, or restart. Those gates remain as stated in

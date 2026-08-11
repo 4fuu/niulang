@@ -53,15 +53,21 @@ concurrent flows, for cold and warm request latency, and for CPU-bound datapath
 cost; see [`docs/PERFORMANCE-20260812.md`](docs/PERFORMANCE-20260812.md) for
 the numbers, the defects they exposed, and the limits of that evidence.
 
-The prototype is still not safe to use as a general-purpose production
-tunnel. Broader loss/soak campaigns remain outstanding, and a live campaign at
-33-40% measured loss still shows worse and less predictable completion than the
-reference — a regime the emulator's independent-loss model does not reproduce.
-UDP is currently carried over reliable stream frames (native QUIC DATAGRAM and
-TUN/VLESS ingress are not yet implemented), and a mid-session rescue creates a
-fresh authenticated association rather than resuming the old remote relay. The
-project has not passed all controlled-loss/resource release gates in
-[`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
+On the live China-US link at 33% measured loss, 20 alternating 4 MiB trials
+with both stacks on the same controller completed 10/10 each, with wanopt 23%
+ahead on the median and ahead in 9 of 10 paired rounds. Before the rescue-window
+fix described in that document, wanopt completed 1 of 6 trials in a comparable
+window while the reference completed 6 of 6.
+
+The prototype is still not safe to use as a general-purpose production tunnel.
+Broader loss/soak campaigns remain outstanding; under extreme correlated loss
+(35% in 10-packet bursts) wanopt still trails the reference on median goodput
+at an equal controller, and its interactive tail under bulk load remains above
+the reference's. UDP is currently carried over reliable stream frames (native
+QUIC DATAGRAM and TUN/VLESS ingress are not yet implemented), and a mid-session
+rescue creates a fresh authenticated association rather than resuming the old
+remote relay. The project has not passed all controlled-loss/resource release
+gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals
 
