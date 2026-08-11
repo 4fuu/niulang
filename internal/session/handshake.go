@@ -34,6 +34,10 @@ const (
 	// The capability is negotiated so a new client never sends the flag to an
 	// older production peer that would reject unknown frame flags.
 	CapabilityReserveControl uint64 = 1 << 1
+	// CapabilityFastLaneJoin allows a separately authenticated QUIC pool to
+	// attach a stream to an existing logical flow without repeating a full
+	// QUIC handshake for every bulk lane.
+	CapabilityFastLaneJoin uint64 = 1 << 2
 )
 
 var helloOKCapabilityMarker = [8]byte{'W', 'O', 'C', 'A', 'P', '0', '0', '1'}
@@ -42,7 +46,11 @@ type HelloKind byte
 
 const (
 	HelloNew HelloKind = iota
+	// HelloJoin retains wire value 1 for compatibility with deployed peers.
 	HelloJoin
+	// HelloPool authenticates a QUIC connection-level pool without creating a
+	// destination flow. It is accepted only on QUIC connections.
+	HelloPool
 )
 
 // Hello is authenticated with the configured pre-shared secret. TLS protects
@@ -94,7 +102,7 @@ func (h *Hello) UnmarshalBinary(b []byte) error {
 	h.LaneID = binary.BigEndian.Uint64(b[40:48])
 	h.Kind = HelloKind(b[48])
 	copy(h.MAC[:], b[49:81])
-	if h.Kind != HelloNew && h.Kind != HelloJoin {
+	if h.Kind != HelloNew && h.Kind != HelloJoin && h.Kind != HelloPool {
 		return errors.New("unsupported hello kind")
 	}
 	return nil

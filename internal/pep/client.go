@@ -3,6 +3,7 @@ package pep
 import (
 	"context"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -108,7 +109,24 @@ type Client struct {
 	quicPoolFast          bool
 	quicPoolControl       bool
 	quicPoolAuthenticated bool
+
+	// bulkMu protects a bounded secondary QUIC connection used only for fast
+	// lane joins. Keeping it separate from the control pool preserves the
+	// control lane's congestion state while avoiding a fresh QUIC handshake at
+	// the bulk-promotion boundary.
+	bulkMu                 sync.Mutex
+	bulkConn               *quic.Conn
+	bulkPacket             net.PacketConn
+	bulkController         wancongestion.TelemetryProvider
+	bulkFastJoin           bool
+	bulkAuthenticated      bool
+	bulkActive             int
+	bulkIdleTimer          *time.Timer
+	bulkJoinUnavailableTil time.Time
 }
+
+const bulkPoolIdleTimeout = 30 * time.Second
+const bulkJoinCapabilityRetry = 60 * time.Second
 
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.ListenAddr == "" || cfg.RemoteAddr == "" || cfg.ServerName == "" {
@@ -291,6 +309,20 @@ func (c *Client) closeQUICPool() {
 	if packet != nil {
 		_ = packet.Close()
 	}
+	c.bulkMu.Lock()
+	bulkConn, bulkPacket, bulkTimer := c.bulkConn, c.bulkPacket, c.bulkIdleTimer
+	c.bulkConn, c.bulkPacket, c.bulkController = nil, nil, nil
+	c.bulkFastJoin, c.bulkAuthenticated, c.bulkActive, c.bulkIdleTimer, c.bulkJoinUnavailableTil = false, false, 0, nil, time.Time{}
+	c.bulkMu.Unlock()
+	if bulkTimer != nil {
+		bulkTimer.Stop()
+	}
+	if bulkConn != nil {
+		_ = bulkConn.CloseWithError(0, "wanopt bulk pool stopped")
+	}
+	if bulkPacket != nil {
+		_ = bulkPacket.Close()
+	}
 }
 
 func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
@@ -317,6 +349,8 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
 	flowSession.openAckPending = flow.openPending
+	flowSession.helloAckPending = flow.helloPending
+	flowSession.onHelloOK = flow.onHelloOK
 	flowSession.reserveControlLane = flow.reserveControl
 	if err := flowSession.addLane(&mpLane{id: flow.laneID, kind: flow.kind, fc: flow.fc}); err != nil {
 		_ = flow.fc.Close()
@@ -360,6 +394,11 @@ type openedFlow struct {
 	kind           TransportKind
 	openPending    bool
 	reserveControl bool
+	// helloPending marks a flow whose authenticated HELLO was pipelined with
+	// OPEN and whose HELLO_OK has not been read yet. onHelloOK publishes the
+	// negotiated capabilities once the flow reader observes it.
+	helloPending bool
+	onHelloOK    func(session.HelloOK)
 }
 
 type authenticatedLane struct {
@@ -370,6 +409,10 @@ type authenticatedLane struct {
 	laneID         uint64
 	fastOpen       bool
 	reserveControl bool
+	// helloPending is true when this lane's HELLO was written without waiting
+	// for HELLO_OK, so the flow reader owns the acknowledgement.
+	helloPending bool
+	onHelloOK    func(session.HelloOK)
 }
 
 func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow, error) {
@@ -442,6 +485,17 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 	}); err != nil {
 		return fail(fmt.Errorf("send pipelined flow open: %w", err))
 	}
+	if c.cfg.OptimisticOpen {
+		// The server emits HELLO_OK before OPEN_OK. Neither acknowledgement
+		// gates the application's first request bytes, so reading HELLO_OK
+		// here would spend one full WAN round trip confirming something the
+		// flow reader validates anyway. A rejected HELLO still fails the flow.
+		_ = lane.outer.SetDeadline(time.Time{})
+		return &openedFlow{
+			fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID,
+			laneID: lane.laneID, kind: lane.kind, openPending: true, helloPending: true,
+		}, nil
+	}
 	// The server emits HELLO_OK before OPEN_OK, even though both client
 	// requests were sent without waiting between them.
 	helloAck, err := lane.fc.Read()
@@ -457,10 +511,6 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 	var helloOK session.HelloOK
 	if err := helloOK.UnmarshalBinary(helloAck.Payload); err != nil {
 		return fail(fmt.Errorf("decode pipelined session acknowledgement: %w", err))
-	}
-	if c.cfg.OptimisticOpen {
-		_ = lane.outer.SetDeadline(time.Time{})
-		return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind, openPending: true}, nil
 	}
 	openAck, err := lane.fc.Read()
 	if err != nil {
@@ -590,7 +640,11 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 	}
 	if c.cfg.OptimisticOpen {
 		_ = lane.outer.SetDeadline(time.Time{})
-		return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind, openPending: true, reserveControl: lane.reserveControl}, nil
+		return &openedFlow{
+			fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID,
+			laneID: lane.laneID, kind: lane.kind, openPending: true, reserveControl: lane.reserveControl,
+			helloPending: lane.helloPending, onHelloOK: lane.onHelloOK,
+		}, nil
 	}
 	response, err := lane.fc.Read()
 	if err != nil {
@@ -640,7 +694,9 @@ func (c *Client) dialJoinLane(ctx context.Context, kind TransportKind, sessionID
 }
 
 func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind) (*authenticatedLane, error) {
-	return c.dialLaneMode(ctx, kind, sessionID, laneID, helloKind, c.cfg.EnableQUICPool, false)
+	// Under optimistic open the initial control stream pipelines HELLO with
+	// OPEN, so the pooled bootstrap must not block on HELLO_OK either.
+	return c.dialLaneMode(ctx, kind, sessionID, laneID, helloKind, c.cfg.EnableQUICPool, c.cfg.OptimisticOpen)
 }
 
 // dialLaneMode uses the shared QUIC stream pool only for a flow's initial
@@ -654,6 +710,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	fastOpen := false
 	reserveControl := false
 	alreadyAuthenticated := false
+	var publishCapabilities func(session.HelloOK)
 	switch kind {
 	case TransportTCP:
 		outer, err = dialTCP(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
@@ -663,7 +720,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
 		}
 		if pooled {
-			outer, fastOpen, alreadyAuthenticated, reserveControl, err = c.dialPooledQUICLane(ctx, ccfg, sessionID)
+			outer, fastOpen, alreadyAuthenticated, reserveControl, publishCapabilities, err = c.dialPooledQUICLane(ctx, ccfg, sessionID, pipelineHello)
 		} else {
 			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg)
 		}
@@ -698,7 +755,11 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	}
 	_ = outer.SetDeadline(time.Time{})
 	c.cfg.Logger.Debug("outer lane authenticated", "transport", kind, "dial_duration", outerReady.Sub(dialStarted), "authentication_duration", time.Since(outerReady), "pooled", pooled, "fast_open", fastOpen)
-	return &authenticatedLane{fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID, fastOpen: fastOpen, reserveControl: reserveControl}, nil
+	return &authenticatedLane{
+		fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID,
+		fastOpen: fastOpen, reserveControl: reserveControl,
+		helloPending: !alreadyAuthenticated && pipelineHello, onHelloOK: publishCapabilities,
+	}, nil
 }
 
 // dialPooledQUICLane opens a stream on the client's shared QUIC connection.
@@ -706,7 +767,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 // simultaneous first flows cannot create competing pools. A stream-open
 // failure caused by a dead connection clears the pool and lets the caller's
 // normal AUTO fallback/retry policy establish a fresh transport.
-func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, sessionID [16]byte) (streamConn, bool, bool, bool, error) {
+func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, sessionID [16]byte, deferAuthentication bool) (streamConn, bool, bool, bool, func(session.HelloOK), error) {
 	dialCtx := ctx
 	var cancel context.CancelFunc
 	if c.cfg.DialTimeout > 0 {
@@ -728,7 +789,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 		if err != nil {
 			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
 			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
-			return nil, false, false, false, err
+			return nil, false, false, false, nil, err
 		}
 		controller := configureQUICController(conn, ccfg)
 		c.quicConn, c.quicPacket, c.quicController = conn, packet, controller
@@ -743,14 +804,26 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
 			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
 		}
-		return nil, false, false, false, err
+		return nil, false, false, false, nil, err
 	}
 	outer := &quicStreamConn{stream: stream, conn: c.quicConn, controller: c.quicController, closeConn: false}
-	// Authenticate the first stream while holding the pool mutex. This makes
-	// connection-level authentication atomic: a second stream cannot race a
-	// not-yet-authenticated connection. Subsequent streams on a capable server
-	// skip Hello and begin with TypeOpenFast.
 	if !c.quicPoolAuthenticated && c.quicConn.Context().Err() == nil {
+		if deferAuthentication {
+			// The caller pipelines HELLO with OPEN and lets the flow reader
+			// consume HELLO_OK, which removes one China-US round trip from
+			// every cold connection. Capabilities stay unpublished until that
+			// acknowledgement arrives; a stream opened in the meantime simply
+			// performs its own pipelined HELLO, which costs a few bytes rather
+			// than a round trip. publishPoolCapabilities is bound to this
+			// connection so a late acknowledgement from a replaced pool cannot
+			// mark a newer connection authenticated.
+			conn := c.quicConn
+			return outer, false, false, false, func(ok session.HelloOK) { c.publishPoolCapabilities(conn, ok) }, nil
+		}
+		// Authenticate the first stream while holding the pool mutex. This
+		// makes connection-level authentication atomic: a second stream cannot
+		// race a not-yet-authenticated connection. Subsequent streams on a
+		// capable server skip Hello and begin with TypeOpenFast.
 		_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
 		ok, authErr := clientAuthenticateKindResult(newFrameConn(outer, c.cfg.MaxPayload), c.cfg.Secret, sessionID, 0, session.HelloNew, time.Now())
 		if authErr != nil {
@@ -759,23 +832,48 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 				c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
 				c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
 			}
-			return nil, false, false, false, authErr
+			return nil, false, false, false, nil, authErr
 		}
 		c.quicPoolFast = ok.Capabilities&session.CapabilityFastStreams != 0
 		c.quicPoolControl = ok.Capabilities&session.CapabilityReserveControl != 0
 		c.quicPoolAuthenticated = true
 		_ = outer.SetDeadline(time.Time{})
-		return outer, false, true, c.quicPoolControl, nil
+		return outer, false, true, c.quicPoolControl, nil, nil
 	}
 	// A capable peer has authenticated the QUIC connection, so this stream
 	// must skip the per-stream Hello and start with OPEN_FAST. An older peer
 	// advertises no capability and deliberately keeps the legacy Hello path.
-	return outer, c.quicPoolFast, c.quicPoolFast, c.quicPoolControl, nil
+	return outer, c.quicPoolFast, c.quicPoolFast, c.quicPoolControl, nil, nil
+}
+
+// publishPoolCapabilities records the negotiated connection capabilities once
+// a deferred HELLO_OK arrives. It is a no-op when the pool has already been
+// replaced, so a slow acknowledgement cannot resurrect a dead connection's
+// negotiated state.
+func (c *Client) publishPoolCapabilities(conn *quic.Conn, ok session.HelloOK) {
+	c.quicMu.Lock()
+	defer c.quicMu.Unlock()
+	if c.quicConn != conn || c.quicPoolAuthenticated {
+		return
+	}
+	c.quicPoolFast = ok.Capabilities&session.CapabilityFastStreams != 0
+	c.quicPoolControl = ok.Capabilities&session.CapabilityReserveControl != 0
+	c.quicPoolAuthenticated = true
 }
 
 func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID [16]byte, flowID, laneID uint64) (*mpLane, error) {
 	if kind != TransportQUIC && kind != TransportTCP {
 		return nil, fmt.Errorf("unsupported join transport %q", kind)
+	}
+	if kind == TransportQUIC && c.cfg.EnableQUICPool {
+		if lane, fastErr := c.openFastJoinLane(ctx, sessionID, flowID, laneID); fastErr == nil {
+			return lane, nil
+		} else {
+			// A missing capability, stale secondary pool, or a transient UDP
+			// failure must not make an otherwise healthy flow fail. Fall back to
+			// the established authenticated dedicated-lane path.
+			c.cfg.Logger.Debug("fast lane join unavailable; using dedicated lane", "error", fastErr)
+		}
 	}
 	lane, err := c.dialJoinLane(ctx, kind, sessionID, laneID)
 	if err != nil {
@@ -804,6 +902,179 @@ func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID
 		return nil, errors.New("invalid lane join acknowledgement")
 	}
 	return &mpLane{id: laneID, kind: kind, fc: lane.fc}, nil
+}
+
+// openFastJoinLane uses a bounded, separately authenticated QUIC connection
+// for bulk streams. The connection handshake and PSK exchange are amortized
+// across joins; the per-flow operation is one stream-open plus one
+// OPEN_JOIN_FAST/OpenOK exchange. If the peer lacks the negotiated capability
+// the caller transparently falls back to the legacy dedicated lane.
+func (c *Client) openFastJoinLane(ctx context.Context, sessionID [16]byte, flowID, laneID uint64) (*mpLane, error) {
+	started := time.Now()
+	outer, err := c.openBulkPoolStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	fc := newFrameConn(outer, c.cfg.MaxPayload)
+	var payload [8]byte
+	binary.BigEndian.PutUint64(payload[:], laneID)
+	_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	if err := fc.Write(protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeOpenJoinFast, Flags: protocol.FlagLaneJoin,
+		SessionID: sessionID, FlowID: flowID, Class: protocol.ClassBulk,
+	}, Payload: payload[:]}); err != nil {
+		_ = outer.Close()
+		return nil, fmt.Errorf("send fast lane join: %w", err)
+	}
+	response, err := fc.Read()
+	if err != nil {
+		_ = outer.Close()
+		return nil, fmt.Errorf("read fast lane join acknowledgement: %w", err)
+	}
+	if response.Header.SessionID != sessionID || response.Header.FlowID != flowID {
+		_ = outer.Close()
+		return nil, errors.New("fast lane join acknowledgement identity mismatch")
+	}
+	if response.Header.Type == protocol.TypeReset {
+		_ = outer.Close()
+		if len(response.Payload) > 1 {
+			return nil, fmt.Errorf("fast lane join rejected: %s", string(response.Payload[1:]))
+		}
+		return nil, errors.New("fast lane join rejected")
+	}
+	if response.Header.Type != protocol.TypeOpenOK || len(response.Payload) != 0 {
+		_ = outer.Close()
+		return nil, errors.New("invalid fast lane join acknowledgement")
+	}
+	_ = outer.SetDeadline(time.Time{})
+	c.cfg.Logger.Debug("fast bulk lane joined", "lane", laneID, "duration", time.Since(started))
+	return &mpLane{id: laneID, kind: TransportQUIC, fc: fc}, nil
+}
+
+// openBulkPoolStream returns one stream from the bounded secondary pool and
+// increments its active-stream count. The pool is created lazily so one-shot
+// and interactive-only clients pay no extra QUIC handshake.
+func (c *Client) openBulkPoolStream(ctx context.Context) (streamConn, error) {
+	started := time.Now()
+	dialCtx := ctx
+	var cancel context.CancelFunc
+	if c.cfg.DialTimeout > 0 {
+		dialCtx, cancel = context.WithTimeout(ctx, c.cfg.DialTimeout)
+		defer cancel()
+	}
+	c.bulkMu.Lock()
+	defer c.bulkMu.Unlock()
+	if time.Now().Before(c.bulkJoinUnavailableTil) {
+		return nil, errors.New("peer fast lane join capability is temporarily unavailable")
+	}
+	if c.bulkConn == nil || c.bulkConn.Context().Err() != nil || !c.bulkFastJoin {
+		if c.bulkConn != nil {
+			_ = c.bulkConn.CloseWithError(0, "wanopt stale bulk pool")
+		}
+		if c.bulkPacket != nil {
+			_ = c.bulkPacket.Close()
+		}
+		c.bulkConn, c.bulkPacket, c.bulkController = nil, nil, nil
+		c.bulkFastJoin, c.bulkAuthenticated = false, false
+		conn, packet, err := dialQUICConnection(dialCtx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
+		if err != nil {
+			return nil, err
+		}
+		controller := configureQUICController(conn, congestionConfig{
+			kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
+			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
+		})
+		stream, err := conn.OpenStreamSync(dialCtx)
+		if err != nil {
+			_ = conn.CloseWithError(0, "wanopt bulk pool bootstrap failed")
+			_ = packet.Close()
+			return nil, err
+		}
+		bootstrap, err := session.NewSessionID()
+		if err == nil {
+			outer := &quicStreamConn{stream: stream, conn: conn, controller: controller, closeConn: false}
+			_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+			var ok session.HelloOK
+			ok, err = clientAuthenticateKindResult(newFrameConn(outer, c.cfg.MaxPayload), c.cfg.Secret, bootstrap, 0, session.HelloPool, time.Now())
+			_ = outer.Close()
+			if err == nil && ok.Capabilities&session.CapabilityFastLaneJoin != 0 {
+				c.bulkConn, c.bulkPacket, c.bulkController = conn, packet, controller
+				c.bulkFastJoin, c.bulkAuthenticated = true, true
+				c.cfg.Logger.Debug("bulk QUIC pool authenticated", "duration", time.Since(started), "capabilities", ok.Capabilities)
+			} else if err == nil {
+				err = errors.New("peer does not support fast lane join")
+				c.bulkJoinUnavailableTil = time.Now().Add(bulkJoinCapabilityRetry)
+			}
+		}
+		if err != nil {
+			_ = conn.CloseWithError(0, "wanopt bulk pool unsupported")
+			_ = packet.Close()
+			return nil, err
+		}
+	}
+	stream, err := c.bulkConn.OpenStreamSync(dialCtx)
+	if err != nil {
+		if c.bulkConn.Context().Err() != nil {
+			_ = c.bulkConn.CloseWithError(0, "wanopt bulk pool failed")
+			_ = c.bulkPacket.Close()
+			c.bulkConn, c.bulkPacket, c.bulkController = nil, nil, nil
+			c.bulkFastJoin, c.bulkAuthenticated = false, false
+		}
+		return nil, err
+	}
+	c.bulkActive++
+	if c.bulkIdleTimer != nil {
+		c.bulkIdleTimer.Stop()
+	}
+	c.cfg.Logger.Debug("bulk pool stream opened", "duration", time.Since(started), "active", c.bulkActive)
+	return &bulkPoolStreamConn{quicStreamConn: &quicStreamConn{stream: stream, conn: c.bulkConn, controller: c.bulkController, closeConn: false}, owner: c}, nil
+}
+
+type bulkPoolStreamConn struct {
+	*quicStreamConn
+	owner *Client
+	once  sync.Once
+}
+
+func (s *bulkPoolStreamConn) Close() error {
+	err := s.quicStreamConn.Close()
+	s.once.Do(func() { s.owner.releaseBulkPoolStream() })
+	return err
+}
+
+func (c *Client) releaseBulkPoolStream() {
+	c.bulkMu.Lock()
+	if c.bulkActive > 0 {
+		c.bulkActive--
+	}
+	if c.bulkActive == 0 && c.bulkConn != nil {
+		conn := c.bulkConn
+		if c.bulkIdleTimer != nil {
+			c.bulkIdleTimer.Stop()
+		}
+		c.bulkIdleTimer = time.AfterFunc(bulkPoolIdleTimeout, func() {
+			c.expireBulkPool(conn)
+		})
+	}
+	c.bulkMu.Unlock()
+}
+
+func (c *Client) expireBulkPool(expected *quic.Conn) {
+	c.bulkMu.Lock()
+	if c.bulkConn != expected || c.bulkActive != 0 {
+		c.bulkMu.Unlock()
+		return
+	}
+	conn, packet := c.bulkConn, c.bulkPacket
+	c.bulkConn, c.bulkPacket, c.bulkController = nil, nil, nil
+	c.bulkFastJoin, c.bulkAuthenticated, c.bulkIdleTimer = false, false, nil
+	c.bulkMu.Unlock()
+	if conn != nil {
+		_ = conn.CloseWithError(0, "wanopt bulk pool idle")
+	}
+	if packet != nil {
+		_ = packet.Close()
+	}
 }
 
 func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, initialKind TransportKind) {

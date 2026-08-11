@@ -3,6 +3,7 @@ package pep
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -181,7 +182,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		sessions:         make(map[[16]byte]*serverFlow),
 		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 		metrics:          cfg.Metrics,
-		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl,
+		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl | session.CapabilityFastLaneJoin,
 	}
 	server.quicFastStreams.Store(true)
 	return server, nil
@@ -393,7 +394,23 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		if readErr != nil {
 			return
 		}
-		if first.Header.Type == protocol.TypeOpenFast {
+		if first.Header.Type == protocol.TypeOpenJoinFast {
+			if s.quicCapabilities&session.CapabilityFastLaneJoin == 0 {
+				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "fast lane join unavailable")})
+				return
+			}
+			if session.IsZeroSessionID(first.Header.SessionID) || first.Header.FlowID == 0 || first.Header.Sequence != 0 || first.Header.Flags != protocol.FlagLaneJoin || len(first.Payload) != 8 {
+				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid fast lane join")})
+				return
+			}
+			laneID := binary.BigEndian.Uint64(first.Payload)
+			if laneID == 0 {
+				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid fast lane join")})
+				return
+			}
+			s.handleLaneJoinOpen(ctx, conn, fc, first.Header.SessionID, laneID, first)
+			return
+		} else if first.Header.Type == protocol.TypeOpenFast {
 			if !s.quicFastStreams.Load() {
 				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "fast streams unavailable")})
 				return
@@ -410,7 +427,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 			openFinished = authFinished
 		} else {
 			hello, readErr = serverAuthenticateHelloFrameCallback(fc, s.cfg.Secret, s.replay, time.Now(), s.quicCapabilities, &first, func(h session.Hello) {
-				if h.Kind == session.HelloNew && h.LaneID == 0 {
+				if (h.Kind == session.HelloNew || h.Kind == session.HelloPool) && h.LaneID == 0 {
 					auth.authenticated.Store(true)
 				}
 			})
@@ -426,7 +443,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		var err error
 		if auth != nil {
 			hello, err = serverAuthenticateHelloFrameCallback(fc, s.cfg.Secret, s.replay, time.Now(), s.quicCapabilities, nil, func(h session.Hello) {
-				if h.Kind == session.HelloNew && h.LaneID == 0 {
+				if (h.Kind == session.HelloNew || h.Kind == session.HelloPool) && h.LaneID == 0 {
 					auth.authenticated.Store(true)
 				}
 			})
@@ -440,6 +457,16 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		authFinished = time.Now()
 	}
 	if !fastOpen {
+		if hello.Kind == session.HelloPool {
+			// Pool bootstrap is connection-scoped and creates no flow/session
+			// entry. The authenticated QUIC connection may now carry only
+			// capability-gated fast operations on later streams.
+			if auth == nil || hello.LaneID != 0 || s.quicCapabilities&session.CapabilityFastLaneJoin == 0 {
+				return
+			}
+			_ = conn.SetDeadline(time.Time{})
+			return
+		}
 		if hello.Kind == session.HelloJoin {
 			s.handleLaneJoin(ctx, conn, fc, hello)
 			return
@@ -592,25 +619,37 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 	if err != nil {
 		return
 	}
-	if open.Header.Type != protocol.TypeOpen || open.Header.SessionID != hello.SessionID || open.Header.FlowID == 0 || open.Header.Sequence != 0 || open.Header.Flags&protocol.FlagReserveControl != 0 || len(open.Payload) != 0 {
+	if open.Header.Type != protocol.TypeOpen || open.Header.SessionID != hello.SessionID || open.Header.FlowID == 0 || open.Header.Sequence != 0 || open.Header.Flags != 0 || len(open.Payload) != 0 {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join")})
 		return
 	}
-	serverSession := s.lookupSession(hello.SessionID)
+	s.handleLaneJoinOpen(ctx, conn, fc, hello.SessionID, hello.LaneID, open)
+}
+
+// handleLaneJoinOpen is shared by the legacy HELLO_JOIN + OPEN exchange and
+// the capability-gated one-frame fast join. Authentication and exact wire
+// validation have completed before entry; this function owns the common
+// session lookup, lane admission, tombstone replay, and lifetime handling.
+func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *frameConn, sessionID [16]byte, laneID uint64, open protocol.Frame) {
+	if session.IsZeroSessionID(sessionID) || laneID == 0 || open.Header.FlowID == 0 {
+		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join identity")})
+		return
+	}
+	serverSession := s.lookupSession(sessionID)
 	if serverSession == nil || serverSession.flow.flowID != open.Header.FlowID {
-		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "unknown session")})
+		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "unknown session")})
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
 	if serverSession.completed.Load() {
-		if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
+		if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
 			return
 		}
 		// The completed server flow has already acknowledged the peer's FIN;
 		// repeat that ACK on this authenticated replacement lane.
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{
 			Version: protocol.Version, Type: protocol.TypeAck, Flags: protocol.FlagAckFinal | serverSession.flow.recvAckFlag,
-			SessionID: hello.SessionID, FlowID: open.Header.FlowID, Sequence: serverSession.flow.remoteFinSequence.Load(),
+			SessionID: sessionID, FlowID: open.Header.FlowID, Sequence: serverSession.flow.remoteFinSequence.Load(),
 			Class: protocol.ClassBulk,
 		}})
 		// The final ACK above acknowledges the peer's FIN.  If the server's
@@ -627,18 +666,18 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 			}
 			_ = fc.Write(protocol.Frame{Header: protocol.Header{
 				Version: protocol.Version, Type: protocol.TypeClose, Flags: flags,
-				SessionID: hello.SessionID, FlowID: open.Header.FlowID, Sequence: serverSession.flow.finSequence.Load(),
+				SessionID: sessionID, FlowID: open.Header.FlowID, Sequence: serverSession.flow.finSequence.Load(),
 				Class: protocol.ClassBulk,
 			}})
 		}
 		return
 	}
-	if err := serverSession.addLane(&mpLane{id: hello.LaneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
-		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetFlowLimit, "lane unavailable")})
+	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
+		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetFlowLimit, "lane unavailable")})
 		return
 	}
 	s.observeLanes(serverSession.flow.laneCount())
-	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
+	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
 		return
 	}
 	// A replacement can arrive after the destination has already reached EOF
@@ -653,7 +692,7 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{
 			Version: protocol.Version, Type: protocol.TypeAck,
 			Flags:     protocol.FlagAckFinal | serverSession.flow.recvAckFlag,
-			SessionID: hello.SessionID, FlowID: open.Header.FlowID,
+			SessionID: sessionID, FlowID: open.Header.FlowID,
 			Sequence: serverSession.flow.remoteFinSequence.Load(), Class: protocol.ClassBulk,
 		}})
 	}
@@ -664,7 +703,7 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 		}
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{
 			Version: protocol.Version, Type: protocol.TypeClose, Flags: flags,
-			SessionID: hello.SessionID, FlowID: open.Header.FlowID,
+			SessionID: sessionID, FlowID: open.Header.FlowID,
 			Sequence: serverSession.flow.finSequence.Load(), Class: protocol.ClassBulk,
 		}})
 	}

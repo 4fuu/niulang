@@ -17,6 +17,7 @@ import (
 	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/multipath"
 	"github.com/icourses-dev/wanopt/internal/protocol"
+	"github.com/icourses-dev/wanopt/internal/session"
 )
 
 var nextTelemetryID atomic.Uint64
@@ -151,7 +152,13 @@ type multipathFlow struct {
 	// still required on the authenticated stream and is consumed by the flow
 	// reader before ordinary data/control frames are accepted.
 	openAckPending bool
-	ackSequence    atomic.Uint64
+	// helloAckPending is set when the flow's first lane pipelined HELLO with
+	// OPEN and did not wait for HELLO_OK. The acknowledgement still has to
+	// arrive and still has to be valid, but the caller no longer pays a
+	// round trip for it. onHelloOK publishes the negotiated capabilities.
+	helloAckPending bool
+	onHelloOK       func(session.HelloOK)
+	ackSequence     atomic.Uint64
 	ackClosing     atomic.Bool
 	lastPayload    atomic.Int64
 	lastActivity   atomic.Int64
@@ -1407,6 +1414,28 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 		select {
 		case event := <-f.events:
 			frame := event.frame
+			// A pipelined HELLO_OK is session-scoped and carries flow 0, so it
+			// is validated before the per-flow identity check below.
+			if frame.Header.Type == protocol.TypeHelloOK {
+				if !f.helloAckPending || frame.Header.SessionID != f.sessionID || frame.Header.FlowID != 0 {
+					return errors.New("unexpected session acknowledgement")
+				}
+				var helloOK session.HelloOK
+				if err := helloOK.UnmarshalBinary(frame.Payload); err != nil {
+					return fmt.Errorf("decode session acknowledgement: %w", err)
+				}
+				f.helloAckPending = false
+				if f.onHelloOK != nil {
+					f.onHelloOK(helloOK)
+				}
+				continue
+			}
+			// A session-scoped rejection of the pipelined HELLO also carries
+			// flow 0. Report it as the authentication failure it is rather
+			// than as a mismatched flow identity.
+			if f.helloAckPending && frame.Header.Type == protocol.TypeReset && frame.Header.FlowID == 0 {
+				return errors.New("server rejected session authentication")
+			}
 			if frame.Header.SessionID != f.sessionID || frame.Header.FlowID != f.flowID {
 				return errors.New("frame belongs to another session or flow")
 			}

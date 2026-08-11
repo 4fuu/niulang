@@ -341,6 +341,67 @@ func TestQUICPoolFastUDPAssociation(t *testing.T) {
 	}
 }
 
+func TestFastLaneJoinUsesSecondaryAuthenticatedPool(t *testing.T) {
+	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destinationListener.Close()
+	go discardDestination(destinationListener)
+
+	certificate, roots := testCertificate(t)
+	secret := []byte("fast-stream-test-secret-32-bytes")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(ServerConfig{
+		ListenAddr: packetConn.LocalAddr().String(), Certificate: certificate, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		HandshakeTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
+		MaxLanes: 2, InitialLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- server.ServePacketConn(ctx, packetConn) }()
+
+	flow, err := client.openFlow(ctx, destinationListener.Addr().String())
+	if err != nil {
+		t.Fatalf("warm pooled flow: %v", err)
+	}
+	lane, err := client.openFastJoinLane(ctx, flow.sessionID, flow.flowID, 1)
+	if err != nil {
+		t.Fatalf("fast lane join: %v", err)
+	}
+	if lane.id != 1 || client.bulkConn == nil || !client.bulkFastJoin || client.bulkActive != 1 {
+		t.Fatalf("unexpected fast pool state: lane=%d conn=%v capable=%v active=%d", lane.id, client.bulkConn != nil, client.bulkFastJoin, client.bulkActive)
+	}
+	_ = flow.outer.Close()
+	_ = lane.fc.Close()
+	client.closeQUICPool()
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server shutdown timeout")
+	}
+}
+
 func TestQUICPoolFastRejectDowngradesToLegacy(t *testing.T) {
 	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -450,6 +511,30 @@ func TestOptimisticOpenReturnsBeforeOpenOKAndPreservesResponse(t *testing.T) {
 	}
 	if !flow.openPending {
 		t.Fatal("optimistic open did not retain pending OPEN_OK state")
+	}
+	// The cold pooled bootstrap pipelines HELLO with OPEN and returns without
+	// waiting for either acknowledgement, so both are still on the stream in
+	// wire order. Waiting for HELLO_OK here would cost one WAN round trip.
+	if !flow.helloPending {
+		t.Fatal("cold optimistic open waited for HELLO_OK")
+	}
+	if client.quicPoolAuthenticated {
+		t.Fatal("pool capabilities were published before HELLO_OK arrived")
+	}
+	helloAck, err := flow.fc.Read()
+	if err != nil {
+		t.Fatalf("read deferred HELLO_OK: %v", err)
+	}
+	if helloAck.Header.Type != protocol.TypeHelloOK || helloAck.Header.SessionID != flow.sessionID || helloAck.Header.FlowID != 0 {
+		t.Fatalf("deferred session response = %+v, want matching HELLO_OK", helloAck.Header)
+	}
+	var helloOK session.HelloOK
+	if err := helloOK.UnmarshalBinary(helloAck.Payload); err != nil {
+		t.Fatalf("decode deferred HELLO_OK: %v", err)
+	}
+	flow.onHelloOK(helloOK)
+	if !client.quicPoolAuthenticated || !client.quicPoolFast {
+		t.Fatalf("deferred HELLO_OK did not publish capabilities: authenticated=%v fast=%v", client.quicPoolAuthenticated, client.quicPoolFast)
 	}
 	response, err := flow.fc.Read()
 	if err != nil {

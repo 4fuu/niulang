@@ -68,13 +68,18 @@ controllers can reduce goodput on a lossy path. `--max-lanes` and
 experiments; adaptive growth still requires positive marginal gain.
 `--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
 initial/control streams and lets multiple short flows share its congestion
-controller; configured bulk lane joins remain independent. These modes must
+controller. On a capable peer, bulk promotion also lazily creates one
+separately authenticated secondary QUIC pool and attaches the lane with a
+capability-gated `OPEN_JOIN_FAST`; peers without that capability use the
+legacy independent join. These modes must
 be validated with the supplied single-flow and concurrent-flow harnesses
 before being enabled in a live Clash profile. The first pooled stream performs
 the authenticated `HELLO`; subsequent streams on a capable peer use a
 connection-scoped fast open while retaining independent flow identities and
 US-side destination-policy checks. Capability-free peers automatically keep
-the legacy per-stream handshake.
+the legacy per-stream handshake. The secondary pool is bounded to one
+connection, expires after 30 seconds of idle time, and is never required for
+correctness or TCP fallback.
 
 ## Non-goals
 
