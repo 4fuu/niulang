@@ -116,19 +116,44 @@ type Client struct {
 	quicPoolControl       bool
 	quicPoolAuthenticated bool
 
-	// bulkMu protects a bounded secondary QUIC connection used only for fast
-	// lane joins. Keeping it separate from the control pool preserves the
-	// control lane's congestion state while avoiding a fresh QUIC handshake at
-	// the bulk-promotion boundary.
+	// bulkMu protects a bounded set of pre-authenticated secondary QUIC
+	// connections used only for fast lane joins. Keeping them separate from
+	// the control pool preserves the control lane's congestion state while
+	// avoiding a fresh QUIC handshake at the bulk-promotion boundary.
+	//
+	// Each connection carries at most one lane at a time. Multiplexing several
+	// lanes of one flow onto a single connection would give them one 4-tuple
+	// and one congestion controller, which is what a single TUIC connection
+	// already provides: measured on a path that polices per source address,
+	// striping over a shared connection produced no gain at all. A connection
+	// is retained after its lane is released so a later flow still skips the
+	// handshake.
 	bulkMu                 sync.Mutex
-	bulkConn               *quic.Conn
-	bulkPacket             net.PacketConn
-	bulkController         wancongestion.TelemetryProvider
-	bulkFastJoin           bool
-	bulkAuthenticated      bool
-	bulkActive             int
-	bulkIdleTimer          *time.Timer
+	bulkConns              []*bulkConn
 	bulkJoinUnavailableTil time.Time
+}
+
+// bulkConn is one pre-authenticated secondary QUIC connection reserved for
+// bulk lane joins.
+type bulkConn struct {
+	conn       *quic.Conn
+	packet     net.PacketConn
+	controller wancongestion.TelemetryProvider
+	busy       bool
+	idleTimer  *time.Timer
+}
+
+func (b *bulkConn) close(reason string) {
+	if b.idleTimer != nil {
+		b.idleTimer.Stop()
+		b.idleTimer = nil
+	}
+	if b.conn != nil {
+		_ = b.conn.CloseWithError(0, reason)
+	}
+	if b.packet != nil {
+		_ = b.packet.Close()
+	}
 }
 
 const bulkPoolIdleTimeout = 30 * time.Second
@@ -317,18 +342,11 @@ func (c *Client) closeQUICPool() {
 		_ = packet.Close()
 	}
 	c.bulkMu.Lock()
-	bulkConn, bulkPacket, bulkTimer := c.bulkConn, c.bulkPacket, c.bulkIdleTimer
-	c.bulkConn, c.bulkPacket, c.bulkController = nil, nil, nil
-	c.bulkFastJoin, c.bulkAuthenticated, c.bulkActive, c.bulkIdleTimer, c.bulkJoinUnavailableTil = false, false, 0, nil, time.Time{}
+	bulkConns := c.bulkConns
+	c.bulkConns, c.bulkJoinUnavailableTil = nil, time.Time{}
 	c.bulkMu.Unlock()
-	if bulkTimer != nil {
-		bulkTimer.Stop()
-	}
-	if bulkConn != nil {
-		_ = bulkConn.CloseWithError(0, "wanopt bulk pool stopped")
-	}
-	if bulkPacket != nil {
-		_ = bulkPacket.Close()
+	for _, entry := range bulkConns {
+		entry.close("wanopt bulk pool stopped")
 	}
 }
 
@@ -959,9 +977,11 @@ func (c *Client) openFastJoinLane(ctx context.Context, sessionID [16]byte, flowI
 	return &mpLane{id: laneID, kind: TransportQUIC, fc: fc}, nil
 }
 
-// openBulkPoolStream returns one stream from the bounded secondary pool and
-// increments its active-stream count. The pool is created lazily so one-shot
-// and interactive-only clients pay no extra QUIC handshake.
+// openBulkPoolStream reserves one secondary connection and opens its lane
+// stream. Connections are created lazily, so one-shot and interactive-only
+// clients pay no extra QUIC handshake, and each is reserved exclusively for
+// the lane it carries so concurrent lanes keep independent 4-tuples and
+// congestion state.
 func (c *Client) openBulkPoolStream(ctx context.Context) (streamConn, error) {
 	started := time.Now()
 	dialCtx := ctx
@@ -970,118 +990,186 @@ func (c *Client) openBulkPoolStream(ctx context.Context) (streamConn, error) {
 		dialCtx, cancel = context.WithTimeout(ctx, c.cfg.DialTimeout)
 		defer cancel()
 	}
-	c.bulkMu.Lock()
-	defer c.bulkMu.Unlock()
-	if time.Now().Before(c.bulkJoinUnavailableTil) {
-		return nil, errors.New("peer fast lane join capability is temporarily unavailable")
-	}
-	if c.bulkConn == nil || c.bulkConn.Context().Err() != nil || !c.bulkFastJoin {
-		if c.bulkConn != nil {
-			_ = c.bulkConn.CloseWithError(0, "wanopt stale bulk pool")
-		}
-		if c.bulkPacket != nil {
-			_ = c.bulkPacket.Close()
-		}
-		c.bulkConn, c.bulkPacket, c.bulkController = nil, nil, nil
-		c.bulkFastJoin, c.bulkAuthenticated = false, false
-		conn, packet, err := dialQUICConnection(dialCtx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
-		if err != nil {
-			return nil, err
-		}
-		controller := configureQUICController(conn, congestionConfig{
-			kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
-			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
-		})
-		stream, err := conn.OpenStreamSync(dialCtx)
-		if err != nil {
-			_ = conn.CloseWithError(0, "wanopt bulk pool bootstrap failed")
-			_ = packet.Close()
-			return nil, err
-		}
-		bootstrap, err := session.NewSessionID()
-		if err == nil {
-			outer := &quicStreamConn{stream: stream, conn: conn, controller: controller, closeConn: false}
-			_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
-			var ok session.HelloOK
-			ok, err = clientAuthenticateKindResult(newFrameConn(outer, c.cfg.MaxPayload), c.cfg.Secret, bootstrap, 0, session.HelloPool, time.Now())
-			_ = outer.Close()
-			if err == nil && ok.Capabilities&session.CapabilityFastLaneJoin != 0 {
-				c.bulkConn, c.bulkPacket, c.bulkController = conn, packet, controller
-				c.bulkFastJoin, c.bulkAuthenticated = true, true
-				c.cfg.Logger.Debug("bulk QUIC pool authenticated", "duration", time.Since(started), "capabilities", ok.Capabilities)
-			} else if err == nil {
-				err = errors.New("peer does not support fast lane join")
-				c.bulkJoinUnavailableTil = time.Now().Add(bulkJoinCapabilityRetry)
-			}
-		}
-		if err != nil {
-			_ = conn.CloseWithError(0, "wanopt bulk pool unsupported")
-			_ = packet.Close()
-			return nil, err
-		}
-	}
-	stream, err := c.bulkConn.OpenStreamSync(dialCtx)
+	entry, err := c.reserveBulkConn(dialCtx)
 	if err != nil {
-		if c.bulkConn.Context().Err() != nil {
-			_ = c.bulkConn.CloseWithError(0, "wanopt bulk pool failed")
-			_ = c.bulkPacket.Close()
-			c.bulkConn, c.bulkPacket, c.bulkController = nil, nil, nil
-			c.bulkFastJoin, c.bulkAuthenticated = false, false
-		}
 		return nil, err
 	}
-	c.bulkActive++
-	if c.bulkIdleTimer != nil {
-		c.bulkIdleTimer.Stop()
+	stream, err := entry.conn.OpenStreamSync(dialCtx)
+	if err != nil {
+		c.releaseBulkConn(entry, entry.conn.Context().Err() != nil)
+		return nil, err
 	}
-	c.cfg.Logger.Debug("bulk pool stream opened", "duration", time.Since(started), "active", c.bulkActive)
-	return &bulkPoolStreamConn{quicStreamConn: &quicStreamConn{stream: stream, conn: c.bulkConn, controller: c.bulkController, closeConn: false}, owner: c}, nil
+	c.cfg.Logger.Debug("bulk pool stream opened", "duration", time.Since(started), "connections", c.bulkConnCount())
+	return &bulkPoolStreamConn{
+		quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, controller: entry.controller, closeConn: false},
+		owner:          c, entry: entry,
+	}, nil
+}
+
+// reserveBulkConn returns an idle authenticated connection, or establishes a
+// new one when every existing connection is already carrying a lane.
+func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
+	c.bulkMu.Lock()
+	if time.Now().Before(c.bulkJoinUnavailableTil) {
+		c.bulkMu.Unlock()
+		return nil, errors.New("peer fast lane join capability is temporarily unavailable")
+	}
+	live := c.bulkConns[:0]
+	for _, entry := range c.bulkConns {
+		if entry.conn.Context().Err() != nil && !entry.busy {
+			entry.close("wanopt stale bulk pool")
+			continue
+		}
+		live = append(live, entry)
+	}
+	c.bulkConns = live
+	for _, entry := range c.bulkConns {
+		if !entry.busy && entry.conn.Context().Err() == nil {
+			entry.busy = true
+			if entry.idleTimer != nil {
+				entry.idleTimer.Stop()
+				entry.idleTimer = nil
+			}
+			c.bulkMu.Unlock()
+			return entry, nil
+		}
+	}
+	if len(c.bulkConns) >= c.maxBulkConns() {
+		c.bulkMu.Unlock()
+		return nil, errors.New("bulk lane connection limit reached")
+	}
+	c.bulkMu.Unlock()
+
+	// The handshake is deliberately performed without the pool mutex so that
+	// one slow secondary handshake cannot block every other lane join.
+	entry, err := c.dialBulkConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.bulkMu.Lock()
+	if len(c.bulkConns) >= c.maxBulkConns() {
+		c.bulkMu.Unlock()
+		entry.close("wanopt bulk pool limit reached")
+		return nil, errors.New("bulk lane connection limit reached")
+	}
+	entry.busy = true
+	c.bulkConns = append(c.bulkConns, entry)
+	c.bulkMu.Unlock()
+	return entry, nil
+}
+
+// maxBulkConns bounds the secondary connections one client may hold. A flow
+// never needs more than its lane budget, and lane zero is not a bulk lane.
+func (c *Client) maxBulkConns() int {
+	if c.cfg.MaxLanes <= 1 {
+		return 1
+	}
+	return c.cfg.MaxLanes
+}
+
+func (c *Client) bulkConnCount() int {
+	c.bulkMu.Lock()
+	defer c.bulkMu.Unlock()
+	return len(c.bulkConns)
+}
+
+func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
+	started := time.Now()
+	conn, packet, err := dialQUICConnection(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
+	if err != nil {
+		return nil, err
+	}
+	entry := &bulkConn{conn: conn, packet: packet}
+	entry.controller = configureQUICController(conn, congestionConfig{
+		kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
+		adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
+	})
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		entry.close("wanopt bulk pool bootstrap failed")
+		return nil, err
+	}
+	bootstrap, err := session.NewSessionID()
+	if err != nil {
+		entry.close("wanopt bulk pool bootstrap failed")
+		return nil, err
+	}
+	outer := &quicStreamConn{stream: stream, conn: conn, controller: entry.controller, closeConn: false}
+	_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	ok, err := clientAuthenticateKindResult(newFrameConn(outer, c.cfg.MaxPayload), c.cfg.Secret, bootstrap, 0, session.HelloPool, time.Now())
+	_ = outer.Close()
+	if err != nil {
+		entry.close("wanopt bulk pool authentication failed")
+		return nil, err
+	}
+	if ok.Capabilities&session.CapabilityFastLaneJoin == 0 {
+		entry.close("wanopt bulk pool unsupported")
+		c.bulkMu.Lock()
+		c.bulkJoinUnavailableTil = time.Now().Add(bulkJoinCapabilityRetry)
+		c.bulkMu.Unlock()
+		return nil, errors.New("peer does not support fast lane join")
+	}
+	c.cfg.Logger.Debug("bulk QUIC pool authenticated", "duration", time.Since(started), "capabilities", ok.Capabilities)
+	return entry, nil
 }
 
 type bulkPoolStreamConn struct {
 	*quicStreamConn
 	owner *Client
+	entry *bulkConn
 	once  sync.Once
 }
 
 func (s *bulkPoolStreamConn) Close() error {
 	err := s.quicStreamConn.Close()
-	s.once.Do(func() { s.owner.releaseBulkPoolStream() })
+	s.once.Do(func() { s.owner.releaseBulkConn(s.entry, s.entry.conn.Context().Err() != nil) })
 	return err
 }
 
-func (c *Client) releaseBulkPoolStream() {
+// releaseBulkConn returns a connection to the idle set, or discards it when
+// its transport is already dead. An idle connection is retained briefly so a
+// following flow can skip the handshake, then closed.
+func (c *Client) releaseBulkConn(entry *bulkConn, dead bool) {
 	c.bulkMu.Lock()
-	if c.bulkActive > 0 {
-		c.bulkActive--
-	}
-	if c.bulkActive == 0 && c.bulkConn != nil {
-		conn := c.bulkConn
-		if c.bulkIdleTimer != nil {
-			c.bulkIdleTimer.Stop()
+	entry.busy = false
+	if dead {
+		remaining := c.bulkConns[:0]
+		for _, existing := range c.bulkConns {
+			if existing != entry {
+				remaining = append(remaining, existing)
+			}
 		}
-		c.bulkIdleTimer = time.AfterFunc(bulkPoolIdleTimeout, func() {
-			c.expireBulkPool(conn)
-		})
+		c.bulkConns = remaining
+		c.bulkMu.Unlock()
+		entry.close("wanopt bulk pool failed")
+		return
 	}
+	if entry.idleTimer != nil {
+		entry.idleTimer.Stop()
+	}
+	entry.idleTimer = time.AfterFunc(bulkPoolIdleTimeout, func() { c.expireBulkConn(entry) })
 	c.bulkMu.Unlock()
 }
 
-func (c *Client) expireBulkPool(expected *quic.Conn) {
+func (c *Client) expireBulkConn(entry *bulkConn) {
 	c.bulkMu.Lock()
-	if c.bulkConn != expected || c.bulkActive != 0 {
+	if entry.busy {
 		c.bulkMu.Unlock()
 		return
 	}
-	conn, packet := c.bulkConn, c.bulkPacket
-	c.bulkConn, c.bulkPacket, c.bulkController = nil, nil, nil
-	c.bulkFastJoin, c.bulkAuthenticated, c.bulkIdleTimer = false, false, nil
-	c.bulkMu.Unlock()
-	if conn != nil {
-		_ = conn.CloseWithError(0, "wanopt bulk pool idle")
+	remaining := c.bulkConns[:0]
+	found := false
+	for _, existing := range c.bulkConns {
+		if existing == entry {
+			found = true
+			continue
+		}
+		remaining = append(remaining, existing)
 	}
-	if packet != nil {
-		_ = packet.Close()
+	c.bulkConns = remaining
+	c.bulkMu.Unlock()
+	if found {
+		entry.close("wanopt bulk pool idle")
 	}
 }
 
@@ -1089,34 +1177,53 @@ func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, s
 	if initialKind != TransportQUIC {
 		return
 	}
-	for flow.laneCount() < c.cfg.InitialLanes {
+	// Every additional lane is an independent authenticated QUIC connection,
+	// so each costs a full handshake. Opening them one after another charges
+	// SOCKS CONNECT the sum of those handshakes: with four configured lanes on
+	// a 200 ms path that measured 1.8 s before any application byte moved.
+	// They are independent operations, so open them concurrently and pay one
+	// handshake of latency instead.
+	wanted := c.cfg.InitialLanes - flow.laneCount()
+	if wanted <= 0 {
+		return
+	}
+	type joined struct {
+		lane *mpLane
+		err  error
+		id   uint64
+	}
+	results := make(chan joined, wanted)
+	started := 0
+	for range wanted {
 		if ctx.Err() != nil {
-			return
+			break
 		}
 		laneID, err := flow.allocateJoinID()
 		if err != nil {
-			return
+			break
 		}
-		lane, err := c.openJoinLane(ctx, TransportQUIC, sessionID, flowID, laneID)
-		if err != nil {
+		started++
+		go func(laneID uint64) {
+			lane, err := c.openJoinLane(ctx, TransportQUIC, sessionID, flowID, laneID)
+			results <- joined{lane: lane, err: err, id: laneID}
+		}(laneID)
+	}
+	for range started {
+		result := <-results
+		if result.err != nil {
 			// A flow can finish while a speculative join is in the handshake.
 			// That is an expected shutdown race, not evidence that the UDP path
 			// is unhealthy; feeding it into the global cooldown causes unrelated
 			// new flows to fall back to TCP unnecessarily.
 			if ctx.Err() != nil || flow.doneChanClosed() {
-				return
+				continue
 			}
 			c.udpHealth.failure(time.Now())
-			c.cfg.Logger.Warn("additional lane unavailable", "lane", laneID, "error", err)
-			// Keep the already-authenticated lane usable. Retrying the same
-			// join synchronously can delay SOCKS CONNECT indefinitely when UDP
-			// is filtered or the path is degraded; the adaptive manager may
-			// attempt replacement later under its normal health policy.
-			return
+			c.cfg.Logger.Warn("additional lane unavailable", "lane", result.id, "error", result.err)
+			continue
 		}
-		if err := flow.addLane(lane); err != nil {
-			_ = lane.fc.Close()
-			return
+		if err := flow.addLane(result.lane); err != nil {
+			_ = result.lane.fc.Close()
 		}
 	}
 }

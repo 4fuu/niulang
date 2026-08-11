@@ -1250,14 +1250,13 @@ func (f *multipathFlow) enqueueOnHealthyLane(ctx context.Context, frame protocol
 			// single lane throttle the whole flow while other lanes sit idle:
 			// the producer stops, so no later frame is ever offered to them and
 			// the scheduler never sees the imbalance it was meant to correct.
+			// A lane that is full and a lane that is unusable are both simply
+			// skipped here; tryEnqueueFrameClass has already transitioned an
+			// unusable lane so the recovery coordinator can replace it.
 			for _, lane := range candidates {
-				accepted, laneErr := f.tryEnqueueFrameClass(lane, frame, bulk)
-				if accepted {
+				if accepted, _ := f.tryEnqueueFrameClass(lane, frame, bulk); accepted {
 					f.chargeLane(lane, len(frame.Payload))
 					return nil
-				}
-				if laneErr != nil {
-					continue
 				}
 			}
 			// Every eligible lane is full, so the flow really is transport

@@ -385,11 +385,23 @@ func TestFastLaneJoinUsesSecondaryAuthenticatedPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fast lane join: %v", err)
 	}
-	if lane.id != 1 || client.bulkConn == nil || !client.bulkFastJoin || client.bulkActive != 1 {
-		t.Fatalf("unexpected fast pool state: lane=%d conn=%v capable=%v active=%d", lane.id, client.bulkConn != nil, client.bulkFastJoin, client.bulkActive)
+	if lane.id != 1 || client.bulkConnCount() != 1 {
+		t.Fatalf("unexpected fast pool state: lane=%d connections=%d", lane.id, client.bulkConnCount())
+	}
+	// Concurrent bulk lanes must not share one secondary connection. Sharing
+	// gives them a single 4-tuple and a single congestion controller, which is
+	// exactly what one TUIC connection already provides and leaves striping
+	// with nothing to gain.
+	second, err := client.openFastJoinLane(ctx, flow.sessionID, flow.flowID, 2)
+	if err != nil {
+		t.Fatalf("second fast lane join: %v", err)
+	}
+	if client.bulkConnCount() != 2 {
+		t.Fatalf("second concurrent bulk lane reused a connection: connections=%d", client.bulkConnCount())
 	}
 	_ = flow.outer.Close()
 	_ = lane.fc.Close()
+	_ = second.fc.Close()
 	client.closeQUICPool()
 	cancel()
 	select {
