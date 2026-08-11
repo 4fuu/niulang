@@ -25,9 +25,20 @@ type Config struct {
 	// OneWayDelay is added in each direction, so the emulated RTT is twice
 	// this value.
 	OneWayDelay time.Duration
-	// LossRate is the independent per-packet drop probability applied in each
+	// LossRate is the overall per-packet drop probability applied in each
 	// direction, in [0,1).
 	LossRate float64
+	// LossBurstPackets is the mean length, in packets, of a loss burst. One
+	// (or zero) gives independent Bernoulli loss. Larger values switch to a
+	// Gilbert model: the path alternates between a lossless good state and a
+	// bad state that drops everything, with LossRate as the long-run fraction
+	// of packets in the bad state.
+	//
+	// Long-haul loss is correlated, and correlated loss is a different regime
+	// for a transport than the same average rate spread evenly: a burst can
+	// take out a whole flight, including the retransmissions of the previous
+	// one. Independent loss alone will not reproduce it.
+	LossBurstPackets float64
 	// RateBytesPerSec is the bottleneck serialization rate in each direction.
 	// Zero means unlimited.
 	RateBytesPerSec uint64
@@ -78,6 +89,9 @@ type direction struct {
 	mu       sync.Mutex
 	nextFree time.Time
 	rng      *rand.Rand
+	// inBurst is the Gilbert model's bad state. It is meaningful only when
+	// the configuration asks for correlated loss.
+	inBurst bool
 
 	packetsIn      atomic.Uint64
 	packetsOut     atomic.Uint64
@@ -102,7 +116,7 @@ func (d *direction) stats() Stats {
 func (d *direction) schedule(now time.Time, size int, cfg Config) (time.Time, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if cfg.LossRate > 0 && d.rng.Float64() < cfg.LossRate {
+	if cfg.LossRate > 0 && d.dropLocked(cfg) {
 		d.packetsLost.Add(1)
 		return time.Time{}, false
 	}
@@ -123,6 +137,30 @@ func (d *direction) schedule(now time.Time, size int, cfg Config) (time.Time, bo
 		start = d.nextFree
 	}
 	return start.Add(cfg.OneWayDelay), true
+}
+
+// dropLocked decides whether this packet is lost. With no burst length
+// configured it is one Bernoulli trial. Otherwise it is a two-state Gilbert
+// chain whose bad state drops everything: the mean bad run is
+// LossBurstPackets, and the transition into it is chosen so the long-run drop
+// fraction is LossRate.
+func (d *direction) dropLocked(cfg Config) bool {
+	if cfg.LossBurstPackets <= 1 {
+		return d.rng.Float64() < cfg.LossRate
+	}
+	recover := 1 / cfg.LossBurstPackets
+	enter := recover * cfg.LossRate / (1 - cfg.LossRate)
+	if d.inBurst {
+		if d.rng.Float64() < recover {
+			d.inBurst = false
+		}
+		return true
+	}
+	if d.rng.Float64() < enter {
+		d.inBurst = true
+		return true
+	}
+	return false
 }
 
 type peer struct {

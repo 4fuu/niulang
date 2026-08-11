@@ -43,6 +43,7 @@ type options struct {
 	stacks       string
 	rttMillis    int
 	lossPercent  float64
+	lossBurst    float64
 	rateMbits    float64
 	perFlowMbits float64
 	queueBytes   int
@@ -73,6 +74,7 @@ func run(args []string) error {
 	fs.StringVar(&opts.stacks, "stacks", "baseline,wanopt", "comma-separated stacks to measure")
 	fs.IntVar(&opts.rttMillis, "rtt", 200, "emulated round-trip time in milliseconds")
 	fs.Float64Var(&opts.lossPercent, "loss", 0, "per-packet loss percentage in each direction")
+	fs.Float64Var(&opts.lossBurst, "loss-burst", 0, "mean loss burst length in packets (0 or 1 gives independent loss)")
 	fs.Float64Var(&opts.rateMbits, "rate", 100, "bottleneck rate in Mbit/s in each direction (0 disables)")
 	fs.Float64Var(&opts.perFlowMbits, "per-flow-rate", 0, "per-source-address rate in Mbit/s, modelling per-flow policing (0 disables)")
 	fs.IntVar(&opts.queueBytes, "queue", 0, "bottleneck queue in bytes (0 selects one BDP)")
@@ -114,6 +116,7 @@ func run(args []string) error {
 	pathCfg := pathsim.Config{
 		OneWayDelay:            time.Duration(opts.rttMillis) * time.Millisecond / 2,
 		LossRate:               opts.lossPercent / 100,
+		LossBurstPackets:       opts.lossBurst,
 		RateBytesPerSec:        uint64(opts.rateMbits * 1e6 / 8),
 		PerFlowRateBytesPerSec: uint64(opts.perFlowMbits * 1e6 / 8),
 		QueueBytes:             opts.queueBytes,
@@ -126,8 +129,8 @@ func run(args []string) error {
 	}
 	defer origin.Close()
 
-	fmt.Printf("# path rtt=%dms loss=%.2f%% rate=%.1fMbit/s per_flow=%.1fMbit/s queue=%s seed=%d object=%s congestion=%s lanes=%d\n",
-		opts.rttMillis, opts.lossPercent, opts.rateMbits, opts.perFlowMbits, humanQueue(pathCfg), opts.seed,
+	fmt.Printf("# path rtt=%dms loss=%.2f%% burst=%.1f rate=%.1fMbit/s per_flow=%.1fMbit/s queue=%s seed=%d object=%s congestion=%s lanes=%d\n",
+		opts.rttMillis, opts.lossPercent, opts.lossBurst, opts.rateMbits, opts.perFlowMbits, humanQueue(pathCfg), opts.seed,
 		humanBytes(opts.bytes), opts.congestion, opts.lanes)
 	fmt.Printf("stack\tflows\ttrial\tseconds\tmbits_per_sec\tcomplete\tnote\n")
 

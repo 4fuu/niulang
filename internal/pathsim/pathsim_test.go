@@ -2,6 +2,7 @@ package pathsim
 
 import (
 	"bytes"
+	"math/rand"
 	"net"
 	"testing"
 	"time"
@@ -184,5 +185,56 @@ func TestBottleneckQueueTailDrops(t *testing.T) {
 	}
 	if got := d.packetsDropped.Load(); got != uint64(20-accepted) {
 		t.Fatalf("tail drop count = %d, want %d", got, 20-accepted)
+	}
+}
+
+func TestBurstLossProducesRunsAtTheConfiguredRate(t *testing.T) {
+	// Correlated loss is a different regime for a transport than the same
+	// average spread evenly, so the model has to deliver both the requested
+	// long-run rate and genuinely clustered drops.
+	d := &direction{rng: rand.New(rand.NewSource(11))}
+	cfg := Config{LossRate: 0.2, LossBurstPackets: 12}
+	const trials = 200000
+	dropped, runs, inRun := 0, 0, false
+	for range trials {
+		if d.dropLocked(cfg) {
+			dropped++
+			if !inRun {
+				runs++
+				inRun = true
+			}
+			continue
+		}
+		inRun = false
+	}
+	rate := float64(dropped) / trials
+	if rate < 0.17 || rate > 0.23 {
+		t.Fatalf("long-run drop rate %.3f, want about 0.20", rate)
+	}
+	meanRun := float64(dropped) / float64(runs)
+	if meanRun < 9 || meanRun > 15 {
+		t.Fatalf("mean burst length %.1f packets, want about 12", meanRun)
+	}
+}
+
+func TestIndependentLossHasNoBurstStructure(t *testing.T) {
+	d := &direction{rng: rand.New(rand.NewSource(11))}
+	cfg := Config{LossRate: 0.2}
+	const trials = 200000
+	dropped, runs, inRun := 0, 0, false
+	for range trials {
+		if d.dropLocked(cfg) {
+			dropped++
+			if !inRun {
+				runs++
+				inRun = true
+			}
+			continue
+		}
+		inRun = false
+	}
+	// Bernoulli runs average 1/(1-p) = 1.25 packets.
+	if meanRun := float64(dropped) / float64(runs); meanRun > 1.5 {
+		t.Fatalf("independent loss produced %.2f-packet runs, want about 1.25", meanRun)
 	}
 }

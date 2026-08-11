@@ -234,14 +234,25 @@ type ClientConfig struct {
 	// under test. wanopt has the same option, and a comparison is only valid
 	// when both sides use it identically.
 	LocalAddress string
-	Logger       *slog.Logger
+	// DialTimeout bounds one connection attempt. Zero selects a default.
+	DialTimeout time.Duration
+	Logger      *slog.Logger
 }
+
+// dialTimeout must be finite. A control that can hang indefinitely is worse
+// than no control: during a lossy window one unbounded dial wedged this client
+// for an entire campaign and made the transport under test look good for a
+// reason that had nothing to do with it.
+const defaultDialTimeout = 10 * time.Second
 
 type Client struct {
 	cfg ClientConfig
 
-	mu   sync.Mutex
-	conn *quic.Conn
+	// dialing serializes connection establishment without holding mu across
+	// the dial itself, so a slow handshake cannot block every other request.
+	dialing sync.Mutex
+	mu      sync.Mutex
+	conn    *quic.Conn
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
@@ -250,6 +261,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.DialTimeout <= 0 {
+		cfg.DialTimeout = defaultDialTimeout
 	}
 	return &Client{cfg: cfg}, nil
 }
@@ -311,7 +325,9 @@ func (c *Client) openStream(ctx context.Context, destination string) (*quic.Stre
 	if err != nil {
 		return nil, err
 	}
-	stream, err := conn.OpenStreamSync(ctx)
+	openCtx, cancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
+	defer cancel()
+	stream, err := conn.OpenStreamSync(openCtx)
 	if err != nil {
 		// One retry on a dead pooled connection matches TUIC's reconnect
 		// behavior and keeps a transient path failure from failing the trial.
@@ -320,7 +336,7 @@ func (c *Client) openStream(ctx context.Context, destination string) (*quic.Stre
 		if err != nil {
 			return nil, err
 		}
-		if stream, err = conn.OpenStreamSync(ctx); err != nil {
+		if stream, err = conn.OpenStreamSync(openCtx); err != nil {
 			return nil, err
 		}
 	}
@@ -338,22 +354,40 @@ func (c *Client) openStream(ctx context.Context, destination string) (*quic.Stre
 }
 
 func (c *Client) connection(ctx context.Context) (*quic.Conn, bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil && c.conn.Context().Err() == nil {
-		return c.conn, false, nil
+	if conn := c.current(); conn != nil {
+		return conn, false, nil
+	}
+	c.dialing.Lock()
+	defer c.dialing.Unlock()
+	// Another request may have established the connection while this one
+	// waited for the dial lock.
+	if conn := c.current(); conn != nil {
+		return conn, false, nil
 	}
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS13, ServerName: c.cfg.ServerName,
 		NextProtos: []string{ALPN}, RootCAs: c.cfg.RootCAs,
 	}
-	conn, err := c.dial(ctx, tlsCfg)
+	dialCtx, cancel := context.WithTimeout(ctx, c.cfg.DialTimeout)
+	defer cancel()
+	conn, err := c.dial(dialCtx, tlsCfg)
 	if err != nil {
 		return nil, false, err
 	}
 	applyCongestion(conn, c.cfg.Congestion)
+	c.mu.Lock()
 	c.conn = conn
+	c.mu.Unlock()
 	return conn, true, nil
+}
+
+func (c *Client) current() *quic.Conn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil && c.conn.Context().Err() == nil {
+		return c.conn
+	}
+	return nil
 }
 
 func (c *Client) dial(ctx context.Context, tlsCfg *tls.Config) (*quic.Conn, error) {
