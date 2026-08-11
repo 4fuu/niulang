@@ -53,6 +53,7 @@ type options struct {
 	flows        string
 	congestion   string
 	lanes        int
+	chunkSize    int
 	initialLanes int
 	quicPool     bool
 	timeout      time.Duration
@@ -84,6 +85,7 @@ func run(args []string) error {
 	fs.StringVar(&opts.flows, "flows", "1", "comma-separated concurrent flow counts")
 	fs.StringVar(&opts.congestion, "congestion", "bbr-tuic", "congestion controller for both stacks")
 	fs.IntVar(&opts.lanes, "lanes", 1, "wanopt maximum lanes")
+	fs.IntVar(&opts.chunkSize, "chunk", 0, "wanopt data frame size in bytes (0 selects the default)")
 	fs.IntVar(&opts.initialLanes, "initial-lanes", 1, "wanopt lanes opened before SOCKS CONNECT succeeds")
 	fs.BoolVar(&opts.quicPool, "quic-pool", true, "enable the wanopt pooled QUIC connection")
 	fs.DurationVar(&opts.timeout, "timeout", 120*time.Second, "per-trial timeout")
@@ -344,7 +346,7 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 		secret := []byte("wanoptbench-shared-secret-32bytes!")
 		server, err := pep.NewServer(pep.ServerConfig{
 			ListenAddr: serverPacket.LocalAddr().String(), Certificate: certificate, Secret: secret,
-			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, EnableQUIC: true,
+			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: opts.chunkSize,
 			Congestion: pep.CongestionControlKind(opts.congestion), MaxLanes: opts.lanes, Logger: logger,
 		})
 		if err != nil {
@@ -353,7 +355,7 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 		}
 		client, err := pep.NewClient(pep.ClientConfig{
 			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "wanopt.test",
-			Secret: secret, RootCAs: roots, Transport: pep.TransportQUIC,
+			Secret: secret, RootCAs: roots, Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
 			EnableQUICPool: opts.quicPool, OptimisticOpen: true,
 			Congestion:   pep.CongestionControlKind(opts.congestion),
 			InitialLanes: opts.initialLanes, MaxLanes: opts.lanes, Logger: logger,
