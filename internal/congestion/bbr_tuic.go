@@ -237,15 +237,30 @@ func (b *TUICBBRSender) HasPacingBudget(now monotime.Time) bool {
 
 func (b *TUICBBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quiccongestion.ByteCount, number quiccongestion.PacketNumber, bytes quiccongestion.ByteCount, retransmittable bool) {
 	b.maxSentPN = number
-	if bytesInFlight == 0 {
+	// apNet/quic-go calls this hook after adding an ack-eliciting packet to its
+	// connection flight. TUIC's sampler, however, takes the pre-send flight and
+	// adds the packet itself when it snapshots send state. Convert at this
+	// adapter boundary; otherwise every packet's sampler flight is one packet
+	// too large and a first packet can never be recognized as opening a flight.
+	preSendFlight := preSendBytesInFlight(bytesInFlight, bytes, retransmittable)
+	if preSendFlight == 0 {
 		b.exitingQuiescence = true
 	}
-	// Native TUIC records quic-go's pre-send flight here. The sampler below
-	// separately stores bytesInFlight+bytes in the packet snapshot.
+	// Keep the controller telemetry in the same post-send units as quic-go.
 	b.bytesInFlight = maxByteCount(0, bytesInFlight)
-	b.estimator.onSentPacket(sentTime, number, uint64(maxByteCount(0, bytes)), uint64(maxByteCount(0, bytesInFlight)), retransmittable)
+	b.estimator.onSentPacket(sentTime, number, uint64(maxByteCount(0, bytes)), uint64(preSendFlight), retransmittable)
 	b.pacer.sentPacket(sentTime, bytes)
 	b.publishTelemetry()
+}
+
+func preSendBytesInFlight(postSend, bytes quiccongestion.ByteCount, retransmittable bool) quiccongestion.ByteCount {
+	if postSend <= 0 || !retransmittable || bytes <= 0 {
+		return maxByteCount(0, postSend)
+	}
+	if postSend <= bytes {
+		return 0
+	}
+	return postSend - bytes
 }
 
 func (b *TUICBBRSender) CanSend(bytesInFlight quiccongestion.ByteCount) bool {
