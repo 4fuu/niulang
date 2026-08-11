@@ -52,6 +52,7 @@ type options struct {
 	trials       int
 	flows        string
 	congestion   string
+	brutalMbits  float64
 	lanes        int
 	chunkSize    int
 	initialLanes int
@@ -84,6 +85,7 @@ func run(args []string) error {
 	fs.IntVar(&opts.trials, "trials", 3, "trials per stack")
 	fs.StringVar(&opts.flows, "flows", "1", "comma-separated concurrent flow counts")
 	fs.StringVar(&opts.congestion, "congestion", "bbr-tuic", "congestion controller for both stacks")
+	fs.Float64Var(&opts.brutalMbits, "brutal-rate", 0, "wanopt fixed send rate in Mbit/s when --congestion=brutal")
 	fs.IntVar(&opts.lanes, "lanes", 1, "wanopt maximum lanes")
 	fs.IntVar(&opts.chunkSize, "chunk", 0, "wanopt data frame size in bytes (0 selects the default)")
 	fs.IntVar(&opts.initialLanes, "initial-lanes", 1, "wanopt lanes opened before SOCKS CONNECT succeeds")
@@ -347,7 +349,8 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 		server, err := pep.NewServer(pep.ServerConfig{
 			ListenAddr: serverPacket.LocalAddr().String(), Certificate: certificate, Secret: secret,
 			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: opts.chunkSize,
-			Congestion: pep.CongestionControlKind(opts.congestion), MaxLanes: opts.lanes, Logger: logger,
+			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
+			MaxLanes: opts.lanes, Logger: logger,
 		})
 		if err != nil {
 			h.Close()
@@ -357,8 +360,9 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "wanopt.test",
 			Secret: secret, RootCAs: roots, Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
 			EnableQUICPool: opts.quicPool, OptimisticOpen: true,
-			Congestion:   pep.CongestionControlKind(opts.congestion),
-			InitialLanes: opts.initialLanes, MaxLanes: opts.lanes, Logger: logger,
+			Congestion:        pep.CongestionControlKind(opts.congestion),
+			BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
+			InitialLanes:      opts.initialLanes, MaxLanes: opts.lanes, Logger: logger,
 		})
 		if err != nil {
 			h.Close()
