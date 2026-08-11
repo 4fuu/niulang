@@ -44,6 +44,7 @@ type options struct {
 	rttMillis    int
 	lossPercent  float64
 	lossBurst    float64
+	lossUp       float64
 	rateMbits    float64
 	perFlowMbits float64
 	queueBytes   int
@@ -78,6 +79,7 @@ func run(args []string) error {
 	fs.IntVar(&opts.rttMillis, "rtt", 200, "emulated round-trip time in milliseconds")
 	fs.Float64Var(&opts.lossPercent, "loss", 0, "per-packet loss percentage in each direction")
 	fs.Float64Var(&opts.lossBurst, "loss-burst", 0, "mean loss burst length in packets (0 or 1 gives independent loss)")
+	fs.Float64Var(&opts.lossUp, "loss-up", 0, "client-to-server loss percentage, overriding --loss for that direction")
 	fs.Float64Var(&opts.rateMbits, "rate", 100, "bottleneck rate in Mbit/s in each direction (0 disables)")
 	fs.Float64Var(&opts.perFlowMbits, "per-flow-rate", 0, "per-source-address rate in Mbit/s, modelling per-flow policing (0 disables)")
 	fs.IntVar(&opts.queueBytes, "queue", 0, "bottleneck queue in bytes (0 selects one BDP)")
@@ -123,6 +125,7 @@ func run(args []string) error {
 		OneWayDelay:            time.Duration(opts.rttMillis) * time.Millisecond / 2,
 		LossRate:               opts.lossPercent / 100,
 		LossBurstPackets:       opts.lossBurst,
+		UpstreamLossRate:       opts.lossUp / 100,
 		RateBytesPerSec:        uint64(opts.rateMbits * 1e6 / 8),
 		PerFlowRateBytesPerSec: uint64(opts.perFlowMbits * 1e6 / 8),
 		QueueBytes:             opts.queueBytes,

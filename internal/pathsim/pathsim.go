@@ -28,6 +28,16 @@ type Config struct {
 	// LossRate is the overall per-packet drop probability applied in each
 	// direction, in [0,1).
 	LossRate float64
+	// UpstreamLossRate overrides LossRate for the client-to-server direction.
+	// Zero means "use LossRate", so a symmetric path needs only LossRate.
+	//
+	// Asymmetric loss is worth modelling because a transport can depend on the
+	// reverse direction in ways that are invisible when both directions are
+	// impaired equally: anything the receiver has to send back - protocol
+	// acknowledgements, window updates - competes for a congestion window that
+	// heavy reverse loss collapses, and the forward flow stalls even though its
+	// own direction is healthy.
+	UpstreamLossRate float64
 	// LossBurstPackets is the mean length, in packets, of a loss burst. One
 	// (or zero) gives independent Bernoulli loss. Larger values switch to a
 	// Gilbert model: the path alternates between a lossless good state and a
@@ -92,6 +102,9 @@ type direction struct {
 	// inBurst is the Gilbert model's bad state. It is meaningful only when
 	// the configuration asks for correlated loss.
 	inBurst bool
+	// lossRate is this direction's drop probability, which may differ from the
+	// other direction's.
+	lossRate float64
 
 	packetsIn      atomic.Uint64
 	packetsOut     atomic.Uint64
@@ -116,7 +129,7 @@ func (d *direction) stats() Stats {
 func (d *direction) schedule(now time.Time, size int, cfg Config) (time.Time, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if cfg.LossRate > 0 && d.dropLocked(cfg) {
+	if d.lossRate > 0 && d.dropLocked(cfg) {
 		d.packetsLost.Add(1)
 		return time.Time{}, false
 	}
@@ -146,10 +159,10 @@ func (d *direction) schedule(now time.Time, size int, cfg Config) (time.Time, bo
 // fraction is LossRate.
 func (d *direction) dropLocked(cfg Config) bool {
 	if cfg.LossBurstPackets <= 1 {
-		return d.rng.Float64() < cfg.LossRate
+		return d.rng.Float64() < d.lossRate
 	}
 	recover := 1 / cfg.LossBurstPackets
-	enter := recover * cfg.LossRate / (1 - cfg.LossRate)
+	enter := recover * d.lossRate / (1 - d.lossRate)
 	if d.inBurst {
 		if d.rng.Float64() < recover {
 			d.inBurst = false
@@ -199,6 +212,9 @@ func New(listen, target string, cfg Config) (*Relay, error) {
 	if cfg.LossRate < 0 || cfg.LossRate >= 1 {
 		return nil, fmt.Errorf("loss rate %v must be in [0,1)", cfg.LossRate)
 	}
+	if cfg.UpstreamLossRate < 0 || cfg.UpstreamLossRate >= 1 {
+		return nil, fmt.Errorf("upstream loss rate %v must be in [0,1)", cfg.UpstreamLossRate)
+	}
 	cfg = cfg.withDefaults()
 	targetAddr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
@@ -221,6 +237,11 @@ func New(listen, target string, cfg Config) (*Relay, error) {
 	// depend on unrelated timing.
 	r.upstream.rng = rand.New(rand.NewSource(cfg.Seed))
 	r.downstream.rng = rand.New(rand.NewSource(cfg.Seed + 1))
+	r.upstream.lossRate = cfg.LossRate
+	if cfg.UpstreamLossRate > 0 {
+		r.upstream.lossRate = cfg.UpstreamLossRate
+	}
+	r.downstream.lossRate = cfg.LossRate
 	r.wg.Add(1)
 	go r.readClient()
 	return r, nil
@@ -330,7 +351,6 @@ func (r *Relay) forward(d *direction, perFlow *direction, payload []byte, send f
 		// aggregate bottleneck.
 		flowCfg := r.cfg
 		flowCfg.RateBytesPerSec = r.cfg.PerFlowRateBytesPerSec
-		flowCfg.LossRate = 0
 		flowCfg.OneWayDelay = 0
 		released, allowed := perFlow.schedule(now, len(payload), flowCfg)
 		if !allowed {

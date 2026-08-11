@@ -192,7 +192,7 @@ func TestBurstLossProducesRunsAtTheConfiguredRate(t *testing.T) {
 	// Correlated loss is a different regime for a transport than the same
 	// average spread evenly, so the model has to deliver both the requested
 	// long-run rate and genuinely clustered drops.
-	d := &direction{rng: rand.New(rand.NewSource(11))}
+	d := &direction{rng: rand.New(rand.NewSource(11)), lossRate: 0.2}
 	cfg := Config{LossRate: 0.2, LossBurstPackets: 12}
 	const trials = 200000
 	dropped, runs, inRun := 0, 0, false
@@ -218,7 +218,7 @@ func TestBurstLossProducesRunsAtTheConfiguredRate(t *testing.T) {
 }
 
 func TestIndependentLossHasNoBurstStructure(t *testing.T) {
-	d := &direction{rng: rand.New(rand.NewSource(11))}
+	d := &direction{rng: rand.New(rand.NewSource(11)), lossRate: 0.2}
 	cfg := Config{LossRate: 0.2}
 	const trials = 200000
 	dropped, runs, inRun := 0, 0, false
@@ -236,5 +236,52 @@ func TestIndependentLossHasNoBurstStructure(t *testing.T) {
 	// Bernoulli runs average 1/(1-p) = 1.25 packets.
 	if meanRun := float64(dropped) / float64(runs); meanRun > 1.5 {
 		t.Fatalf("independent loss produced %.2f-packet runs, want about 1.25", meanRun)
+	}
+}
+
+func TestAsymmetricLossAppliesPerDirection(t *testing.T) {
+	// A transport can depend on the reverse direction in ways that are
+	// invisible when both directions are impaired equally, so the emulator has
+	// to be able to make one direction much worse than the other.
+	server := echoServer(t)
+	relay, err := New("127.0.0.1:0", server.LocalAddr().String(), Config{UpstreamLossRate: 0.6, Seed: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	target, err := net.ResolveUDPAddr("udp", relay.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sent = 400
+	for range sent {
+		if _, err := client.WriteTo([]byte("x"), target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if up, _ := relay.Stats(); up.PacketsIn >= sent {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	up, down := relay.Stats()
+	if up.PacketsLost < sent*4/10 {
+		t.Fatalf("upstream dropped %d of %d, want roughly 60%%", up.PacketsLost, sent)
+	}
+	if down.PacketsLost != 0 {
+		t.Fatalf("downstream dropped %d packets, want none", down.PacketsLost)
+	}
+}
+
+func TestAsymmetricLossRateIsValidated(t *testing.T) {
+	if _, err := New("127.0.0.1:0", "127.0.0.1:1", Config{UpstreamLossRate: 1}); err == nil {
+		t.Fatal("upstream loss rate of 1 was accepted")
 	}
 }

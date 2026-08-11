@@ -176,23 +176,23 @@ the exact expected body.
 
 | Condition | Reference | wanopt | Delta |
 | --- | ---: | ---: | ---: |
-| 200 ms, 100 Mbit/s, 0% loss, 10 MiB | 37.79 | 37.46 | −0.9% |
-| 200 ms, 100 Mbit/s, 1% loss, 10 MiB | 32.05 | 34.19 | +6.7% |
-| 200 ms, 100 Mbit/s, 3% loss, 10 MiB | 29.10 | 29.56 | +1.6% |
-| 200 ms, 100 Mbit/s, 5% loss, 10 MiB | 27.78 | 28.53 | +2.7% |
-| 200 ms, 100 Mbit/s, 1% loss, 50 MiB | 57.38 | 61.55 | +7.3% |
-| 200 ms, 1% loss, 4 concurrent flows | 61.42 | 61.73 | +0.5% |
-| 200 ms, 1% loss, 8 concurrent flows | 70.68 | 70.23 | −0.6% |
-| 264 ms, 50 Mbit/s, 10% loss | 18.03 | 17.91 | −0.7% |
-| 264 ms, 50 Mbit/s, 20% loss | 14.86 | 14.96 | +0.7% |
-| No impairment, 256 MiB (datapath cost) | 879.71 | 897.50 | +2.0% |
-| Cold connect (ms, lower is better) | 409.9 | 409.6 | parity |
-| Warm request (ms, lower is better) | 203.4 | 202.7 | parity |
+| 200 ms, 100 Mbit/s, 0% loss, 10 MiB | 37.87 | 37.82 | −0.1% |
+| 200 ms, 100 Mbit/s, 1% loss, 10 MiB | 31.74 | 31.84 | +0.3% |
+| 200 ms, 100 Mbit/s, 3% loss, 10 MiB | 28.61 | 29.70 | +3.8% |
+| 200 ms, 100 Mbit/s, 5% loss, 10 MiB | 28.18 | 28.71 | +1.9% |
+| 200 ms, 100 Mbit/s, 1% loss, 50 MiB | 57.81 | 58.02 | +0.4% |
+| 200 ms, 1% loss, 4 concurrent flows | 61.96 | 61.59 | −0.6% |
+| 200 ms, 1% loss, 8 concurrent flows | 70.26 | 70.28 | +0.0% |
+| 264 ms, 50 Mbit/s, 10% loss | 18.14 | 17.79 | −1.9% |
+| 264 ms, 50 Mbit/s, 20% loss | 14.71 | 15.57 | +5.8% |
+| No impairment, 256 MiB (datapath cost) | 890.15 | 897.13 | +0.8% |
+| Cold connect (ms, lower is better) | 409.1 | 409.5 | parity |
+| Warm request (ms, lower is better) | 203.0 | 202.9 | parity |
 
 Single-flow goodput, concurrent-flow goodput, connection latency, and CPU-bound
-datapath cost are all at or above the reference. For comparison, before these
-changes the same single-flow cells measured 24.3 against 32.1 at 1% loss and
-20.5 against 29.7 at 3% loss.
+datapath cost are all within noise of the reference or above it. For comparison,
+before these changes the same single-flow cells measured 24.3 against 32.1 at
+1% loss and 20.5 against 29.7 at 3% loss.
 
 ### Lane aggregation
 
@@ -216,7 +216,11 @@ path-validation knob.
 The emulator's independent per-packet loss did not reproduce the live link's
 behavior, so it also models correlated loss: the path alternates between a
 lossless state and one that drops everything, with a configurable mean burst
-length and the requested long-run rate.
+length and the requested long-run rate. It can also apply a different loss rate
+to each direction, which is the shape of defect 6: with 25% loss on the reverse
+direction and 0.5% forward, a 32 MiB transfer now completes at 45.8 Mbit/s
+against the reference's 46.5, where the coupling would previously have stalled
+it.
 
 Correlated loss is a different regime, and it breaks *both* designs. At 178 ms
 with 20% loss in 20-packet bursts, the reference failed two of four trials and
