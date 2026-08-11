@@ -57,6 +57,7 @@ func run(args []string) error {
 		rootCAFile string
 		localAddr  string
 		congestion string
+		brutalRate uint64
 		genCert    string
 		logLevel   string
 	)
@@ -71,7 +72,8 @@ func run(args []string) error {
 	fs.StringVar(&keyFile, "tls-key", "", "server private key PEM")
 	fs.StringVar(&rootCAFile, "root-ca", "", "client: PEM to trust")
 	fs.StringVar(&localAddr, "local-address", "", "client: bind the outer UDP socket to this local IP")
-	fs.StringVar(&congestion, "congestion", "bbr-tuic", "congestion controller: reno, bbr, or bbr-tuic")
+	fs.StringVar(&congestion, "congestion", "bbr-tuic", "congestion controller: reno, bbr, bbr-tuic, or brutal")
+	fs.Uint64Var(&brutalRate, "brutal-bytes-per-sec", 0, "fixed send rate in bytes/s when --congestion=brutal")
 	fs.StringVar(&genCert, "gencert-prefix", "reference", "gencert: output prefix for PEM files")
 	fs.StringVar(&logLevel, "log-level", "info", "debug, info, warn, or error")
 	if err := fs.Parse(args); err != nil {
@@ -112,7 +114,8 @@ func run(args []string) error {
 		}
 		server, err := baseline.NewServer(baseline.ServerConfig{
 			ListenAddr: listen, Certificate: certificate, Token: token,
-			Transport: baseline.TUICTransport(), Congestion: baseline.CongestionKind(congestion), Logger: logger,
+			Transport: baseline.TUICTransport(), Congestion: baseline.CongestionKind(congestion),
+			BrutalBytesPerSec: brutalRate, Logger: logger,
 		})
 		if err != nil {
 			return err
@@ -142,7 +145,8 @@ func run(args []string) error {
 		client, err := baseline.NewClient(baseline.ClientConfig{
 			ListenAddr: listen, RemoteAddr: remote, ServerName: serverName, RootCAs: roots,
 			Token: token, Transport: baseline.TUICTransport(),
-			Congestion: baseline.CongestionKind(congestion), LocalAddress: localAddr, Logger: logger,
+			Congestion: baseline.CongestionKind(congestion), BrutalBytesPerSec: brutalRate,
+			LocalAddress: localAddr, Logger: logger,
 		})
 		if err != nil {
 			return err

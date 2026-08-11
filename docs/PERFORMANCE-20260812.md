@@ -166,6 +166,80 @@ aggregate, 200 ms, 1% loss, 100 MiB:
 The default remains one lane. `--max-lanes` is still an explicit
 path-validation knob.
 
+## Correlated loss, and what the controller is worth
+
+The emulator's independent per-packet loss did not reproduce the live link's
+behavior, so it also models correlated loss: the path alternates between a
+lossless state and one that drops everything, with a configurable mean burst
+length and the requested long-run rate.
+
+Correlated loss is a different regime, and it breaks *both* designs. At 178 ms
+with 20% loss in 20-packet bursts, the reference failed two of four trials and
+wanopt one of four; at 35% in 10-packet bursts, neither completed reliably.
+The instability seen on the live link is a property of that regime rather than
+of one design, which is why live campaigns in a bad window show either
+transport "winning" depending on when they ran.
+
+What does change the outcome is the congestion controller. A loss-responsive
+controller keeps backing off from losses that carry no capacity signal:
+
+| 178 ms, burst length 10 | Reference (`bbr-tuic`) | wanopt (`brutal`) |
+| --- | --- | --- |
+| 15% loss | 4/5 complete, 13.6 Mbit/s | 5/5 complete, 14.9 Mbit/s |
+| 35% loss | 3/5 complete, 5.6 Mbit/s | 5/5 complete, 6.9 Mbit/s |
+
+That table compares two different controllers, so on its own it says nothing
+about the transports. Holding the controller constant is what separates them.
+With both stacks on the same fixed rate at 35% loss and burst length 10, the
+reference completed 4 of 5 at a 7.6 Mbit/s median and wanopt completed 5 of 5
+at 6.4, with two slow outliers (1.4 and 3.3) that the reference did not have.
+
+The honest reading is therefore: **the gain in this regime belongs to the
+controller, not to wanopt's transport**, and under extreme correlated loss
+wanopt still shows more run-to-run variance than the reference at an equal
+controller. That variance is an open item; it is not visible at 0-20%
+independent loss or at 8% burst loss, where the two are indistinguishable.
+
+The fixed-rate controller is not congestion responsive — it explicitly raises
+its send rate as loss rises, to hold goodput at the configured target — so it
+stays an explicit operator choice for a known path budget and is not proposed
+as a default.
+
+Two hypotheses were tested and rejected, and are recorded so they are not
+retried: wanopt's 32 KiB application framing quantum does not amplify burst
+loss (2 KiB, 8 KiB and 32 KiB frames are indistinguishable at 15% burst loss),
+and reducing frame size does not improve completion.
+
+## Live-path campaign
+
+Run with `scripts/bench_live_matched.sh` between a wanopt client and the
+reference client, both bound to the physical interface, against a fixed
+4 MiB object served from the US host, alternating order each round.
+
+Two measurement defects had to be fixed first, and both are worth recording
+because each produced a confident but wrong result:
+
+- The first attempt used the server's hostname, which a local TUN-mode proxy
+  resolved to a fake IP. Both transports were being measured *through the
+  existing tunnel* rather than over the path under test.
+- The reference client dialed with no timeout while holding its connection
+  mutex, so one hung handshake wedged it for a whole campaign: it completed 0
+  of 8 trials while wanopt completed 9 of 9. A control that can hang fails in
+  the flattering direction, which is worse than having no control.
+- The remote oracle was a single-threaded `http.server`, so a lingering
+  connection from one trial delayed the next. Before this was fixed, wanopt
+  measured 1.19 Mbit/s against the reference's 4.52; with a threaded oracle and
+  nothing else changed, the two measured 0.478 and 0.522.
+
+With all three corrected, in a window where 20 ICMP probes showed 30% loss and
+178 ms RTT, 17 alternating 4 MiB trials gave: reference 8/8 complete at a
+0.522 Mbit/s median, wanopt 9/9 complete at 0.478. Both transports delivered
+every byte; the path itself was delivering about half a megabit.
+
+That window is not evidence of parity at useful throughput — it is evidence
+that the two behave the same on a badly degraded path. The emulated matrix is
+the stronger evidence, and the live link's variance is exactly why it exists.
+
 ## Reproducing
 
 ```sh

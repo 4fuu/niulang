@@ -326,7 +326,8 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 		server, err := baseline.NewServer(baseline.ServerConfig{
 			ListenAddr: serverPacket.LocalAddr().String(), Certificate: certificate,
 			Token: token, Transport: baseline.TUICTransport(),
-			Congestion: baseline.CongestionKind(opts.congestion), Logger: logger,
+			Congestion:        baseline.CongestionKind(opts.congestion),
+			BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8), Logger: logger,
 		})
 		if err != nil {
 			h.Close()
@@ -335,7 +336,8 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 		client, err := baseline.NewClient(baseline.ClientConfig{
 			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "wanopt.test",
 			RootCAs: roots, Token: token, Transport: baseline.TUICTransport(),
-			Congestion: baseline.CongestionKind(opts.congestion), Logger: logger,
+			Congestion:        baseline.CongestionKind(opts.congestion),
+			BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8), Logger: logger,
 		})
 		if err != nil {
 			h.Close()

@@ -52,6 +52,11 @@ const (
 	CongestionReno    CongestionKind = "reno"
 	CongestionBBR     CongestionKind = "bbr"
 	CongestionBBRTUIC CongestionKind = "bbr-tuic"
+	// CongestionBrutal is not something TUIC offers. It exists here so a
+	// controller can be held constant while the transport design varies:
+	// otherwise a wanopt-with-Brutal versus reference-with-BBR result measures
+	// the controller choice and says nothing about the transport.
+	CongestionBrutal CongestionKind = "brutal"
 )
 
 // Transport mirrors TUIC's quinn transport knobs.
@@ -106,12 +111,16 @@ func (t Transport) quicConfig() *quic.Config {
 	}
 }
 
-func applyCongestion(conn *quic.Conn, kind CongestionKind) {
+func applyCongestion(conn *quic.Conn, kind CongestionKind, brutalBytesPerSecond uint64) {
 	switch kind {
 	case CongestionBBR:
 		conn.SetCongestionControl(wancongestion.NewBBRSender(conn.InitialPacketSize()))
 	case CongestionBBRTUIC:
 		conn.SetCongestionControl(wancongestion.NewTUICBBRSender(conn.InitialPacketSize()))
+	case CongestionBrutal:
+		if brutalBytesPerSecond > 0 {
+			conn.SetCongestionControl(wancongestion.NewBrutalSender(brutalBytesPerSecond, false))
+		}
 	}
 }
 
@@ -123,7 +132,9 @@ type ServerConfig struct {
 	Token       []byte
 	Transport   Transport
 	Congestion  CongestionKind
-	Logger      *slog.Logger
+	// BrutalBytesPerSec is required when Congestion is brutal.
+	BrutalBytesPerSec uint64
+	Logger            *slog.Logger
 }
 
 type Server struct {
@@ -163,7 +174,7 @@ func (s *Server) Serve(ctx context.Context, packet net.PacketConn) error {
 			}
 			return acceptErr
 		}
-		applyCongestion(conn, s.cfg.Congestion)
+		applyCongestion(conn, s.cfg.Congestion, s.cfg.BrutalBytesPerSec)
 		go s.serveConn(ctx, conn)
 	}
 }
@@ -228,6 +239,8 @@ type ClientConfig struct {
 	Token      []byte
 	Transport  Transport
 	Congestion CongestionKind
+	// BrutalBytesPerSec is required when Congestion is brutal.
+	BrutalBytesPerSec uint64
 	// LocalAddress binds the outer UDP socket to a specific local IP. On a
 	// host running a TUN-mode proxy, an unbound socket is captured by the TUN
 	// and the measurement would run through that tunnel rather than the path
@@ -374,7 +387,7 @@ func (c *Client) connection(ctx context.Context) (*quic.Conn, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	applyCongestion(conn, c.cfg.Congestion)
+	applyCongestion(conn, c.cfg.Congestion, c.cfg.BrutalBytesPerSec)
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
