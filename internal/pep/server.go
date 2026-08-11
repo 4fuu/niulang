@@ -181,7 +181,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		sessions:         make(map[[16]byte]*serverFlow),
 		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 		metrics:          cfg.Metrics,
-		quicCapabilities: session.CapabilityFastStreams,
+		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl,
 	}
 	server.quicFastStreams.Store(true)
 	return server, nil
@@ -494,6 +494,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics, s.cfg.Logger)
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
+	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0
 	serverSession := &serverFlow{flow: flow, maxLanes: s.cfg.MaxLanes}
 	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
 		flow.closeAll()
@@ -591,7 +592,7 @@ func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameC
 	if err != nil {
 		return
 	}
-	if open.Header.Type != protocol.TypeOpen || open.Header.SessionID != hello.SessionID || open.Header.FlowID == 0 || open.Header.Sequence != 0 || len(open.Payload) != 0 {
+	if open.Header.Type != protocol.TypeOpen || open.Header.SessionID != hello.SessionID || open.Header.FlowID == 0 || open.Header.Sequence != 0 || open.Header.Flags&protocol.FlagReserveControl != 0 || len(open.Payload) != 0 {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join")})
 		return
 	}

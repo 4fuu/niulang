@@ -29,6 +29,11 @@ const (
 	// capability is scoped to that TLS connection and never authorizes a
 	// standalone lane.
 	CapabilityFastStreams uint64 = 1 << 0
+	// CapabilityReserveControl allows OPEN / OPEN_FAST to request that lane 0
+	// remain reserved for interactive/control traffic after bulk promotion.
+	// The capability is negotiated so a new client never sends the flag to an
+	// older production peer that would reject unknown frame flags.
+	CapabilityReserveControl uint64 = 1 << 1
 )
 
 var helloOKCapabilityMarker = [8]byte{'W', 'O', 'C', 'A', 'P', '0', '0', '1'}

@@ -28,6 +28,13 @@ import (
 const (
 	maxLaneRecoveryAttempts = 8
 	laneRecoveryResetAfter  = 5 * time.Minute
+	// A rejected speculative lane must not be reopened on every scheduler tick.
+	// The backoff is intentionally shorter than a normal bulk request timeout,
+	// but long enough to collect a fresh throughput/RTT sample on the surviving
+	// control lane before trying another independent QUIC path.
+	minLaneProbeBackoff  = 10 * time.Second
+	maxLaneProbeBackoff  = 60 * time.Second
+	maxLaneProbeAttempts = 4
 )
 
 type ClientConfig struct {
@@ -93,6 +100,7 @@ type Client struct {
 	// remains per logical flow; only the TLS/QUIC connection authentication is
 	// shared. A zero capability keeps compatibility with an older server.
 	quicPoolFast          bool
+	quicPoolControl       bool
 	quicPoolAuthenticated bool
 }
 
@@ -269,7 +277,7 @@ func (c *Client) closeQUICPool() {
 	c.quicMu.Lock()
 	conn, packet := c.quicConn, c.quicPacket
 	c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
-	c.quicPoolFast, c.quicPoolAuthenticated = false, false
+	c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
 	c.quicMu.Unlock()
 	if conn != nil {
 		_ = conn.CloseWithError(0, "wanopt client stopped")
@@ -303,6 +311,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
 	flowSession.openAckPending = flow.openPending
+	flowSession.reserveControlLane = flow.reserveControl
 	if err := flowSession.addLane(&mpLane{id: flow.laneID, kind: flow.kind, fc: flow.fc}); err != nil {
 		_ = flow.fc.Close()
 		flowSession.closeAll()
@@ -337,22 +346,24 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 }
 
 type openedFlow struct {
-	fc          *frameConn
-	outer       streamConn
-	sessionID   [16]byte
-	flowID      uint64
-	laneID      uint64
-	kind        TransportKind
-	openPending bool
+	fc             *frameConn
+	outer          streamConn
+	sessionID      [16]byte
+	flowID         uint64
+	laneID         uint64
+	kind           TransportKind
+	openPending    bool
+	reserveControl bool
 }
 
 type authenticatedLane struct {
-	fc        *frameConn
-	outer     streamConn
-	sessionID [16]byte
-	kind      TransportKind
-	laneID    uint64
-	fastOpen  bool
+	fc             *frameConn
+	outer          streamConn
+	sessionID      [16]byte
+	kind           TransportKind
+	laneID         uint64
+	fastOpen       bool
+	reserveControl bool
 }
 
 func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow, error) {
@@ -561,15 +572,19 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 	if lane.fastOpen {
 		openType = protocol.TypeOpenFast
 	}
+	openFlags := uint16(0)
+	if lane.reserveControl {
+		openFlags |= protocol.FlagReserveControl
+	}
 	if err := lane.fc.Write(protocol.Frame{
-		Header:  protocol.Header{Version: protocol.Version, Type: openType, SessionID: lane.sessionID, FlowID: flowID, Class: protocol.ClassNew},
+		Header:  protocol.Header{Version: protocol.Version, Type: openType, Flags: openFlags, SessionID: lane.sessionID, FlowID: flowID, Class: protocol.ClassNew},
 		Payload: payload,
 	}); err != nil {
 		return fail(fmt.Errorf("send flow open: %w", err))
 	}
 	if c.cfg.OptimisticOpen {
 		_ = lane.outer.SetDeadline(time.Time{})
-		return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind, openPending: true}, nil
+		return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind, openPending: true, reserveControl: lane.reserveControl}, nil
 	}
 	response, err := lane.fc.Read()
 	if err != nil {
@@ -590,7 +605,7 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 		return fail(errors.New("invalid flow open acknowledgement"))
 	}
 	_ = lane.outer.SetDeadline(time.Time{})
-	return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind}, nil
+	return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind, reserveControl: lane.reserveControl}, nil
 }
 
 func resetCode(payload []byte) session.ResetCode {
@@ -631,6 +646,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	var outer streamConn
 	var err error
 	fastOpen := false
+	reserveControl := false
 	alreadyAuthenticated := false
 	switch kind {
 	case TransportTCP:
@@ -641,7 +657,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
 		}
 		if pooled {
-			outer, fastOpen, alreadyAuthenticated, err = c.dialPooledQUICLane(ctx, ccfg, sessionID)
+			outer, fastOpen, alreadyAuthenticated, reserveControl, err = c.dialPooledQUICLane(ctx, ccfg, sessionID)
 		} else {
 			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg)
 		}
@@ -676,7 +692,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	}
 	_ = outer.SetDeadline(time.Time{})
 	c.cfg.Logger.Debug("outer lane authenticated", "transport", kind, "dial_duration", outerReady.Sub(dialStarted), "authentication_duration", time.Since(outerReady), "pooled", pooled, "fast_open", fastOpen)
-	return &authenticatedLane{fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID, fastOpen: fastOpen}, nil
+	return &authenticatedLane{fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID, fastOpen: fastOpen, reserveControl: reserveControl}, nil
 }
 
 // dialPooledQUICLane opens a stream on the client's shared QUIC connection.
@@ -684,7 +700,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 // simultaneous first flows cannot create competing pools. A stream-open
 // failure caused by a dead connection clears the pool and lets the caller's
 // normal AUTO fallback/retry policy establish a fresh transport.
-func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, sessionID [16]byte) (streamConn, bool, bool, error) {
+func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, sessionID [16]byte) (streamConn, bool, bool, bool, error) {
 	dialCtx := ctx
 	var cancel context.CancelFunc
 	if c.cfg.DialTimeout > 0 {
@@ -701,12 +717,12 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 		if c.quicPacket != nil {
 			_ = c.quicPacket.Close()
 		}
-		c.quicPoolFast, c.quicPoolAuthenticated = false, false
+		c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
 		conn, packet, err := dialQUICConnection(dialCtx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
 		if err != nil {
 			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
-			c.quicPoolFast, c.quicPoolAuthenticated = false, false
-			return nil, false, false, err
+			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
+			return nil, false, false, false, err
 		}
 		controller := configureQUICController(conn, ccfg)
 		c.quicConn, c.quicPacket, c.quicController = conn, packet, controller
@@ -719,9 +735,9 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 				_ = c.quicPacket.Close()
 			}
 			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
-			c.quicPoolFast, c.quicPoolAuthenticated = false, false
+			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
 		}
-		return nil, false, false, err
+		return nil, false, false, false, err
 	}
 	outer := &quicStreamConn{stream: stream, conn: c.quicConn, controller: c.quicController, closeConn: false}
 	// Authenticate the first stream while holding the pool mutex. This makes
@@ -734,19 +750,21 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 		if authErr != nil {
 			_ = outer.Close()
 			if c.quicConn.Context().Err() != nil {
-				c.quicConn, c.quicPacket, c.quicController, c.quicPoolFast = nil, nil, nil, false
+				c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
+				c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
 			}
-			return nil, false, false, authErr
+			return nil, false, false, false, authErr
 		}
 		c.quicPoolFast = ok.Capabilities&session.CapabilityFastStreams != 0
+		c.quicPoolControl = ok.Capabilities&session.CapabilityReserveControl != 0
 		c.quicPoolAuthenticated = true
 		_ = outer.SetDeadline(time.Time{})
-		return outer, false, true, nil
+		return outer, false, true, c.quicPoolControl, nil
 	}
 	// A capable peer has authenticated the QUIC connection, so this stream
 	// must skip the per-stream Hello and start with OPEN_FAST. An older peer
 	// advertises no capability and deliberately keeps the legacy Hello path.
-	return outer, c.quicPoolFast, c.quicPoolFast, nil
+	return outer, c.quicPoolFast, c.quicPoolFast, c.quicPoolControl, nil
 }
 
 func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID [16]byte, flowID, laneID uint64) (*mpLane, error) {
@@ -822,8 +840,16 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	if initialKind != TransportQUIC {
 		return
 	}
+	bulkStartLanes := c.cfg.BulkStartLanes
+	if flow.reserveControlLane && c.cfg.MaxLanes >= 2 && bulkStartLanes < 2 {
+		// A negotiated pooled control lane must not remain the only lane once
+		// the flow is classified as bulk. Open one independent lane at the
+		// promotion boundary; chooseLane retains lane 0 as a bounded fallback
+		// if this probe cannot be established.
+		bulkStartLanes = 2
+	}
 	planner := scheduler.New(scheduler.Config{
-		MaxLanes: c.cfg.MaxLanes, InteractiveLanes: 1, BulkStartLanes: c.cfg.BulkStartLanes,
+		MaxLanes: c.cfg.MaxLanes, InteractiveLanes: 1, BulkStartLanes: bulkStartLanes,
 		MinimumMarginalGain: c.cfg.MinimumMarginalGain, InteractiveRTTBudget: 40 * time.Millisecond,
 	})
 	manageCtx, manageCancel := context.WithCancel(ctx)
@@ -843,6 +869,11 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	var nextRecovery time.Time
 	recoveryAttempts := 0
 	var lastRecoveryAttempt time.Time
+	var growthBlockedUntil time.Time
+	var growthBackoff time.Duration
+	var seenLaneFailures uint64
+	growthAttempts := 0
+	growthSuppressed := false
 	for {
 		select {
 		case <-flow.doneChan():
@@ -859,11 +890,29 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				return
 			}
 			snapshot := flow.snapshot()
+			now := time.Now()
+			// Lane failures are asynchronous. If a speculative lane disappears,
+			// suppress immediate re-probing; otherwise a lossy path can churn
+			// through authenticated lanes faster than QUIC can declare them dead.
+			failures := flow.laneFailureCount()
+			if failures != seenLaneFailures {
+				seenLaneFailures = failures
+				if snapshot.HealthyLanes > 0 {
+					if growthBackoff == 0 {
+						growthBackoff = minLaneProbeBackoff
+					} else if growthBackoff < maxLaneProbeBackoff {
+						growthBackoff *= 2
+						if growthBackoff > maxLaneProbeBackoff {
+							growthBackoff = maxLaneProbeBackoff
+						}
+					}
+					growthBlockedUntil = now.Add(growthBackoff)
+				}
+			}
 			if snapshot.HealthyLanes == 0 {
 				if flow.doneChanClosed() || recoveryAttempts >= maxLaneRecoveryAttempts {
 					return
 				}
-				now := time.Now()
 				if !nextRecovery.IsZero() && now.Before(nextRecovery) {
 					continue
 				}
@@ -917,13 +966,17 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					return
 				}
 			}
-			if !lastDecision.IsZero() && time.Since(lastDecision) < 2*time.Second {
-				continue
-			}
-			lastDecision = time.Now()
 			if snapshot.Class != classifier.ClassBulk {
 				continue
 			}
+			// Do not consume the decision interval while the flow is still NEW or
+			// INTERACTIVE. The classifier may cross its bulk byte/age boundary just
+			// after such a tick; delaying the first probe by another full interval
+			// leaves several MiB on the shared control connection on a fast path.
+			if !lastDecision.IsZero() && now.Sub(lastDecision) < 2*time.Second {
+				continue
+			}
+			lastDecision = now
 			goodput := 0.0
 			if snapshot.Elapsed > 0 {
 				goodput = float64(snapshot.Bytes) / snapshot.Elapsed.Seconds()
@@ -939,10 +992,15 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				BaselineRTT: snapshot.BaselineRTT, CurrentRTT: snapshot.CurrentRTT,
 				UDPHealthy: c.udpHealth.allow(time.Now()),
 			})
-			for flow.laneCount() > decision.TargetLanes && flow.laneCount() > 1 {
-				if !flow.retireLeastProductiveLane() {
-					break
-				}
+			if decision.TargetLanes < flow.laneCount() && snapshot.Class == classifier.ClassBulk {
+				// DATA already written on a lane remains in the peer's replay window
+				// until cumulatively acknowledged. Closing that lane here turns a
+				// policy demotion into a transport failure and causes the peer to
+				// retransmit the outstanding window on lane zero. Until the wire
+				// protocol has an acknowledged lane-drain exchange, retain every
+				// healthy lane for the lifetime of the flow and only suppress further
+				// growth. This preserves correctness and avoids replay amplification.
+				growthSuppressed = true
 			}
 			// Open at most one speculative lane per scheduler tick.  A flow can
 			// finish while a join is in flight; if the peer has already started
@@ -951,12 +1009,15 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			// dozens of zero-byte lanes behind).  One bounded probe per tick keeps
 			// growth observable, gives the completion watcher a chance to stop the
 			// manager, and makes the configured lane cap a real resource bound.
-			if flow.laneCount() < decision.TargetLanes && !flow.doneChanClosed() &&
+			if flow.laneCount() < decision.TargetLanes && !growthSuppressed &&
+				growthAttempts < maxLaneProbeAttempts && !flow.doneChanClosed() &&
+				(now.After(growthBlockedUntil) || now.Equal(growthBlockedUntil)) &&
 				!(flow.finSent.Load() && flow.remoteFinSeen.Load()) {
 				laneID, err := flow.allocateJoinID()
 				if err != nil {
 					return
 				}
+				growthAttempts++
 				lane, err := c.openJoinLane(manageCtx, TransportQUIC, sessionID, flowID, laneID)
 				if err != nil {
 					if manageCtx.Err() != nil || flow.doneChanClosed() {
@@ -964,6 +1025,15 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					}
 					c.udpHealth.failure(time.Now())
 					c.cfg.Logger.Warn("adaptive lane unavailable", "lane", laneID, "error", err)
+					if growthBackoff == 0 {
+						growthBackoff = minLaneProbeBackoff
+					} else if growthBackoff < maxLaneProbeBackoff {
+						growthBackoff *= 2
+						if growthBackoff > maxLaneProbeBackoff {
+							growthBackoff = maxLaneProbeBackoff
+						}
+					}
+					growthBlockedUntil = now.Add(growthBackoff)
 				} else if err := flow.addLane(lane); err != nil {
 					_ = lane.fc.Close()
 					return

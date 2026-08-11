@@ -103,8 +103,8 @@ func TestQUICPoolLegacyCapabilityFallsBackToHello(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first pooled flow: %v", err)
 	}
-	if !client.quicPoolAuthenticated || client.quicPoolFast {
-		t.Fatalf("unexpected legacy pool state: authenticated=%v fast=%v", client.quicPoolAuthenticated, client.quicPoolFast)
+	if !client.quicPoolAuthenticated || client.quicPoolFast || client.quicPoolControl {
+		t.Fatalf("unexpected legacy pool state: authenticated=%v fast=%v control=%v", client.quicPoolAuthenticated, client.quicPoolFast, client.quicPoolControl)
 	}
 	second, err := client.openFlow(ctx, destinationListener.Addr().String())
 	if err != nil {
@@ -177,8 +177,13 @@ func TestQUICPoolConcurrentFastStreams(t *testing.T) {
 			t.Fatalf("concurrent pooled flow %d: %v", i, err)
 		}
 	}
-	if !client.quicPoolAuthenticated || !client.quicPoolFast {
-		t.Fatalf("fast capability was not retained: authenticated=%v fast=%v", client.quicPoolAuthenticated, client.quicPoolFast)
+	if !client.quicPoolAuthenticated || !client.quicPoolFast || !client.quicPoolControl {
+		t.Fatalf("pool capabilities were not retained: authenticated=%v fast=%v control=%v", client.quicPoolAuthenticated, client.quicPoolFast, client.quicPoolControl)
+	}
+	for i, flow := range flows {
+		if !flow.reserveControl {
+			t.Fatalf("pooled flow %d did not negotiate control-lane reservation", i)
+		}
 	}
 	for _, flow := range flows {
 		_ = flow.outer.Close()
@@ -236,7 +241,7 @@ func TestQUICPoolReconnectResetsAuthentication(t *testing.T) {
 		t.Fatalf("first pooled flow: %v", err)
 	}
 	oldConn := client.quicConn
-	if oldConn == nil || !client.quicPoolAuthenticated || !client.quicPoolFast {
+	if oldConn == nil || !client.quicPoolAuthenticated || !client.quicPoolFast || !client.quicPoolControl {
 		t.Fatalf("initial pool was not authenticated/capable")
 	}
 	// Simulate a dead path after the first flow. The next stream must not reuse
@@ -257,8 +262,8 @@ func TestQUICPoolReconnectResetsAuthentication(t *testing.T) {
 	if client.quicConn == oldConn {
 		t.Fatal("pool reused a dead QUIC connection")
 	}
-	if !client.quicPoolAuthenticated || !client.quicPoolFast {
-		t.Fatalf("reconnected pool did not renegotiate capability: authenticated=%v fast=%v", client.quicPoolAuthenticated, client.quicPoolFast)
+	if !client.quicPoolAuthenticated || !client.quicPoolFast || !client.quicPoolControl {
+		t.Fatalf("reconnected pool did not renegotiate capabilities: authenticated=%v fast=%v control=%v", client.quicPoolAuthenticated, client.quicPoolFast, client.quicPoolControl)
 	}
 	_ = second.outer.Close()
 	client.closeQUICPool()

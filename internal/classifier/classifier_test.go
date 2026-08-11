@@ -33,6 +33,17 @@ func TestSustainedOneWayFlowBecomesBulk(t *testing.T) {
 	}
 }
 
+func TestBulkPromotionStartsAtEarlyLaneIsolationBoundary(t *testing.T) {
+	c := New(DefaultConfig())
+	got := c.Observe(Observation{
+		Age: 1 * time.Second, BytesDown: 128 * 1024,
+		DownRate: 128 * 1024, SinceLastPayload: 5 * time.Millisecond,
+	})
+	if got != ClassBulk {
+		t.Fatalf("class = %s, want bulk at the configured promotion boundary", got)
+	}
+}
+
 func TestConstrainedOneWayFlowStillBecomesBulk(t *testing.T) {
 	c := New(DefaultConfig())
 	got := c.Observe(Observation{

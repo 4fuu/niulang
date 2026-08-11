@@ -126,19 +126,26 @@ type multipathFlow struct {
 	ackWake  chan struct{}
 	ackErr   chan error
 
-	classifier        *classifier.Classifier
-	started           time.Time
-	completionGrace   time.Duration
-	bytesUp           atomic.Uint64
-	bytesDown         atomic.Uint64
-	class             atomic.Uint32
-	finSequence       atomic.Uint64
-	remoteFinSequence atomic.Uint64
-	finSent           atomic.Bool
-	remoteFinSeen     atomic.Bool
-	localClosed       atomic.Bool
-	remoteAbort       atomic.Bool
-	localAbortSent    atomic.Bool
+	classifier *classifier.Classifier
+	// reserveControlLane is negotiated for pooled flows. Lane 0 is the
+	// authenticated/persistent control stream; once a joined lane exists,
+	// bulk payloads prefer joined lanes so loss recovery for a large transfer
+	// cannot monopolize the interactive connection. If no joined lane is
+	// healthy, selection deliberately falls back to lane 0 for availability.
+	reserveControlLane bool
+	started            time.Time
+	completionGrace    time.Duration
+	bytesUp            atomic.Uint64
+	bytesDown          atomic.Uint64
+	class              atomic.Uint32
+	finSequence        atomic.Uint64
+	remoteFinSequence  atomic.Uint64
+	finSent            atomic.Bool
+	remoteFinSeen      atomic.Bool
+	localClosed        atomic.Bool
+	remoteAbort        atomic.Bool
+	localAbortSent     atomic.Bool
+	laneFailures       atomic.Uint64
 	// openAckPending is set only for the opt-in optimistic OPEN path. The
 	// application may begin sending immediately, but the eventual OPEN_OK is
 	// still required on the authenticated stream and is consumed by the flow
@@ -526,6 +533,7 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 	if f.metrics != nil {
 		f.metrics.LaneFailure()
 	}
+	f.laneFailures.Add(1)
 	if f.logger != nil {
 		f.logger.Debug("multipath lane failed", "flow_id", f.flowID, "lane_id", lane.id, "transport", lane.kind, "error", err)
 	}
@@ -536,6 +544,8 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 		// current health directly, so coalescing notifications is safe.
 	}
 }
+
+func (f *multipathFlow) laneFailureCount() uint64 { return f.laneFailures.Load() }
 
 func (f *multipathFlow) healthyLanes() []*mpLane {
 	f.lanesMu.RLock()
@@ -558,6 +568,20 @@ func (f *multipathFlow) chooseLane(bulk bool) (*mpLane, error) {
 	if !bulk || len(lanes) == 1 {
 		return lanes[0], nil
 	}
+	if f.reserveControlLane {
+		// Lane zero is the initial authenticated stream by protocol. Exclude
+		// it only when at least one independent lane is healthy; retaining the
+		// fallback is essential during join failure and lane recovery.
+		bulkLanes := lanes[:0]
+		for _, lane := range lanes {
+			if lane.id != 0 {
+				bulkLanes = append(bulkLanes, lane)
+			}
+		}
+		if len(bulkLanes) > 0 {
+			lanes = bulkLanes
+		}
+	}
 	f.laneCursorMu.Lock()
 	defer f.laneCursorMu.Unlock()
 	lane := lanes[f.laneCursor%len(lanes)]
@@ -566,7 +590,9 @@ func (f *multipathFlow) chooseLane(bulk bool) (*mpLane, error) {
 }
 
 func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
-	ackCtx, cancelACKs := context.WithCancel(ctx)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	ackCtx, cancelACKs := context.WithCancel(runCtx)
 	go f.ackLoop(ackCtx)
 	telemetryStop := make(chan struct{})
 	go f.telemetryLoop(telemetryStop)
@@ -588,8 +614,8 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	defer f.finished.Store(true)
 	stats := FlowStats{Started: f.started}
 	results := make(chan error, 2)
-	go func() { results <- f.sendInner(ctx) }()
-	go func() { results <- f.receiveInner(ctx) }()
+	go func() { results <- f.sendInner(runCtx) }()
+	go func() { results <- f.receiveInner(runCtx) }()
 	completed := 0
 	for completed < 2 {
 		select {
@@ -624,6 +650,10 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 					}
 				}
 				if err != nil {
+					// Once the bounded remote-FIN drain above is exhausted, stop the
+					// sibling worker before tearing down the physical lanes. Otherwise
+					// a blocked application read can outlive the logical flow.
+					cancelRun()
 					f.closeAll()
 					stats.Ended = time.Now()
 					stats.BytesSent = f.bytesUp.Load()
@@ -639,6 +669,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			if f.metrics != nil {
 				f.metrics.FlowTimeout()
 			}
+			cancelRun()
 			f.closeAll()
 			stats.Ended = time.Now()
 			stats.BytesSent = f.bytesUp.Load()
@@ -649,6 +680,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			if err == nil {
 				continue
 			}
+			cancelRun()
 			f.closeAll()
 			stats.Ended = time.Now()
 			stats.BytesSent = f.bytesUp.Load()
@@ -700,6 +732,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.LaneBytes = f.laneStats()
 			return stats, err
 		case <-ctx.Done():
+			cancelRun()
 			f.closeAll()
 			stats.Ended = time.Now()
 			stats.BytesSent = f.bytesUp.Load()

@@ -221,6 +221,25 @@ func TestLaneWriterStopsWhenFlowCompletes(t *testing.T) {
 	}
 }
 
+func TestLaneFailureCountIsMonotonicAndIdempotent(t *testing.T) {
+	conn := newAckCaptureConn(0, nil)
+	flow := &multipathFlow{
+		ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1),
+		lanes: make(map[uint64]*mpLane),
+	}
+	lane := &mpLane{id: 1, fc: newFrameConn(conn, protocol.DefaultMaxPayload)}
+	flow.failLane(lane, errors.New("first"))
+	flow.failLane(lane, errors.New("duplicate"))
+	if got := flow.laneFailureCount(); got != 1 {
+		t.Fatalf("lane failure count = %d, want one transition", got)
+	}
+	select {
+	case <-flow.laneErr:
+	default:
+		t.Fatal("lane failure was not published")
+	}
+}
+
 func TestLaneWriterPrioritizesInteractiveFrames(t *testing.T) {
 	conn := newAckCaptureConn(0, nil)
 	flow := &multipathFlow{
@@ -254,6 +273,67 @@ func TestLaneWriterPrioritizesInteractiveFrames(t *testing.T) {
 	case <-lane.writeDone:
 	case <-time.After(time.Second):
 		t.Fatal("lane writer did not stop")
+	}
+}
+
+func TestBulkSelectionReservesNegotiatedControlLane(t *testing.T) {
+	flow := &multipathFlow{
+		done: make(chan struct{}),
+		lanes: map[uint64]*mpLane{
+			0: {id: 0},
+			1: {id: 1},
+			2: {id: 2},
+		},
+		reserveControlLane: true,
+	}
+
+	control, err := flow.chooseLane(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control.id != 0 {
+		t.Fatalf("control selection chose lane %d, want lane 0", control.id)
+	}
+	first, err := flow.chooseLane(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := flow.chooseLane(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.id != 1 || second.id != 2 {
+		t.Fatalf("bulk selection chose lanes %d then %d, want 1 then 2", first.id, second.id)
+	}
+}
+
+func TestBulkSelectionFallsBackToControlLane(t *testing.T) {
+	flow := &multipathFlow{
+		done: make(chan struct{}), lanes: map[uint64]*mpLane{0: {id: 0}}, reserveControlLane: true,
+	}
+	lane, err := flow.chooseLane(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lane.id != 0 {
+		t.Fatalf("bulk fallback chose lane %d, want control lane 0", lane.id)
+	}
+}
+
+func TestBulkSelectionKeepsAllLanesWithoutReservation(t *testing.T) {
+	flow := &multipathFlow{
+		done: make(chan struct{}), lanes: map[uint64]*mpLane{0: {id: 0}, 1: {id: 1}},
+	}
+	first, err := flow.chooseLane(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := flow.chooseLane(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.id != 0 || second.id != 1 {
+		t.Fatalf("unreserved bulk selection chose lanes %d then %d, want 0 then 1", first.id, second.id)
 	}
 }
 

@@ -71,6 +71,16 @@ it does not resume the old remote UDP relay or retransmit datagrams lost during
 the transport transition.
 Native QUIC DATAGRAM mode is a planned optimization for loss-sensitive UDP.
 
+If the server also advertises `CapabilityReserveControl`, a pooled client may
+set `FlagReserveControl` on its `OPEN` or `OPEN_FAST` frame. This marks lane 0
+as the authenticated control/rescue lane for that logical flow. After a
+joined lane is established, bulk `DATA` frames prefer joined lanes with
+independent QUIC congestion state; ACK, FIN, and interactive/control frames
+continue to use lane 0. If no joined lane is healthy, bulk traffic falls back
+to lane 0, so the capability is an isolation preference rather than a
+correctness dependency. The flag is never sent to a peer that did not
+negotiate the capability.
+
 `CLOSE` with `FlagFin` is a directional half-close. A sender may later send
 the same final sequence with `FlagCloseAbort` when its application socket has
 fully closed and the peer should release an otherwise idle keep-alive
