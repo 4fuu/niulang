@@ -35,6 +35,12 @@ const (
 	minLaneProbeBackoff  = 10 * time.Second
 	maxLaneProbeBackoff  = 60 * time.Second
 	maxLaneProbeAttempts = 4
+	// Start the authenticated join slightly before the classifier's final bulk
+	// transition. The lane is attached but carries no NEW/interactive DATA, so
+	// this only overlaps its lossy QUIC handshake with the tail of classification.
+	bulkLanePrewarmBytes = 64 * 1024
+	bulkLanePrewarmAge   = 500 * time.Millisecond
+	bulkLaneAsymmetry    = 8
 )
 
 type ClientConfig struct {
@@ -966,7 +972,9 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					return
 				}
 			}
-			if snapshot.Class != classifier.ClassBulk {
+			prewarm := bulkStartLanes >= 2 && flow.laneCount() < bulkStartLanes &&
+				shouldPrewarmBulkLane(snapshot)
+			if snapshot.Class != classifier.ClassBulk && !prewarm {
 				continue
 			}
 			// Do not consume the decision interval while the flow is still NEW or
@@ -977,21 +985,24 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				continue
 			}
 			lastDecision = now
-			goodput := 0.0
-			if snapshot.Elapsed > 0 {
-				goodput = float64(snapshot.Bytes) / snapshot.Elapsed.Seconds()
+			decision := scheduler.Decision{TargetLanes: bulkStartLanes, Class: snapshot.Class, Reason: "bounded bulk-lane prewarm"}
+			if snapshot.Class == classifier.ClassBulk {
+				goodput := 0.0
+				if snapshot.Elapsed > 0 {
+					goodput = float64(snapshot.Bytes) / snapshot.Elapsed.Seconds()
+				}
+				gain := 0.0
+				if previous > 0 {
+					gain = (goodput - previous) / previous
+				}
+				previous = goodput
+				decision = planner.Decide(snapshot.Class, scheduler.Metrics{
+					CurrentLanes: snapshot.CurrentLanes, HealthyLanes: snapshot.HealthyLanes,
+					AvailableLanes: c.cfg.MaxLanes, MarginalGain: gain,
+					BaselineRTT: snapshot.BaselineRTT, CurrentRTT: snapshot.CurrentRTT,
+					UDPHealthy: c.udpHealth.allow(time.Now()),
+				})
 			}
-			gain := 0.0
-			if previous > 0 {
-				gain = (goodput - previous) / previous
-			}
-			previous = goodput
-			decision := planner.Decide(snapshot.Class, scheduler.Metrics{
-				CurrentLanes: snapshot.CurrentLanes, HealthyLanes: snapshot.HealthyLanes,
-				AvailableLanes: c.cfg.MaxLanes, MarginalGain: gain,
-				BaselineRTT: snapshot.BaselineRTT, CurrentRTT: snapshot.CurrentRTT,
-				UDPHealthy: c.udpHealth.allow(time.Now()),
-			})
 			if decision.TargetLanes < flow.laneCount() && snapshot.Class == classifier.ClassBulk {
 				// DATA already written on a lane remains in the peer's replay window
 				// until cumulatively acknowledged. Closing that lane here turns a
@@ -1033,7 +1044,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 							growthBackoff = maxLaneProbeBackoff
 						}
 					}
-					growthBlockedUntil = now.Add(growthBackoff)
+					growthBlockedUntil = time.Now().Add(growthBackoff)
 				} else if err := flow.addLane(lane); err != nil {
 					_ = lane.fc.Close()
 					return
@@ -1041,6 +1052,20 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			}
 		}
 	}
+}
+
+func shouldPrewarmBulkLane(snapshot flowSnapshot) bool {
+	if snapshot.Elapsed < bulkLanePrewarmAge || snapshot.Bytes < bulkLanePrewarmBytes {
+		return false
+	}
+	smaller, larger := snapshot.BytesUp, snapshot.BytesDown
+	if smaller > larger {
+		smaller, larger = larger, smaller
+	}
+	if smaller == 0 {
+		return larger >= bulkLanePrewarmBytes
+	}
+	return larger/smaller >= bulkLaneAsymmetry
 }
 
 func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64) error {

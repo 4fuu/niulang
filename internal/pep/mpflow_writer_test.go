@@ -337,6 +337,28 @@ func TestBulkSelectionKeepsAllLanesWithoutReservation(t *testing.T) {
 	}
 }
 
+func TestBulkLanePrewarmRequiresAgeBytesAndDirectionality(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot flowSnapshot
+		want     bool
+	}{
+		{name: "young", snapshot: flowSnapshot{Bytes: 256 * 1024, BytesUp: 1, BytesDown: 256 * 1024, Elapsed: 100 * time.Millisecond}},
+		{name: "small", snapshot: flowSnapshot{Bytes: 32 * 1024, BytesUp: 1, BytesDown: 32 * 1024, Elapsed: time.Second}},
+		{name: "balanced interactive", snapshot: flowSnapshot{Bytes: 256 * 1024, BytesUp: 128 * 1024, BytesDown: 128 * 1024, Elapsed: time.Second}},
+		{name: "download", snapshot: flowSnapshot{Bytes: 256*1024 + 1024, BytesUp: 1024, BytesDown: 256 * 1024, Elapsed: time.Second}, want: true},
+		{name: "upload", snapshot: flowSnapshot{Bytes: 256*1024 + 1024, BytesUp: 256 * 1024, BytesDown: 1024, Elapsed: time.Second}, want: true},
+		{name: "one way", snapshot: flowSnapshot{Bytes: 64 * 1024, BytesDown: 64 * 1024, Elapsed: bulkLanePrewarmAge}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldPrewarmBulkLane(test.snapshot); got != test.want {
+				t.Fatalf("prewarm = %t, want %t for %+v", got, test.want, test.snapshot)
+			}
+		})
+	}
+}
+
 func TestLaneQueueHasGlobalBound(t *testing.T) {
 	flow := &multipathFlow{ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1)}
 	lane := &mpLane{

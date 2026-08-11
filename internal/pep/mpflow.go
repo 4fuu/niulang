@@ -316,6 +316,8 @@ type flowSnapshot struct {
 	CurrentLanes int
 	HealthyLanes int
 	Bytes        uint64
+	BytesUp      uint64
+	BytesDown    uint64
 	Elapsed      time.Duration
 	BaselineRTT  time.Duration
 	CurrentRTT   time.Duration
@@ -324,9 +326,10 @@ type flowSnapshot struct {
 func (f *multipathFlow) snapshot() flowSnapshot {
 	lanes := f.healthyLanes()
 	f.observeTransport(lanes)
+	bytesUp, bytesDown := f.bytesUp.Load(), f.bytesDown.Load()
 	return flowSnapshot{
 		Class: classifier.Class(f.classifier.Class()), CurrentLanes: f.laneCount(), HealthyLanes: len(lanes),
-		Bytes: f.bytesUp.Load() + f.bytesDown.Load(), Elapsed: time.Since(f.started),
+		Bytes: bytesUp + bytesDown, BytesUp: bytesUp, BytesDown: bytesDown, Elapsed: time.Since(f.started),
 		BaselineRTT: time.Duration(f.baselineRTTNS.Load()), CurrentRTT: time.Duration(f.currentRTTNS.Load()),
 	}
 }
