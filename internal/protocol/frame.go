@@ -33,7 +33,10 @@ const (
 	// lane is attached. Older peers never see this flag because it is gated by
 	// the negotiated control-lane capability.
 	FlagReserveControl uint16 = 1 << 5
-	knownFlags                = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl
+	// FlagLaneJoin is valid only on OPEN_JOIN_FAST. The lane identifier is
+	// carried in the bounded payload after the authenticated session/flow ID.
+	FlagLaneJoin uint16 = 1 << 6
+	knownFlags          = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl | FlagLaneJoin
 )
 
 type Type byte
@@ -59,9 +62,13 @@ const (
 	// the connection-level authenticated stream pool; independent lanes and
 	// TLS/TCP continue to use TypeHello followed by TypeOpen.
 	TypeOpenFast
+	// TypeOpenJoinFast attaches a stream on an authenticated secondary QUIC
+	// pool to an existing logical flow. Its payload is exactly one big-endian
+	// uint64 lane ID.
+	TypeOpenJoinFast
 )
 
-func (t Type) valid() bool { return t >= TypeHello && t <= TypeOpenFast }
+func (t Type) valid() bool { return t >= TypeHello && t <= TypeOpenJoinFast }
 
 type Class byte
 
@@ -91,11 +98,15 @@ func reserveControlFlagValid(t Type, flags uint16) bool {
 	return flags&FlagReserveControl == 0 || t == TypeOpen || t == TypeOpenFast
 }
 
+func laneJoinFlagValid(t Type, flags uint16) bool {
+	return flags&FlagLaneJoin == 0 || t == TypeOpenJoinFast
+}
+
 func (h Header) Encode(dst []byte) error {
 	if len(dst) < HeaderSize {
 		return io.ErrShortBuffer
 	}
-	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk || h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) {
+	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk || h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !laneJoinFlagValid(h.Type, h.Flags) {
 		return errors.New("invalid frame header")
 	}
 	if uint64(h.PayloadLen) > DefaultMaxPayload {
@@ -119,7 +130,7 @@ func (h Header) Validate(maxPayload uint32) error {
 	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk {
 		return errors.New("invalid frame header")
 	}
-	if h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) {
+	if h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !laneJoinFlagValid(h.Type, h.Flags) {
 		return errors.New("unknown frame flags")
 	}
 	if maxPayload == 0 || maxPayload > DefaultMaxPayload {
@@ -169,19 +180,32 @@ func ReadFrame(r io.Reader, maxPayload uint32) (Frame, error) {
 	return Frame{Header: h, Payload: payload}, nil
 }
 
-func WriteFrame(w io.Writer, f Frame) error {
+// AppendFrame serializes one frame into dst and returns the extended slice.
+//
+// The header and payload must reach the transport in a single write. When they
+// were written separately, a QUIC sender that happened to be idle could
+// packetize the 46-byte header into its own datagram, adding roughly one extra
+// packet per data frame on the wire; on a lossy path that inflates both the
+// byte count and the number of packets exposed to loss.
+func AppendFrame(dst []byte, f Frame) ([]byte, error) {
 	if uint64(len(f.Payload)) > DefaultMaxPayload {
-		return errors.New("payload exceeds default limit")
+		return dst, errors.New("payload exceeds default limit")
 	}
 	f.Header.PayloadLen = uint32(len(f.Payload))
-	var raw [HeaderSize]byte
-	if err := f.Header.Encode(raw[:]); err != nil {
+	start := len(dst)
+	dst = append(dst, make([]byte, HeaderSize)...)
+	if err := f.Header.Encode(dst[start:]); err != nil {
+		return dst[:start], err
+	}
+	return append(dst, f.Payload...), nil
+}
+
+func WriteFrame(w io.Writer, f Frame) error {
+	buf, err := AppendFrame(make([]byte, 0, HeaderSize+len(f.Payload)), f)
+	if err != nil {
 		return err
 	}
-	if err := writeFull(w, raw[:]); err != nil {
-		return err
-	}
-	return writeFull(w, f.Payload)
+	return writeFull(w, buf)
 }
 
 // writeFull is intentionally local rather than relying on a particular
