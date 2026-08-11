@@ -26,8 +26,14 @@ const (
 	maxReassemblyBytes  = 8 * 1024 * 1024
 	maxReassemblyFrames = 4096
 	maxLaneWriteQueue   = 64
-	maxReplayBytes      = 8 * 1024 * 1024
-	maxReplayFrames     = 4096
+	// Keep a small part of the bounded queue available for interactive/new
+	// frames even when a bulk producer has filled its queue. This is a hard
+	// reservation, not an additional memory allowance: writeSlots still caps
+	// the combined queues at maxLaneWriteQueue.
+	maxLaneInteractiveReserve = 8
+	maxLaneBulkQueue          = maxLaneWriteQueue - maxLaneInteractiveReserve
+	maxReplayBytes            = 8 * 1024 * 1024
+	maxReplayFrames           = 4096
 	// Must exceed QUIC dead-path detection plus TCP handshake time. The
 	// client normally detects a blackhole at ~15 s, then needs one scheduler
 	// tick and a bounded TCP handshake before the replacement can arrive.
@@ -67,11 +73,19 @@ type mpLane struct {
 	// integration tests. Production lanes leave it nil, so the data path has
 	// only one predictable nil check before the real framed write.
 	writeHook func(protocol.Frame) error
-	writeQ    chan protocol.Frame
-	writeDone chan struct{}
-	closed    atomic.Bool
-	sent      atomic.Uint64
-	recv      atomic.Uint64
+	// writeQ is the bounded bulk/data queue. Interactive and new-flow frames
+	// use writeInteractiveQ when it is initialized. Keeping a separate queue
+	// lets the writer avoid sitting behind a burst of bulk retransmissions.
+	// writeSlots is a semaphore shared by both queues, so the total queued
+	// frames remain bounded by maxLaneWriteQueue rather than by the sum of
+	// both channel capacities.
+	writeQ            chan protocol.Frame
+	writeInteractiveQ chan protocol.Frame
+	writeSlots        chan struct{}
+	writeDone         chan struct{}
+	closed            atomic.Bool
+	sent              atomic.Uint64
+	recv              atomic.Uint64
 }
 
 type inboundEvent struct {
@@ -191,7 +205,13 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 		return errors.New("duplicate lane id")
 	}
 	if lane.writeQ == nil {
-		lane.writeQ = make(chan protocol.Frame, maxLaneWriteQueue)
+		lane.writeQ = make(chan protocol.Frame, maxLaneBulkQueue)
+	}
+	if lane.writeInteractiveQ == nil {
+		lane.writeInteractiveQ = make(chan protocol.Frame, maxLaneWriteQueue)
+	}
+	if lane.writeSlots == nil {
+		lane.writeSlots = make(chan struct{}, maxLaneWriteQueue)
 	}
 	if lane.writeDone == nil {
 		lane.writeDone = make(chan struct{})
@@ -207,19 +227,26 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 }
 
 // writeLane serializes data and close frames for one lane while allowing
-// other lanes to make progress independently. The bounded queue prevents a
-// slow lane from becoming an unbounded memory sink. ACK/PING/PONG writes may
-// still call frameConn.Write directly; its mutex preserves frame integrity.
+// other lanes to make progress independently. Interactive/new frames are
+// always selected before queued bulk frames. A bulk frame already in the
+// underlying write may finish, but a later interactive frame does not wait
+// behind the rest of the bulk queue. ACK/PING/PONG writes may still call
+// frameConn.Write directly; its mutex preserves frame integrity.
 func (f *multipathFlow) writeLane(lane *mpLane) {
 	defer close(lane.writeDone)
 	for {
-		var frame protocol.Frame
-		select {
-		case frame = <-lane.writeQ:
-		case <-f.done:
+		frame, ok := nextLaneFrame(lane, f.done, f.ctx.Done())
+		if !ok {
 			return
-		case <-f.ctx.Done():
-			return
+		}
+		if lane.writeSlots != nil {
+			// A slot is released when the writer takes ownership of a frame.
+			// The non-blocking receive is safe because every initialized queue
+			// insertion acquires exactly one slot first.
+			select {
+			case <-lane.writeSlots:
+			default:
+			}
 		}
 		if lane.writeHook != nil {
 			if err := lane.writeHook(frame); err != nil {
@@ -233,6 +260,46 @@ func (f *multipathFlow) writeLane(lane *mpLane) {
 		}
 		if frame.Header.Type == protocol.TypeData {
 			lane.sent.Add(uint64(len(frame.Payload)))
+		}
+	}
+}
+
+// nextLaneFrame gives the interactive queue strict preference without
+// starving shutdown: check it once before allowing the bulk queue to win a
+// select, then check both queues while waiting. The non-blocking first check
+// closes the common race where both queues already have work.
+func nextLaneFrame(lane *mpLane, done <-chan struct{}, ctxDone <-chan struct{}) (protocol.Frame, bool) {
+	if lane.writeInteractiveQ != nil {
+		select {
+		case frame := <-lane.writeInteractiveQ:
+			return frame, true
+		default:
+		}
+	}
+	for {
+		select {
+		case <-done:
+			return protocol.Frame{}, false
+		case <-ctxDone:
+			return protocol.Frame{}, false
+		default:
+		}
+		if lane.writeInteractiveQ != nil {
+			select {
+			case frame := <-lane.writeInteractiveQ:
+				return frame, true
+			default:
+			}
+		}
+		select {
+		case frame := <-lane.writeInteractiveQ:
+			return frame, true
+		case frame := <-lane.writeQ:
+			return frame, true
+		case <-done:
+			return protocol.Frame{}, false
+		case <-ctxDone:
+			return protocol.Frame{}, false
 		}
 	}
 }
@@ -889,18 +956,52 @@ func (f *multipathFlow) sendInner(ctx context.Context) (err error) {
 }
 
 func (f *multipathFlow) enqueueFrame(ctx context.Context, lane *mpLane, frame protocol.Frame) error {
+	return f.enqueueFrameClass(ctx, lane, frame, frame.Header.Class == protocol.ClassBulk)
+}
+
+func (f *multipathFlow) enqueueFrameClass(ctx context.Context, lane *mpLane, frame protocol.Frame, bulk bool) error {
 	if lane == nil || lane.closed.Load() {
 		return errors.New("lane is closed")
 	}
+	queue := lane.writeQ
+	if !bulk && lane.writeInteractiveQ != nil {
+		queue = lane.writeInteractiveQ
+	}
+	if queue == nil {
+		return errors.New("lane writer queue is unavailable")
+	}
+	acquired := false
+	if lane.writeSlots != nil {
+		select {
+		case lane.writeSlots <- struct{}{}:
+			acquired = true
+		case <-lane.writeDone:
+			f.failLane(lane, errors.New("lane writer stopped"))
+			return errors.New("lane writer stopped")
+		case <-f.done:
+			return errors.New("flow is closed")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	select {
-	case lane.writeQ <- frame:
+	case queue <- frame:
 		return nil
 	case <-lane.writeDone:
+		if acquired {
+			<-lane.writeSlots
+		}
 		f.failLane(lane, errors.New("lane writer stopped"))
 		return errors.New("lane writer stopped")
 	case <-f.done:
+		if acquired {
+			<-lane.writeSlots
+		}
 		return errors.New("flow is closed")
 	case <-ctx.Done():
+		if acquired {
+			<-lane.writeSlots
+		}
 		return ctx.Err()
 	}
 }
@@ -915,7 +1016,7 @@ func (f *multipathFlow) enqueueOnHealthyLane(ctx context.Context, frame protocol
 	for {
 		lane, err := f.chooseLane(bulk)
 		if err == nil {
-			if err = f.enqueueFrame(ctx, lane, frame); err == nil {
+			if err = f.enqueueFrameClass(ctx, lane, frame, bulk); err == nil {
 				return nil
 			}
 		}
@@ -1044,7 +1145,7 @@ func (f *multipathFlow) replayPending(ctx context.Context) error {
 	f.replayMu.Unlock()
 
 	for _, frame := range frames {
-		if err := f.enqueueOnHealthyLane(ctx, frame, frame.Header.Type == protocol.TypeData); err != nil {
+		if err := f.enqueueOnHealthyLane(ctx, frame, frame.Header.Type == protocol.TypeData && frame.Header.Class == protocol.ClassBulk); err != nil {
 			return err
 		}
 	}

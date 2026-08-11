@@ -221,6 +221,76 @@ func TestLaneWriterStopsWhenFlowCompletes(t *testing.T) {
 	}
 }
 
+func TestLaneWriterPrioritizesInteractiveFrames(t *testing.T) {
+	conn := newAckCaptureConn(0, nil)
+	flow := &multipathFlow{
+		ctx:     context.Background(),
+		done:    make(chan struct{}),
+		laneErr: make(chan laneFailure, 1),
+	}
+	lane := &mpLane{
+		id:                1,
+		fc:                newFrameConn(conn, protocol.DefaultMaxPayload),
+		writeQ:            make(chan protocol.Frame, maxLaneWriteQueue),
+		writeInteractiveQ: make(chan protocol.Frame, maxLaneWriteQueue),
+		writeSlots:        make(chan struct{}, maxLaneWriteQueue),
+		writeDone:         make(chan struct{}),
+	}
+	bulk := protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Class: protocol.ClassBulk}, Payload: []byte("bulk")}
+	interactive := protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Class: protocol.ClassInteractive}, Payload: []byte("interactive")}
+	for _, frame := range []protocol.Frame{bulk, interactive} {
+		if err := flow.enqueueFrameClass(context.Background(), lane, frame, frame.Header.Class == protocol.ClassBulk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	go flow.writeLane(lane)
+	first := waitAckFrame(t, conn)
+	second := waitAckFrame(t, conn)
+	if string(first.Payload) != string(interactive.Payload) || string(second.Payload) != string(bulk.Payload) {
+		t.Fatalf("writer order = %q then %q, want interactive then bulk", first.Payload, second.Payload)
+	}
+	close(flow.done)
+	select {
+	case <-lane.writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("lane writer did not stop")
+	}
+}
+
+func TestLaneQueueHasGlobalBound(t *testing.T) {
+	flow := &multipathFlow{ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1)}
+	lane := &mpLane{
+		writeQ:            make(chan protocol.Frame, maxLaneWriteQueue),
+		writeInteractiveQ: make(chan protocol.Frame, maxLaneWriteQueue),
+		writeSlots:        make(chan struct{}, maxLaneWriteQueue),
+		writeDone:         make(chan struct{}),
+	}
+	frame := protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Class: protocol.ClassBulk}, Payload: []byte("x")}
+	for i := 0; i < maxLaneBulkQueue; i++ {
+		if err := flow.enqueueFrameClass(context.Background(), lane, frame, true); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+	// The reserved interactive slots remain available even when bulk is at
+	// its queue limit. Fill those slots with high-priority frames, then verify
+	// that the combined queue cannot exceed the global bound.
+	interactive := frame
+	interactive.Header.Class = protocol.ClassInteractive
+	for i := 0; i < maxLaneInteractiveReserve; i++ {
+		if err := flow.enqueueFrameClass(context.Background(), lane, interactive, false); err != nil {
+			t.Fatalf("interactive enqueue %d: %v", i, err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := flow.enqueueFrameClass(ctx, lane, frame, true); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("overflow enqueue error = %v, want context deadline", err)
+	}
+	if got := len(lane.writeSlots); got != maxLaneWriteQueue {
+		t.Fatalf("global queue slots used = %d, want %d", got, maxLaneWriteQueue)
+	}
+}
+
 func TestReplayBufferAcknowledgesCumulativeSequence(t *testing.T) {
 	flow := &multipathFlow{replay: make(map[uint64]protocol.Frame)}
 	frames := []protocol.Frame{
