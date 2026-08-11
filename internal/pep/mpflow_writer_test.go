@@ -298,12 +298,29 @@ func TestBulkSelectionReservesNegotiatedControlLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if first.id != 1 {
+		t.Fatalf("bulk selection chose lane %d, want the first non-control lane", first.id)
+	}
+	// Selection is by estimated delivery time, not rotation: the next frame
+	// moves to lane 2 only once lane 1 actually has a backlog. Rotating
+	// unconditionally is what causes in-order reassembly to stall behind the
+	// slower lane.
+	flow.lanes[1].nextFree = time.Now().Add(500 * time.Millisecond)
 	second, err := flow.chooseLane(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.id != 1 || second.id != 2 {
-		t.Fatalf("bulk selection chose lanes %d then %d, want 1 then 2", first.id, second.id)
+	if second.id != 2 {
+		t.Fatalf("busy bulk selection chose lane %d, want the idle lane 2", second.id)
+	}
+	// The control lane stays excluded even when both bulk lanes are busy.
+	flow.lanes[2].nextFree = time.Now().Add(time.Second)
+	third, err := flow.chooseLane(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.id != 1 {
+		t.Fatalf("busy bulk selection chose lane %d, want the least backlogged bulk lane 1", third.id)
 	}
 }
 
@@ -328,12 +345,16 @@ func TestBulkSelectionKeepsAllLanesWithoutReservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if first.id != 0 {
+		t.Fatalf("unreserved bulk selection chose lane %d, want lane 0", first.id)
+	}
+	flow.lanes[0].nextFree = time.Now().Add(500 * time.Millisecond)
 	second, err := flow.chooseLane(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.id != 0 || second.id != 1 {
-		t.Fatalf("unreserved bulk selection chose lanes %d then %d, want 0 then 1", first.id, second.id)
+	if second.id != 1 {
+		t.Fatalf("backlogged unreserved selection chose lane %d, want the idle lane 1", second.id)
 	}
 }
 
@@ -424,9 +445,11 @@ func TestReplayBufferAcknowledgesCumulativeSequence(t *testing.T) {
 
 func TestReplayBufferRejectsInvalidBounds(t *testing.T) {
 	flow := &multipathFlow{replay: make(map[uint64]protocol.Frame)}
+	// A frame larger than any window the flow could ever be granted must be
+	// rejected rather than waiting forever for space that cannot arrive.
 	tooLarge := protocol.Frame{
 		Header:  protocol.Header{Type: protocol.TypeData},
-		Payload: []byte(strings.Repeat("x", maxReplayBytes+1)),
+		Payload: []byte(strings.Repeat("x", maxFlowReplayBytes+1)),
 	}
 	if err := flow.recordReplay(tooLarge); err == nil {
 		t.Fatal("oversized replay frame was accepted")

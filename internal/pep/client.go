@@ -77,15 +77,18 @@ type ClientConfig struct {
 	AdaptiveMaxBytesSec           uint64
 	AggregateBytesPerSec          uint64
 	InteractiveReserveBytesPerSec uint64
-	Metrics                       *metrics.Registry
-	FallbackDelay                 time.Duration
-	UDPFailureThreshold           int
-	UDPCooldown                   time.Duration
-	InitialLanes                  int
-	MaxLanes                      int
-	BulkStartLanes                int
-	MinimumMarginalGain           float64
-	Logger                        *slog.Logger
+	// ReplayMemoryBytes bounds the total memory all local flows may hold in
+	// their replay windows. Zero selects the package default.
+	ReplayMemoryBytes   uint64
+	Metrics             *metrics.Registry
+	FallbackDelay       time.Duration
+	UDPFailureThreshold int
+	UDPCooldown         time.Duration
+	InitialLanes        int
+	MaxLanes            int
+	BulkStartLanes      int
+	MinimumMarginalGain float64
+	Logger              *slog.Logger
 }
 
 type Client struct {
@@ -93,6 +96,9 @@ type Client struct {
 	udpHealth *udpHealth
 	budget    *limiter.Budget
 	metrics   *metrics.Registry
+	// replayBudget bounds the memory all local flows may hold in their
+	// replay windows.
+	replayBudget *replayBudget
 
 	// One QUIC connection can carry many independent PEP streams. This is
 	// intentionally a single bounded pool: it gives concurrent flows a shared
@@ -236,7 +242,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		budget: limiter.New(limiter.Config{
 			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
 		}),
-		metrics: cfg.Metrics,
+		metrics:      cfg.Metrics,
+		replayBudget: newReplayBudget(int64(cfg.ReplayMemoryBytes)),
 	}, nil
 }
 
@@ -346,6 +353,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	}
 	c.cfg.Logger.Debug("local flow opened", "transport", flow.kind, "duration", time.Since(flowOpenStarted))
 	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics, c.cfg.Logger)
+	flowSession.replayBudget = c.replayBudget
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
 	flowSession.openAckPending = flow.openPending
@@ -1117,16 +1125,36 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	if initialKind != TransportQUIC {
 		return
 	}
+	// A negotiated control lane is excluded from bulk selection, so it is not
+	// part of the flow's bulk capacity. Planning in total lanes while lane 0
+	// cannot carry bulk payload caps a bulk transfer at one lane no matter how
+	// large --max-lanes is; measured on the emulated per-flow-policed path,
+	// that is the difference between using one lane's share and using several.
+	// The planner therefore reasons in bulk lanes, and the reservation is
+	// added back when the target is compared against the flow.
+	controlReserve := 0
+	if flow.reserveControlLane && c.cfg.MaxLanes >= 2 {
+		controlReserve = 1
+	}
+	bulkBudget := c.cfg.MaxLanes - controlReserve
+	if bulkBudget < 1 {
+		bulkBudget = 1
+	}
 	bulkStartLanes := c.cfg.BulkStartLanes
-	if flow.reserveControlLane && c.cfg.MaxLanes >= 2 && bulkStartLanes < 2 {
-		// A negotiated pooled control lane must not remain the only lane once
-		// the flow is classified as bulk. Open one independent lane at the
-		// promotion boundary; chooseLane retains lane 0 as a bounded fallback
-		// if this probe cannot be established.
+	if bulkStartLanes < 1 {
+		bulkStartLanes = 1
+	}
+	if c.cfg.MaxLanes >= 2 && bulkStartLanes < 2 {
+		// Once a flow is classified as bulk it should not remain on the single
+		// lane it shared with interactive traffic. Growth beyond this still
+		// requires a measured marginal gain.
 		bulkStartLanes = 2
 	}
+	if bulkStartLanes > bulkBudget {
+		bulkStartLanes = bulkBudget
+	}
 	planner := scheduler.New(scheduler.Config{
-		MaxLanes: c.cfg.MaxLanes, InteractiveLanes: 1, BulkStartLanes: bulkStartLanes,
+		MaxLanes: bulkBudget, InteractiveLanes: 1, BulkStartLanes: bulkStartLanes,
 		MinimumMarginalGain: c.cfg.MinimumMarginalGain, InteractiveRTTBudget: 40 * time.Millisecond,
 	})
 	manageCtx, manageCancel := context.WithCancel(ctx)
@@ -1141,6 +1169,8 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	var previous float64
+	var lastSample time.Time
+	var lastBytes uint64
 	var lastDecision time.Time
 	var recoveryBackoff time.Duration
 	var nextRecovery time.Time
@@ -1243,7 +1273,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					return
 				}
 			}
-			prewarm := bulkStartLanes >= 2 && flow.laneCount() < bulkStartLanes &&
+			prewarm := bulkStartLanes >= 1 && flow.laneCount() < bulkStartLanes+controlReserve &&
 				shouldPrewarmBulkLane(snapshot)
 			if snapshot.Class != classifier.ClassBulk && !prewarm {
 				continue
@@ -1258,22 +1288,31 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			lastDecision = now
 			decision := scheduler.Decision{TargetLanes: bulkStartLanes, Class: snapshot.Class, Reason: "bounded bulk-lane prewarm"}
 			if snapshot.Class == classifier.ClassBulk {
+				// Marginal gain must be measured over the decision interval.
+				// Cumulative average goodput lags by the whole flow history, so
+				// a lane that immediately doubles the instantaneous rate still
+				// shows a small average change and growth stalls at the
+				// bootstrap target.
 				goodput := 0.0
-				if snapshot.Elapsed > 0 {
+				if interval := now.Sub(lastSample); interval > 0 && !lastSample.IsZero() {
+					goodput = float64(snapshot.Bytes-lastBytes) / interval.Seconds()
+				} else if snapshot.Elapsed > 0 {
 					goodput = float64(snapshot.Bytes) / snapshot.Elapsed.Seconds()
 				}
+				lastSample, lastBytes = now, snapshot.Bytes
 				gain := 0.0
 				if previous > 0 {
 					gain = (goodput - previous) / previous
 				}
 				previous = goodput
 				decision = planner.Decide(snapshot.Class, scheduler.Metrics{
-					CurrentLanes: snapshot.CurrentLanes, HealthyLanes: snapshot.HealthyLanes,
-					AvailableLanes: c.cfg.MaxLanes, MarginalGain: gain,
+					CurrentLanes: snapshot.CurrentLanes - controlReserve, HealthyLanes: snapshot.HealthyLanes - controlReserve,
+					AvailableLanes: bulkBudget, MarginalGain: gain,
 					BaselineRTT: snapshot.BaselineRTT, CurrentRTT: snapshot.CurrentRTT,
 					UDPHealthy: c.udpHealth.allow(time.Now()),
 				})
 			}
+			decision.TargetLanes += controlReserve
 			if decision.TargetLanes < flow.laneCount() && snapshot.Class == classifier.ClassBulk {
 				// DATA already written on a lane remains in the peer's replay window
 				// until cumulatively acknowledged. Closing that lane here turns a

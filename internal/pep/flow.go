@@ -25,6 +25,13 @@ type FlowStats struct {
 	// benchmarks and operators can verify actual striping rather than merely
 	// counting successful lane handshakes.
 	LaneBytes map[uint64]LaneStats
+	// SendStalls and SendStalled report how often, and for how long, the
+	// sender could not hand the next chunk to a lane because the replay
+	// window was full. A transport that is fast on the wire but slow
+	// end-to-end usually shows the difference here, so this is deliberately
+	// part of the normal completion record rather than a debug-only counter.
+	SendStalls  uint64
+	SendStalled time.Duration
 }
 
 type LaneStats struct {

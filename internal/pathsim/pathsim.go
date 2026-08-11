@@ -31,6 +31,12 @@ type Config struct {
 	// RateBytesPerSec is the bottleneck serialization rate in each direction.
 	// Zero means unlimited.
 	RateBytesPerSec uint64
+	// PerFlowRateBytesPerSec additionally polices each client source address
+	// independently, modelling a path that shapes per 4-tuple rather than only
+	// in aggregate. This is the regime in which multiple transport lanes can
+	// raise a single application flow's goodput; with only an aggregate limit
+	// they cannot, and should not be expected to. Zero disables it.
+	PerFlowRateBytesPerSec uint64
 	// QueueBytes bounds the bottleneck buffer. Packets that would exceed it
 	// are tail-dropped. Zero selects one bandwidth-delay product, with a small
 	// floor, which is the usual "reasonably provisioned router" assumption.
@@ -123,6 +129,12 @@ type peer struct {
 	client net.Addr
 	conn   *net.UDPConn
 	last   atomic.Int64
+	// up and down are this source address's own policer, used only when the
+	// configuration asks for per-flow shaping. They deliberately do not apply
+	// loss: loss stays a property of the shared path so that per-flow shaping
+	// can be varied independently of the loss regime.
+	up   direction
+	down direction
 }
 
 // Relay is a running emulated path. It is safe for concurrent use and is
@@ -218,7 +230,7 @@ func (r *Relay) readClient() {
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
-		r.forward(&r.upstream, payload, func(b []byte) {
+		r.forward(&r.upstream, &p.up, payload, func(b []byte) {
 			_, _ = p.conn.Write(b)
 		})
 	}
@@ -240,6 +252,8 @@ func (r *Relay) peerFor(addr net.Addr) (*peer, error) {
 		return nil, err
 	}
 	p := &peer{client: addr, conn: conn}
+	p.up.rng = rand.New(rand.NewSource(r.cfg.Seed))
+	p.down.rng = rand.New(rand.NewSource(r.cfg.Seed))
 	p.last.Store(time.Now().UnixNano())
 	r.peers[key] = p
 	r.wg.Add(1)
@@ -258,7 +272,7 @@ func (r *Relay) readServer(p *peer) {
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
 		client := p.client
-		r.forward(&r.downstream, payload, func(b []byte) {
+		r.forward(&r.downstream, &p.down, payload, func(b []byte) {
 			_, _ = r.local.WriteTo(b, client)
 		})
 	}
@@ -268,10 +282,28 @@ func (r *Relay) readServer(p *peer) {
 // scheduled delivery time. One timer goroutine per in-flight packet is
 // acceptable here: the emulator runs in the benchmark process, and the
 // bandwidth-delay product bounds the concurrent count.
-func (r *Relay) forward(d *direction, payload []byte, send func([]byte)) {
+func (r *Relay) forward(d *direction, perFlow *direction, payload []byte, send func([]byte)) {
 	d.packetsIn.Add(1)
 	d.bytesIn.Add(uint64(len(payload)))
-	deliver, ok := d.schedule(time.Now(), len(payload), r.cfg)
+	now := time.Now()
+	if perFlow != nil && r.cfg.PerFlowRateBytesPerSec > 0 {
+		// The per-flow policer runs first and contributes only queueing delay
+		// and its own tail drop; the shared path then adds loss and the
+		// aggregate bottleneck.
+		flowCfg := r.cfg
+		flowCfg.RateBytesPerSec = r.cfg.PerFlowRateBytesPerSec
+		flowCfg.LossRate = 0
+		flowCfg.OneWayDelay = 0
+		released, allowed := perFlow.schedule(now, len(payload), flowCfg)
+		if !allowed {
+			d.packetsDropped.Add(1)
+			return
+		}
+		if released.After(now) {
+			now = released
+		}
+	}
+	deliver, ok := d.schedule(now, len(payload), r.cfg)
 	if !ok {
 		return
 	}

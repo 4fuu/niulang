@@ -40,22 +40,24 @@ import (
 )
 
 type options struct {
-	stacks      string
-	rttMillis   int
-	lossPercent float64
-	rateMbits   float64
-	queueBytes  int
-	seed        int64
-	bytes       int64
-	trials      int
-	flows       string
-	congestion  string
-	lanes       int
-	quicPool    bool
-	timeout     time.Duration
-	cpuProfile  string
-	verbose     bool
-	latency     bool
+	stacks       string
+	rttMillis    int
+	lossPercent  float64
+	rateMbits    float64
+	perFlowMbits float64
+	queueBytes   int
+	seed         int64
+	bytes        int64
+	trials       int
+	flows        string
+	congestion   string
+	lanes        int
+	initialLanes int
+	quicPool     bool
+	timeout      time.Duration
+	cpuProfile   string
+	verbose      bool
+	latency      bool
 }
 
 func main() {
@@ -72,6 +74,7 @@ func run(args []string) error {
 	fs.IntVar(&opts.rttMillis, "rtt", 200, "emulated round-trip time in milliseconds")
 	fs.Float64Var(&opts.lossPercent, "loss", 0, "per-packet loss percentage in each direction")
 	fs.Float64Var(&opts.rateMbits, "rate", 100, "bottleneck rate in Mbit/s in each direction (0 disables)")
+	fs.Float64Var(&opts.perFlowMbits, "per-flow-rate", 0, "per-source-address rate in Mbit/s, modelling per-flow policing (0 disables)")
 	fs.IntVar(&opts.queueBytes, "queue", 0, "bottleneck queue in bytes (0 selects one BDP)")
 	fs.Int64Var(&opts.seed, "seed", 1, "path emulator seed")
 	fs.Int64Var(&opts.bytes, "bytes", 10<<20, "object size per flow in bytes")
@@ -79,6 +82,7 @@ func run(args []string) error {
 	fs.StringVar(&opts.flows, "flows", "1", "comma-separated concurrent flow counts")
 	fs.StringVar(&opts.congestion, "congestion", "bbr-tuic", "congestion controller for both stacks")
 	fs.IntVar(&opts.lanes, "lanes", 1, "wanopt maximum lanes")
+	fs.IntVar(&opts.initialLanes, "initial-lanes", 1, "wanopt lanes opened before SOCKS CONNECT succeeds")
 	fs.BoolVar(&opts.quicPool, "quic-pool", true, "enable the wanopt pooled QUIC connection")
 	fs.DurationVar(&opts.timeout, "timeout", 120*time.Second, "per-trial timeout")
 	fs.StringVar(&opts.cpuProfile, "cpuprofile", "", "write a CPU profile to this path")
@@ -108,11 +112,12 @@ func run(args []string) error {
 		return err
 	}
 	pathCfg := pathsim.Config{
-		OneWayDelay:     time.Duration(opts.rttMillis) * time.Millisecond / 2,
-		LossRate:        opts.lossPercent / 100,
-		RateBytesPerSec: uint64(opts.rateMbits * 1e6 / 8),
-		QueueBytes:      opts.queueBytes,
-		Seed:            opts.seed,
+		OneWayDelay:            time.Duration(opts.rttMillis) * time.Millisecond / 2,
+		LossRate:               opts.lossPercent / 100,
+		RateBytesPerSec:        uint64(opts.rateMbits * 1e6 / 8),
+		PerFlowRateBytesPerSec: uint64(opts.perFlowMbits * 1e6 / 8),
+		QueueBytes:             opts.queueBytes,
+		Seed:                   opts.seed,
 	}
 
 	origin, err := newOrigin(opts.bytes)
@@ -121,9 +126,9 @@ func run(args []string) error {
 	}
 	defer origin.Close()
 
-	fmt.Printf("# path rtt=%dms loss=%.2f%% rate=%.1fMbit/s queue=%s seed=%d object=%s congestion=%s\n",
-		opts.rttMillis, opts.lossPercent, opts.rateMbits, humanQueue(pathCfg), opts.seed,
-		humanBytes(opts.bytes), opts.congestion)
+	fmt.Printf("# path rtt=%dms loss=%.2f%% rate=%.1fMbit/s per_flow=%.1fMbit/s queue=%s seed=%d object=%s congestion=%s lanes=%d\n",
+		opts.rttMillis, opts.lossPercent, opts.rateMbits, opts.perFlowMbits, humanQueue(pathCfg), opts.seed,
+		humanBytes(opts.bytes), opts.congestion, opts.lanes)
 	fmt.Printf("stack\tflows\ttrial\tseconds\tmbits_per_sec\tcomplete\tnote\n")
 
 	for _, stack := range strings.Split(opts.stacks, ",") {
@@ -348,7 +353,7 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 			Secret: secret, RootCAs: roots, Transport: pep.TransportQUIC,
 			EnableQUICPool: opts.quicPool, OptimisticOpen: true,
 			Congestion:   pep.CongestionControlKind(opts.congestion),
-			InitialLanes: 1, MaxLanes: opts.lanes, Logger: logger,
+			InitialLanes: opts.initialLanes, MaxLanes: opts.lanes, Logger: logger,
 		})
 		if err != nil {
 			h.Close()

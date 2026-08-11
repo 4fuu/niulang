@@ -44,9 +44,12 @@ type ServerConfig struct {
 	AdaptiveMaxBytesSec           uint64
 	AggregateBytesPerSec          uint64
 	InteractiveReserveBytesPerSec uint64
-	Metrics                       *metrics.Registry
-	MaxLanes                      int
-	Logger                        *slog.Logger
+	// ReplayMemoryBytes bounds the total memory all remote flows may hold in
+	// their replay windows. Zero selects the package default.
+	ReplayMemoryBytes uint64
+	Metrics           *metrics.Registry
+	MaxLanes          int
+	Logger            *slog.Logger
 	// testLaneWriteHook is intentionally unexported and nil in production. It
 	// lets package integration tests reproduce loss of a specific logical
 	// frame without depending on encrypted QUIC packet layout.
@@ -62,6 +65,9 @@ type Server struct {
 	maxObservedLanes atomic.Int64
 	budget           *limiter.Budget
 	metrics          *metrics.Registry
+	// replayBudget bounds the memory all remote flows may hold in their
+	// replay windows.
+	replayBudget *replayBudget
 	// quicCapabilities is kept on the server instance so capability negotiation
 	// is consistent for every stream on a connection. It is initialized to the
 	// current capability set; tests may set it to zero to model an older peer.
@@ -182,6 +188,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		sessions:         make(map[[16]byte]*serverFlow),
 		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 		metrics:          cfg.Metrics,
+		replayBudget:     newReplayBudget(int64(cfg.ReplayMemoryBytes)),
 		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl | session.CapabilityFastLaneJoin,
 	}
 	server.quicFastStreams.Store(true)
@@ -519,6 +526,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	s.cfg.Logger.Debug("remote flow opened", "transport", transportKindForConn(conn), "authentication_duration", authFinished.Sub(sessionStarted), "open_duration", openFinished.Sub(authFinished), "destination_dial_duration", time.Since(destinationDialStarted), "total_duration", time.Since(sessionStarted))
 	defer destinationConn.Close()
 	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics, s.cfg.Logger)
+	flow.replayBudget = s.replayBudget
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0
@@ -570,7 +578,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		s.cfg.Logger.Debug("remote flow ended with error", "error", err, "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "lane_bytes", stats.LaneBytes)
 		return
 	}
-	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes)
+	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes, "send_stalls", stats.SendStalls, "send_stalled", stats.SendStalled)
 }
 
 // watchFlowCompletion closes a correctness gap between the application FIN

@@ -23,9 +23,22 @@ import (
 var nextTelemetryID atomic.Uint64
 
 const (
-	maxLaneEvents       = 256
-	maxReassemblyBytes  = 8 * 1024 * 1024
-	maxReassemblyFrames = 4096
+	maxLaneEvents = 256
+	// The receiver's out-of-order capacity must be at least the sender's send
+	// window, or an ordinary striped transfer can legitimately overflow it and
+	// abort a healthy application flow. Bytes buffered out of order are always
+	// bytes the sender has not had acknowledged, so sizing both from the same
+	// constant makes overflow impossible between peers running this code, and
+	// keeps a hostile peer bounded by the same per-flow figure.
+	//
+	// The receiver cannot instead apply backpressure here: every lane feeds one
+	// ordered reassembler, so pausing consumption would also pause the lane
+	// carrying the segment that would close the gap.
+	maxReassemblyBytes = maxFlowReplayBytes
+	// The byte bound above is what limits memory. This frame bound only stops
+	// a peer using very small frames from turning the window into millions of
+	// map entries.
+	maxReassemblyFrames = 16384
 	maxLaneWriteQueue   = 64
 	// Keep a small part of the bounded queue available for interactive/new
 	// frames even when a bulk producer has filled its queue. This is a hard
@@ -33,8 +46,11 @@ const (
 	// the combined queues at maxLaneWriteQueue.
 	maxLaneInteractiveReserve = 8
 	maxLaneBulkQueue          = maxLaneWriteQueue - maxLaneInteractiveReserve
-	maxReplayBytes            = 8 * 1024 * 1024
-	maxReplayFrames           = 4096
+	// maxReplayBytes is the window a flow may hold without drawing on the
+	// endpoint's shared replay budget. Growth above it is granted only while
+	// the endpoint has spare accounted memory; see replaybudget.go.
+	maxReplayBytes  = 8 * 1024 * 1024
+	maxReplayFrames = 16384
 	// Must exceed QUIC dead-path detection plus TCP handshake time. The
 	// client normally detects a blackhole at ~15 s, then needs one scheduler
 	// tick and a bounded TCP handshake before the replacement can arrive.
@@ -87,6 +103,72 @@ type mpLane struct {
 	closed            atomic.Bool
 	sent              atomic.Uint64
 	recv              atomic.Uint64
+	// nextFree is this lane's virtual transmit clock: the time at which it
+	// would finish sending everything the scheduler has already assigned to
+	// it. It is read and advanced under multipathFlow.schedMu.
+	nextFree time.Time
+
+	// rateMu guards a short-lived cache of the lane's transport statistics.
+	// Reading them from QUIC on every frame would take the connection lock on
+	// the hot path for information that changes on an RTT timescale.
+	rateMu      sync.Mutex
+	rateSampled time.Time
+	rateBytes   float64       // estimated send rate in bytes per second
+	rateRTT     time.Duration // smoothed round-trip time
+}
+
+// laneRateCacheTTL is far below one long-haul RTT, so the scheduler still
+// reacts within a single congestion round while avoiding per-frame lock
+// traffic on a fast local path.
+const laneRateCacheTTL = 5 * time.Millisecond
+
+// serializationTime is how long this lane needs to put payload bytes on the
+// wire at its current estimated rate.
+func (l *mpLane) serializationTime(payload int) time.Duration {
+	rate, rtt := l.sendRate()
+	if rate <= 0 {
+		if rtt <= 0 {
+			return 0
+		}
+		// The RTT is known but the controller exposes no rate. One chunk per
+		// round trip is a deliberately pessimistic stand-in that still orders
+		// lanes consistently against each other.
+		rate = float64(defaultChunkSize) / rtt.Seconds()
+	}
+	return time.Duration(float64(payload) / rate * float64(time.Second))
+}
+
+// laneScheduleHorizon bounds how far ahead the scheduler will commit bytes to
+// a single lane. Without it, a lane that stops draining would keep its virtual
+// clock running away and stay unusable long after it recovered.
+const laneScheduleHorizon = 2 * time.Second
+
+func (l *mpLane) sendRate() (float64, time.Duration) {
+	l.rateMu.Lock()
+	defer l.rateMu.Unlock()
+	now := time.Now()
+	if !l.rateSampled.IsZero() && now.Sub(l.rateSampled) < laneRateCacheTTL {
+		return l.rateBytes, l.rateRTT
+	}
+	if l.fc == nil {
+		return 0, 0
+	}
+	provider, ok := l.fc.conn.(laneStatsProvider)
+	if !ok {
+		l.rateSampled = now
+		return l.rateBytes, l.rateRTT
+	}
+	stats := provider.transportStats()
+	rtt := stats.smoothedRTT
+	if rtt <= 0 {
+		rtt = stats.latestRTT
+	}
+	rate := float64(stats.controller.PacingRate)
+	if rate <= 0 && stats.controller.CongestionWindow > 0 && rtt > 0 {
+		rate = float64(stats.controller.CongestionWindow) / rtt.Seconds()
+	}
+	l.rateSampled, l.rateBytes, l.rateRTT = now, rate, rtt
+	return rate, rtt
 }
 
 type inboundEvent struct {
@@ -114,10 +196,11 @@ type multipathFlow struct {
 	sendAckFlag uint16
 	recvAckFlag uint16
 
-	lanesMu      sync.RWMutex
-	lanes        map[uint64]*mpLane
-	laneCursorMu sync.Mutex
-	laneCursor   int
+	lanesMu sync.RWMutex
+	lanes   map[uint64]*mpLane
+	// schedMu serializes lane selection so that choosing a lane and charging
+	// it for the selected bytes is one atomic step.
+	schedMu sync.Mutex
 
 	events   chan inboundEvent
 	laneErr  chan laneFailure
@@ -159,23 +242,33 @@ type multipathFlow struct {
 	helloAckPending bool
 	onHelloOK       func(session.HelloOK)
 	ackSequence     atomic.Uint64
-	ackClosing     atomic.Bool
-	lastPayload    atomic.Int64
-	lastActivity   atomic.Int64
-	closeOnce      sync.Once
-	doneOnce       sync.Once
-	finished       atomic.Bool
-	nextJoinID     uint64
-	telemetryID    uint64
-	baselineRTTNS  atomic.Int64
-	currentRTTNS   atomic.Int64
-	idleTimeout    time.Duration
-	maxLifetime    time.Duration
+	ackClosing      atomic.Bool
+	lastPayload     atomic.Int64
+	lastActivity    atomic.Int64
+	closeOnce       sync.Once
+	doneOnce        sync.Once
+	finished        atomic.Bool
+	nextJoinID      uint64
+	telemetryID     uint64
+	baselineRTTNS   atomic.Int64
+	currentRTTNS    atomic.Int64
+	idleTimeout     time.Duration
+	maxLifetime     time.Duration
+
+	replayStalls  atomic.Uint64
+	replayStalled atomic.Int64
 
 	replayMu     sync.Mutex
 	replay       map[uint64]protocol.Frame
 	replayNotify chan struct{}
 	replayBytes  uint64
+	// replayLimit is this flow's current send window. It starts at the
+	// unaccounted floor and grows from replayBudget while the endpoint has
+	// spare accounted memory. replayGranted is what has been drawn from that
+	// shared budget and must be returned when the flow ends.
+	replayLimit   uint64
+	replayGranted uint64
+	replayBudget  *replayBudget
 	acked        uint64
 	highestSent  uint64
 }
@@ -192,6 +285,7 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 		done: make(chan struct{}), ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1),
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
 		replay: make(map[uint64]protocol.Frame), replayNotify: make(chan struct{}, 1),
+		replayLimit: maxReplayBytes,
 	}
 	if len(loggers) > 0 && loggers[0] != nil {
 		f.logger = loggers[0]
@@ -268,7 +362,8 @@ func (f *multipathFlow) writeLane(lane *mpLane) {
 				return
 			}
 		}
-		if err := lane.fc.WriteContext(f.ctx, frame); err != nil {
+		err := lane.fc.WriteContext(f.ctx, frame)
+		if err != nil {
 			f.failLane(lane, fmt.Errorf("lane %d write: %w", lane.id, err))
 			return
 		}
@@ -571,12 +666,25 @@ func (f *multipathFlow) healthyLanes() []*mpLane {
 }
 
 func (f *multipathFlow) chooseLane(bulk bool) (*mpLane, error) {
+	candidates, err := f.laneCandidates(bulk)
+	if err != nil {
+		return nil, err
+	}
+	lane := candidates[0]
+	f.chargeLane(lane, f.chunkSize)
+	return lane, nil
+}
+
+// laneCandidates returns the eligible lanes for a frame, best first. Callers
+// that can fall back to a second choice use the whole list; callers that must
+// commit to one lane take the head.
+func (f *multipathFlow) laneCandidates(bulk bool) ([]*mpLane, error) {
 	lanes := f.healthyLanes()
 	if len(lanes) == 0 {
 		return nil, errors.New("no healthy lanes")
 	}
 	if !bulk || len(lanes) == 1 {
-		return lanes[0], nil
+		return lanes[:1], nil
 	}
 	if f.reserveControlLane {
 		// Lane zero is the initial authenticated stream by protocol. Exclude
@@ -592,11 +700,79 @@ func (f *multipathFlow) chooseLane(bulk bool) (*mpLane, error) {
 			lanes = bulkLanes
 		}
 	}
-	f.laneCursorMu.Lock()
-	defer f.laneCursorMu.Unlock()
-	lane := lanes[f.laneCursor%len(lanes)]
-	f.laneCursor = (f.laneCursor + 1) % len(lanes)
-	return lane, nil
+	return f.orderLanesByArrival(lanes, f.chunkSize), nil
+}
+
+// orderLanesByArrival sorts lanes by when each would deliver the next frame.
+//
+// Round-robin striping is wrong for this transport. The receiver reassembles
+// one ordered byte stream, so a frame placed on a slow lane blocks every later
+// frame that already arrived on a fast one. Measured on the emulated 200 ms /
+// 1% loss path, a two-lane round-robin flow ran 18% slower than the same flow
+// on a single lane while carrying the same number of packets.
+//
+// The backlog cannot be read from the transport: a lane's writer returns as
+// soon as bytes are copied into the QUIC stream's multi-megabyte send buffer,
+// so the visible queue stays near zero and every lane looks idle. Each lane
+// therefore carries its own virtual transmit clock, advanced by the
+// serialization time of everything already assigned to it. Selecting the
+// minimum of clock-plus-propagation both spreads bytes in proportion to
+// measured lane rate and equalizes arrival times, which is exactly what
+// in-order reassembly needs.
+func (f *multipathFlow) orderLanesByArrival(lanes []*mpLane, payload int) []*mpLane {
+	f.schedMu.Lock()
+	defer f.schedMu.Unlock()
+	now := time.Now()
+	type ranked struct {
+		lane      *mpLane
+		arrival   time.Time
+		validated bool
+	}
+	order := make([]ranked, 0, len(lanes))
+	for _, lane := range lanes {
+		_, rtt := lane.sendRate()
+		// A lane with no round-trip sample has not proven it can carry
+		// anything: its congestion window is still the initial guess, so
+		// trusting it would pull ordered data onto a path in slow start.
+		// Rank any validated lane ahead of any unvalidated one.
+		start := lane.nextFree
+		if start.Before(now) {
+			start = now
+		}
+		order = append(order, ranked{
+			lane:      lane,
+			arrival:   start.Add(lane.serializationTime(payload)).Add(rtt / 2),
+			validated: rtt > 0,
+		})
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		if order[i].validated != order[j].validated {
+			return order[i].validated
+		}
+		return order[i].arrival.Before(order[j].arrival)
+	})
+	ordered := make([]*mpLane, len(order))
+	for i, entry := range order {
+		ordered[i] = entry.lane
+	}
+	return ordered
+}
+
+// chargeLane advances a lane's virtual transmit clock for bytes just assigned
+// to it. The horizon keeps a lane that stops draining from banking unbounded
+// backlog and staying unusable long after it recovers.
+func (f *multipathFlow) chargeLane(lane *mpLane, payload int) {
+	f.schedMu.Lock()
+	defer f.schedMu.Unlock()
+	now := time.Now()
+	start := lane.nextFree
+	if start.Before(now) {
+		start = now
+	}
+	lane.nextFree = start.Add(lane.serializationTime(payload))
+	if horizon := now.Add(laneScheduleHorizon); lane.nextFree.After(horizon) {
+		lane.nextFree = horizon
+	}
 }
 
 func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
@@ -612,6 +788,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	limitErr := make(chan error, 1)
 	go f.watchLimits(limitsStop, limitErr)
 	defer f.signalDone()
+	defer f.releaseReplayBudget()
 	defer func() {
 		cancelACKs()
 		close(limitsStop)
@@ -656,6 +833,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 						stats.BytesSent = f.bytesUp.Load()
 						stats.BytesRead = f.bytesDown.Load()
 						stats.LaneBytes = f.laneStats()
+						f.recordSendStalls(&stats)
 						return stats, nil
 					}
 				}
@@ -669,6 +847,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 					stats.BytesSent = f.bytesUp.Load()
 					stats.BytesRead = f.bytesDown.Load()
 					stats.LaneBytes = f.laneStats()
+					f.recordSendStalls(&stats)
 					return stats, err
 				}
 			}
@@ -685,6 +864,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
+			f.recordSendStalls(&stats)
 			return stats, err
 		case err := <-f.ackErr:
 			if err == nil {
@@ -696,6 +876,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
+			f.recordSendStalls(&stats)
 			return stats, fmt.Errorf("cumulative acknowledgement: %w", err)
 		case failure := <-f.laneErr:
 			err := failure.err
@@ -709,6 +890,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				stats.BytesSent = f.bytesUp.Load()
 				stats.BytesRead = f.bytesDown.Load()
 				stats.LaneBytes = f.laneStats()
+				f.recordSendStalls(&stats)
 				return stats, nil
 			}
 			// A secondary lane can fail without invalidating the bytes already
@@ -726,6 +908,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				stats.BytesSent = f.bytesUp.Load()
 				stats.BytesRead = f.bytesDown.Load()
 				stats.LaneBytes = f.laneStats()
+				f.recordSendStalls(&stats)
 				return stats, nil
 			}
 			if len(f.healthyLanes()) > 0 {
@@ -740,6 +923,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
+			f.recordSendStalls(&stats)
 			return stats, err
 		case <-ctx.Done():
 			cancelRun()
@@ -748,6 +932,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
+			f.recordSendStalls(&stats)
 			return stats, ctx.Err()
 		}
 	}
@@ -756,6 +941,7 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	stats.BytesSent = f.bytesUp.Load()
 	stats.BytesRead = f.bytesDown.Load()
 	stats.LaneBytes = f.laneStats()
+	f.recordSendStalls(&stats)
 	return stats, nil
 }
 
@@ -1057,15 +1243,76 @@ func (f *multipathFlow) enqueueOnHealthyLane(ctx context.Context, frame protocol
 		}
 	}
 	for {
-		lane, err := f.chooseLane(bulk)
+		candidates, err := f.laneCandidates(bulk)
 		if err == nil {
-			if err = f.enqueueFrameClass(ctx, lane, frame, bulk); err == nil {
+			// Try each lane in preference order without blocking. Committing to
+			// the best lane and then waiting for one of its queue slots lets a
+			// single lane throttle the whole flow while other lanes sit idle:
+			// the producer stops, so no later frame is ever offered to them and
+			// the scheduler never sees the imbalance it was meant to correct.
+			for _, lane := range candidates {
+				accepted, laneErr := f.tryEnqueueFrameClass(lane, frame, bulk)
+				if accepted {
+					f.chargeLane(lane, len(frame.Payload))
+					return nil
+				}
+				if laneErr != nil {
+					continue
+				}
+			}
+			// Every eligible lane is full, so the flow really is transport
+			// limited. Wait on the best one.
+			if err = f.enqueueFrameClass(ctx, candidates[0], frame, bulk); err == nil {
+				f.chargeLane(candidates[0], len(frame.Payload))
 				return nil
 			}
 		}
 		if err := f.waitForHealthyLane(ctx, laneReplacementWait); err != nil {
 			return err
 		}
+	}
+}
+
+// tryEnqueueFrameClass offers a frame to one lane without blocking. It reports
+// accepted=false with a nil error when the lane is merely full, so the caller
+// can move on to the next lane, and a non-nil error when the lane is unusable.
+func (f *multipathFlow) tryEnqueueFrameClass(lane *mpLane, frame protocol.Frame, bulk bool) (bool, error) {
+	if lane == nil || lane.closed.Load() {
+		return false, errors.New("lane is closed")
+	}
+	queue := lane.writeQ
+	if !bulk && lane.writeInteractiveQ != nil {
+		queue = lane.writeInteractiveQ
+	}
+	if queue == nil {
+		return false, errors.New("lane writer queue is unavailable")
+	}
+	acquired := false
+	if lane.writeSlots != nil {
+		select {
+		case lane.writeSlots <- struct{}{}:
+			acquired = true
+		case <-lane.writeDone:
+			f.failLane(lane, errors.New("lane writer stopped"))
+			return false, errors.New("lane writer stopped")
+		default:
+			return false, nil
+		}
+	}
+	select {
+	case queue <- frame:
+		return true, nil
+	case <-lane.writeDone:
+		if acquired {
+			<-lane.writeSlots
+		}
+		f.failLane(lane, errors.New("lane writer stopped"))
+		return false, errors.New("lane writer stopped")
+	default:
+		if acquired {
+			<-lane.writeSlots
+		}
+		return false, nil
 	}
 }
 
@@ -1117,11 +1364,18 @@ func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.
 			f.replayMu.Unlock()
 			return errors.New("duplicate replay sequence")
 		}
-		if len(frame.Payload) > maxReplayBytes {
+		if len(frame.Payload) > maxFlowReplayBytes {
 			f.replayMu.Unlock()
 			return errors.New("replay frame exceeds buffer limit")
 		}
-		if len(f.replay)+1 <= maxReplayFrames && f.replayBytes+uint64(len(frame.Payload)) <= maxReplayBytes {
+		if len(f.replay)+1 <= maxReplayFrames && f.replayBytes+uint64(len(frame.Payload)) > f.replayLimit {
+			// The window is the flow's send window. Grow it from the shared
+			// endpoint budget rather than blocking, so a high bandwidth-delay
+			// product path is not throttled by a fixed constant, and so the
+			// total commitment across flows stays accounted.
+			f.growReplayLimitLocked(uint64(len(frame.Payload)))
+		}
+		if len(f.replay)+1 <= maxReplayFrames && f.replayBytes+uint64(len(frame.Payload)) <= f.replayLimit {
 			frame.Payload = append([]byte(nil), frame.Payload...)
 			f.replay[frame.Header.Sequence] = frame
 			f.replayBytes += uint64(len(frame.Payload))
@@ -1133,6 +1387,7 @@ func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.
 			return nil
 		}
 		f.replayMu.Unlock()
+		stallStarted := time.Now()
 		select {
 		case <-f.replayNotify:
 		case <-f.done:
@@ -1140,6 +1395,8 @@ func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+		f.replayStalls.Add(1)
+		f.replayStalled.Add(int64(time.Since(stallStarted)))
 	}
 }
 
@@ -1660,4 +1917,46 @@ func (f *multipathFlow) closeAll() {
 		}
 	})
 	f.signalDone()
+}
+
+// recordSendStalls attaches the sender's replay-window stall accounting to a
+// completion record.
+func (f *multipathFlow) recordSendStalls(stats *FlowStats) {
+	stats.SendStalls = f.replayStalls.Load()
+	stats.SendStalled = time.Duration(f.replayStalled.Load())
+}
+
+// growReplayLimitLocked raises this flow's send window so it can cover the
+// path's bandwidth-delay product, drawing the increase from the endpoint's
+// shared replay budget. It must be called with replayMu held. Failing to grow
+// is not an error: the caller then waits for acknowledgements, which is the
+// previous fixed-window behavior and keeps memory bounded under load.
+func (f *multipathFlow) growReplayLimitLocked(needed uint64) {
+	if f.replayLimit >= maxFlowReplayBytes {
+		return
+	}
+	step := uint64(minFlowReplayBytes)
+	for step < needed {
+		step *= 2
+	}
+	if f.replayLimit+step > maxFlowReplayBytes {
+		step = maxFlowReplayBytes - f.replayLimit
+	}
+	if step == 0 || !f.replayBudget.acquire(int64(step)) {
+		return
+	}
+	f.replayLimit += step
+	f.replayGranted += step
+}
+
+// releaseReplayBudget returns this flow's share of the endpoint replay budget.
+// It is idempotent so both the normal completion path and an error path can
+// call it.
+func (f *multipathFlow) releaseReplayBudget() {
+	f.replayMu.Lock()
+	granted := f.replayGranted
+	f.replayGranted = 0
+	f.replayLimit = maxReplayBytes
+	f.replayMu.Unlock()
+	f.replayBudget.release(int64(granted))
 }
