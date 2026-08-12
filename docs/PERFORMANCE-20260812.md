@@ -278,33 +278,48 @@ evicting. Evicted bytes that the peer has not acknowledged make the flow
 unreplayable, and the next lane hiccup then fails it closed, which is correct
 but fatal.
 
-The second of those two remedies is now implemented: a striped flow re-sends
-its oldest unacknowledged frame on the lane predicted to deliver first once the
-retention window is half full. The receiver already deduplicates a segment it
-holds or has passed, so the duplicate is harmless, and delivering the missing
-bytes over a fast lane lets the contiguous point advance and the window drain.
-This is the reinjection multipath TCP performs for the same reason.
+Both remedies are now implemented, along with a third defect they exposed.
 
-That fixed the reliability but not the aggregation. Four trials per cell,
-20 MiB on the same policed path, measured after the emulator defect described
-below was corrected:
+**Reinjection.** A striped flow re-sends its oldest unacknowledged frame on the
+lane predicted to deliver first once the retention window is half full. The
+receiver already deduplicates a segment it holds or has passed, so the
+duplicate is harmless, and delivering the missing bytes over a fast lane lets
+the contiguous point advance. This is what multipath TCP does for the same
+reason. It fixed the reliability: every transfer completes.
+
+**Range acknowledgements.** A receiver now reports the byte ranges it holds out
+of order alongside the cumulative sequence, and the sender releases frames a
+reported range covers completely. Retention-window evictions on a four-lane
+transfer fall from 196 to zero, so the window tracks the bytes actually
+outstanding and the unreplayable state that made lane failures fatal no longer
+arises at all.
+
+It did **not** improve throughput, and in hindsight the evidence said it would
+not: the sender's stall counter was already zero, so the window was never what
+held it back. It removes a failure mode, not a bottleneck.
+
+**The reassembly buffer was quadratic.** Every insert scanned the whole buffer
+to reject overlapping segments. That is invisible on one lane, where almost
+nothing is buffered, and throttles the receiver exactly when striping makes the
+reorder span large. Indexing it took four-lane goodput from 23.12 to 33.47
+Mbit/s.
+
+Four trials per cell, 20 MiB, on the same policed path:
 
 | Configuration | Median | Completed |
 | --- | ---: | --- |
 | Native TUIC, one connection | 20.35 | 4/4 |
-| wanopt, one lane | 21.02 | 4/4 |
-| wanopt, two lanes | 19.60 | 4/4 |
-| wanopt, four lanes | 26.48 | 4/4 |
+| wanopt, one lane | 20.43 | 4/4 |
+| wanopt, four lanes | 33.47 | 4/4 |
 
-Every transfer completes, where before roughly one in three failed. But two
-lanes are *worse* than one, and four lanes return 26% more on a path that would
-allow four times as much.
+Note that `--max-lanes` counts lanes carrying bulk payload but the flow also
+holds the reserved control lane, so "four lanes" here is three bulk
+connections, not four. Against three available shares, 33.47 against 20.43 is
+1.64x, not 3x.
 
-The remaining limit is the one that has not been fixed: a single cumulative
-acknowledgement cannot tell the sender which ranges a striped receiver actually
-holds, so the retention window still tracks the reorder span and reinjection is
-only bounding the damage. Acknowledgements carrying received ranges are the
-real fix, and that is protocol work not yet done.
+So striping is now reliable and worth something, and still well short of what
+the path allows. The remaining shortfall has not been attributed; the two
+causes identified so far were both real and neither closed the gap.
 
 ### The emulator was capping these measurements
 
