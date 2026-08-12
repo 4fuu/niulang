@@ -207,18 +207,25 @@ the exact expected body.
 
 | Condition | Reference | wanopt | Delta |
 | --- | ---: | ---: | ---: |
-| 200 ms, 100 Mbit/s, 0% loss, 10 MiB | 37.87 | 37.82 | −0.1% |
-| 200 ms, 100 Mbit/s, 1% loss, 10 MiB | 31.74 | 31.84 | +0.3% |
-| 200 ms, 100 Mbit/s, 3% loss, 10 MiB | 28.61 | 29.70 | +3.8% |
-| 200 ms, 100 Mbit/s, 5% loss, 10 MiB | 28.18 | 28.71 | +1.9% |
-| 200 ms, 100 Mbit/s, 1% loss, 50 MiB | 57.81 | 58.02 | +0.4% |
-| 200 ms, 1% loss, 4 concurrent flows | 61.96 | 61.59 | −0.6% |
-| 200 ms, 1% loss, 8 concurrent flows | 70.26 | 70.28 | +0.0% |
-| 264 ms, 50 Mbit/s, 10% loss | 18.14 | 17.79 | −1.9% |
-| 264 ms, 50 Mbit/s, 20% loss | 14.71 | 15.57 | +5.8% |
-| No impairment, 256 MiB (datapath cost) | 890.15 | 897.13 | +0.8% |
+| 200 ms, 100 Mbit/s, 0% loss, 10 MiB | 38.00 | 38.10 | +0.3% |
+| 200 ms, 100 Mbit/s, 1% loss, 10 MiB | 31.61 | 32.06 | +1.4% |
+| 200 ms, 100 Mbit/s, 3% loss, 10 MiB | 29.26 | 29.14 | −0.4% |
+| 200 ms, 100 Mbit/s, 5% loss, 10 MiB | 26.67 | 28.41 | +6.5% |
+| 200 ms, 100 Mbit/s, 1% loss, 50 MiB | 57.24 | 57.94 | +1.2% |
+| 200 ms, 1% loss, 4 concurrent flows | 62.00 | 59.23 | −4.5% |
+| 200 ms, 1% loss, 8 concurrent flows | 70.41 | 72.07 | +2.4% |
+| 264 ms, 50 Mbit/s, 10% loss | 18.50 | 18.69 | +1.0% |
+| 264 ms, 50 Mbit/s, 20% loss | 14.32 | 15.01 | +4.8% |
+| No impairment, 256 MiB (datapath cost) | 890.46 | 905.29 | +1.7% |
 | Cold connect (ms, lower is better) | 409.1 | 409.5 | parity |
 | Warm request (ms, lower is better) | 203.0 | 202.9 | parity |
+| Interactive p50 during 50 MiB (ms) | 300 | 206 | −31% |
+| Interactive p95 during 50 MiB (ms) | 540 | 349 | −35% |
+| Bulk goodput during that transfer | 57.78 | 52.72 | −8.8% |
+
+Every cell delivered the exact expected body in all five trials, and the run
+passed `bench_matrix.sh --gate --tolerance 0.12` in all eleven compared blocks,
+so this is a machine-checked result rather than a table someone read.
 
 Single-flow goodput, concurrent-flow goodput, connection latency, and CPU-bound
 datapath cost are all within noise of the reference or above it. For comparison,
