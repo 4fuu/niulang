@@ -44,6 +44,12 @@ different paths rather than two transports. Two controls exist for this:
   connection, unframed copying, TUIC's published transport windows — built on
   the same QUIC stack and controllers wanopt uses, so a measured gap is
   attributable to the transport design rather than to the language or library.
+- `internal/extproxy` drives real implementations over the same emulated path,
+  because an in-tree control on its own is a weak claim: sing-box for native
+  TUIC v5 and Hysteria2, and VLESS over TLS and over WebSocket on a stream
+  relay. Five trials each at 200 ms with every stack completing every trial,
+  wanopt measures 37.6 / 34.0 / 26.6 Mbit/s at 0 / 1 / 3% loss against native
+  TUIC's 37.4 / 30.4 / 28.6 — broadly at parity, not uniformly ahead.
 
 `cmd/wanoptbench` runs both over one emulated path, emits JSON, and can fail a
 build with `--gate` when wanopt falls behind the reference;

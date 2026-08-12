@@ -32,8 +32,12 @@ initial packet size, MTU probing disabled).
 
 This reference is a control, not a claim to be native TUIC. Comparing against a
 separately built Rust implementation conflates the transport design with the
-language and QUIC library; comparing against this isolates the design. Live
-comparisons against native TUIC remain worthwhile and are not replaced by it.
+language and QUIC library; comparing against this isolates the design.
+
+It is also, on its own, a weak claim. `internal/extproxy` therefore drives real
+implementations over the same emulated path — sing-box for native TUIC v5 and
+Hysteria2, and VLESS over TLS and over WebSocket on a TCP relay — so the
+comparison is not confined to something written alongside the code under test.
 
 `cmd/wanoptbench` runs both stacks over one emulated path in a single process.
 `scripts/bench_matrix.sh` is the standard matrix.
@@ -248,6 +252,40 @@ aggregate, 200 ms, 1% loss, 100 MiB:
 
 The default remains one lane. `--max-lanes` is still an explicit
 path-validation knob.
+
+## Against real implementations
+
+Everything above compares wanopt with the in-tree control. This block compares
+it with the implementations people actually deploy, over the same seeded path,
+five trials each, all stacks completing every trial (median Mbit/s):
+
+| Loss | In-tree control | wanopt | Native TUIC | Hysteria2 |
+| --- | ---: | ---: | ---: | ---: |
+| 0% | 38.72 | 37.58 | 37.37 | 28.42 |
+| 1% | 33.92 | 34.00 | 30.38 | 25.16 |
+| 3% | 29.30 | 26.62 | 28.61 | 22.74 |
+
+Against native TUIC, wanopt is +0.6% at 0% loss, +11.9% at 1%, and −7.0% at 3%:
+broadly at parity, not uniformly ahead. The in-tree control tracks native TUIC
+within about 10% and reads slightly optimistic, which is worth knowing when
+reading every other table in this document.
+
+Hysteria2 is measured on its own default congestion control, not its fixed-rate
+mode; that mode needs explicit rate configuration and would be a different
+experiment.
+
+### The TCP family
+
+VLESS over TLS and over WebSocket run on the stream relay, which cannot apply
+loss. At 200 ms with a 100 Mbit/s bottleneck and no loss, four trials each:
+VLESS/TCP 67.21 Mbit/s, VLESS/WebSocket 57.81 — WebSocket framing costs about
+14%.
+
+**These numbers must not be compared against the QUIC rows above.** The two
+relays model different things: the packet relay applies per-packet
+serialization and tail drop, the stream relay applies backpressure and no loss
+at all. VLESS/WebSocket against VLESS/TCP is a fair comparison; VLESS against
+TUIC, on this rig, is not.
 
 ## Correlated loss, and what the controller is worth
 

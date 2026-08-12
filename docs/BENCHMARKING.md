@@ -36,9 +36,43 @@ It is a control, not a claim to be native TUIC. Comparing against a separately
 built Rust implementation conflates the transport design with the language and
 QUIC library; comparing against this isolates the design.
 
-**`cmd/wanoptbench`** — runs both stacks over one emulated path in a single
-process and reports per-trial rows, a summary, optional JSON, and an optional
-regression gate.
+**`internal/extproxy`** — launches third-party implementations so the
+comparison is not limited to an in-tree control. With `--sing-box PATH` the
+benchmark gains four more stacks:
+
+| Stack | Implementation | Carried by |
+| --- | --- | --- |
+| `tuic` | sing-box, native TUIC v5 | UDP relay |
+| `hysteria2` | sing-box | UDP relay |
+| `vless-tcp` | sing-box, VLESS over TLS | TCP relay |
+| `vless-ws` | sing-box, VLESS over WebSocket | TCP relay |
+
+Each runs as a server the emulator forwards to and a client exposing SOCKS5,
+over exactly the same seeded path as wanopt. The client trusts exactly the
+server's certificate, so nothing disables verification.
+
+**`cmd/wanoptbench`** — runs the selected stacks over one emulated path in a
+single process and reports per-trial rows, a summary, optional JSON, and an
+optional regression gate.
+
+## Do not compare a QUIC stack against a TCP stack
+
+The two relays model different things, and their numbers are not
+interchangeable.
+
+The UDP relay models per-packet serialization, tail drop, and loss. The TCP
+relay cannot: a userspace relay receives a byte stream, not segments, so
+dropping bytes would deliver a hole rather than trigger a retransmission, and
+the kernel TCP stack whose loss recovery is the interesting behaviour sits
+below the relay. It therefore refuses a loss rate instead of silently
+producing a lossless result, and it applies backpressure where the packet relay
+would tail-drop.
+
+So `vless-ws` against `vless-tcp` is a fair comparison — it isolates
+WebSocket's framing cost — and `tuic` against `wanopt` is a fair comparison.
+`vless-tcp` against `tuic` is not. Emulating loss for a stream transport needs
+an IP-layer facility such as dummynet, which needs privilege this harness does
+not take.
 
 ## Reading the numbers
 
@@ -60,6 +94,14 @@ queueing behind the bulk transfer.
 ## Typical invocations
 
 ```sh
+# Against real implementations rather than only the in-tree control.
+go run ./cmd/wanoptbench --stacks baseline,wanopt,tuic,hysteria2 \
+    --sing-box /path/to/sing-box --rtt 200 --loss 1 --rate 100 --trials 5
+
+# The TCP family, which cannot be measured under loss.
+go run ./cmd/wanoptbench --stacks vless-tcp,vless-ws \
+    --sing-box /path/to/sing-box --rtt 200 --loss 0 --rate 100 --trials 4
+
 # The standard matrix, five trials per cell.
 ./scripts/bench_matrix.sh --trials 5 --output /tmp/matrix.tsv
 
