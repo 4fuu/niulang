@@ -263,7 +263,7 @@ five runs of the same configuration:
 | 3 | 19.28 | 2/3 |
 
 Sometimes twice a single lane, sometimes no better, and roughly one transfer in
-three fails outright. An earlier revision of this document reported "67.2
+three failed outright. An earlier revision of this document reported "67.2
 against 22.5" from a single two-trial run; that figure is not reproducible and
 has been withdrawn.
 
@@ -277,13 +277,34 @@ evicting. Evicted bytes that the peer has not acknowledged make the flow
 unreplayable, and the next lane hiccup then fails it closed, which is correct
 but fatal.
 
-Fixing this needs the acknowledgement to carry received *ranges* rather than
-one contiguous point, so the sender can release what the peer actually holds,
-or it needs frames reinjected onto a healthy lane before they are evicted. Both
-are protocol work that has not been done.
+The second of those two remedies is now implemented: a striped flow re-sends
+its oldest unacknowledged frame on the lane predicted to deliver first once the
+retention window is half full. The receiver already deduplicates a segment it
+holds or has passed, so the duplicate is harmless, and delivering the missing
+bytes over a fast lane lets the contiguous point advance and the window drain.
+This is the reinjection multipath TCP performs for the same reason.
+
+That fixed the reliability but not the aggregation. Four trials per cell, 50 MiB
+on the same policed path:
+
+| Seed | One lane | Four lanes |
+| --- | --- | --- |
+| 5 | 19.55 (4/4) | 23.28 (4/4) |
+| 91 | 20.26 (4/4) | 24.91 (4/4) |
+
+Every transfer now completes, and the worst trial rose from an outright failure
+to 22.65 Mbit/s. But four lanes return about 20% more than one, not four times
+as much, on a path that would allow four shares.
+
+The remaining limit is the one that has not been fixed: a single cumulative
+acknowledgement cannot tell the sender which ranges a striped receiver actually
+holds, so the retention window still tracks the reorder span and reinjection is
+only bounding the damage. Acknowledgements carrying received ranges are the
+real fix, and that is protocol work not yet done.
 
 **The default is one lane and is unaffected.** `--max-lanes` above one should
-be treated as experimental and is not currently a supported configuration.
+be treated as experimental and is not currently a supported configuration: it
+is now reliable, but it does not deliver the aggregation it exists for.
 
 ## Correlated loss, and what the controller is worth
 

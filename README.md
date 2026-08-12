@@ -136,17 +136,17 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
   application-visible failures.
 
 The unattended client default is one QUIC lane, and striping a single flow over
-several lanes does not currently work reliably. On a path that polices per
-source address — the regime where it should help — four lanes measured between
-19 and 43 Mbit/s across repeated runs against a single lane's steady 20, and
-roughly one transfer in three failed. The cause is that the protocol
-acknowledgement carries one cumulative sequence, so under striping the sender's
-retention window covers the whole reorder span, fills, and evicts bytes the
-peer has not acknowledged, after which a lane failure is fatal. Fixing it needs
-range acknowledgements or reinjection onto a healthy lane; neither is done.
-`--max-lanes` above one is therefore experimental and unsupported, and
-`--bulk-start-lanes` with it; adaptive growth still requires positive marginal
-gain.
+several lanes does not yet deliver the aggregation it exists for. On a path
+that polices each source address at 25 Mbit/s — the regime where it should help
+— four lanes measure about 23-25 Mbit/s against a single lane's 20, completing
+every transfer, where before they ranged from 19 to 43 and failed roughly one
+transfer in three. Re-sending a stalled head segment on a faster lane fixed the
+reliability; the remaining shortfall is that a single cumulative acknowledgement
+cannot tell the sender which ranges a striped receiver holds, so the retention
+window still tracks the whole reorder span. Range acknowledgements are the real
+fix and are not implemented. `--max-lanes` above one is therefore experimental
+and unsupported, and `--bulk-start-lanes` with it; adaptive growth still
+requires positive marginal gain.
 `--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
 initial/control streams and lets multiple short flows share its congestion
 controller. On a capable peer, bulk promotion also lazily creates one
