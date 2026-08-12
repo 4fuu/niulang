@@ -45,9 +45,12 @@ different paths rather than two transports. Two controls exist for this:
   the same QUIC stack and controllers wanopt uses, so a measured gap is
   attributable to the transport design rather than to the language or library.
 
-`cmd/wanoptbench` runs both over one emulated path; `scripts/bench_matrix.sh`
-is the standard matrix and `scripts/bench_live_matched.sh` alternates trials
-between two running proxies on a real link. On the emulated matrix, wanopt is
+`cmd/wanoptbench` runs both over one emulated path, emits JSON, and can fail a
+build with `--gate` when wanopt falls behind the reference;
+`scripts/bench_matrix.sh` is the standard matrix and
+`scripts/bench_live_matched.sh` alternates trials between two running proxies
+on a real link. [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) explains what
+each knob models and how to read the numbers. On the emulated matrix, wanopt is
 at or above the reference for single-flow goodput at 0-20% loss, for 4 and 8
 concurrent flows, for cold and warm request latency, and for CPU-bound datapath
 cost; see [`docs/PERFORMANCE-20260812.md`](docs/PERFORMANCE-20260812.md) for
@@ -59,12 +62,41 @@ ahead on the median and ahead in 9 of 10 paired rounds. Before the rescue-window
 fix described in that document, wanopt completed 1 of 6 trials in a comparable
 window while the reference completed 6 of 6.
 
+### Protecting interactive latency under bulk load
+
+A bulk transfer sharing one congestion-controlled connection with interactive
+traffic queues that traffic behind it. That is unavoidable for a single-connection
+design, and it is what classifying flows is for: once a flow is classified bulk,
+wanopt moves it onto its own QUIC connection and keeps the pooled control
+connection for short and interactive flows.
+
+Measured at 200 ms and 1% loss with a 50 MiB transfer running and small requests
+alongside (medians, reference / wanopt):
+
+| | Reference | wanopt |
+| --- | ---: | ---: |
+| bulk goodput | 56.6 Mbit/s | 52.0 Mbit/s |
+| interactive median | 324 ms | 206 ms |
+| interactive 95th percentile | 517 ms | 367 ms |
+
+Isolation is demand-driven: a bulk flow alone on the control connection has
+nothing to protect, so it stays there and keeps full goodput (57.7 Mbit/s
+measured). It requires `--quic-pool`, which is where the shared control
+connection exists at all.
+
+### Recommended configuration
+
+The measured configuration is `--quic-pool --optimistic-open` with the default
+single bulk lane. Everything above was measured that way. Both remain opt-in
+because this project's release gates are not met, not because they measured
+badly.
+
 The prototype is still not safe to use as a general-purpose production tunnel.
-Broader loss/soak campaigns remain outstanding; under extreme correlated loss
-(35% in 10-packet bursts) wanopt still trails the reference on median goodput
-at an equal controller, and its interactive tail under bulk load remains above
-the reference's. UDP is currently carried over reliable stream frames (native
-QUIC DATAGRAM and TUN/VLESS ingress are not yet implemented), and a mid-session
+Broader loss/soak campaigns remain outstanding, and under extreme correlated
+loss (35% in 10-packet bursts) wanopt's behavior still differs from the
+reference's: it completes more transfers but is slower on the ones both
+finish. UDP is currently carried over reliable stream frames (native QUIC
+DATAGRAM and TUN/VLESS ingress are not yet implemented), and a mid-session
 rescue creates a fresh authenticated association rather than resuming the old
 remote relay. The project has not passed all controlled-loss/resource release
 gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
@@ -75,7 +107,9 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 - One application TCP flow can be framed, reordered, and striped over
   multiple QUIC lanes.
 - A PIAS-inspired policy that protects one-shot and interactive flows while
-  allocating additional lanes to bulk flows.
+  allocating additional lanes to bulk flows. `--max-lanes` bounds the lanes
+  carrying bulk payload; a negotiated control lane is additional, so one lane
+  still means a classified bulk flow gets its own connection.
 - No HTTPS MITM: the optimizer forwards encrypted application bytes.
 - UDP health probing, UDP/TCP racing, fallback, and bounded mid-session lane
   replacement.
@@ -85,9 +119,10 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
   capability-negotiated `OPEN_FAST`.
 - One aggregate token bucket with an interactive reserve above all lanes.
 - Optional localhost `/metrics` counters for flow completion, bytes, fallback,
-  lane failure/replacement, PIAS class transitions, active QUIC RTT/loss, and
+  lane failure/replacement, PIAS class transitions, active QUIC RTT/loss,
   controller mode/max bandwidth/pacing/cwnd/bytes-in-flight/min-RTT/recovery
-  telemetry, plus explicit flow-idle/lifetime timeouts. The endpoint is
+  telemetry, rescue-window evictions and unreplayable flows, bulk isolations,
+  plus explicit flow-idle/lifetime timeouts. The endpoint is
   loopback-only in the development service.
 - Reproducible measurements for latency, throughput, loss, queueing, and
   application-visible failures.
