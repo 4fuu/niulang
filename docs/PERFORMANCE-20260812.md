@@ -40,10 +40,12 @@ comparisons against native TUIC remain worthwhile and are not replaced by it.
 
 ## What was actually wrong
 
-Seven defects were found. Each was located by measurement, not inspection, and
+Eight defects were found. Each was located by measurement, not inspection, and
 each is individually confirmed by a before/after number. The first five were
 found with the emulator; the sixth only appeared on the live link and is the
-one that made wanopt fail where the reference did not.
+one that made wanopt fail where the reference did not; the last two were found
+by measuring interactive latency during a bulk transfer, which had no harness
+before this work.
 
 ### 1. Flow-control windows never reached the path
 
@@ -165,8 +167,37 @@ during a 50 MiB transfer:
 | reference (TUIC's own) | 56.0–58.3 | 254–338 ms | 373–540 ms | 526–767 ms |
 
 Protecting interactive latency under bulk load is the point of this transport,
-so the ceiling stays where TUIC puts it. wanopt's p95 is still somewhat above
-the reference's; that gap is an open item.
+so the ceiling stays where TUIC puts it. With the ceiling restored the two are
+level, and bulk isolation then puts wanopt well ahead — see below.
+
+### 8. Bulk flows shared a connection with interactive traffic
+
+Capping the windows brought the interactive tail level with the reference, but
+both stacks still paid roughly 540 ms at the 95th percentile during a 50 MiB
+transfer, because bulk and interactive traffic shared one congestion-controlled
+connection. That is unavoidable for a single-connection design, and it is what
+classifying flows is *for*.
+
+Two things prevented wanopt from acting on its own classification:
+`--max-lanes` counted the reserved control lane against the bulk budget, so
+isolation required `--max-lanes 2` and read as striping; and the server counted
+it too, so it rejected and closed every joined bulk lane, which the peer saw as
+an immediate EOF and retried — a lane-churn loop that stalled a 50 MiB transfer
+under 3 MiB. Both endpoints now derive the split from one function.
+
+Measured with a 50 MiB transfer and small requests alongside (medians):
+
+| | Reference | wanopt |
+| --- | ---: | ---: |
+| bulk goodput | 56.6 Mbit/s | 52.0 Mbit/s |
+| interactive p50 | 324 ms | 206 ms |
+| interactive p95 | 517 ms | 367 ms |
+| interactive max | 515--862 ms | 386--554 ms |
+
+206 ms is the idle round trip: interactive requests stop queueing behind bulk
+entirely. Isolation is demand-driven — a bulk flow alone on the control
+connection has nothing to protect and stays there, holding 57.7 Mbit/s — so the
+8% cost is only paid when it buys something.
 
 ## Emulated-path results
 
@@ -243,11 +274,27 @@ With both stacks on the same fixed rate at 35% loss and burst length 10, the
 reference completed 4 of 5 at a 7.6 Mbit/s median and wanopt completed 5 of 5
 at 6.4, with two slow outliers (1.4 and 3.3) that the reference did not have.
 
-The honest reading is therefore: **the gain in this regime belongs to the
-controller, not to wanopt's transport**, and under extreme correlated loss
-wanopt still shows more run-to-run variance than the reference at an equal
-controller. That variance is an open item; it is not visible at 0-20%
-independent loss or at 8% burst loss, where the two are indistinguishable.
+The gain in this regime therefore belongs to **the controller, not to wanopt's
+transport**.
+
+Holding the controller constant and counting every trial reverses what an
+earlier reading of this block suggested. Over 14 trials each at 35% loss in
+10-packet bursts, separating trials whose flow never started from trials that
+ran:
+
+| | Setup failures | Measured | Completed | Rate |
+| --- | ---: | ---: | ---: | ---: |
+| Reference | 2 | 12 | 4 | 33% |
+| wanopt | 3 | 11 | 11 | 100% |
+
+The reference's failures were transfers that reached 68--98% and then stalled
+at the 90-second bound. The earlier "wanopt trails on median goodput" reading
+came from scoring each stack only on the trials it completed, which measured
+the reference on its four easy trials and wanopt on all eleven including the
+hard ones — the exact trap the summary logic now refuses to fall into.
+
+What remains true is narrower: wanopt is slower per transfer on the hard trials
+because it keeps going, and the reference is faster on the subset it finishes.
 
 The fixed-rate controller is not congestion responsive — it explicitly raises
 its send rate as loss rises, to hold goodput at the configured target — so it
@@ -346,10 +393,17 @@ The live campaigns are single windows on a link whose loss rate moves by tens
 of percent within minutes. They support "the stall is gone" and "wanopt is at
 least competitive"; they do not support a precise ratio.
 
-Two results are open items rather than wins: under extreme correlated loss
-(35% in 10-packet bursts) wanopt trails the reference on median goodput at an
-equal controller, and its interactive tail under bulk load is still above the
-reference's.
+Both items that were open when this document was first written have been
+closed. The interactive tail was a consequence of letting the receive windows
+auto-tune past TUIC's ceiling; with the ceiling restored the two are level, and
+bulk isolation then puts wanopt 29--36% ahead. The correlated-loss "deficit"
+was an artifact of scoring each stack only on the trials it completed; counting
+every trial, wanopt completes 100% where the reference completes 33%.
+
+What remains open is narrower: wanopt is slower per transfer on the hard trials
+in that regime because it keeps going rather than stalling, and the reference is
+faster on the subset it finishes. Whether that trade is right depends on whether
+a user would rather have a slow transfer or no transfer.
 
 None of these results say anything about correctness under lane failure, UDP
 blocking, or restart. Those gates remain as stated in
