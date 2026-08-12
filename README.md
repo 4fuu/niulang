@@ -135,18 +135,23 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 - Reproducible measurements for latency, throughput, loss, queueing, and
   application-visible failures.
 
-The unattended client default is one QUIC lane, and striping a single flow over
-several lanes does not yet deliver the aggregation it exists for. On a path
-that polices each source address at 25 Mbit/s — the regime where it should help
-— four lanes measure 26.5 Mbit/s against a single lane's 21.0 and native TUIC's
-20.4, and two lanes measure 19.6, which is worse than one. Every transfer
-completes, where before roughly one in three failed. Re-sending a stalled head segment on a faster lane fixed the
-reliability; the remaining shortfall is that a single cumulative acknowledgement
-cannot tell the sender which ranges a striped receiver holds, so the retention
-window still tracks the whole reorder span. Range acknowledgements are the real
-fix and are not implemented. `--max-lanes` above one is therefore experimental
-and unsupported, and `--bulk-start-lanes` with it; adaptive growth still
-requires positive marginal gain.
+The client chooses its own lane count; there is no configuration to get right.
+A flow starts on one lane, and the lane manager adds another only after a
+controlled experiment measures that the last one raised goodput: it averages a
+window of samples at the current lane count, adds a lane, discards its
+handshake and ramp, averages another window, and compares. A probe that fails
+to clear 15% retires the search for that flow, so a path that does not reward
+striping pays for exactly one probe and then behaves like a single-lane
+transport. `--max-lanes` is the ceiling on that search (default 4, not a
+target); `--max-lanes 1` disables striping outright.
+
+Established up front, lanes work: on a path policing each source address at
+25 Mbit/s, four lanes measure 33.5 Mbit/s against a single lane's 20.4 and
+native TUIC's 20.4, with every transfer completing. Reached by the automatic
+search on the same path, they measure 20.6 — the search is safe but does not
+yet earn its keep, because a lane opened mid-transfer has to handshake through
+a bottleneck the flow has already filled, which was measured taking 3.1s and
+then 6.7s. Pre-warmed connections are the fix and are not implemented.
 `--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
 initial/control streams and lets multiple short flows share its congestion
 controller. On a capable peer, bulk promotion also lazily creates one

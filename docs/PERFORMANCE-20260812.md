@@ -342,6 +342,83 @@ corrected emulator and are within run-to-run variance of their earlier values,
 which confirms they sat below the old ceiling. The lane figures did not, and
 are the ones that had to be re-measured.
 
+## Choosing the lane count without asking the operator
+
+Everything above was measured by passing `--max-lanes` explicitly. In the
+shipped default it could not have happened at all: `--max-lanes` defaulted to
+1, and the planner's growth branch is `current < MaxLanes`, so the adaptive
+lane manager was unreachable code in the configuration people actually run.
+Multi-lane was not a policy the system chose, it was a flag.
+
+The signal it would have grown on was not evidence either. It compared one
+decision's goodput with the previous decision's, which measures what the path
+did between two ticks rather than what a lane did. A flow still opening its
+congestion window shows a large positive change with no lane added; ordinary
+variance on a lossy path shows a negative one. Growth on that signal is a
+random walk that spends handshakes on paths that cannot repay them, which is
+worse than not growing.
+
+So growth is now an A/B test that holds a baseline across the lane it adds:
+discard the opening ramp, average a window at the current lane count, add a
+lane, discard its handshake and ramp, average another window, compare. Both
+sides are window means because single samples are unusable for this -- on the
+policed path a 500ms sample ranges over 7 to 32 Mbit/s. The bias is against
+striping on purpose: a probe must clear 15%, and one that does not retires the
+search for that flow rather than retrying, so a path that does not reward lanes
+pays for one probe and then behaves like a single-lane transport.
+
+Three defects had to be fixed before the search could run at all, and each was
+only visible by tracing a live transfer:
+
+- **The RTT guard made bulk striping unreachable.** It retired a lane whenever
+  the flow exceeded baseline + 40ms. A bulk transfer inflates its own RTT by
+  filling the bottleneck queue; on the 200ms path it passed 240ms within a
+  second and every subsequent decision was `retire lane: RTT budget exceeded`.
+  That budget exists to protect interactive traffic, not to describe a bulk
+  flow. Bulk now reacts only to collapse, at 2.5x baseline.
+- **The control-lane hold vetoed measured growth.** It pinned the target to the
+  current lane count whenever a bulk flow was alone on the pooled connection,
+  to avoid paying for isolation nothing needed. But the first bulk lane is what
+  moves a flow off that connection, so a flow alone on the pool could never
+  stripe however much the path would reward it.
+- **The probe judged lanes that were never opened.** It assumed its request was
+  served. Both vetoes above declined it silently, and the probe then compared
+  one lane against one lane, read the difference as noise, and retired the
+  search. Confirm and Cancel now make the answer explicit.
+
+Joins also had to move off the decision loop. Opening a lane on a saturated
+path was measured taking 3.1s and then 6.7s; doing it inline stopped the
+sampler for that whole time, destroying the windows being compared.
+
+### What it is worth
+
+Four trials, 50 MiB, on the path policing each source address at 25 Mbit/s:
+
+| Configuration | Median | Completed | Worst |
+| --- | ---: | --- | ---: |
+| One lane | 20.81 | 4/4 | 20.10 |
+| Automatic search | 20.56 | 4/4 | 19.23 |
+| Four lanes, fixed | 23.13 | 3/4 | 5.39 |
+
+The search is safe and it does not pay. It holds parity with a single lane and
+completes every transfer, but it does not reach the 33.5 Mbit/s that four lanes
+established up front deliver on a 20 MiB object.
+
+The reason is in the join costs above. Lanes opened before a transfer starts
+handshake on an idle path; lanes opened during one handshake through a
+bottleneck the flow has already filled, and arrive seconds later with a
+congestion window that has to ramp from scratch. The search cannot buy what it
+is measuring for, so it correctly declines to keep buying.
+
+Two things follow, and the second is the more interesting one. Pre-warmed
+connections would make a mid-transfer lane cheap, and are the fix worth
+building. And "just always use four lanes" is not the safe default it looks
+like: at 50 MiB the fixed four-lane configuration lost a transfer outright and
+its worst trial ran at 5.39 Mbit/s, a quarter of a single lane. The 33.5
+Mbit/s figure is real at 20 MiB and does not survive the object getting larger.
+Measuring and declining is a worse headline than striping, and a better
+default.
+
 **The default is one lane and is unaffected.** `--max-lanes` above one should
 be treated as experimental and is not currently a supported configuration: it
 is now reliable, but it does not deliver the aggregation it exists for.
