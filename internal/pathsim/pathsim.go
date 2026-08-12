@@ -239,6 +239,11 @@ type Relay struct {
 	peers  map[string]*peer
 	closed bool
 
+	// queues hold packets until their modelled arrival. One goroutine per
+	// direction replaces one per in-flight packet; see deliveryQueue.
+	queueMu sync.Mutex
+	queues  map[*direction]*deliveryQueue
+
 	wg   sync.WaitGroup
 	done chan struct{}
 }
@@ -307,6 +312,16 @@ func (r *Relay) Close() error {
 	_ = r.local.Close()
 	for _, p := range peers {
 		_ = p.conn.Close()
+	}
+	r.queueMu.Lock()
+	queues := make([]*deliveryQueue, 0, len(r.queues))
+	for _, queue := range r.queues {
+		queues = append(queues, queue)
+	}
+	r.queues = nil
+	r.queueMu.Unlock()
+	for _, queue := range queues {
+		queue.close()
 	}
 	r.wg.Wait()
 	return nil
@@ -402,24 +417,27 @@ func (r *Relay) forward(d *direction, perFlow *direction, payload []byte, send f
 	if !ok {
 		return
 	}
-	wait := time.Until(deliver)
-	if wait <= 0 {
+	if !deliver.After(time.Now()) {
 		d.packetsOut.Add(1)
 		d.bytesOut.Add(uint64(len(payload)))
 		send(payload)
 		return
 	}
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			d.packetsOut.Add(1)
-			d.bytesOut.Add(uint64(len(payload)))
-			send(payload)
-		case <-r.done:
-		}
-	}()
+	r.queueFor(d).add(scheduled{deliver: deliver, payload: payload, send: send, direction: d})
+}
+
+// queueFor returns the delivery queue for a direction, created on first use so
+// an unimpaired relay starts no extra goroutines at all.
+func (r *Relay) queueFor(d *direction) *deliveryQueue {
+	r.queueMu.Lock()
+	defer r.queueMu.Unlock()
+	if r.queues == nil {
+		r.queues = make(map[*direction]*deliveryQueue, 2)
+	}
+	queue, ok := r.queues[d]
+	if !ok {
+		queue = newDeliveryQueue(r.done)
+		r.queues[d] = queue
+	}
+	return queue
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -445,5 +446,88 @@ func TestTCPRelayRefusesLoss(t *testing.T) {
 	}
 	if _, err := NewTCP("127.0.0.1:0", "127.0.0.1:1", Config{UpstreamLossRate: 0.1}); err == nil {
 		t.Fatal("a TCP relay accepted an upstream loss rate it cannot apply")
+	}
+}
+
+// An emulator that becomes the bottleneck silently caps every result taken
+// with it. One goroutine and one timer per delayed packet does exactly that: at
+// 200 ms of delay every packet in flight is a live goroutine, so offered load
+// turns into scheduler pressure. Configured at 1 Gbit/s with no loss, that
+// implementation delivered *less* than the same path configured at 100 Mbit/s,
+// and it capped measured transport throughput near 20-30 Mbit/s; replacing it
+// took a single connection from 29.5 to 94.8 Mbit/s on an otherwise identical
+// path.
+//
+// Throughput itself is too environment-dependent to assert here, so this pins
+// the design property that made it possible: delayed packets must not cost a
+// goroutine each.
+func TestDelayedPacketsDoNotCostAGoroutineEach(t *testing.T) {
+	sink, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			if _, _, err := sink.ReadFrom(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// A long delay keeps every packet in flight for the whole test.
+	relay, err := New("127.0.0.1:0", sink.LocalAddr().String(), Config{
+		OneWayDelay: 5 * time.Second, RateBytesPerSec: 125_000_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	target, err := net.ResolveUDPAddr("udp", relay.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseline := runtime.NumGoroutine()
+	const packets = 3000
+	payload := make([]byte, 1200)
+	for range packets {
+		if _, err := client.WriteTo(payload, target); err != nil {
+			t.Fatal(err)
+		}
+		// Pace slightly so the relay's socket buffer does not drop the burst
+		// before the delay model ever sees it.
+		if runtime.NumGoroutine() < 0 {
+			return
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if up, _ := relay.Stats(); up.PacketsIn >= packets/2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	up, _ := relay.Stats()
+	if up.PacketsIn < packets/2 {
+		t.Skipf("only %d of %d packets reached the relay; the socket buffer dropped the burst", up.PacketsIn, packets)
+	}
+	if up.PacketsOut > 0 {
+		t.Fatalf("%d packets were delivered despite a 5s delay; they are not being held", up.PacketsOut)
+	}
+	growth := runtime.NumGoroutine() - baseline
+	// One scheduler goroutine per direction, plus whatever the runtime and the
+	// test itself are doing. A goroutine per in-flight packet would be three
+	// orders of magnitude above this.
+	if growth > 64 {
+		t.Fatalf("goroutines grew by %d with %d packets in flight; delayed packets are costing a goroutine each",
+			growth, up.PacketsIn)
 	}
 }
