@@ -233,15 +233,36 @@ func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPoo
 // multiply by the stream limit.
 const (
 	initialStreamReceiveWindow     = 8 * 1024 * 1024
-	maxStreamReceiveWindow         = 8 * 1024 * 1024
 	initialConnectionReceiveWindow = 16 * 1024 * 1024
-	maxConnectionReceiveWindow     = 16 * 1024 * 1024
 	// A bounded stream fan-out lets one QUIC connection carry multiple
 	// independent PEP flows, like TUIC, without an unbounded stream commitment.
 	maxIncomingStreams = 128
 )
 
-func quicConfig() *quic.Config {
+// flowWindows selects the QUIC receive windows. A zero field takes the
+// default. They are configurable because they are the single largest measured
+// determinant of long-haul goodput and because their correct value is a
+// property of the path, not of the code: the defaults match TUIC, which is the
+// right answer for the paths this project targets, but a much fatter or much
+// thinner path wants a different one.
+type flowWindows struct {
+	stream     uint64
+	connection uint64
+}
+
+func (w flowWindows) resolved() (stream, connection uint64) {
+	stream, connection = w.stream, w.connection
+	if stream == 0 {
+		stream = initialStreamReceiveWindow
+	}
+	if connection == 0 {
+		connection = initialConnectionReceiveWindow
+	}
+	return stream, connection
+}
+
+func quicConfig(windows flowWindows) *quic.Config {
+	streamWindow, connectionWindow := windows.resolved()
 	return &quic.Config{
 		HandshakeIdleTimeout: 10 * time.Second,
 		// Existing-flow TCP rescue cannot begin until QUIC declares the
@@ -249,10 +270,10 @@ func quicConfig() *quic.Config {
 		// request timeouts while allowing several PTOs on a 200 ms WAN.
 		MaxIdleTimeout:                 15 * time.Second,
 		KeepAlivePeriod:                5 * time.Second,
-		InitialStreamReceiveWindow:     initialStreamReceiveWindow,
-		MaxStreamReceiveWindow:         maxStreamReceiveWindow,
-		InitialConnectionReceiveWindow: initialConnectionReceiveWindow,
-		MaxConnectionReceiveWindow:     maxConnectionReceiveWindow,
+		InitialStreamReceiveWindow:     streamWindow,
+		MaxStreamReceiveWindow:         streamWindow,
+		InitialConnectionReceiveWindow: connectionWindow,
+		MaxConnectionReceiveWindow:     connectionWindow,
 		MaxIncomingStreams:             maxIncomingStreams,
 		MaxIncomingUniStreams:          0,
 		// The China path has a smaller effective UDP MTU than this host's
@@ -264,8 +285,8 @@ func quicConfig() *quic.Config {
 	}
 }
 
-func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string, ccfg congestionConfig) (streamConn, error) {
-	conn, packetConn, err := dialQUICConnection(ctx, remote, serverName, roots, dialTimeout, localAddress)
+func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string, ccfg congestionConfig, windows flowWindows) (streamConn, error) {
+	conn, packetConn, err := dialQUICConnection(ctx, remote, serverName, roots, dialTimeout, localAddress, windows)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +305,7 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 // dialQUICConnection establishes only the QUIC connection. Keeping this
 // separate from stream creation allows the client to pool one connection and
 // open a stream for each logical flow without paying another handshake.
-func dialQUICConnection(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string) (*quic.Conn, net.PacketConn, error) {
+func dialQUICConnection(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string, windows flowWindows) (*quic.Conn, net.PacketConn, error) {
 	dialCtx := ctx
 	var cancel context.CancelFunc
 	if dialTimeout > 0 {
@@ -305,14 +326,14 @@ func dialQUICConnection(ctx context.Context, remote, serverName string, roots *x
 		if listenErr != nil {
 			return nil, nil, listenErr
 		}
-		conn, dialErr := quic.Dial(dialCtx, packetConn, remoteAddr, tlsCfg, quicConfig())
+		conn, dialErr := quic.Dial(dialCtx, packetConn, remoteAddr, tlsCfg, quicConfig(windows))
 		if dialErr != nil {
 			_ = packetConn.Close()
 			return nil, nil, dialErr
 		}
 		return conn, packetConn, nil
 	}
-	conn, err := quic.DialAddr(dialCtx, remote, tlsCfg, quicConfig())
+	conn, err := quic.DialAddr(dialCtx, remote, tlsCfg, quicConfig(windows))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -447,8 +468,8 @@ func quicServerTLSConfig(certificate tls.Certificate) *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, NextProtos: []string{defaultALPN}}
 }
 
-func quicServerConfig() *quic.Config {
-	cfg := quicConfig()
+func quicServerConfig(windows flowWindows) *quic.Config {
+	cfg := quicConfig(windows)
 	return cfg
 }
 

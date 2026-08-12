@@ -78,6 +78,10 @@ type ClientConfig struct {
 	AdaptiveMaxBytesSec           uint64
 	AggregateBytesPerSec          uint64
 	InteractiveReserveBytesPerSec uint64
+	// StreamReceiveWindow and ConnectionReceiveWindow override the QUIC
+	// receive windows. Zero selects the defaults, which match TUIC.
+	StreamReceiveWindow     uint64
+	ConnectionReceiveWindow uint64
 	// ReplayMemoryBytes bounds the total memory all local flows may hold in
 	// their replay windows. Zero selects the package default.
 	ReplayMemoryBytes   uint64
@@ -275,6 +279,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		metrics:      cfg.Metrics,
 		replayBudget: newReplayBudget(int64(cfg.ReplayMemoryBytes)),
 	}, nil
+}
+
+func (c *Client) windows() flowWindows {
+	return flowWindows{stream: c.cfg.StreamReceiveWindow, connection: c.cfg.ConnectionReceiveWindow}
 }
 
 func (c *Client) Serve(ctx context.Context) error {
@@ -753,7 +761,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 		if pooled {
 			outer, fastOpen, alreadyAuthenticated, reserveControl, publishCapabilities, err = c.dialPooledQUICLane(ctx, ccfg, sessionID, pipelineHello)
 		} else {
-			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg)
+			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg, c.windows())
 		}
 	default:
 		return nil, fmt.Errorf("cannot dial transport %q", kind)
@@ -816,7 +824,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 			_ = c.quicPacket.Close()
 		}
 		c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
-		conn, packet, err := dialQUICConnection(dialCtx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
+		conn, packet, err := dialQUICConnection(dialCtx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, c.windows())
 		if err != nil {
 			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
 			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
@@ -1086,7 +1094,7 @@ func (c *Client) bulkConnCount() int {
 
 func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
 	started := time.Now()
-	conn, packet, err := dialQUICConnection(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
+	conn, packet, err := dialQUICConnection(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, c.windows())
 	if err != nil {
 		return nil, err
 	}

@@ -111,7 +111,9 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 - One local SOCKS5/TUN-facing agent and one fixed-egress US agent.
 - One application TCP flow can be framed, reordered, and striped over
-  multiple QUIC lanes.
+  multiple QUIC lanes. The framing and reassembly work; the striping does not
+  yet deliver a reliable gain, and one lane is the default and the supported
+  configuration.
 - A PIAS-inspired policy that protects one-shot and interactive flows while
   allocating additional lanes to bulk flows. `--max-lanes` bounds the lanes
   carrying bulk payload; a negotiated control lane is additional, so one lane
@@ -133,10 +135,18 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 - Reproducible measurements for latency, throughput, loss, queueing, and
   application-visible failures.
 
-The unattended client default is one QUIC lane because independent congestion
-controllers can reduce goodput on a lossy path. `--max-lanes` and
-`--bulk-start-lanes` are explicit path-validation knobs for measured bulk
-experiments; adaptive growth still requires positive marginal gain.
+The unattended client default is one QUIC lane, and striping a single flow over
+several lanes does not currently work reliably. On a path that polices per
+source address — the regime where it should help — four lanes measured between
+19 and 43 Mbit/s across repeated runs against a single lane's steady 20, and
+roughly one transfer in three failed. The cause is that the protocol
+acknowledgement carries one cumulative sequence, so under striping the sender's
+retention window covers the whole reorder span, fills, and evicts bytes the
+peer has not acknowledged, after which a lane failure is fatal. Fixing it needs
+range acknowledgements or reinjection onto a healthy lane; neither is done.
+`--max-lanes` above one is therefore experimental and unsupported, and
+`--bulk-start-lanes` with it; adaptive growth still requires positive marginal
+gain.
 `--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
 initial/control streams and lets multiple short flows share its congestion
 controller. On a capable peer, bulk promotion also lazily creates one

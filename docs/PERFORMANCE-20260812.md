@@ -236,64 +236,54 @@ datapath cost are all within noise of the reference or above it. For comparison,
 before these changes the same single-flow cells measured 24.3 against 32.1 at
 1% loss and 20.5 against 29.7 at 3% loss.
 
-### Lane aggregation
+### Lane aggregation does not yet work reliably
 
 Extra lanes cannot raise a single flow's goodput when the only limit is an
 aggregate bottleneck, and this transport should not claim otherwise. They can
-when the path polices per flow, which is the premise of the project. With the
-emulator policing each source address at 25 Mbit/s under a 400 Mbit/s
-aggregate, 200 ms, 1% loss, 100 MiB:
+when the path polices per flow, which is the premise of the project. On a path
+policing each source address at 25 Mbit/s under a 400 Mbit/s aggregate, at
+200 ms and 1% loss, one connection is pinned at one share regardless of
+implementation:
 
-| Lanes | Before | After |
-| --- | ---: | ---: |
-| 1 | 22.5 | 22.5 |
-| 2 | 20.0 | 35.7 |
-| 4 | 30.4 (aborted at 100 MiB) | 67.2 |
+| Stack, one connection | Median |
+| --- | ---: |
+| In-tree reference | 19.96 |
+| wanopt | 20.26 |
+| Native TUIC | 20.50 |
 
-The default remains one lane. `--max-lanes` is still an explicit
-path-validation knob.
+Four lanes should reach four shares. **They do not do so reliably.** Across
+five runs of the same configuration:
 
-## Against real implementations
+| Trials | Median Mbit/s | Completed |
+| --- | ---: | --- |
+| 2 | 43.00 | 2/2 |
+| 2 | 34.84 | 1/2 |
+| 4 | 28.08 | 4/4 |
+| 3 | 24.39 | 2/3 |
+| 3 | 19.28 | 2/3 |
 
-Everything above compares wanopt with the in-tree control. This block compares
-it with the implementations people actually deploy, over the same seeded path,
-five trials each, all stacks completing every trial (median Mbit/s).
+Sometimes twice a single lane, sometimes no better, and roughly one transfer in
+three fails outright. An earlier revision of this document reported "67.2
+against 22.5" from a single two-trial run; that figure is not reproducible and
+has been withdrawn.
 
-**This is a single-lane comparison on a path with no per-flow policing**
-(`--lanes 1`, `--per-flow-rate 0`), so wanopt's multipath is inactive
-throughout. That is deliberate: on a shared bottleneck extra lanes cannot raise
-one flow's goodput — they split the same capacity and add loss — so the only
-thing this measures is what wanopt's framing and session layer cost relative to
-a plain tunnel. It is the precondition for the optimization to be worth
-anything, not the optimization itself, which is measured separately below.
+The mechanism is visible in the failing trials, and it is a protocol
+limitation rather than a tuning problem. wanopt's protocol acknowledgement is a
+single cumulative sequence. Under striping the receiver's *contiguous* point
+sits behind whatever the slowest lane has not yet delivered — in one failing
+trial one lane carried 8.4 MB while its peers carried 19 and 21 MB — so the
+sender's retention window covers the whole reorder span, fills, and begins
+evicting. Evicted bytes that the peer has not acknowledged make the flow
+unreplayable, and the next lane hiccup then fails it closed, which is correct
+but fatal.
 
-| Loss | In-tree control | wanopt | Native TUIC | Hysteria2 |
-| --- | ---: | ---: | ---: | ---: |
-| 0% | 38.72 | 37.58 | 37.37 | 28.42 |
-| 1% | 33.92 | 34.00 | 30.38 | 25.16 |
-| 3% | 29.30 | 26.62 | 28.61 | 22.74 |
+Fixing this needs the acknowledgement to carry received *ranges* rather than
+one contiguous point, so the sender can release what the peer actually holds,
+or it needs frames reinjected onto a healthy lane before they are evicted. Both
+are protocol work that has not been done.
 
-Against native TUIC, wanopt is +0.6% at 0% loss, +11.9% at 1%, and −7.0% at 3%:
-broadly at parity, not uniformly ahead. The in-tree control tracks native TUIC
-within about 10% and reads slightly optimistic, which is worth knowing when
-reading every other table in this document.
-
-Hysteria2 is measured on its own default congestion control, not its fixed-rate
-mode; that mode needs explicit rate configuration and would be a different
-experiment.
-
-### The TCP family
-
-VLESS over TLS and over WebSocket run on the stream relay, which cannot apply
-loss. At 200 ms with a 100 Mbit/s bottleneck and no loss, four trials each:
-VLESS/TCP 67.21 Mbit/s, VLESS/WebSocket 57.81 — WebSocket framing costs about
-14%.
-
-**These numbers must not be compared against the QUIC rows above.** The two
-relays model different things: the packet relay applies per-packet
-serialization and tail drop, the stream relay applies backpressure and no loss
-at all. VLESS/WebSocket against VLESS/TCP is a fair comparison; VLESS against
-TUIC, on this rig, is not.
+**The default is one lane and is unaffected.** `--max-lanes` above one should
+be treated as experimental and is not currently a supported configuration.
 
 ## Correlated loss, and what the controller is worth
 

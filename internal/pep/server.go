@@ -44,6 +44,10 @@ type ServerConfig struct {
 	AdaptiveMaxBytesSec           uint64
 	AggregateBytesPerSec          uint64
 	InteractiveReserveBytesPerSec uint64
+	// StreamReceiveWindow and ConnectionReceiveWindow override the QUIC
+	// receive windows. Zero selects the defaults, which match TUIC.
+	StreamReceiveWindow     uint64
+	ConnectionReceiveWindow uint64
 	// ReplayMemoryBytes bounds the total memory all remote flows may hold in
 	// their replay windows. Zero selects the package default.
 	ReplayMemoryBytes uint64
@@ -304,7 +308,8 @@ func (s *Server) serveQUIC(ctx context.Context) error {
 
 // ServePacketConn runs the QUIC listener on an already-bound UDP socket.
 func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn) error {
-	listener, err := quic.Listen(packetConn, quicServerTLSConfig(s.cfg.Certificate), quicServerConfig())
+	listener, err := quic.Listen(packetConn, quicServerTLSConfig(s.cfg.Certificate), quicServerConfig(
+		flowWindows{stream: s.cfg.StreamReceiveWindow, connection: s.cfg.ConnectionReceiveWindow}))
 	if err != nil {
 		_ = packetConn.Close()
 		return fmt.Errorf("create QUIC listener: %w", err)
