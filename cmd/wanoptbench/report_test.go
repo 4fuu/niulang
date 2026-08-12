@@ -117,3 +117,58 @@ func TestMedianHandlesEvenAndEmpty(t *testing.T) {
 		t.Fatalf("median of three values = %v, want 2", got)
 	}
 }
+
+// A trial whose flow never started measures the path, not the transport's
+// transfer behaviour, and carries no goodput. Counting it drags the median
+// toward zero for whichever stack happened to run during a bad window, and
+// makes the completion rate depend on setup luck.
+func TestSetupFailuresAreSeparatedFromTransportFailures(t *testing.T) {
+	trials := []TrialRecord{
+		{Stack: "wanopt", Flows: 1, MbitsPerSec: 10, Complete: true},
+		{Stack: "wanopt", Flows: 1, MbitsPerSec: 12, Complete: true},
+		{Stack: "wanopt", Flows: 1, MbitsPerSec: 0, Note: "warmup: EOF"},
+		{Stack: "wanopt", Flows: 1, MbitsPerSec: 0, Note: "setup: dial failed"},
+	}
+	summaries := summarize(trials)
+	got := summaries[0]
+	if got.SetupFailures != 2 {
+		t.Fatalf("setup failures = %d, want 2", got.SetupFailures)
+	}
+	if got.CompletionRate != 1 {
+		t.Fatalf("completion rate = %.2f, want 1 over the trials that actually ran", got.CompletionRate)
+	}
+	if got.MedianMbits != 11 {
+		t.Fatalf("median = %.2f, want 11 with setup failures excluded", got.MedianMbits)
+	}
+	if got.WorstMbits != 10 {
+		t.Fatalf("worst = %.2f, want the worst measured trial", got.WorstMbits)
+	}
+}
+
+// A mid-transfer stall is a transport failure and must still count: it is
+// exactly the behaviour the completion rate exists to expose.
+func TestPartialTransferStillCountsAsFailure(t *testing.T) {
+	trials := []TrialRecord{
+		{Stack: "baseline", Flows: 1, MbitsPerSec: 8, Complete: true},
+		{Stack: "baseline", Flows: 1, MbitsPerSec: 1, Note: "received 4118325 of 4194304 bytes"},
+	}
+	got := summarize(trials)[0]
+	if got.SetupFailures != 0 {
+		t.Fatalf("setup failures = %d, want a stalled transfer counted as a transport failure", got.SetupFailures)
+	}
+	if got.CompletionRate != 0.5 {
+		t.Fatalf("completion rate = %.2f, want 0.5", got.CompletionRate)
+	}
+}
+
+// Every trial failing setup must not produce a divide-by-zero or a fake
+// completion rate.
+func TestAllSetupFailuresDoNotPanic(t *testing.T) {
+	got := summarize([]TrialRecord{
+		{Stack: "wanopt", Flows: 1, Note: "warmup: EOF"},
+		{Stack: "wanopt", Flows: 1, Note: "warmup: EOF"},
+	})[0]
+	if got.SetupFailures != 2 || got.CompletionRate != 0 || got.MedianMbits != 0 {
+		t.Fatalf("all-setup-failure cell = %+v, want zeroes and two setup failures", got)
+	}
+}

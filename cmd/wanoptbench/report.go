@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/icourses-dev/wanopt/internal/pathsim"
 )
@@ -68,10 +69,17 @@ type InteractiveReport struct {
 // 12, and reporting only successes made the transport that finished the hard
 // trials look slower than the one that abandoned them.
 type CellSummary struct {
-	Stack          string  `json:"stack"`
-	Flows          int     `json:"flows"`
-	Trials         int     `json:"trials"`
-	Completed      int     `json:"completed"`
+	Stack     string `json:"stack"`
+	Flows     int    `json:"flows"`
+	Trials    int    `json:"trials"`
+	Completed int    `json:"completed"`
+	// SetupFailures are trials whose flow never started, usually because the
+	// warm-up request could not be established. They measure the path, not the
+	// transport's transfer behavior, and carry no goodput, so they are counted
+	// and reported but excluded from the goodput statistics and from the
+	// completion rate. Leaving them in drags a median toward zero for whichever
+	// stack happened to run during a bad window.
+	SetupFailures  int     `json:"setup_failures,omitempty"`
 	CompletionRate float64 `json:"completion_rate"`
 	MedianMbits    float64 `json:"median_mbits_all_trials"`
 	MeanMbits      float64 `json:"mean_mbits_all_trials"`
@@ -115,7 +123,12 @@ func summarize(trials []TrialRecord) []CellSummary {
 		all := make([]float64, 0, len(group))
 		completed := make([]float64, 0, len(group))
 		interactive := make([]InteractiveReport, 0, len(group))
+		setupFailures := 0
 		for _, trial := range group {
+			if isSetupFailure(trial) {
+				setupFailures++
+				continue
+			}
 			all = append(all, trial.MbitsPerSec)
 			if trial.Complete {
 				completed = append(completed, trial.MbitsPerSec)
@@ -126,12 +139,17 @@ func summarize(trials []TrialRecord) []CellSummary {
 		}
 		sort.Float64s(all)
 		sort.Float64s(completed)
+		measured := len(all)
 		summary := CellSummary{
 			Stack: k.stack, Flows: k.flows, Trials: len(group), Completed: len(completed),
-			CompletionRate: round3(float64(len(completed)) / float64(len(group))),
-			MedianMbits:    round3(median(all)), MeanMbits: round3(mean(all)),
-			WorstMbits:          round3(all[0]),
+			SetupFailures:       setupFailures,
+			MedianMbits:         round3(median(all)),
+			MeanMbits:           round3(mean(all)),
 			MedianCompleteMbits: round3(median(completed)),
+		}
+		if measured > 0 {
+			summary.CompletionRate = round3(float64(len(completed)) / float64(measured))
+			summary.WorstMbits = round3(all[0])
 		}
 		if len(interactive) > 0 {
 			summary.Interactive = medianInteractive(interactive)
@@ -139,6 +157,11 @@ func summarize(trials []TrialRecord) []CellSummary {
 		summaries = append(summaries, summary)
 	}
 	return summaries
+}
+
+// isSetupFailure reports whether a trial never reached the transfer stage.
+func isSetupFailure(trial TrialRecord) bool {
+	return !trial.Complete && (strings.HasPrefix(trial.Note, "warmup:") || strings.HasPrefix(trial.Note, "setup:"))
 }
 
 func medianInteractive(reports []InteractiveReport) *InteractiveReport {
@@ -164,15 +187,16 @@ func printSummary(summaries []CellSummary) {
 	if len(summaries) == 0 {
 		return
 	}
-	fmt.Printf("\nstack\tflows\tcomplete\tmedian_mbits\tmean_mbits\tworst_mbits\tinteractive_p50_ms\tinteractive_p95_ms\n")
+	fmt.Printf("\nstack\tflows\tcomplete\tsetup_fail\tmedian_mbits\tmean_mbits\tworst_mbits\tinteractive_p50_ms\tinteractive_p95_ms\n")
 	for _, s := range summaries {
 		p50, p95 := "", ""
 		if s.Interactive != nil {
 			p50 = fmt.Sprintf("%.0f", s.Interactive.P50Millis)
 			p95 = fmt.Sprintf("%.0f", s.Interactive.P95Millis)
 		}
-		fmt.Printf("%s\t%d\t%d/%d\t%.2f\t%.2f\t%.2f\t%s\t%s\n",
-			s.Stack, s.Flows, s.Completed, s.Trials, s.MedianMbits, s.MeanMbits, s.WorstMbits, p50, p95)
+		fmt.Printf("%s\t%d\t%d/%d\t%d\t%.2f\t%.2f\t%.2f\t%s\t%s\n",
+			s.Stack, s.Flows, s.Completed, s.Trials-s.SetupFailures, s.SetupFailures,
+			s.MedianMbits, s.MeanMbits, s.WorstMbits, p50, p95)
 	}
 }
 
