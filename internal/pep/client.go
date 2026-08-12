@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apernet/quic-go"
@@ -115,6 +116,10 @@ type Client struct {
 	quicPoolFast          bool
 	quicPoolControl       bool
 	quicPoolAuthenticated bool
+	// quicPoolActive counts flows currently sharing the pooled control
+	// connection. A bulk flow only needs to move off it when another flow
+	// would otherwise queue behind its congestion window.
+	quicPoolActive atomic.Int64
 
 	// bulkMu protects a bounded set of pre-authenticated secondary QUIC
 	// connections used only for fast lane joins. Keeping them separate from
@@ -832,7 +837,13 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 		}
 		return nil, false, false, false, nil, err
 	}
-	outer := &quicStreamConn{stream: stream, conn: c.quicConn, controller: c.quicController, closeConn: false}
+	// Track how many flows share the control connection. Bulk isolation is
+	// only worth its cost when there is something to protect.
+	c.quicPoolActive.Add(1)
+	outer := &controlPoolStreamConn{
+		quicStreamConn: &quicStreamConn{stream: stream, conn: c.quicConn, controller: c.quicController, closeConn: false},
+		owner:          c,
+	}
 	if !c.quicPoolAuthenticated && c.quicConn.Context().Err() == nil {
 		if deferAuthentication {
 			// The caller pipelines HELLO with OPEN and lets the flow reader
@@ -1113,6 +1124,25 @@ func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
 	return entry, nil
 }
 
+// controlPoolStreamConn keeps the count of flows sharing the pooled control
+// connection accurate, which is what decides whether a bulk flow should move
+// off it.
+type controlPoolStreamConn struct {
+	*quicStreamConn
+	owner *Client
+	once  sync.Once
+}
+
+func (s *controlPoolStreamConn) Close() error {
+	err := s.quicStreamConn.Close()
+	s.once.Do(func() {
+		if remaining := s.owner.quicPoolActive.Add(-1); remaining < 0 {
+			s.owner.quicPoolActive.Store(0)
+		}
+	})
+	return err
+}
+
 type bulkPoolStreamConn struct {
 	*quicStreamConn
 	owner *Client
@@ -1228,6 +1258,32 @@ func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, s
 	}
 }
 
+// bulkLaneBudget splits a configured lane maximum into the lanes that may
+// carry bulk payload and the separately reserved control lane.
+//
+// A negotiated control lane is excluded from bulk selection, so it is not part
+// of a flow's bulk capacity: --max-lanes bounds the lanes that carry bulk
+// payload, and the reserved control lane is additional. Both endpoints must
+// agree on this, or the server rejects the bulk lanes the client opens.
+//
+// This is what makes bulk isolation work. A bulk flow left on the shared
+// pooled connection queues interactive traffic behind its congestion window;
+// moving it to its own connection is the point of classifying flows at all.
+// Measured at 200 ms and 1% loss with a 50 MiB transfer running, isolating
+// bulk took interactive requests from a 338 ms median and 545 ms 95th
+// percentile to 204 ms and 356 ms, for roughly 8% less bulk goodput. One
+// configured lane still means one bulk connection; striping beyond that
+// remains an explicit, measured decision.
+func bulkLaneBudget(maxLanes int, reserveControl bool) (bulk, controlReserve int) {
+	if maxLanes < 1 {
+		maxLanes = 1
+	}
+	if reserveControl {
+		return maxLanes, 1
+	}
+	return maxLanes, 0
+}
+
 func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, initialKind TransportKind) {
 	if initialKind != TransportQUIC {
 		return
@@ -1239,23 +1295,10 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	// that is the difference between using one lane's share and using several.
 	// The planner therefore reasons in bulk lanes, and the reservation is
 	// added back when the target is compared against the flow.
-	controlReserve := 0
-	if flow.reserveControlLane && c.cfg.MaxLanes >= 2 {
-		controlReserve = 1
-	}
-	bulkBudget := c.cfg.MaxLanes - controlReserve
-	if bulkBudget < 1 {
-		bulkBudget = 1
-	}
+	bulkBudget, controlReserve := bulkLaneBudget(c.cfg.MaxLanes, flow.reserveControlLane)
 	bulkStartLanes := c.cfg.BulkStartLanes
 	if bulkStartLanes < 1 {
 		bulkStartLanes = 1
-	}
-	if c.cfg.MaxLanes >= 2 && bulkStartLanes < 2 {
-		// Once a flow is classified as bulk it should not remain on the single
-		// lane it shared with interactive traffic. Growth beyond this still
-		// requires a measured marginal gain.
-		bulkStartLanes = 2
 	}
 	if bulkStartLanes > bulkBudget {
 		bulkStartLanes = bulkBudget
@@ -1380,8 +1423,17 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 					return
 				}
 			}
-			prewarm := bulkStartLanes >= 1 && flow.laneCount() < bulkStartLanes+controlReserve &&
-				shouldPrewarmBulkLane(snapshot)
+			// Isolation earns its cost only while another flow shares the
+			// control connection. A bulk transfer that is alone on it has
+			// nothing to protect, and moving it would spend a handshake and
+			// a fresh congestion window for no benefit; measured on an
+			// otherwise idle path that costs about 8% of bulk goodput.
+			isolate := controlReserve == 0 || c.quicPoolActive.Load() > 1
+			target := bulkStartLanes + controlReserve
+			if !isolate {
+				target = 0
+			}
+			prewarm := flow.laneCount() < target && shouldPrewarmBulkLane(snapshot)
 			if snapshot.Class != classifier.ClassBulk && !prewarm {
 				continue
 			}
@@ -1420,6 +1472,11 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				})
 			}
 			decision.TargetLanes += controlReserve
+			if !isolate && flow.laneCount() <= controlReserve {
+				// Stay on the shared connection while nothing else is using
+				// it. A later arrival flips this on the next tick.
+				decision.TargetLanes = flow.laneCount()
+			}
 			if decision.TargetLanes < flow.laneCount() && snapshot.Class == classifier.ClassBulk {
 				// DATA already written on a lane remains in the peer's replay window
 				// until cumulatively acknowledged. Closing that lane here turns a

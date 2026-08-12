@@ -204,7 +204,7 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	// interactive latency past its budget, so measure that directly rather
 	// than inferring it from throughput.
 	probeStop := make(chan struct{})
-	probeDone := make(chan []time.Duration, 1)
+	probeDone := make(chan []requestStages, 1)
 	if opts.interactive {
 		go func() { probeDone <- probeInteractive(ctx, harness.socks, origin, probeStop) }()
 	}
@@ -219,7 +219,7 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	}
 	wg.Wait()
 	elapsed := time.Since(started)
-	var probes []time.Duration
+	var probes []requestStages
 	if opts.interactive {
 		close(probeStop)
 		probes = <-probeDone
@@ -260,8 +260,8 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 // probeInteractive issues one small request at a time until stopped, and
 // returns each request's latency. Failures are recorded as the elapsed time so
 // a stalled probe cannot be silently dropped from the distribution.
-func probeInteractive(ctx context.Context, socksAddr string, o *origin, stop <-chan struct{}) []time.Duration {
-	var samples []time.Duration
+func probeInteractive(ctx context.Context, socksAddr string, o *origin, stop <-chan struct{}) []requestStages {
+	var samples []requestStages
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -272,28 +272,32 @@ func probeInteractive(ctx context.Context, socksAddr string, o *origin, stop <-c
 			return samples
 		case <-ticker.C:
 		}
-		started := time.Now()
-		_, err := fetch(ctx, socksAddr, o.smallAddr, o.smallSize)
-		elapsed := time.Since(started)
+		_, stages, err := fetchTimed(ctx, socksAddr, o.smallAddr, o.smallSize)
 		if err != nil && ctx.Err() != nil {
 			return samples
 		}
-		samples = append(samples, elapsed)
+		samples = append(samples, stages)
 	}
 }
 
-func summarizeProbes(samples []time.Duration) string {
+func summarizeProbes(samples []requestStages) string {
 	if len(samples) == 0 {
 		return "interactive=none"
 	}
-	sorted := append([]time.Duration(nil), samples...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	pick := func(q float64) float64 {
-		index := int(q * float64(len(sorted)-1))
-		return float64(sorted[index].Microseconds()) / 1000
+	quantile := func(pick func(requestStages) time.Duration, q float64) float64 {
+		values := make([]time.Duration, len(samples))
+		for i, sample := range samples {
+			values[i] = pick(sample)
+		}
+		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+		return float64(values[int(q*float64(len(values)-1))].Microseconds()) / 1000
 	}
-	return fmt.Sprintf("interactive_n=%d p50=%.0fms p95=%.0fms max=%.0fms",
-		len(sorted), pick(0.5), pick(0.95), float64(sorted[len(sorted)-1].Microseconds())/1000)
+	total := func(s requestStages) time.Duration { return s.Total }
+	connect := func(s requestStages) time.Duration { return s.Connect }
+	first := func(s requestStages) time.Duration { return s.FirstByte }
+	return fmt.Sprintf("interactive_n=%d p50=%.0fms p95=%.0fms max=%.0fms connect_p95=%.0fms firstbyte_p95=%.0fms",
+		len(samples), quantile(total, 0.5), quantile(total, 0.95), quantile(total, 1),
+		quantile(connect, 0.95), quantile(first, 0.95))
 }
 
 func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) error {
@@ -520,29 +524,53 @@ func warmUp(ctx context.Context, socksAddr string, o *origin) error {
 }
 
 func fetch(ctx context.Context, socksAddr, destination string, expect int64) (int64, error) {
+	received, _, err := fetchTimed(ctx, socksAddr, destination, expect)
+	return received, err
+}
+
+// requestStages breaks one request into the parts a transport controls
+// separately, so a latency regression can be attributed to flow setup, to the
+// first byte, or to the transfer itself rather than only observed in total.
+type requestStages struct {
+	Connect   time.Duration // SOCKS CONNECT acknowledged
+	FirstByte time.Duration // first response byte after the request was written
+	Total     time.Duration
+}
+
+func fetchTimed(ctx context.Context, socksAddr, destination string, expect int64) (int64, requestStages, error) {
+	var stages requestStages
+	started := time.Now()
 	dialer := &net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "tcp", socksAddr)
 	if err != nil {
-		return 0, err
+		return 0, stages, err
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
 	if err := socksConnect(conn, destination); err != nil {
-		return 0, err
+		return 0, stages, err
 	}
+	stages.Connect = time.Since(started)
 	if _, err := conn.Write([]byte{'g'}); err != nil {
-		return 0, err
+		return 0, stages, err
 	}
-	received, err := io.Copy(io.Discard, io.LimitReader(conn, expect))
+	var first [1]byte
+	if _, err := io.ReadFull(conn, first[:]); err != nil {
+		return 0, stages, err
+	}
+	stages.FirstByte = time.Since(started)
+	received, err := io.Copy(io.Discard, io.LimitReader(conn, expect-1))
+	received++
+	stages.Total = time.Since(started)
 	if err != nil {
-		return received, err
+		return received, stages, err
 	}
 	if received != expect {
-		return received, fmt.Errorf("received %d of %d bytes", received, expect)
+		return received, stages, fmt.Errorf("received %d of %d bytes", received, expect)
 	}
-	return received, nil
+	return received, stages, nil
 }
 
 func socksConnect(conn net.Conn, destination string) error {

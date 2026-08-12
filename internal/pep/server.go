@@ -90,6 +90,16 @@ type serverFlow struct {
 // state with another QUIC connection.
 type quicAuthState struct{ authenticated atomic.Bool }
 
+// serverLaneBudget is the total lanes this endpoint will admit for one flow.
+// It must match the client's split in bulkLaneBudget: counting the reserved
+// control lane against the bulk maximum makes the server reject and close
+// every joined bulk lane, which the peer sees as an immediate EOF and retries,
+// churning through lanes instead of transferring.
+func serverLaneBudget(maxLanes int, reserveControl bool) int {
+	bulk, control := bulkLaneBudget(maxLanes, reserveControl)
+	return bulk + control
+}
+
 func (s *serverFlow) addLane(lane *mpLane) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -530,7 +540,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0
-	serverSession := &serverFlow{flow: flow, maxLanes: s.cfg.MaxLanes}
+	serverSession := &serverFlow{flow: flow, maxLanes: serverLaneBudget(s.cfg.MaxLanes, flow.reserveControlLane)}
 	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
 		flow.closeAll()
 		return
