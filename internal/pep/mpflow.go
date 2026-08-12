@@ -258,6 +258,7 @@ type multipathFlow struct {
 	replayStalls    atomic.Uint64
 	replayStalled   atomic.Int64
 	replayEvictions atomic.Uint64
+	reinjections    atomic.Uint64
 
 	replayMu sync.Mutex
 	replay   map[uint64]protocol.Frame
@@ -275,6 +276,10 @@ type multipathFlow struct {
 	// a flow forever for an eviction the peer went on to acknowledge, which
 	// turned completed transfers into failures at teardown.
 	replayEvictedThrough uint64
+	// reinjectedThrough is the sequence past which the stall detector has
+	// already re-sent, so a held head is duplicated once per position rather
+	// than on every tick.
+	reinjectedThrough uint64
 	// replayLimit is this flow's current send window. It starts at the
 	// unaccounted floor and grows from replayBudget while the endpoint has
 	// spare accounted memory. replayGranted is what has been drawn from that
@@ -1079,16 +1084,101 @@ func (f *multipathFlow) completionWatchdog(stop <-chan struct{}) {
 func (f *multipathFlow) telemetryLoop(stop <-chan struct{}) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	// The stall detector runs far more often than telemetry: a head-of-line
+	// segment held on a slow lane has to be re-sent within a round trip or so,
+	// or the reorder span keeps growing.
+	stall := time.NewTicker(reinjectInterval)
+	defer stall.Stop()
 	for {
 		select {
 		case <-ticker.C:
 			f.observeTransport(f.healthyLanes())
+		case <-stall.C:
+			f.reinjectStalledHead()
 		case <-stop:
 			return
 		case <-f.ctx.Done():
 			return
 		}
 	}
+}
+
+const (
+	// reinjectInterval is how often a striped flow checks whether its oldest
+	// unacknowledged frame is holding up the receiver.
+	reinjectInterval = 200 * time.Millisecond
+	// reinjectPressure is the fraction of the retention window that must be
+	// occupied before re-sending anything. Below it the window is doing its
+	// job and a duplicate would only waste capacity.
+	reinjectPressure = 2
+)
+
+// reinjectStalledHead re-sends the oldest unacknowledged frame on the lane
+// most likely to deliver it first.
+//
+// A striped flow acknowledges one cumulative sequence, so the receiver's
+// contiguous point sits behind whatever the slowest lane has not delivered.
+// The sender's retention window then covers the whole reorder span rather than
+// the bytes actually in flight; it fills, evicts bytes the peer never
+// acknowledged, and the flow becomes unreplayable, after which any lane failure
+// is fatal. Measured on a per-flow-policed path, four-lane transfers failed
+// roughly one time in three that way.
+//
+// Re-sending the head bounds the span: the receiver already deduplicates a
+// segment it holds or has passed, so a duplicate is harmless, and delivering
+// the missing bytes over a fast lane lets the contiguous point advance and the
+// window drain. This is the reinjection multipath TCP performs for the same
+// reason.
+func (f *multipathFlow) reinjectStalledHead() {
+	if f.laneCount() < 2 || f.doneChanClosed() {
+		return
+	}
+	f.replayMu.Lock()
+	underPressure := f.replayBytes*uint64(reinjectPressure) >= f.replayLimit
+	head, retained := f.oldestRetainedLocked()
+	alreadySent := f.reinjectedThrough
+	f.replayMu.Unlock()
+	if !underPressure || !retained || head.Header.Sequence < alreadySent {
+		return
+	}
+
+	// Choose by predicted arrival, and never re-send onto a lane that has not
+	// proven it can carry anything.
+	candidates, err := f.laneCandidates(true)
+	if err != nil {
+		return
+	}
+	lane := candidates[0]
+	if _, rtt := lane.sendRate(); rtt <= 0 {
+		return
+	}
+	if accepted, _ := f.tryEnqueueFrameClass(lane, head, true); !accepted {
+		return
+	}
+	f.chargeLane(lane, len(head.Payload))
+	f.replayMu.Lock()
+	// Advance past this frame so a stalled head is re-sent once per position
+	// rather than on every tick.
+	f.reinjectedThrough = head.Header.Sequence + 1
+	f.replayMu.Unlock()
+	f.reinjections.Add(1)
+	f.metrics.Reinjected()
+}
+
+// oldestRetainedLocked returns the lowest-sequence frame still held for
+// replay. It must be called with replayMu held.
+func (f *multipathFlow) oldestRetainedLocked() (protocol.Frame, bool) {
+	for _, sequence := range f.replayOrder {
+		if frame, ok := f.replay[sequence]; ok {
+			if frame.Header.Type != protocol.TypeData {
+				continue
+			}
+			copied := frame
+			copied.Payload = append([]byte(nil), frame.Payload...)
+			return copied, true
+		}
+	}
+	return protocol.Frame{}, false
 }
 
 func (f *multipathFlow) signalDone() {

@@ -172,3 +172,117 @@ func TestPooledFlowCountTracksOpenAndClose(t *testing.T) {
 		t.Fatal("server shutdown timeout")
 	}
 }
+
+// A striped flow acknowledges one cumulative sequence, so the receiver's
+// contiguous point sits behind whatever the slowest lane has not delivered.
+// The sender's retention window then covers the whole reorder span rather than
+// the bytes in flight, fills, and evicts bytes the peer never acknowledged,
+// after which any lane failure is fatal. Re-sending the head on a faster lane
+// is what bounds that span.
+func TestStalledHeadIsReinjectedOnAnotherLane(t *testing.T) {
+	flow := newIsolationTestFlow(t, false)
+	// addLane starts the lane's writer, so the frame reaches the transport
+	// rather than sitting in the queue. Capture what each lane actually sends.
+	fastConn, slowConn := newAckCaptureConn(0, nil), newAckCaptureConn(0, nil)
+	fast := &mpLane{id: 0, kind: TransportQUIC, fc: newFrameConn(fastConn, protocol.DefaultMaxPayload)}
+	slow := &mpLane{id: 1, kind: TransportQUIC, fc: newFrameConn(slowConn, protocol.DefaultMaxPayload)}
+	for _, lane := range []*mpLane{fast, slow} {
+		if err := flow.addLane(lane); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = fastConn.Close(); _ = slowConn.Close() })
+	laneRate(fast, 1<<20, 10*time.Millisecond)
+	laneRate(slow, 1<<10, 500*time.Millisecond)
+
+	// Fill the retention window past the pressure threshold.
+	payload := make([]byte, defaultChunkSize)
+	var sequence uint64
+	for flowRetained(flow)*uint64(reinjectPressure) < flow.replayLimit {
+		frame := protocol.Frame{
+			Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Sequence: sequence},
+			Payload: payload,
+		}
+		if err := flow.recordReplay(frame); err != nil {
+			t.Fatalf("record at %d: %v", sequence, err)
+		}
+		sequence += uint64(len(payload))
+	}
+
+	flow.reinjectStalledHead()
+	if got := flow.reinjections.Load(); got != 1 {
+		t.Fatalf("reinjections = %d, want the stalled head re-sent once", got)
+	}
+	select {
+	case frame := <-fastConn.frames:
+		if frame.Header.Sequence != 0 || frame.Header.Type != protocol.TypeData {
+			t.Fatalf("re-sent %+v, want the oldest retained data frame", frame.Header)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("nothing was re-sent on the faster lane")
+	}
+	select {
+	case frame := <-slowConn.frames:
+		t.Fatalf("the slow lane received %+v; re-sending there defeats the purpose", frame.Header)
+	default:
+	}
+
+	// The same head must not be duplicated on every tick.
+	flow.reinjectStalledHead()
+	if got := flow.reinjections.Load(); got != 1 {
+		t.Fatalf("reinjections = %d, want the head re-sent once per position", got)
+	}
+}
+
+// A flow on one lane has nowhere to re-send, and duplicating onto the same
+// lane would only waste capacity.
+func TestSingleLaneFlowDoesNotReinject(t *testing.T) {
+	flow := newIsolationTestFlow(t, false)
+	if err := flow.addLane(isolationLane(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, defaultChunkSize)
+	var sequence uint64
+	for flowRetained(flow)*uint64(reinjectPressure) < flow.replayLimit {
+		if err := flow.recordReplay(protocol.Frame{
+			Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Sequence: sequence},
+			Payload: payload,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		sequence += uint64(len(payload))
+	}
+	flow.reinjectStalledHead()
+	if got := flow.reinjections.Load(); got != 0 {
+		t.Fatalf("reinjections = %d on a single-lane flow, want none", got)
+	}
+}
+
+// Below the pressure threshold the window is doing its job and a duplicate
+// would only waste capacity.
+func TestReinjectionWaitsForWindowPressure(t *testing.T) {
+	flow := newIsolationTestFlow(t, false)
+	for id := range uint64(2) {
+		lane := isolationLane(t, id)
+		if err := flow.addLane(lane); err != nil {
+			t.Fatal(err)
+		}
+		laneRate(lane, 1<<20, 10*time.Millisecond)
+	}
+	if err := flow.recordReplay(protocol.Frame{
+		Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData},
+		Payload: make([]byte, defaultChunkSize),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flow.reinjectStalledHead()
+	if got := flow.reinjections.Load(); got != 0 {
+		t.Fatalf("reinjections = %d with an almost empty window, want none", got)
+	}
+}
+
+func flowRetained(f *multipathFlow) uint64 {
+	f.replayMu.Lock()
+	defer f.replayMu.Unlock()
+	return f.replayBytes
+}

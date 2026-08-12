@@ -37,8 +37,12 @@ type Registry struct {
 	// bulkIsolations counts bulk flows moved off the shared control
 	// connection, which is the mechanism that protects interactive latency.
 	bulkIsolations atomic.Uint64
-	telemetryMu    sync.Mutex
-	quicFlows      map[uint64]QUICObservation
+	// reinjections counts frames re-sent on a second lane because the first
+	// was holding up the receiver. A rising count means striping is costing
+	// duplicate capacity to keep the reorder span bounded.
+	reinjections atomic.Uint64
+	telemetryMu  sync.Mutex
+	quicFlows    map[uint64]QUICObservation
 }
 
 type Snapshot struct {
@@ -48,7 +52,7 @@ type Snapshot struct {
 	CompletionTimeouts                                               uint64
 	FlowTimeouts                                                     uint64
 	ClassTransitions                                                 [3]uint64
-	ReplayEvictions, UnreplayableFlows, BulkIsolations               uint64
+	ReplayEvictions, UnreplayableFlows, BulkIsolations, Reinjections uint64
 	ReplayBytesInUse                                                 int64
 	QUICLanes                                                        int64
 	QUICLatestRTT, QUICSmoothedRTT                                   time.Duration
@@ -156,6 +160,14 @@ func (r *Registry) ReplayBytes(delta int64) {
 	}
 }
 
+// Reinjected records a frame re-sent on a second lane to unblock the receiver.
+func (r *Registry) Reinjected() {
+	if r == nil {
+		return
+	}
+	r.reinjections.Add(1)
+}
+
 // BulkIsolated records a bulk flow moving off the shared control connection.
 func (r *Registry) BulkIsolated() {
 	if r == nil {
@@ -215,6 +227,7 @@ func (r *Registry) Snapshot() Snapshot {
 		ReplayEvictions:              r.replayEvictions.Load(),
 		UnreplayableFlows:            r.unreplayableFlows.Load(),
 		BulkIsolations:               r.bulkIsolations.Load(),
+		Reinjections:                 r.reinjections.Load(),
 		ReplayBytesInUse:             r.replayBytesInUse.Load(),
 	}
 	for i := range s.ClassTransitions {
@@ -351,6 +364,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "wanopt_unreplayable_flows_total %d\n", s.UnreplayableFlows)
 	fmt.Fprintf(w, "wanopt_replay_bytes_in_use %d\n", s.ReplayBytesInUse)
 	fmt.Fprintf(w, "wanopt_bulk_isolations_total %d\n", s.BulkIsolations)
+	fmt.Fprintf(w, "wanopt_lane_reinjections_total %d\n", s.Reinjections)
 	fmt.Fprintf(w, "wanopt_quic_lanes %d\n", s.QUICLanes)
 	fmt.Fprintf(w, "wanopt_quic_latest_rtt_seconds %.9f\n", s.QUICLatestRTT.Seconds())
 	fmt.Fprintf(w, "wanopt_quic_smoothed_rtt_seconds %.9f\n", s.QUICSmoothedRTT.Seconds())
