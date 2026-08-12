@@ -1424,13 +1424,17 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				}
 			}
 			// Isolation earns its cost only while another flow shares the
-			// control connection. A bulk transfer that is alone on it has
-			// nothing to protect, and moving it would spend a handshake and
-			// a fresh congestion window for no benefit; measured on an
-			// otherwise idle path that costs about 8% of bulk goodput.
-			isolate := controlReserve == 0 || c.quicPoolActive.Load() > 1
+			// control connection. A bulk transfer alone on it has nothing to
+			// protect, and moving it would spend a handshake and a fresh
+			// congestion window for no benefit: measured on an otherwise idle
+			// path that costs about 8% of bulk goodput.
+			//
+			// Without a negotiated control lane there is no shared connection
+			// to leave, so this hold does not apply and lane policy is
+			// whatever --max-lanes asks for.
+			holdOnControlLane := controlReserve > 0 && c.quicPoolActive.Load() <= 1
 			target := bulkStartLanes + controlReserve
-			if !isolate {
+			if holdOnControlLane {
 				target = 0
 			}
 			prewarm := flow.laneCount() < target && shouldPrewarmBulkLane(snapshot)
@@ -1472,7 +1476,7 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				})
 			}
 			decision.TargetLanes += controlReserve
-			if !isolate && flow.laneCount() <= controlReserve {
+			if holdOnControlLane && flow.laneCount() <= controlReserve {
 				// Stay on the shared connection while nothing else is using
 				// it. A later arrival flips this on the next tick.
 				decision.TargetLanes = flow.laneCount()
