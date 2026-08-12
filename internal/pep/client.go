@@ -1522,6 +1522,12 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				} else if err := flow.addLane(lane); err != nil {
 					_ = lane.fc.Close()
 					return
+				} else if controlReserve > 0 && flow.laneCount() == controlReserve+1 {
+					// The flow's first bulk lane is what moves it off the
+					// shared control connection, which is the mechanism that
+					// keeps interactive traffic out of a bulk congestion
+					// window. Count it so an operator can see the policy act.
+					c.metrics.BulkIsolated()
 				}
 			}
 		}

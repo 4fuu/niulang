@@ -83,3 +83,64 @@ func TestZeroValueRegistryIsSafe(t *testing.T) {
 	}
 	r.RemoveQUIC(7)
 }
+
+// The rescue window is dropped rather than allowed to throttle the
+// application. That trade has to be visible: once a flow has evicted part of
+// its window, a lane failure fails the flow instead of recovering it, so an
+// operator needs to see it happening.
+func TestReplayAndIsolationCountersAreExported(t *testing.T) {
+	registry := New()
+	registry.ReplayEvicted(3, true)
+	registry.ReplayEvicted(2, false)
+	registry.ReplayBytes(1024)
+	registry.ReplayBytes(512)
+	registry.ReplayBytes(-1024)
+	registry.BulkIsolated()
+
+	got := registry.Snapshot()
+	if got.ReplayEvictions != 5 {
+		t.Fatalf("replay evictions = %d, want 5", got.ReplayEvictions)
+	}
+	if got.UnreplayableFlows != 1 {
+		t.Fatalf("unreplayable flows = %d, want one flow marked once", got.UnreplayableFlows)
+	}
+	if got.ReplayBytesInUse != 512 {
+		t.Fatalf("replay bytes in use = %d, want 512", got.ReplayBytesInUse)
+	}
+	if got.BulkIsolations != 1 {
+		t.Fatalf("bulk isolations = %d, want 1", got.BulkIsolations)
+	}
+
+	recorder := httptest.NewRecorder()
+	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	for _, want := range []string{
+		"wanopt_replay_evictions_total 5",
+		"wanopt_unreplayable_flows_total 1",
+		"wanopt_replay_bytes_in_use 512",
+		"wanopt_bulk_isolations_total 1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics output is missing %q", want)
+		}
+	}
+}
+
+// Releasing more than was acquired must not drive the gauge negative, or the
+// endpoint budget would appear to have capacity it does not have.
+func TestReplayBytesGaugeCannotGoNegative(t *testing.T) {
+	registry := New()
+	registry.ReplayBytes(256)
+	registry.ReplayBytes(-4096)
+	if got := registry.Snapshot().ReplayBytesInUse; got != 0 {
+		t.Fatalf("replay bytes in use = %d after an oversized release, want 0", got)
+	}
+}
+
+// A nil registry is the "metrics disabled" case and must stay safe.
+func TestNilRegistryIsSafe(t *testing.T) {
+	var registry *Registry
+	registry.ReplayEvicted(1, true)
+	registry.ReplayBytes(10)
+	registry.BulkIsolated()
+}

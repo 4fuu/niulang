@@ -26,8 +26,19 @@ type Registry struct {
 	completionTimeouts atomic.Uint64
 	flowTimeouts       atomic.Uint64
 	classTransitions   [3]atomic.Uint64
-	telemetryMu        sync.Mutex
-	quicFlows          map[uint64]QUICObservation
+	// The rescue window is dropped rather than allowed to throttle the
+	// application. That trade has to be visible: a flow that has evicted part
+	// of its window will fail rather than recover if its lane dies, so a
+	// rising count is the operator's warning that lane rescue is no longer
+	// available for the affected traffic.
+	replayEvictions   atomic.Uint64
+	unreplayableFlows atomic.Uint64
+	replayBytesInUse  atomic.Int64
+	// bulkIsolations counts bulk flows moved off the shared control
+	// connection, which is the mechanism that protects interactive latency.
+	bulkIsolations atomic.Uint64
+	telemetryMu    sync.Mutex
+	quicFlows      map[uint64]QUICObservation
 }
 
 type Snapshot struct {
@@ -37,6 +48,8 @@ type Snapshot struct {
 	CompletionTimeouts                                               uint64
 	FlowTimeouts                                                     uint64
 	ClassTransitions                                                 [3]uint64
+	ReplayEvictions, UnreplayableFlows, BulkIsolations               uint64
+	ReplayBytesInUse                                                 int64
 	QUICLanes                                                        int64
 	QUICLatestRTT, QUICSmoothedRTT                                   time.Duration
 	QUICBytesSent, QUICBytesReceived, QUICBytesLost, QUICPacketsLost uint64
@@ -120,6 +133,37 @@ func (r *Registry) UDPAssociationReconnect() {
 func (r *Registry) UDPAssociationRescueFailure() {
 	r.udpRescueFailures.Add(1)
 }
+
+// ReplayEvicted records frames dropped from a flow's rescue window, and marks
+// the flow unreplayable the first time it happens.
+func (r *Registry) ReplayEvicted(frames uint64, firstForFlow bool) {
+	if r == nil || frames == 0 {
+		return
+	}
+	r.replayEvictions.Add(frames)
+	if firstForFlow {
+		r.unreplayableFlows.Add(1)
+	}
+}
+
+// ReplayBytes tracks the endpoint's accounted rescue-window memory.
+func (r *Registry) ReplayBytes(delta int64) {
+	if r == nil || delta == 0 {
+		return
+	}
+	if remaining := r.replayBytesInUse.Add(delta); remaining < 0 {
+		r.replayBytesInUse.Store(0)
+	}
+}
+
+// BulkIsolated records a bulk flow moving off the shared control connection.
+func (r *Registry) BulkIsolated() {
+	if r == nil {
+		return
+	}
+	r.bulkIsolations.Add(1)
+}
+
 func (r *Registry) CompletionTimeout() { r.completionTimeouts.Add(1) }
 func (r *Registry) FlowTimeout()       { r.flowTimeouts.Add(1) }
 func (r *Registry) ClassTransition(class int) {
@@ -168,6 +212,10 @@ func (r *Registry) Snapshot() Snapshot {
 		UDPAssociationRescueFailures: r.udpRescueFailures.Load(),
 		CompletionTimeouts:           r.completionTimeouts.Load(),
 		FlowTimeouts:                 r.flowTimeouts.Load(),
+		ReplayEvictions:              r.replayEvictions.Load(),
+		UnreplayableFlows:            r.unreplayableFlows.Load(),
+		BulkIsolations:               r.bulkIsolations.Load(),
+		ReplayBytesInUse:             r.replayBytesInUse.Load(),
 	}
 	for i := range s.ClassTransitions {
 		s.ClassTransitions[i] = r.classTransitions[i].Load()
@@ -296,6 +344,13 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "wanopt_udp_association_rescue_failures_total %d\n", s.UDPAssociationRescueFailures)
 	fmt.Fprintf(w, "wanopt_completion_timeouts_total %d\n", s.CompletionTimeouts)
 	fmt.Fprintf(w, "wanopt_flow_timeouts_total %d\n", s.FlowTimeouts)
+	// A rising unreplayable count means lane rescue is no longer available for
+	// the affected flows: their rescue window was dropped to keep the
+	// application moving, so a lane failure now fails the flow.
+	fmt.Fprintf(w, "wanopt_replay_evictions_total %d\n", s.ReplayEvictions)
+	fmt.Fprintf(w, "wanopt_unreplayable_flows_total %d\n", s.UnreplayableFlows)
+	fmt.Fprintf(w, "wanopt_replay_bytes_in_use %d\n", s.ReplayBytesInUse)
+	fmt.Fprintf(w, "wanopt_bulk_isolations_total %d\n", s.BulkIsolations)
 	fmt.Fprintf(w, "wanopt_quic_lanes %d\n", s.QUICLanes)
 	fmt.Fprintf(w, "wanopt_quic_latest_rtt_seconds %.9f\n", s.QUICLatestRTT.Seconds())
 	fmt.Fprintf(w, "wanopt_quic_smoothed_rtt_seconds %.9f\n", s.QUICSmoothedRTT.Seconds())

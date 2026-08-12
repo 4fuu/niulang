@@ -1436,7 +1436,11 @@ func (f *multipathFlow) evictOldestReplayLocked(needed uint64) {
 		f.replayBytes -= uint64(len(entry.Payload))
 		freed += uint64(len(entry.Payload))
 		f.replayEvictions.Add(1)
-		f.replayable.Store(false)
+		if f.metrics != nil {
+			f.metrics.ReplayEvicted(1, f.replayable.Swap(false))
+		} else {
+			f.replayable.Store(false)
+		}
 	}
 }
 
@@ -2012,6 +2016,7 @@ func (f *multipathFlow) growReplayLimitLocked(needed uint64) {
 	}
 	f.replayLimit += step
 	f.replayGranted += step
+	f.metrics.ReplayBytes(int64(step))
 }
 
 // releaseReplayBudget returns this flow's share of the endpoint replay budget.
@@ -2024,4 +2029,5 @@ func (f *multipathFlow) releaseReplayBudget() {
 	f.replayLimit = maxReplayBytes
 	f.replayMu.Unlock()
 	f.replayBudget.release(int64(granted))
+	f.metrics.ReplayBytes(-int64(granted))
 }
