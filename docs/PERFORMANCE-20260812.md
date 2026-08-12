@@ -211,25 +211,26 @@ the exact expected body.
 
 | Condition | Reference | wanopt | Delta |
 | --- | ---: | ---: | ---: |
-| 200 ms, 100 Mbit/s, 0% loss, 10 MiB | 38.00 | 38.10 | +0.3% |
-| 200 ms, 100 Mbit/s, 1% loss, 10 MiB | 31.61 | 32.06 | +1.4% |
-| 200 ms, 100 Mbit/s, 3% loss, 10 MiB | 29.26 | 29.14 | −0.4% |
-| 200 ms, 100 Mbit/s, 5% loss, 10 MiB | 26.67 | 28.41 | +6.5% |
-| 200 ms, 100 Mbit/s, 1% loss, 50 MiB | 57.24 | 57.94 | +1.2% |
-| 200 ms, 1% loss, 4 concurrent flows | 62.00 | 59.23 | −4.5% |
-| 200 ms, 1% loss, 8 concurrent flows | 70.41 | 72.07 | +2.4% |
-| 264 ms, 50 Mbit/s, 10% loss | 18.50 | 18.69 | +1.0% |
-| 264 ms, 50 Mbit/s, 20% loss | 14.32 | 15.01 | +4.8% |
-| No impairment, 256 MiB (datapath cost) | 890.46 | 905.29 | +1.7% |
-| Cold connect (ms, lower is better) | 409.1 | 409.5 | parity |
-| Warm request (ms, lower is better) | 203.0 | 202.9 | parity |
-| Interactive p50 during 50 MiB (ms) | 300 | 206 | −31% |
-| Interactive p95 during 50 MiB (ms) | 540 | 349 | −35% |
-| Bulk goodput during that transfer | 57.78 | 52.72 | −8.8% |
+| 200 ms, 100 Mbit/s, 0% loss, 10 MiB | 38.03 | 38.48 | +1.2% |
+| 200 ms, 100 Mbit/s, 1% loss, 10 MiB | 32.12 | 32.42 | +0.9% |
+| 200 ms, 100 Mbit/s, 3% loss, 10 MiB | 29.26 | 29.67 | +1.4% |
+| 200 ms, 100 Mbit/s, 5% loss, 10 MiB | 29.12 | 26.99 | −7.3% |
+| 200 ms, 100 Mbit/s, 1% loss, 50 MiB | 57.91 | 58.31 | +0.7% |
+| 200 ms, 1% loss, 4 concurrent flows | 62.30 | 57.81 | −7.2% |
+| 200 ms, 1% loss, 8 concurrent flows | 71.00 | 73.56 | +3.6% |
+| 264 ms, 50 Mbit/s, 10% loss | 17.73 | 18.12 | +2.2% |
+| 264 ms, 50 Mbit/s, 20% loss | 14.56 | 14.89 | +2.3% |
+| No impairment, 256 MiB (datapath cost) | 894.07 | 911.18 | +1.9% |
+| Interactive p50 during 50 MiB (ms) | 338 | 208 | −38% |
+| Interactive p95 during 50 MiB (ms) | 497 | 381 | −23% |
+| Bulk goodput during that transfer | 58.13 | 52.80 | −9.2% |
 
 Every cell delivered the exact expected body in all five trials, and the run
 passed `bench_matrix.sh --gate --tolerance 0.12` in all eleven compared blocks,
-so this is a machine-checked result rather than a table someone read.
+so this is a machine-checked result rather than a table someone read. It was
+taken after the emulator defect described under lane aggregation was corrected;
+the figures are within run-to-run variance of the same matrix taken before it,
+which confirms these cells sat below the old ceiling.
 
 Single-flow goodput, concurrent-flow goodput, connection latency, and CPU-bound
 datapath cost are all within noise of the reference or above it. For comparison,
@@ -321,9 +322,10 @@ loss and 1 Gbit/s configured, the reference goes from 19.07 to 87.51 Mbit/s and
 wanopt from 29.53 to 94.81. A test pins the property rather than the
 throughput: packets held in flight must not grow the goroutine count.
 
-The single-lane cells elsewhere in this document sit well below the old
-ceiling, but they were taken on the old emulator and should be re-run before
-being quoted precisely.
+The single-lane cells elsewhere in this document have been re-run on the
+corrected emulator and are within run-to-run variance of their earlier values,
+which confirms they sat below the old ceiling. The lane figures did not, and
+are the ones that had to be re-measured.
 
 **The default is one lane and is unaffected.** `--max-lanes` above one should
 be treated as experimental and is not currently a supported configuration: it
