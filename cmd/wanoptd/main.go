@@ -190,7 +190,7 @@ func parseOptions(args []string) (options, error) {
 	fs.IntVar(&opts.udpFailureThreshold, "udp-failure-threshold", 3, "consecutive UDP failures before temporary TCP-only mode")
 	fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "how long to suppress UDP after repeated failures")
 	fs.IntVar(&opts.initialLanes, "initial-lanes", 1, "number of QUIC lanes to open after a flow is established (1-8)")
-	fs.IntVar(&opts.maxLanes, "max-lanes", 1, "maximum QUIC lanes carrying bulk payload per flow (1-8); a negotiated control lane is additional")
+	fs.IntVar(&opts.maxLanes, "max-lanes", 4, "ceiling on QUIC lanes carrying bulk payload per flow (1-8); lanes are added only when a controlled probe measures a gain, so this is a bound and not a target. A negotiated control lane is additional; set 1 to disable striping")
 	fs.IntVar(&opts.bulkStartLanes, "bulk-start-lanes", 1, "bulk lanes to open when a flow becomes bulk (growth beyond this requires measured gain)")
 	fs.BoolVar(&opts.allowPrivate, "allow-private-destinations", false, "allow the server to reach private/link-local destinations")
 	fs.StringVar(&opts.logLevel, "log-level", "info", "debug, info, warn, or error")

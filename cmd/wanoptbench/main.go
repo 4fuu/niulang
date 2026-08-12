@@ -97,7 +97,7 @@ func run(args []string) error {
 	fs.StringVar(&opts.flows, "flows", "1", "comma-separated concurrent flow counts")
 	fs.StringVar(&opts.congestion, "congestion", "bbr-tuic", "congestion controller for both stacks")
 	fs.Float64Var(&opts.brutalMbits, "brutal-rate", 0, "wanopt fixed send rate in Mbit/s when --congestion=brutal")
-	fs.IntVar(&opts.lanes, "lanes", 1, "wanopt maximum lanes")
+	fs.IntVar(&opts.lanes, "lanes", 0, "wanopt bulk-lane ceiling; 0 uses the product default (a measured search up to 4)")
 	fs.IntVar(&opts.chunkSize, "chunk", 0, "wanopt data frame size in bytes (0 selects the default)")
 	fs.IntVar(&opts.initialLanes, "initial-lanes", 1, "wanopt lanes opened before SOCKS CONNECT succeeds")
 	fs.BoolVar(&opts.quicPool, "quic-pool", true, "enable the wanopt pooled QUIC connection")

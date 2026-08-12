@@ -23,7 +23,28 @@ func TestPlannerStartsBulkWithConfiguredLanes(t *testing.T) {
 	}
 }
 
-func TestPlannerRetiresLaneWhenLatencyBudgetExceeded(t *testing.T) {
+// A bulk transfer fills the bottleneck queue and inflates its own RTT; that is
+// the transport working, not a reason to retire a lane. Charging it the
+// interactive latency budget made striping unreachable on every path with a
+// buffer, because a 200ms path reaches 240ms within a second of the transfer
+// starting.
+func TestPlannerHoldsLanesUnderSelfInflictedQueueing(t *testing.T) {
+	p := New(DefaultConfig())
+	d := p.Decide(classifier.ClassBulk, Metrics{
+		CurrentLanes: 4,
+		HealthyLanes: 8,
+		UDPHealthy:   true,
+		BaselineRTT:  200 * time.Millisecond,
+		CurrentRTT:   380 * time.Millisecond, // standing queue at a full bottleneck
+	})
+	if d.TargetLanes != 4 {
+		t.Fatalf("target lanes = %d, want 4 held: %s", d.TargetLanes, d.Reason)
+	}
+}
+
+// Collapse is still worth reacting to: delay several times the baseline means
+// the queue is growing faster than it drains.
+func TestPlannerRetiresLaneOnRTTCollapse(t *testing.T) {
 	p := New(DefaultConfig())
 	d := p.Decide(classifier.ClassBulk, Metrics{
 		CurrentLanes: 4,
@@ -31,10 +52,10 @@ func TestPlannerRetiresLaneWhenLatencyBudgetExceeded(t *testing.T) {
 		UDPHealthy:   true,
 		MarginalGain: 0.50,
 		BaselineRTT:  200 * time.Millisecond,
-		CurrentRTT:   300 * time.Millisecond,
+		CurrentRTT:   900 * time.Millisecond,
 	})
 	if d.TargetLanes != 3 {
-		t.Fatalf("target lanes = %d, want 3", d.TargetLanes)
+		t.Fatalf("target lanes = %d, want 3: %s", d.TargetLanes, d.Reason)
 	}
 }
 
