@@ -28,6 +28,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime/pprof"
 	"sort"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/baseline"
+	"github.com/icourses-dev/wanopt/internal/extproxy"
 	"github.com/icourses-dev/wanopt/internal/pathsim"
 	"github.com/icourses-dev/wanopt/internal/pep"
 )
@@ -64,6 +66,7 @@ type options struct {
 	verbose      bool
 	latency      bool
 	interactive  bool
+	singBox      string
 	jsonOut      string
 	gate         bool
 	tolerance    float64
@@ -103,6 +106,7 @@ func run(args []string) error {
 	fs.BoolVar(&opts.verbose, "verbose", false, "log transport diagnostics")
 	fs.BoolVar(&opts.latency, "latency", false, "also measure small-request latency")
 	fs.BoolVar(&opts.interactive, "interactive", false, "issue small requests during the bulk transfer and report their latency")
+	fs.StringVar(&opts.singBox, "sing-box", "", "path to a sing-box binary, enabling the tuic and hysteria2 stacks")
 	fs.StringVar(&opts.jsonOut, "json", "", "also write the full result set to this path as JSON")
 	fs.BoolVar(&opts.gate, "gate", false, "exit non-zero when wanopt is worse than the reference beyond --tolerance")
 	fs.Float64Var(&opts.tolerance, "tolerance", 0.10, "fractional goodput shortfall allowed by --gate")
@@ -491,10 +495,64 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 		go func() { _ = server.ServePacketConn(ctx, serverPacket) }()
 		go func() { _ = client.ServeListener(ctx, socksListener) }()
 	default:
-		h.Close()
-		return nil, fmt.Errorf("unknown stack %q", stack)
+		kind := extproxy.Kind(stack)
+		if kind.Transport() != "udp" {
+			h.Close()
+			return nil, fmt.Errorf("stack %q is not carried by the UDP path emulator", stack)
+		}
+		if opts.singBox == "" {
+			h.Close()
+			return nil, fmt.Errorf("stack %q requires --sing-box", stack)
+		}
+		// The third-party implementation needs its TLS material on disk, and
+		// the SOCKS listener has to be free for it to bind itself.
+		workDir, err := os.MkdirTemp("", "wanoptbench-"+stack+"-")
+		if err != nil {
+			h.Close()
+			return nil, err
+		}
+		certPath, keyPath, err := writeCertificateFiles(workDir)
+		if err != nil {
+			h.Close()
+			_ = os.RemoveAll(workDir)
+			return nil, err
+		}
+		// The external implementation binds these itself, so the harness has to
+		// release the addresses it reserved. Without this the server silently
+		// fails to bind and every request fails at SOCKS with a general error.
+		serverAddr := serverPacket.LocalAddr().String()
+		_ = serverPacket.Close()
+		socksAddr := h.socks
+		_ = socksListener.Close()
+		pair, err := extproxy.Start(ctx, extproxy.Config{
+			Kind: kind, Binary: opts.singBox,
+			ServerListen: serverAddr, ClientRemote: relay.LocalAddr(),
+			SOCKSListen: socksAddr, CertificatePath: certPath, KeyPath: keyPath,
+			Congestion: externalCongestion(opts.congestion), WorkDir: workDir,
+		})
+		if err != nil {
+			h.Close()
+			_ = os.RemoveAll(workDir)
+			return nil, err
+		}
+		h.closes = append(h.closes, pair.Close, func() { _ = os.RemoveAll(workDir) })
 	}
 	return h, nil
+}
+
+// externalCongestion maps this project's controller names onto the names the
+// third-party implementations use. Only the shared ones are meaningful; an
+// unknown name falls back to the implementation's own default so a comparison
+// never silently runs an unintended controller.
+func externalCongestion(name string) string {
+	switch name {
+	case "bbr", "bbr-tuic":
+		return "bbr"
+	case "reno":
+		return "new_reno"
+	default:
+		return "bbr"
+	}
 }
 
 // ----------------------------------------------------------------- origin ---
@@ -778,4 +836,40 @@ func selfSignedCertificate() (tls.Certificate, *x509.CertPool, error) {
 		return tls.Certificate{}, nil, errors.New("append benchmark certificate")
 	}
 	return certificate, roots, nil
+}
+
+// writeCertificateFiles emits a self-signed pair for a third-party
+// implementation, which needs its TLS material as files. The client trusts
+// exactly this certificate, so no verification bypass is involved.
+func writeCertificateFiles(dir string) (certPath, keyPath string, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", err
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "wanopt.test"},
+		DNSNames:     []string{"wanopt.test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return "", "", err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return "", "", err
+	}
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		return "", "", err
+	}
+	return certPath, keyPath, nil
 }
