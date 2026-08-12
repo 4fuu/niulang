@@ -275,7 +275,7 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	}
 	up, down := harness.relay.Stats()
 	if note == "" {
-		note = fmt.Sprintf("udp_up=%d/%d udp_down=%d/%d", up.PacketsOut, up.PacketsIn, down.PacketsOut, down.PacketsIn)
+		note = fmt.Sprintf("up=%d/%d down=%d/%d", up.PacketsOut, up.PacketsIn, down.PacketsOut, down.PacketsIn)
 	}
 	var interactive *InteractiveReport
 	if opts.interactive {
@@ -399,9 +399,17 @@ func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) error 
 
 // ---------------------------------------------------------------- harness ---
 
+// pathRelay is whichever emulator carries this stack: the UDP relay for
+// QUIC-based transports, the TCP relay for stream-based ones.
+type pathRelay interface {
+	LocalAddr() string
+	Stats() (pathsim.Stats, pathsim.Stats)
+	Close() error
+}
+
 type harness struct {
 	socks  string
-	relay  *pathsim.Relay
+	relay  pathRelay
 	closes []func()
 }
 
@@ -420,6 +428,12 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 	if opts.verbose {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
+	// A stream-based transport needs the TCP relay; everything else is carried
+	// by the UDP one.
+	if kind := extproxy.Kind(stack); kind.Transport() == "tcp" && stack != "baseline" && stack != "wanopt" {
+		return startTCPStack(ctx, kind, opts, pathCfg, logger)
+	}
+
 	serverPacket, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -872,4 +886,65 @@ func writeCertificateFiles(dir string) (certPath, keyPath string, err error) {
 		return "", "", err
 	}
 	return certPath, keyPath, nil
+}
+
+// startTCPStack runs a stream-based transport over the TCP relay. Loss is not
+// available there: a userspace relay carries a byte stream and cannot drop a
+// segment, so the caller is told rather than given a silently lossless result.
+func startTCPStack(ctx context.Context, kind extproxy.Kind, opts options, pathCfg pathsim.Config, logger *slog.Logger) (*harness, error) {
+	if opts.singBox == "" {
+		return nil, fmt.Errorf("stack %q requires --sing-box", kind)
+	}
+	if pathCfg.LossRate > 0 || pathCfg.UpstreamLossRate > 0 {
+		return nil, fmt.Errorf("stack %q is TCP based and cannot be measured under emulated loss; "+
+			"run it with --loss 0 and compare delay and bandwidth only", kind)
+	}
+	// Reserve a port for the external server, then release it so the external
+	// process can bind it itself.
+	serverProbe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	serverAddr := serverProbe.Addr().String()
+	_ = serverProbe.Close()
+
+	relay, err := pathsim.NewTCP("127.0.0.1:0", serverAddr, pathCfg)
+	if err != nil {
+		return nil, err
+	}
+	socksProbe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = relay.Close()
+		return nil, err
+	}
+	socksAddr := socksProbe.Addr().String()
+	_ = socksProbe.Close()
+
+	h := &harness{socks: socksAddr, relay: relay}
+	h.closes = append(h.closes, func() { _ = relay.Close() })
+
+	workDir, err := os.MkdirTemp("", "wanoptbench-"+string(kind)+"-")
+	if err != nil {
+		h.Close()
+		return nil, err
+	}
+	certPath, keyPath, err := writeCertificateFiles(workDir)
+	if err != nil {
+		h.Close()
+		_ = os.RemoveAll(workDir)
+		return nil, err
+	}
+	pair, err := extproxy.Start(ctx, extproxy.Config{
+		Kind: kind, Binary: opts.singBox,
+		ServerListen: serverAddr, ClientRemote: relay.LocalAddr(),
+		SOCKSListen: socksAddr, CertificatePath: certPath, KeyPath: keyPath,
+		WorkDir: workDir,
+	})
+	if err != nil {
+		h.Close()
+		_ = os.RemoveAll(workDir)
+		return nil, err
+	}
+	h.closes = append(h.closes, pair.Close, func() { _ = os.RemoveAll(workDir) })
+	return h, nil
 }

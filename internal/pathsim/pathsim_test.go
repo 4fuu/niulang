@@ -2,6 +2,7 @@ package pathsim
 
 import (
 	"bytes"
+	"io"
 	"math/rand"
 	"net"
 	"testing"
@@ -324,5 +325,125 @@ func TestNoJitterPreservesOrder(t *testing.T) {
 			t.Fatal("packets were reordered without jitter configured")
 		}
 		previous = arrival
+	}
+}
+
+// echoTCP is a TCP origin that echoes and can send a fixed volume on request.
+func echoTCP(t *testing.T, volume int) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				var request [1]byte
+				if _, err := conn.Read(request[:]); err != nil {
+					return
+				}
+				payload := make([]byte, 32*1024)
+				sent := 0
+				for sent < volume {
+					chunk := len(payload)
+					if remaining := volume - sent; remaining < chunk {
+						chunk = remaining
+					}
+					n, err := conn.Write(payload[:chunk])
+					if err != nil {
+						return
+					}
+					sent += n
+				}
+			}()
+		}
+	}()
+	return listener
+}
+
+// A bottleneck must not truncate a stream. Tail drop is meaningless for a byte
+// stream - discarding a chunk delivers a hole rather than triggering a
+// retransmission - and treating it as fatal ended transfers at exactly one
+// bandwidth-delay product.
+func TestTCPRelayDeliversMoreThanOneQueueOfData(t *testing.T) {
+	const volume = 4 << 20
+	origin := echoTCP(t, volume)
+	relay, err := NewTCP("127.0.0.1:0", origin.Addr().String(), Config{
+		OneWayDelay: 10 * time.Millisecond, RateBytesPerSec: 12500000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	conn, err := net.DialTimeout("tcp", relay.LocalAddr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if _, err := conn.Write([]byte{'g'}); err != nil {
+		t.Fatal(err)
+	}
+	received, err := io.Copy(io.Discard, io.LimitReader(conn, volume))
+	if err != nil {
+		t.Fatalf("after %d bytes: %v", received, err)
+	}
+	if received != volume {
+		t.Fatalf("received %d of %d bytes; a stream relay must apply backpressure, not drop", received, volume)
+	}
+}
+
+// Reading and delayed writing have to be separate stages. Holding a chunk
+// inline before reading the next makes the relay serial, capping throughput at
+// one buffer per one-way delay no matter what rate is configured.
+func TestTCPRelayPipelinesAcrossTheDelay(t *testing.T) {
+	const volume = 2 << 20
+	origin := echoTCP(t, volume)
+	// 40 ms one way with a 16 KiB read size would cap a serial relay near
+	// 3 Mbit/s; the configured bottleneck is far above that.
+	relay, err := NewTCP("127.0.0.1:0", origin.Addr().String(), Config{
+		OneWayDelay: 40 * time.Millisecond, RateBytesPerSec: 12500000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	conn, err := net.DialTimeout("tcp", relay.LocalAddr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if _, err := conn.Write([]byte{'g'}); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	received, err := io.Copy(io.Discard, io.LimitReader(conn, volume))
+	elapsed := time.Since(started)
+	if err != nil || received != volume {
+		t.Fatalf("received %d of %d bytes: %v", received, volume, err)
+	}
+	mbits := float64(volume) * 8 / elapsed.Seconds() / 1e6
+	if mbits < 20 {
+		t.Fatalf("throughput %.1f Mbit/s over a 100 Mbit/s bottleneck; the relay is not pipelining", mbits)
+	}
+}
+
+// Loss cannot be emulated for a stream relay, and silently ignoring the
+// request would produce a lossless result labelled as lossy.
+func TestTCPRelayRefusesLoss(t *testing.T) {
+	if _, err := NewTCP("127.0.0.1:0", "127.0.0.1:1", Config{LossRate: 0.1}); err == nil {
+		t.Fatal("a TCP relay accepted a loss rate it cannot apply")
+	}
+	if _, err := NewTCP("127.0.0.1:0", "127.0.0.1:1", Config{UpstreamLossRate: 0.1}); err == nil {
+		t.Fatal("a TCP relay accepted an upstream loss rate it cannot apply")
 	}
 }

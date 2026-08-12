@@ -161,6 +161,34 @@ func (d *direction) schedule(now time.Time, size int, cfg Config) (time.Time, bo
 	return arrival, true
 }
 
+// scheduleStream is the schedule a byte-stream relay needs: the same
+// serialization and propagation model, but it never drops.
+//
+// Tail drop is meaningless for a stream. Discarding a chunk delivers a hole
+// rather than triggering a retransmission, and treating the drop as fatal
+// truncates the transfer at exactly one queue's worth of data - which is how
+// this was found, with 4 MiB transfers ending at 1.25 MiB, the configured
+// bandwidth-delay product. A stream relay applies backpressure instead, by
+// bounding its own queue.
+func (d *direction) scheduleStream(now time.Time, size int, cfg Config) time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	start := now
+	if cfg.RateBytesPerSec > 0 {
+		if d.nextFree.After(start) {
+			start = d.nextFree
+		}
+		serialize := time.Duration(float64(size) / float64(cfg.RateBytesPerSec) * float64(time.Second))
+		d.nextFree = start.Add(serialize)
+		start = d.nextFree
+	}
+	arrival := start.Add(cfg.OneWayDelay)
+	if cfg.DelayJitter > 0 {
+		arrival = arrival.Add(time.Duration(d.rng.Int63n(int64(cfg.DelayJitter))))
+	}
+	return arrival
+}
+
 // dropLocked decides whether this packet is lost. With no burst length
 // configured it is one Bernoulli trial. Otherwise it is a two-state Gilbert
 // chain whose bad state drops everything: the mean bad run is
