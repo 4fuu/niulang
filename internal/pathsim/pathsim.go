@@ -25,6 +25,11 @@ type Config struct {
 	// OneWayDelay is added in each direction, so the emulated RTT is twice
 	// this value.
 	OneWayDelay time.Duration
+	// DelayJitter is the maximum extra delay added to a packet, drawn
+	// uniformly from [0, DelayJitter). Because the draw is per packet, this
+	// also produces reordering, which is what a real path does and which
+	// changes when a QUIC sender declares a packet lost.
+	DelayJitter time.Duration
 	// LossRate is the overall per-packet drop probability applied in each
 	// direction, in [0,1).
 	LossRate float64
@@ -149,7 +154,11 @@ func (d *direction) schedule(now time.Time, size int, cfg Config) (time.Time, bo
 		d.nextFree = start.Add(serialize)
 		start = d.nextFree
 	}
-	return start.Add(cfg.OneWayDelay), true
+	arrival := start.Add(cfg.OneWayDelay)
+	if cfg.DelayJitter > 0 {
+		arrival = arrival.Add(time.Duration(d.rng.Int63n(int64(cfg.DelayJitter))))
+	}
+	return arrival, true
 }
 
 // dropLocked decides whether this packet is lost. With no burst length

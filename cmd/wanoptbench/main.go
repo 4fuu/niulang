@@ -45,6 +45,7 @@ type options struct {
 	lossPercent  float64
 	lossBurst    float64
 	lossUp       float64
+	jitterMillis float64
 	rateMbits    float64
 	perFlowMbits float64
 	queueBytes   int
@@ -63,6 +64,9 @@ type options struct {
 	verbose      bool
 	latency      bool
 	interactive  bool
+	jsonOut      string
+	gate         bool
+	tolerance    float64
 }
 
 func main() {
@@ -80,6 +84,7 @@ func run(args []string) error {
 	fs.Float64Var(&opts.lossPercent, "loss", 0, "per-packet loss percentage in each direction")
 	fs.Float64Var(&opts.lossBurst, "loss-burst", 0, "mean loss burst length in packets (0 or 1 gives independent loss)")
 	fs.Float64Var(&opts.lossUp, "loss-up", 0, "client-to-server loss percentage, overriding --loss for that direction")
+	fs.Float64Var(&opts.jitterMillis, "jitter", 0, "maximum extra per-packet delay in milliseconds, which also reorders")
 	fs.Float64Var(&opts.rateMbits, "rate", 100, "bottleneck rate in Mbit/s in each direction (0 disables)")
 	fs.Float64Var(&opts.perFlowMbits, "per-flow-rate", 0, "per-source-address rate in Mbit/s, modelling per-flow policing (0 disables)")
 	fs.IntVar(&opts.queueBytes, "queue", 0, "bottleneck queue in bytes (0 selects one BDP)")
@@ -98,6 +103,9 @@ func run(args []string) error {
 	fs.BoolVar(&opts.verbose, "verbose", false, "log transport diagnostics")
 	fs.BoolVar(&opts.latency, "latency", false, "also measure small-request latency")
 	fs.BoolVar(&opts.interactive, "interactive", false, "issue small requests during the bulk transfer and report their latency")
+	fs.StringVar(&opts.jsonOut, "json", "", "also write the full result set to this path as JSON")
+	fs.BoolVar(&opts.gate, "gate", false, "exit non-zero when wanopt is worse than the reference beyond --tolerance")
+	fs.Float64Var(&opts.tolerance, "tolerance", 0.10, "fractional goodput shortfall allowed by --gate")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -126,6 +134,7 @@ func run(args []string) error {
 		LossRate:               opts.lossPercent / 100,
 		LossBurstPackets:       opts.lossBurst,
 		UpstreamLossRate:       opts.lossUp / 100,
+		DelayJitter:            time.Duration(opts.jitterMillis * float64(time.Millisecond)),
 		RateBytesPerSec:        uint64(opts.rateMbits * 1e6 / 8),
 		PerFlowRateBytesPerSec: uint64(opts.perFlowMbits * 1e6 / 8),
 		QueueBytes:             opts.queueBytes,
@@ -143,6 +152,7 @@ func run(args []string) error {
 		humanBytes(opts.bytes), opts.congestion, opts.lanes)
 	fmt.Printf("stack\tflows\ttrial\tseconds\tmbits_per_sec\tcomplete\tnote\n")
 
+	report := Report{Path: describePath(opts, pathCfg)}
 	for _, stack := range strings.Split(opts.stacks, ",") {
 		stack = strings.TrimSpace(stack)
 		if stack == "" {
@@ -155,13 +165,29 @@ func run(args []string) error {
 				result := measure(stack, opts, pathCfg, origin, flows, trial)
 				fmt.Printf("%s\t%d\t%d\t%.3f\t%.3f\t%d\t%s\n",
 					stack, flows, trial, result.seconds, result.mbitsPerSec, boolInt(result.complete), result.note)
+				report.Trials = append(report.Trials, TrialRecord{
+					Stack: stack, Flows: flows, Trial: trial,
+					Seconds: round3(result.seconds), MbitsPerSec: round3(result.mbitsPerSec),
+					Complete: result.complete, Note: result.note, Interactive: result.interactive,
+				})
 			}
 		}
 	}
+	report.Summary = summarize(report.Trials)
+	printSummary(report.Summary)
+
 	if opts.latency {
 		if err := measureLatency(opts, pathCfg, origin); err != nil {
 			return err
 		}
+	}
+	if opts.jsonOut != "" {
+		if err := writeReport(opts.jsonOut, report); err != nil {
+			return err
+		}
+	}
+	if opts.gate {
+		return gateReport(report.Summary, opts.tolerance)
 	}
 	return nil
 }
@@ -171,6 +197,7 @@ type trialResult struct {
 	mbitsPerSec float64
 	complete    bool
 	note        string
+	interactive *InteractiveReport
 }
 
 func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin, flows, trial int) trialResult {
@@ -246,7 +273,9 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	if note == "" {
 		note = fmt.Sprintf("udp_up=%d/%d udp_down=%d/%d", up.PacketsOut, up.PacketsIn, down.PacketsOut, down.PacketsIn)
 	}
+	var interactive *InteractiveReport
 	if opts.interactive {
+		interactive = summarizeProbeReport(probes)
 		note = summarizeProbes(probes) + " " + note
 	}
 	return trialResult{
@@ -254,6 +283,7 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 		mbitsPerSec: float64(total) * 8 / elapsed.Seconds() / 1e6,
 		complete:    complete,
 		note:        note,
+		interactive: interactive,
 	}
 }
 
@@ -277,6 +307,30 @@ func probeInteractive(ctx context.Context, socksAddr string, o *origin, stop <-c
 			return samples
 		}
 		samples = append(samples, stages)
+	}
+}
+
+// summarizeProbeReport is the structured form of summarizeProbes.
+func summarizeProbeReport(samples []requestStages) *InteractiveReport {
+	if len(samples) == 0 {
+		return nil
+	}
+	quantile := func(pick func(requestStages) time.Duration, q float64) float64 {
+		values := make([]time.Duration, len(samples))
+		for i, sample := range samples {
+			values[i] = pick(sample)
+		}
+		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+		return round3(float64(values[int(q*float64(len(values)-1))].Microseconds()) / 1000)
+	}
+	total := func(s requestStages) time.Duration { return s.Total }
+	return &InteractiveReport{
+		Samples:        len(samples),
+		P50Millis:      quantile(total, 0.5),
+		P95Millis:      quantile(total, 0.95),
+		MaxMillis:      quantile(total, 1),
+		ConnectP95:     quantile(func(s requestStages) time.Duration { return s.Connect }, 0.95),
+		FirstByteP95Ms: quantile(func(s requestStages) time.Duration { return s.FirstByte }, 0.95),
 	}
 }
 

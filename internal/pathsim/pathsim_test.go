@@ -285,3 +285,44 @@ func TestAsymmetricLossRateIsValidated(t *testing.T) {
 		t.Fatal("upstream loss rate of 1 was accepted")
 	}
 }
+
+func TestDelayJitterReordersPackets(t *testing.T) {
+	// Jitter is drawn per packet, so it reorders. Reordering changes when a
+	// QUIC sender declares a packet lost, which is exactly why the emulator
+	// should be able to produce it.
+	d := &direction{rng: rand.New(rand.NewSource(3))}
+	cfg := Config{OneWayDelay: 10 * time.Millisecond, DelayJitter: 20 * time.Millisecond}
+	now := time.Now()
+	var previous time.Time
+	reordered := 0
+	for i := range 200 {
+		arrival, ok := d.schedule(now.Add(time.Duration(i)*time.Millisecond), 1200, cfg)
+		if !ok {
+			t.Fatal("jitter must not drop packets")
+		}
+		if i > 0 && arrival.Before(previous) {
+			reordered++
+		}
+		previous = arrival
+	}
+	if reordered == 0 {
+		t.Fatal("jitter produced no reordering")
+	}
+}
+
+func TestNoJitterPreservesOrder(t *testing.T) {
+	d := &direction{rng: rand.New(rand.NewSource(3))}
+	cfg := Config{OneWayDelay: 10 * time.Millisecond}
+	now := time.Now()
+	var previous time.Time
+	for i := range 100 {
+		arrival, ok := d.schedule(now.Add(time.Duration(i)*time.Millisecond), 1200, cfg)
+		if !ok {
+			t.Fatal("an unimpaired path must not drop packets")
+		}
+		if i > 0 && arrival.Before(previous) {
+			t.Fatal("packets were reordered without jitter configured")
+		}
+		previous = arrival
+	}
+}
