@@ -29,6 +29,17 @@ latency, half-close, large uploads, and cancellation.
 Gate: bulk cannot cause the interactive RTT target to exceed the configured
 budget in controlled loss and bandwidth tests.
 
+Status: the gate now has a harness. `wanoptbench --interactive` issues small
+requests during a bulk transfer and reports their distribution, split into
+connect and first-byte time. At 200 ms and 1% loss with a 50 MiB transfer
+running, interactive requests measure a 206 ms median and 367 ms 95th
+percentile against the TUIC-shaped reference's 324 and 517; 206 ms is the idle
+round trip, so they no longer queue behind bulk at all. This is achieved by
+moving a classified bulk flow onto its own QUIC connection, and it holds only
+with `--quic-pool`, where a shared control connection exists. The gate has not
+been demonstrated on the live link, and the per-class queueing inside a lane is
+not what produced this result.
+
 ## Stage 3 — adaptive multipath lanes
 
 - Multiple authenticated QUIC connections.
@@ -38,6 +49,12 @@ budget in controlled loss and bandwidth tests.
 
 Gate: single-flow bulk improvement is demonstrated on at least three separate
 time windows without unacceptable interactive tail latency.
+
+Status: not met. Striping raises single-flow goodput only where the path
+polices per source address; on the emulated per-flow-policed path four lanes
+reach 67.2 Mbit/s against one lane's 22.5, but on a shared bottleneck extra
+lanes cannot help and are not expected to. No live campaign has demonstrated
+this across three windows.
 
 ## Stage 4 — automatic fallback and resumption
 
