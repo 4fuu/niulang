@@ -62,3 +62,59 @@ func TestReassemblerRejectsOverlap(t *testing.T) {
 		t.Fatal("expected overlap rejection")
 	}
 }
+
+func TestReceivedRangesMergesAndOrders(t *testing.T) {
+	r := NewReassembler(DefaultConfig())
+	// Deliberately out of order, with two adjacent segments that must merge.
+	for _, segment := range []Segment{
+		{Sequence: 300, Payload: []byte("ccc")},
+		{Sequence: 100, Payload: []byte("aa")},
+		{Sequence: 102, Payload: []byte("bb")},
+	} {
+		if _, _, err := r.Insert(segment); err != nil {
+			t.Fatalf("insert at %d: %v", segment.Sequence, err)
+		}
+	}
+	got := r.ReceivedRanges(8)
+	want := [][2]uint64{{100, 104}, {300, 303}}
+	if len(got) != len(want) {
+		t.Fatalf("ranges = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ranges = %v, want %v", got, want)
+		}
+	}
+}
+
+// A truncated report must describe the bytes closest to the contiguous point,
+// which are the ones the sender is most likely to still be holding.
+func TestReceivedRangesTruncatesFromTheLowest(t *testing.T) {
+	r := NewReassembler(DefaultConfig())
+	for i := range uint64(5) {
+		if _, _, err := r.Insert(Segment{Sequence: 100 + i*10, Payload: []byte("xx")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := r.ReceivedRanges(2)
+	if len(got) != 2 || got[0][0] != 100 || got[1][0] != 110 {
+		t.Fatalf("ranges = %v, want the two lowest", got)
+	}
+}
+
+func TestReceivedRangesIgnoresContiguousAndEmpty(t *testing.T) {
+	r := NewReassembler(DefaultConfig())
+	if got := r.ReceivedRanges(4); got != nil {
+		t.Fatalf("ranges = %v on an empty reassembler, want none", got)
+	}
+	// A segment delivered contiguously is not buffered, so it is not a range.
+	if _, _, err := r.Insert(Segment{Sequence: 0, Payload: []byte("abc")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.ReceivedRanges(4); got != nil {
+		t.Fatalf("ranges = %v after contiguous delivery, want none", got)
+	}
+	if got := r.ReceivedRanges(0); got != nil {
+		t.Fatalf("ranges = %v with a zero cap, want none", got)
+	}
+}

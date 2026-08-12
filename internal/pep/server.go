@@ -203,7 +203,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 		metrics:          cfg.Metrics,
 		replayBudget:     newReplayBudget(int64(cfg.ReplayMemoryBytes)),
-		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl | session.CapabilityFastLaneJoin,
+		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl | session.CapabilityFastLaneJoin | session.CapabilityAckRanges,
 	}
 	server.quicFastStreams.Store(true)
 	return server, nil
@@ -542,6 +542,10 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	defer destinationConn.Close()
 	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics, s.cfg.Logger)
 	flow.replayBudget = s.replayBudget
+	// The server consumes range acknowledgements from the client. It advertised
+	// the capability in HelloOK, so a client that sends them is one that read
+	// that advertisement.
+	flow.ackRanges.Store(true)
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0

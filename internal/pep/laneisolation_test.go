@@ -286,3 +286,93 @@ func flowRetained(f *multipathFlow) uint64 {
 	defer f.replayMu.Unlock()
 	return f.replayBytes
 }
+
+// Releasing frames the peer reports holding is what keeps a striped flow's
+// retention window proportional to the bytes actually outstanding rather than
+// to the whole reorder span.
+func TestRangeAcknowledgementReleasesRetainedFrames(t *testing.T) {
+	flow := newIsolationTestFlow(t, false)
+	payload := make([]byte, 1000)
+	for sequence := uint64(0); sequence < 5000; sequence += 1000 {
+		if err := flow.recordReplay(protocol.Frame{
+			Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Sequence: sequence},
+			Payload: payload,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := flowRetained(flow)
+
+	// The peer holds [2000,4000) out of order, above a cumulative point of 0.
+	flow.releaseAcknowledgedRanges([][2]uint64{{2000, 4000}})
+	if got := flowRetained(flow); got != before-2000 {
+		t.Fatalf("retained %d bytes, want %d after releasing two frames", got, before-2000)
+	}
+	flow.replayMu.Lock()
+	_, stillThere := flow.replay[2000]
+	_, partial := flow.replay[4000]
+	flow.replayMu.Unlock()
+	if stillThere {
+		t.Fatal("a fully covered frame was retained")
+	}
+	if !partial {
+		t.Fatal("a frame outside the reported range was released")
+	}
+}
+
+// A frame only partly covered by a reported range must still be replayable in
+// full, or a rescue would deliver a hole.
+func TestPartiallyCoveredFrameIsNotReleased(t *testing.T) {
+	flow := newIsolationTestFlow(t, false)
+	if err := flow.recordReplay(protocol.Frame{
+		Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Sequence: 0},
+		Payload: make([]byte, 1000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flow.releaseAcknowledgedRanges([][2]uint64{{0, 500}})
+	if got := flowRetained(flow); got != 1000 {
+		t.Fatalf("retained %d bytes, want the partly covered frame kept whole", got)
+	}
+}
+
+// A peer that never advertised the capability must never be sent ranges.
+func TestRangesAreNotSentToAPeerThatDidNotAdvertiseThem(t *testing.T) {
+	conn := newAckCaptureConn(0, nil)
+	flow := newAckTestFlow(conn)
+	flow.rangesMu.Lock()
+	flow.pendingRanges = [][2]uint64{{100, 200}}
+	flow.rangesMu.Unlock()
+
+	if err := flow.writeACK(context.Background(), 50, protocol.FlagAckDown, false); err != nil {
+		t.Fatal(err)
+	}
+	frame := waitAckFrame(t, conn)
+	if frame.Header.Flags&protocol.FlagAckRanges != 0 || len(frame.Payload) != 0 {
+		t.Fatalf("ranges were sent to a peer that did not advertise support: %+v", frame.Header)
+	}
+
+	flow.ackRanges.Store(true)
+	if err := flow.writeACK(context.Background(), 50, protocol.FlagAckDown, false); err != nil {
+		t.Fatal(err)
+	}
+	frame = waitAckFrame(t, conn)
+	if frame.Header.Flags&protocol.FlagAckRanges == 0 || len(frame.Payload) != protocol.AckRangeSize {
+		t.Fatalf("ranges were not sent to a capable peer: %+v", frame.Header)
+	}
+}
+
+// The snapshot is taken at insert time but the acknowledgement is coalesced and
+// sent later with a newer cumulative sequence. Ranges the cursor has passed are
+// not merely redundant: the peer rejects an ACK whose ranges start below its
+// cumulative point, which failed the flow outright.
+func TestStaleRangesAreDroppedAgainstTheCumulativePoint(t *testing.T) {
+	flow := newIsolationTestFlow(t, false)
+	flow.rangesMu.Lock()
+	flow.pendingRanges = [][2]uint64{{100, 200}, {300, 400}}
+	flow.rangesMu.Unlock()
+	got := flow.takeReceivedRanges(250)
+	if len(got) != 1 || got[0] != [2]uint64{300, 400} {
+		t.Fatalf("ranges = %v, want only those above the cumulative point", got)
+	}
+}

@@ -124,6 +124,9 @@ type Client struct {
 	// connection. A bulk flow only needs to move off it when another flow
 	// would otherwise queue behind its congestion window.
 	quicPoolActive atomic.Int64
+	// peerAckRanges records whether the server advertised that it can consume
+	// range acknowledgements.
+	peerAckRanges atomic.Bool
 
 	// bulkMu protects a bounded set of pre-authenticated secondary QUIC
 	// connections used only for fast lane joins. Keeping them separate from
@@ -385,6 +388,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	c.cfg.Logger.Debug("local flow opened", "transport", flow.kind, "duration", time.Since(flowOpenStarted))
 	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics, c.cfg.Logger)
 	flowSession.replayBudget = c.replayBudget
+	flowSession.ackRanges.Store(c.peerAcceptsAckRanges())
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
 	flowSession.openAckPending = flow.openPending
@@ -551,6 +555,7 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 	if err := helloOK.UnmarshalBinary(helloAck.Payload); err != nil {
 		return fail(fmt.Errorf("decode pipelined session acknowledgement: %w", err))
 	}
+	c.peerAckRanges.Store(helloOK.Capabilities&session.CapabilityAckRanges != 0)
 	openAck, err := lane.fc.Read()
 	if err != nil {
 		return fail(fmt.Errorf("read pipelined flow acknowledgement: %w", err))
@@ -882,6 +887,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 		c.quicPoolFast = ok.Capabilities&session.CapabilityFastStreams != 0
 		c.quicPoolControl = ok.Capabilities&session.CapabilityReserveControl != 0
 		c.quicPoolAuthenticated = true
+		c.peerAckRanges.Store(ok.Capabilities&session.CapabilityAckRanges != 0)
 		_ = outer.SetDeadline(time.Time{})
 		return outer, false, true, c.quicPoolControl, nil, nil
 	}
@@ -904,7 +910,17 @@ func (c *Client) publishPoolCapabilities(conn *quic.Conn, ok session.HelloOK) {
 	c.quicPoolFast = ok.Capabilities&session.CapabilityFastStreams != 0
 	c.quicPoolControl = ok.Capabilities&session.CapabilityReserveControl != 0
 	c.quicPoolAuthenticated = true
+	c.peerAckRanges.Store(ok.Capabilities&session.CapabilityAckRanges != 0)
 }
+
+// peerAcceptsAckRanges reports whether the server advertised that it can
+// consume byte ranges alongside the cumulative acknowledgement. A peer that
+// did not say so must never be sent them.
+//
+// A flow opened before the first HELLO_OK arrives starts without them and does
+// not retrofit: the capability is per flow, and the only cost of being late is
+// that one early flow keeps the cumulative-only behavior.
+func (c *Client) peerAcceptsAckRanges() bool { return c.peerAckRanges.Load() }
 
 func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID [16]byte, flowID, laneID uint64) (*mpLane, error) {
 	if kind != TransportQUIC && kind != TransportTCP {

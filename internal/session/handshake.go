@@ -38,6 +38,11 @@ const (
 	// attach a stream to an existing logical flow without repeating a full
 	// QUIC handshake for every bulk lane.
 	CapabilityFastLaneJoin uint64 = 1 << 2
+	// CapabilityAckRanges allows a receiver to report byte ranges it already
+	// holds out of order alongside the cumulative acknowledgement. It is
+	// advertised by the side that would *consume* those reports, because a
+	// peer that cannot parse them must never be sent them.
+	CapabilityAckRanges uint64 = 1 << 3
 )
 
 var helloOKCapabilityMarker = [8]byte{'W', 'O', 'C', 'A', 'P', '0', '0', '1'}

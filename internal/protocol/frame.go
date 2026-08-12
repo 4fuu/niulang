@@ -36,7 +36,15 @@ const (
 	// FlagLaneJoin is valid only on OPEN_JOIN_FAST. The lane identifier is
 	// carried in the bounded payload after the authenticated session/flow ID.
 	FlagLaneJoin uint16 = 1 << 6
-	knownFlags          = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl | FlagLaneJoin
+	// FlagAckRanges is valid only on ACK. The payload carries byte ranges the
+	// receiver already holds out of order, beyond the cumulative sequence.
+	//
+	// A striped flow's sender otherwise learns only the contiguous receive
+	// point, which sits behind whatever the slowest lane has not delivered, so
+	// its retention window has to cover the whole reorder span. It is
+	// capability-gated: a peer that does not advertise support never sees it.
+	FlagAckRanges uint16 = 1 << 7
+	knownFlags           = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl | FlagLaneJoin | FlagAckRanges
 )
 
 type Type byte
@@ -102,11 +110,66 @@ func laneJoinFlagValid(t Type, flags uint16) bool {
 	return flags&FlagLaneJoin == 0 || t == TypeOpenJoinFast
 }
 
+func ackRangesFlagValid(t Type, flags uint16) bool {
+	return flags&FlagAckRanges == 0 || t == TypeAck
+}
+
+// MaxAckRanges bounds one acknowledgement's range list, so a peer cannot make
+// the receiver allocate or the sender iterate without limit.
+const MaxAckRanges = 16
+
+// AckRangeSize is the encoded width of one range: two big-endian uint64s.
+const AckRangeSize = 16
+
+// EncodeAckRanges serializes received byte ranges for an ACK payload.
+func EncodeAckRanges(ranges [][2]uint64) ([]byte, error) {
+	if len(ranges) > MaxAckRanges {
+		return nil, fmt.Errorf("acknowledgement carries %d ranges, limit is %d", len(ranges), MaxAckRanges)
+	}
+	payload := make([]byte, 0, len(ranges)*AckRangeSize)
+	for _, r := range ranges {
+		if r[0] >= r[1] {
+			return nil, errors.New("acknowledgement range is empty or inverted")
+		}
+		payload = binary.BigEndian.AppendUint64(payload, r[0])
+		payload = binary.BigEndian.AppendUint64(payload, r[1])
+	}
+	return payload, nil
+}
+
+// DecodeAckRanges parses an ACK payload. Ranges must be non-empty, strictly
+// increasing, and disjoint: a peer that sends overlapping or unordered ranges
+// is either broken or trying to make the sender release bytes it should retain.
+func DecodeAckRanges(payload []byte, cumulative uint64) ([][2]uint64, error) {
+	if len(payload)%AckRangeSize != 0 {
+		return nil, errors.New("acknowledgement range payload is misaligned")
+	}
+	count := len(payload) / AckRangeSize
+	if count > MaxAckRanges {
+		return nil, fmt.Errorf("acknowledgement carries %d ranges, limit is %d", count, MaxAckRanges)
+	}
+	ranges := make([][2]uint64, 0, count)
+	previousEnd := cumulative
+	for i := range count {
+		start := binary.BigEndian.Uint64(payload[i*AckRangeSize:])
+		end := binary.BigEndian.Uint64(payload[i*AckRangeSize+8:])
+		if start >= end {
+			return nil, errors.New("acknowledgement range is empty or inverted")
+		}
+		if start < previousEnd {
+			return nil, errors.New("acknowledgement ranges overlap or are unordered")
+		}
+		previousEnd = end
+		ranges = append(ranges, [2]uint64{start, end})
+	}
+	return ranges, nil
+}
+
 func (h Header) Encode(dst []byte) error {
 	if len(dst) < HeaderSize {
 		return io.ErrShortBuffer
 	}
-	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk || h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !laneJoinFlagValid(h.Type, h.Flags) {
+	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk || h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !laneJoinFlagValid(h.Type, h.Flags) || !ackRangesFlagValid(h.Type, h.Flags) {
 		return errors.New("invalid frame header")
 	}
 	if uint64(h.PayloadLen) > DefaultMaxPayload {
@@ -130,7 +193,7 @@ func (h Header) Validate(maxPayload uint32) error {
 	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk {
 		return errors.New("invalid frame header")
 	}
-	if h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !laneJoinFlagValid(h.Type, h.Flags) {
+	if h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !laneJoinFlagValid(h.Type, h.Flags) || !ackRangesFlagValid(h.Type, h.Flags) {
 		return errors.New("unknown frame flags")
 	}
 	if maxPayload == 0 || maxPayload > DefaultMaxPayload {

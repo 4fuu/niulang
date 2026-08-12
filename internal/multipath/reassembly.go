@@ -145,3 +145,47 @@ func (r *Reassembler) BufferedSequences() []uint64 {
 	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
 	return sequences
 }
+
+// ReceivedRanges reports the byte ranges held out of order, merged and sorted,
+// capped at max entries.
+//
+// A striped flow's sender otherwise learns only the contiguous receive point,
+// which sits behind whatever the slowest lane has not delivered. Its retention
+// window then has to cover the whole reorder span rather than the bytes
+// actually outstanding. Reporting what the receiver already holds lets the
+// sender release those frames, which is what keeps the window proportional to
+// the data in flight.
+//
+// Ranges are returned lowest first so a truncated report still describes the
+// bytes closest to the contiguous point, which are the ones the sender is most
+// likely to still be holding.
+func (r *Reassembler) ReceivedRanges(max int) [][2]uint64 {
+	if max <= 0 || len(r.buffer) == 0 {
+		return nil
+	}
+	starts := make([]uint64, 0, len(r.buffer))
+	for sequence := range r.buffer {
+		starts = append(starts, sequence)
+	}
+	sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
+
+	ranges := make([][2]uint64, 0, len(starts))
+	for _, start := range starts {
+		segment := r.buffer[start]
+		end := start + uint64(len(segment.Payload))
+		if segment.Final {
+			// A buffered FIN covers no bytes; reporting it would tell the
+			// sender a zero-length range it cannot act on.
+			continue
+		}
+		if last := len(ranges) - 1; last >= 0 && ranges[last][1] == start {
+			ranges[last][1] = end
+			continue
+		}
+		ranges = append(ranges, [2]uint64{start, end})
+	}
+	if len(ranges) > max {
+		ranges = ranges[:max]
+	}
+	return ranges
+}

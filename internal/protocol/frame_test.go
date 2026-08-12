@@ -113,3 +113,79 @@ func TestReserveControlFlagIsScopedToOpen(t *testing.T) {
 		t.Fatal("DATA unexpectedly accepted reserve-control flag")
 	}
 }
+
+func TestAckRangesRoundTrip(t *testing.T) {
+	ranges := [][2]uint64{{100, 200}, {300, 400}}
+	payload, err := EncodeAckRanges(ranges)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeAckRanges(payload, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != len(ranges) || decoded[0] != ranges[0] || decoded[1] != ranges[1] {
+		t.Fatalf("decoded %v, want %v", decoded, ranges)
+	}
+}
+
+// A peer that reports overlapping, unordered, empty, or below-cumulative
+// ranges is either broken or trying to make the sender release bytes it must
+// keep, which would turn a lane failure into silent corruption.
+func TestAckRangesRejectMalformedInput(t *testing.T) {
+	valid, err := EncodeAckRanges([][2]uint64{{100, 200}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		payload    []byte
+		cumulative uint64
+	}{
+		"misaligned":       {append(append([]byte(nil), valid...), 0x01), 0},
+		"below cumulative": {valid, 150},
+	} {
+		if _, err := DecodeAckRanges(test.payload, test.cumulative); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+	overlapping, err := EncodeAckRanges([][2]uint64{{100, 200}, {150, 300}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAckRanges(overlapping, 0); err == nil {
+		t.Fatal("overlapping ranges were accepted")
+	}
+	unordered, err := EncodeAckRanges([][2]uint64{{300, 400}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unordered = append(unordered, make([]byte, AckRangeSize)...)
+	if _, err := DecodeAckRanges(unordered, 0); err == nil {
+		t.Fatal("an empty trailing range was accepted")
+	}
+	if _, err := EncodeAckRanges([][2]uint64{{200, 100}}); err == nil {
+		t.Fatal("an inverted range was encoded")
+	}
+	tooMany := make([][2]uint64, MaxAckRanges+1)
+	for i := range tooMany {
+		tooMany[i] = [2]uint64{uint64(i) * 10, uint64(i)*10 + 5}
+	}
+	if _, err := EncodeAckRanges(tooMany); err == nil {
+		t.Fatal("an unbounded range list was encoded")
+	}
+}
+
+// The flag is meaningful only on an acknowledgement; allowing it elsewhere
+// would let a peer attach an unvalidated payload to any frame type.
+func TestAckRangesFlagIsRejectedOnOtherFrameTypes(t *testing.T) {
+	var raw [HeaderSize]byte
+	header := Header{Version: Version, Type: TypeData, Flags: FlagAckRanges}
+	if err := header.Encode(raw[:]); err == nil {
+		t.Fatal("the range flag was accepted on a data frame")
+	}
+	header.Type = TypeAck
+	header.Flags = FlagAckRanges | FlagAckDown
+	if err := header.Encode(raw[:]); err != nil {
+		t.Fatalf("the range flag was rejected on an acknowledgement: %v", err)
+	}
+}

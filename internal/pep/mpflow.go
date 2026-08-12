@@ -241,19 +241,28 @@ type multipathFlow struct {
 	// round trip for it. onHelloOK publishes the negotiated capabilities.
 	helloAckPending bool
 	onHelloOK       func(session.HelloOK)
-	ackSequence     atomic.Uint64
-	ackClosing      atomic.Bool
-	lastPayload     atomic.Int64
-	lastActivity    atomic.Int64
-	closeOnce       sync.Once
-	doneOnce        sync.Once
-	finished        atomic.Bool
-	nextJoinID      uint64
-	telemetryID     uint64
-	baselineRTTNS   atomic.Int64
-	currentRTTNS    atomic.Int64
-	idleTimeout     time.Duration
-	maxLifetime     time.Duration
+	// ackRanges is set when the peer advertised that it can consume byte
+	// ranges alongside the cumulative acknowledgement. It is only useful to a
+	// striped flow, and must never be assumed of a peer that did not say so.
+	ackRanges atomic.Bool
+	// receivedRanges publishes what the reassembler currently holds out of
+	// order, so the acknowledgement loop can report it without touching the
+	// reassembler from another goroutine.
+	rangesMu      sync.Mutex
+	pendingRanges [][2]uint64
+	ackSequence   atomic.Uint64
+	ackClosing    atomic.Bool
+	lastPayload   atomic.Int64
+	lastActivity  atomic.Int64
+	closeOnce     sync.Once
+	doneOnce      sync.Once
+	finished      atomic.Bool
+	nextJoinID    uint64
+	telemetryID   uint64
+	baselineRTTNS atomic.Int64
+	currentRTTNS  atomic.Int64
+	idleTimeout   time.Duration
+	maxLifetime   time.Duration
 
 	replayStalls    atomic.Uint64
 	replayStalled   atomic.Int64
@@ -1675,11 +1684,20 @@ func (f *multipathFlow) writeACK(ctx context.Context, sequence uint64, direction
 	if final {
 		flags |= protocol.FlagAckFinal
 	}
+	var payload []byte
+	// A final acknowledgement proves everything arrived, so ranges would add
+	// nothing; and a peer that did not advertise support must never see them.
+	if !final && f.ackRanges.Load() {
+		if encoded, err := protocol.EncodeAckRanges(f.takeReceivedRanges(sequence)); err == nil && len(encoded) > 0 {
+			payload = encoded
+			flags |= protocol.FlagAckRanges
+		}
+	}
 	frame := protocol.Frame{Header: protocol.Header{
 		Version: protocol.Version, Type: protocol.TypeAck, Flags: flags,
 		SessionID: f.sessionID, FlowID: f.flowID, Sequence: sequence,
 		Class: protocol.Class(f.class.Load()),
-	}}
+	}, Payload: payload}
 	// ACKs are cumulative and their state is replayable.  Do not wait for the
 	// full lane-replacement timeout when every current lane rejects one: the
 	// flow coordinator must observe the failure immediately so a replacement
@@ -1884,6 +1902,10 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					return fmt.Errorf("decode session acknowledgement: %w", err)
 				}
 				f.helloAckPending = false
+				// The peer's capabilities arrive after this flow started, so
+				// adopt the range acknowledgement setting now rather than
+				// leaving this flow on cumulative-only behavior.
+				f.ackRanges.Store(helloOK.Capabilities&session.CapabilityAckRanges != 0)
 				if f.onHelloOK != nil {
 					f.onHelloOK(helloOK)
 				}
@@ -1914,6 +1936,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					f.observe(len(out), false)
 					f.bytesDown.Add(uint64(len(out)))
 					if next := reassembler.NextSequence(); next > lastAckSequence {
+						f.publishReceivedRanges(reassembler)
 						f.scheduleACK(next)
 						lastAckSequence = next
 					}
@@ -1989,6 +2012,13 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				if frame.Header.Flags&protocol.FlagAckFinal == 0 {
 					if err := f.acknowledgeReplay(frame.Header.Sequence, false); err != nil {
 						return err
+					}
+					if frame.Header.Flags&protocol.FlagAckRanges != 0 {
+						ranges, err := protocol.DecodeAckRanges(frame.Payload, frame.Header.Sequence)
+						if err != nil {
+							return fmt.Errorf("acknowledgement ranges: %w", err)
+						}
+						f.releaseAcknowledgedRanges(ranges)
 					}
 					continue
 				}
@@ -2179,4 +2209,70 @@ func (f *multipathFlow) replayComplete() bool {
 	f.replayMu.Lock()
 	defer f.replayMu.Unlock()
 	return f.acked >= f.replayEvictedThrough
+}
+
+// publishReceivedRanges snapshots what the reassembler holds out of order.
+// The acknowledgement loop runs on its own goroutine and must not touch the
+// reassembler, which belongs to the receive loop.
+func (f *multipathFlow) publishReceivedRanges(reassembler *multipath.Reassembler) {
+	if !f.ackRanges.Load() {
+		return
+	}
+	ranges := reassembler.ReceivedRanges(protocol.MaxAckRanges)
+	f.rangesMu.Lock()
+	f.pendingRanges = ranges
+	f.rangesMu.Unlock()
+}
+
+// takeReceivedRanges returns the published ranges that are still above the
+// cumulative point this acknowledgement carries.
+//
+// The snapshot is taken when a segment is inserted, but the acknowledgement is
+// coalesced and sent later with a newer cumulative sequence. Ranges the cursor
+// has since passed are not merely redundant: the peer rejects an ACK whose
+// ranges start below its cumulative point, which failed the flow outright.
+func (f *multipathFlow) takeReceivedRanges(cumulative uint64) [][2]uint64 {
+	f.rangesMu.Lock()
+	defer f.rangesMu.Unlock()
+	fresh := f.pendingRanges[:0]
+	for _, r := range f.pendingRanges {
+		if r[0] >= cumulative {
+			fresh = append(fresh, r)
+		}
+	}
+	f.pendingRanges = fresh
+	return fresh
+}
+
+// releaseAcknowledgedRanges drops retained frames the peer has reported
+// holding, even though they sit above the cumulative point.
+//
+// This is what keeps a striped flow's retention window proportional to the
+// bytes actually outstanding rather than to the whole reorder span. A frame is
+// released only when a reported range covers it completely; a partially
+// covered frame still has to be replayable in full.
+func (f *multipathFlow) releaseAcknowledgedRanges(ranges [][2]uint64) {
+	if len(ranges) == 0 {
+		return
+	}
+	f.replayMu.Lock()
+	for start, frame := range f.replay {
+		if frame.Header.Type != protocol.TypeData {
+			continue
+		}
+		end := start + uint64(len(frame.Payload))
+		for _, r := range ranges {
+			if r[0] <= start && end <= r[1] {
+				delete(f.replay, start)
+				f.replayBytes -= uint64(len(frame.Payload))
+				break
+			}
+		}
+	}
+	f.pruneReplayOrderLocked()
+	f.replayMu.Unlock()
+	select {
+	case f.replayNotify <- struct{}{}:
+	default:
+	}
 }
