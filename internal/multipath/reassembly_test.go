@@ -118,3 +118,78 @@ func TestReceivedRangesIgnoresContiguousAndEmpty(t *testing.T) {
 		t.Fatalf("ranges = %v with a zero cap, want none", got)
 	}
 }
+
+// Scanning the whole buffer on every insert makes a transfer quadratic in the
+// number of buffered segments. That is invisible on one lane, where almost
+// nothing is buffered, and throttles the receiver exactly when striping makes
+// the reorder span large.
+func BenchmarkInsertIntoLargeReorderBuffer(b *testing.B) {
+	const buffered = 4000
+	for range b.N {
+		r := NewReassembler(Config{MaxBufferedBytes: 64 << 20, MaxBufferedFrames: buffered + 16})
+		// Leave a hole at zero so nothing is ever delivered contiguously and
+		// the buffer keeps growing.
+		for i := uint64(1); i <= buffered; i++ {
+			if _, _, err := r.Insert(Segment{Sequence: i * 100, Payload: make([]byte, 100)}); err != nil {
+				b.Fatalf("insert %d: %v", i, err)
+			}
+		}
+	}
+}
+
+// The neighbour check must still reject every overlap the full scan did.
+func TestOverlapDetectionAfterIndexing(t *testing.T) {
+	r := NewReassembler(DefaultConfig())
+	for _, sequence := range []uint64{100, 300, 500} {
+		if _, _, err := r.Insert(Segment{Sequence: sequence, Payload: make([]byte, 50)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, segment := range map[string]Segment{
+		"starts inside an existing segment": {Sequence: 120, Payload: make([]byte, 10)},
+		"ends inside an existing segment":   {Sequence: 280, Payload: make([]byte, 40)},
+		"spans an existing segment":         {Sequence: 90, Payload: make([]byte, 100)},
+		"duplicate start with new length":   {Sequence: 300, Payload: make([]byte, 10)},
+	} {
+		if _, _, err := r.Insert(segment); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+	// A segment in a genuine gap is still accepted.
+	if _, _, err := r.Insert(Segment{Sequence: 200, Payload: make([]byte, 50)}); err != nil {
+		t.Fatalf("a non-overlapping segment was rejected: %v", err)
+	}
+	got := r.BufferedSequences()
+	want := []uint64{100, 200, 300, 500}
+	if len(got) != len(want) {
+		t.Fatalf("buffered %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("buffered %v, want %v", got, want)
+		}
+	}
+}
+
+// The index has to shrink as segments are consumed, or it would report
+// sequences that are no longer buffered and grow without bound.
+func TestOrderIndexShrinksOnDelivery(t *testing.T) {
+	r := NewReassembler(DefaultConfig())
+	if _, _, err := r.Insert(Segment{Sequence: 100, Payload: []byte("bbbb")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.Insert(Segment{Sequence: 200, Payload: []byte("cccc")}); err != nil {
+		t.Fatal(err)
+	}
+	// Filling the hole delivers the first two segments contiguously.
+	out, _, err := r.Insert(Segment{Sequence: 0, Payload: make([]byte, 100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 104 {
+		t.Fatalf("delivered %d bytes, want the gap plus the first buffered segment", len(out))
+	}
+	if got := r.BufferedSequences(); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("buffered %v, want only the still-unreachable segment", got)
+	}
+}

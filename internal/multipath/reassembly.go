@@ -31,9 +31,18 @@ type Segment struct {
 }
 
 type Reassembler struct {
-	cfg     Config
-	next    uint64
-	buffer  map[uint64]Segment
+	cfg    Config
+	next   uint64
+	buffer map[uint64]Segment
+	// order holds the buffered start sequences, sorted. Buffered segments are
+	// disjoint by construction, so an overlap check only has to look at the
+	// two neighbours of an insertion point.
+	//
+	// Scanning the whole buffer instead makes Insert cost O(n) and a transfer
+	// O(n squared) in the number of buffered segments. That is invisible on
+	// one lane, where almost nothing is buffered, and throttles the receiver
+	// exactly when striping makes the reorder span large.
+	order   []uint64
 	bytes   uint64
 	finalAt *uint64
 }
@@ -81,17 +90,8 @@ func (r *Reassembler) Insert(segment Segment) ([]byte, bool, error) {
 		}
 		return nil, false, errors.New("conflicting duplicate segment")
 	}
-	for _, existing := range r.buffer {
-		existingEnd := existing.Sequence + uint64(len(existing.Payload))
-		if existing.Final {
-			existingEnd = existing.Sequence
-		}
-		if segment.Sequence < existingEnd && existing.Sequence < end {
-			return nil, false, errors.New("overlapping reassembly segments")
-		}
-		if segment.Final && existing.Sequence == segment.Sequence {
-			return nil, false, errors.New("FIN conflicts with buffered segment")
-		}
+	if err := r.checkNeighbours(segment, end); err != nil {
+		return nil, false, err
 	}
 	if segment.Sequence != r.next {
 		if uint64(len(r.buffer))+1 > uint64(r.cfg.MaxBufferedFrames) || r.bytes+uint64(len(segment.Payload)) > r.cfg.MaxBufferedBytes {
@@ -99,6 +99,7 @@ func (r *Reassembler) Insert(segment Segment) ([]byte, bool, error) {
 		}
 		segment.Payload = append([]byte(nil), segment.Payload...)
 		r.buffer[segment.Sequence] = segment
+		r.insertOrder(segment.Sequence)
 		r.bytes += uint64(len(segment.Payload))
 		if segment.Final {
 			at := segment.Sequence
@@ -125,6 +126,7 @@ func (r *Reassembler) consumeContiguous(first Segment) ([]byte, bool, error) {
 		r.next += uint64(len(current.Payload))
 		if next, ok := r.buffer[r.next]; ok {
 			delete(r.buffer, r.next)
+			r.removeOrder(r.next)
 			r.bytes -= uint64(len(next.Payload))
 			current = next
 			continue
@@ -138,12 +140,48 @@ func (r *Reassembler) consumeContiguous(first Segment) ([]byte, bool, error) {
 
 // BufferedSequences is intended for diagnostics and deterministic tests.
 func (r *Reassembler) BufferedSequences() []uint64 {
-	sequences := make([]uint64, 0, len(r.buffer))
-	for sequence := range r.buffer {
-		sequences = append(sequences, sequence)
+	return append([]uint64(nil), r.order...)
+}
+
+// checkNeighbours rejects a segment that overlaps one already buffered.
+// Buffered segments are disjoint, so only the neighbours of the insertion
+// point can overlap.
+func (r *Reassembler) checkNeighbours(segment Segment, end uint64) error {
+	at := sort.Search(len(r.order), func(i int) bool { return r.order[i] >= segment.Sequence })
+	if at > 0 {
+		previous := r.buffer[r.order[at-1]]
+		previousEnd := previous.Sequence + uint64(len(previous.Payload))
+		if previous.Final {
+			previousEnd = previous.Sequence
+		}
+		if segment.Sequence < previousEnd {
+			return errors.New("overlapping reassembly segments")
+		}
 	}
-	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
-	return sequences
+	if at < len(r.order) {
+		next := r.buffer[r.order[at]]
+		if next.Sequence < end {
+			return errors.New("overlapping reassembly segments")
+		}
+		if segment.Final && next.Sequence == segment.Sequence {
+			return errors.New("FIN conflicts with buffered segment")
+		}
+	}
+	return nil
+}
+
+func (r *Reassembler) insertOrder(sequence uint64) {
+	at := sort.Search(len(r.order), func(i int) bool { return r.order[i] >= sequence })
+	r.order = append(r.order, 0)
+	copy(r.order[at+1:], r.order[at:])
+	r.order[at] = sequence
+}
+
+func (r *Reassembler) removeOrder(sequence uint64) {
+	at := sort.Search(len(r.order), func(i int) bool { return r.order[i] >= sequence })
+	if at < len(r.order) && r.order[at] == sequence {
+		r.order = append(r.order[:at], r.order[at+1:]...)
+	}
 }
 
 // ReceivedRanges reports the byte ranges held out of order, merged and sorted,
@@ -163,14 +201,8 @@ func (r *Reassembler) ReceivedRanges(max int) [][2]uint64 {
 	if max <= 0 || len(r.buffer) == 0 {
 		return nil
 	}
-	starts := make([]uint64, 0, len(r.buffer))
-	for sequence := range r.buffer {
-		starts = append(starts, sequence)
-	}
-	sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
-
-	ranges := make([][2]uint64, 0, len(starts))
-	for _, start := range starts {
+	ranges := make([][2]uint64, 0, len(r.order))
+	for _, start := range r.order {
 		segment := r.buffer[start]
 		end := start + uint64(len(segment.Payload))
 		if segment.Final {
