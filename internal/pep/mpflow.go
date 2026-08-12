@@ -262,8 +262,13 @@ type multipathFlow struct {
 	// which the flow can no longer be moved onto a replacement lane.
 	replayable atomic.Bool
 
-	replayMu     sync.Mutex
-	replay       map[uint64]protocol.Frame
+	replayMu sync.Mutex
+	replay   map[uint64]protocol.Frame
+	// replayOrder is the retention FIFO. Data frames are recorded in
+	// increasing sequence order, so its front is always the oldest retained
+	// frame; entries whose frame has already been acknowledged are skipped
+	// when popped rather than removed eagerly.
+	replayOrder  []uint64
 	replayNotify chan struct{}
 	replayBytes  uint64
 	// replayLimit is this flow's current send window. It starts at the
@@ -1388,6 +1393,7 @@ func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.
 		if len(f.replay)+1 <= maxReplayFrames && f.replayBytes+uint64(len(frame.Payload)) <= f.replayLimit {
 			frame.Payload = append([]byte(nil), frame.Payload...)
 			f.replay[frame.Header.Sequence] = frame
+			f.replayOrder = append(f.replayOrder, frame.Header.Sequence)
 			f.replayBytes += uint64(len(frame.Payload))
 			end := frame.Header.Sequence + uint64(len(frame.Payload))
 			if end > f.highestSent {
@@ -1420,18 +1426,26 @@ func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.
 
 // evictOldestReplayLocked frees at least needed bytes by discarding the
 // lowest-sequence retained frames. It must be called with replayMu held.
+//
+// Eviction runs once per frame while the window is full, which is exactly when
+// the path is already struggling, so it must not be expensive. replayOrder is
+// a FIFO of retained sequences: data frames are recorded in increasing
+// sequence order, so the oldest is always at its front and eviction is
+// amortized constant time. Sorting the whole window on every frame instead
+// would put an O(n log n) cost on the hot path under loss.
 func (f *multipathFlow) evictOldestReplayLocked(needed uint64) {
-	sequences := make([]uint64, 0, len(f.replay))
-	for sequence := range f.replay {
-		sequences = append(sequences, sequence)
-	}
-	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
 	freed := uint64(0)
-	for _, sequence := range sequences {
+	for len(f.replayOrder) > 0 {
 		if freed >= needed && len(f.replay)+1 <= maxReplayFrames {
-			break
+			return
 		}
-		entry := f.replay[sequence]
+		sequence := f.replayOrder[0]
+		f.replayOrder = f.replayOrder[1:]
+		entry, retained := f.replay[sequence]
+		if !retained {
+			// Already released by an acknowledgement.
+			continue
+		}
 		delete(f.replay, sequence)
 		f.replayBytes -= uint64(len(entry.Payload))
 		freed += uint64(len(entry.Payload))
@@ -1465,12 +1479,40 @@ func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) error {
 			delete(f.replay, start)
 		}
 	}
+	f.pruneReplayOrderLocked()
 	f.replayMu.Unlock()
 	select {
 	case f.replayNotify <- struct{}{}:
 	default:
 	}
 	return nil
+}
+
+// pruneReplayOrderLocked drops leading entries whose frame has already been
+// released. Without it the retention FIFO would grow by one entry per frame
+// for the life of a flow even when nothing is ever evicted, which on a
+// long-lived bulk transfer is millions of entries. It must be called with
+// replayMu held.
+func (f *multipathFlow) pruneReplayOrderLocked() {
+	pruned := 0
+	for pruned < len(f.replayOrder) {
+		if _, retained := f.replay[f.replayOrder[pruned]]; retained {
+			break
+		}
+		pruned++
+	}
+	if pruned == 0 {
+		return
+	}
+	f.replayOrder = f.replayOrder[pruned:]
+	// Re-slicing alone leaves the released prefix reachable through the
+	// backing array. Compact once the dead prefix dominates, so a long flow
+	// cannot pin an ever-growing allocation.
+	if cap(f.replayOrder) > 64 && len(f.replayOrder)*2 < cap(f.replayOrder) {
+		compacted := make([]uint64, len(f.replayOrder))
+		copy(compacted, f.replayOrder)
+		f.replayOrder = compacted
+	}
 }
 
 func (f *multipathFlow) replayPending(ctx context.Context) error {

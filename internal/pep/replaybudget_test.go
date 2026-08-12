@@ -166,3 +166,42 @@ func TestEvictedFlowStartsReplayable(t *testing.T) {
 		t.Fatal("a new flow must start replayable")
 	}
 }
+
+// The retention FIFO must not grow by one entry per frame for the life of a
+// flow. On a long-lived bulk transfer that is millions of entries retained for
+// frames that were acknowledged and released long ago.
+func TestReplayOrderDoesNotGrowWithAcknowledgedFrames(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer inner.Close()
+	defer peer.Close()
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 1, defaultChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
+
+	payload := make([]byte, 1024)
+	var sequence uint64
+	for range 2000 {
+		frame := protocol.Frame{
+			Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Sequence: sequence},
+			Payload: payload,
+		}
+		if err := flow.recordReplay(frame); err != nil {
+			t.Fatalf("record at %d: %v", sequence, err)
+		}
+		sequence += uint64(len(payload))
+		// Acknowledge everything immediately, as a healthy path would.
+		if err := flow.acknowledgeReplay(sequence, false); err != nil {
+			t.Fatalf("acknowledge at %d: %v", sequence, err)
+		}
+	}
+	flow.replayMu.Lock()
+	retained, order, capacity := len(flow.replay), len(flow.replayOrder), cap(flow.replayOrder)
+	flow.replayMu.Unlock()
+	if retained != 0 {
+		t.Fatalf("replay window holds %d frames after acknowledging everything", retained)
+	}
+	if order > 4 {
+		t.Fatalf("retention FIFO holds %d entries for zero retained frames", order)
+	}
+	if capacity > 256 {
+		t.Fatalf("retention FIFO still pins a %d-entry allocation", capacity)
+	}
+}
