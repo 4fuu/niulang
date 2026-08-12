@@ -284,23 +284,46 @@ holds or has passed, so the duplicate is harmless, and delivering the missing
 bytes over a fast lane lets the contiguous point advance and the window drain.
 This is the reinjection multipath TCP performs for the same reason.
 
-That fixed the reliability but not the aggregation. Four trials per cell, 50 MiB
-on the same policed path:
+That fixed the reliability but not the aggregation. Four trials per cell,
+20 MiB on the same policed path, measured after the emulator defect described
+below was corrected:
 
-| Seed | One lane | Four lanes |
-| --- | --- | --- |
-| 5 | 19.55 (4/4) | 23.28 (4/4) |
-| 91 | 20.26 (4/4) | 24.91 (4/4) |
+| Configuration | Median | Completed |
+| --- | ---: | --- |
+| Native TUIC, one connection | 20.35 | 4/4 |
+| wanopt, one lane | 21.02 | 4/4 |
+| wanopt, two lanes | 19.60 | 4/4 |
+| wanopt, four lanes | 26.48 | 4/4 |
 
-Every transfer now completes, and the worst trial rose from an outright failure
-to 22.65 Mbit/s. But four lanes return about 20% more than one, not four times
-as much, on a path that would allow four shares.
+Every transfer completes, where before roughly one in three failed. But two
+lanes are *worse* than one, and four lanes return 26% more on a path that would
+allow four times as much.
 
 The remaining limit is the one that has not been fixed: a single cumulative
 acknowledgement cannot tell the sender which ranges a striped receiver actually
 holds, so the retention window still tracks the reorder span and reinjection is
 only bounding the damage. Acknowledgements carrying received ranges are the
 real fix, and that is protocol work not yet done.
+
+### The emulator was capping these measurements
+
+Every lane figure above had to be taken twice. The path emulator scheduled each
+delayed packet on its own goroutine and timer, so at 200 ms of delay every
+packet in flight was a live goroutine and offered load turned into scheduler
+pressure. Configured at 1 Gbit/s with no loss at all it carried 19--30 Mbit/s —
+*less* than the same path configured at 100 Mbit/s. An emulator that becomes
+the bottleneck silently caps every result taken with it, and the multi-lane
+cells offered four 25 Mbit/s shares into exactly that ceiling.
+
+One goroutine per direction, waking on the earliest deadline in a heap, costs
+one timer however many packets are in flight. On the same 200 ms path with no
+loss and 1 Gbit/s configured, the reference goes from 19.07 to 87.51 Mbit/s and
+wanopt from 29.53 to 94.81. A test pins the property rather than the
+throughput: packets held in flight must not grow the goroutine count.
+
+The single-lane cells elsewhere in this document sit well below the old
+ceiling, but they were taken on the old emulator and should be re-run before
+being quoted precisely.
 
 **The default is one lane and is unaffected.** `--max-lanes` above one should
 be treated as experimental and is not currently a supported configuration: it

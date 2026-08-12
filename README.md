@@ -138,9 +138,9 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 The unattended client default is one QUIC lane, and striping a single flow over
 several lanes does not yet deliver the aggregation it exists for. On a path
 that polices each source address at 25 Mbit/s — the regime where it should help
-— four lanes measure about 23-25 Mbit/s against a single lane's 20, completing
-every transfer, where before they ranged from 19 to 43 and failed roughly one
-transfer in three. Re-sending a stalled head segment on a faster lane fixed the
+— four lanes measure 26.5 Mbit/s against a single lane's 21.0 and native TUIC's
+20.4, and two lanes measure 19.6, which is worse than one. Every transfer
+completes, where before roughly one in three failed. Re-sending a stalled head segment on a faster lane fixed the
 reliability; the remaining shortfall is that a single cumulative acknowledgement
 cannot tell the sender which ranges a striped receiver holds, so the retention
 window still tracks the whole reorder span. Range acknowledgements are the real
