@@ -257,7 +257,15 @@ path-validation knob.
 
 Everything above compares wanopt with the in-tree control. This block compares
 it with the implementations people actually deploy, over the same seeded path,
-five trials each, all stacks completing every trial (median Mbit/s):
+five trials each, all stacks completing every trial (median Mbit/s).
+
+**This is a single-lane comparison on a path with no per-flow policing**
+(`--lanes 1`, `--per-flow-rate 0`), so wanopt's multipath is inactive
+throughout. That is deliberate: on a shared bottleneck extra lanes cannot raise
+one flow's goodput — they split the same capacity and add loss — so the only
+thing this measures is what wanopt's framing and session layer cost relative to
+a plain tunnel. It is the precondition for the optimization to be worth
+anything, not the optimization itself, which is measured separately below.
 
 | Loss | In-tree control | wanopt | Native TUIC | Hysteria2 |
 | --- | ---: | ---: | ---: | ---: |

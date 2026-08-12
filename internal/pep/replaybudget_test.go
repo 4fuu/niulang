@@ -144,8 +144,8 @@ func TestReplayWindowEvictsRatherThanBlocking(t *testing.T) {
 	if flow.replayEvictions.Load() == 0 {
 		t.Fatal("a full window did not evict anything")
 	}
-	if flow.replayable.Load() {
-		t.Fatal("flow still claims to be replayable after eviction")
+	if flow.replayComplete() {
+		t.Fatal("flow claims a complete retention window while evicted bytes are unacknowledged")
 	}
 	flow.replayMu.Lock()
 	retained := flow.replayBytes
@@ -155,15 +155,46 @@ func TestReplayWindowEvictsRatherThanBlocking(t *testing.T) {
 	}
 }
 
-// A flow that has dropped part of its unacknowledged window must fail rather
-// than replay a gap onto a replacement lane.
-func TestEvictedFlowStartsReplayable(t *testing.T) {
+// Eviction must not condemn a flow permanently. Frames are released oldest
+// first and the peer's cumulative acknowledgement keeps advancing over them;
+// once it passes everything released, the retained window is complete again.
+// Treating the first eviction as permanent turned transfers that had delivered
+// every byte into failures when a lane closed at teardown.
+func TestReplayBecomesCompleteAgainOnceEvictedBytesAreAcknowledged(t *testing.T) {
 	inner, peer := net.Pipe()
 	defer inner.Close()
 	defer peer.Close()
 	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 1, defaultChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
-	if !flow.replayable.Load() {
-		t.Fatal("a new flow must start replayable")
+	if !flow.replayComplete() {
+		t.Fatal("a new flow must have a complete retention window")
+	}
+	flow.replayBudget = newReplayBudget(1)
+
+	payload := make([]byte, defaultChunkSize)
+	var sequence uint64
+	for range (maxReplayBytes / defaultChunkSize) + 8 {
+		frame := protocol.Frame{
+			Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Sequence: sequence},
+			Payload: payload,
+		}
+		if err := flow.recordReplay(frame); err != nil {
+			t.Fatalf("record at %d: %v", sequence, err)
+		}
+		sequence += uint64(len(payload))
+	}
+	if flow.replayEvictions.Load() == 0 {
+		t.Fatal("the window never filled, so this test proves nothing")
+	}
+	if flow.replayComplete() {
+		t.Fatal("evicted bytes are unacknowledged, so the window is not complete")
+	}
+	// The peer acknowledges everything sent, which is what happens while a
+	// transfer finishes normally.
+	if err := flow.acknowledgeReplay(sequence, false); err != nil {
+		t.Fatalf("acknowledge: %v", err)
+	}
+	if !flow.replayComplete() {
+		t.Fatal("window is still reported incomplete after every evicted byte was acknowledged")
 	}
 }
 

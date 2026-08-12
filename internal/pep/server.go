@@ -588,7 +588,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		s.cfg.Logger.Debug("remote flow ended with error", "error", err, "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "lane_bytes", stats.LaneBytes)
 		return
 	}
-	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes, "send_stalls", stats.SendStalls, "send_stalled", stats.SendStalled)
+	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes, "send_stalls", stats.SendStalls, "send_stalled", stats.SendStalled, "replay_evictions", stats.ReplayEvictions)
 }
 
 // watchFlowCompletion closes a correctness gap between the application FIN

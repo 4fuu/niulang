@@ -258,9 +258,6 @@ type multipathFlow struct {
 	replayStalls    atomic.Uint64
 	replayStalled   atomic.Int64
 	replayEvictions atomic.Uint64
-	// replayable is cleared once any retained frame has been evicted, after
-	// which the flow can no longer be moved onto a replacement lane.
-	replayable atomic.Bool
 
 	replayMu sync.Mutex
 	replay   map[uint64]protocol.Frame
@@ -271,6 +268,13 @@ type multipathFlow struct {
 	replayOrder  []uint64
 	replayNotify chan struct{}
 	replayBytes  uint64
+	// replayEvictedThrough is the highest byte offset released from the
+	// retention window to keep the application moving. Replay onto a
+	// replacement lane is complete as long as the peer has since acknowledged
+	// everything up to it; a sticky "unreplayable" flag would instead condemn
+	// a flow forever for an eviction the peer went on to acknowledge, which
+	// turned completed transfers into failures at teardown.
+	replayEvictedThrough uint64
 	// replayLimit is this flow's current send window. It starts at the
 	// unaccounted floor and grows from replayBudget while the endpoint has
 	// spare accounted memory. replayGranted is what has been drawn from that
@@ -299,7 +303,6 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 	if len(loggers) > 0 && loggers[0] != nil {
 		f.logger = loggers[0]
 	}
-	f.replayable.Store(true)
 	f.idleTimeout = defaultFlowIdleTimeout
 	f.maxLifetime = defaultFlowMaxLifetime
 	f.lastActivity.Store(f.started.UnixNano())
@@ -922,11 +925,11 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				return stats, nil
 			}
 			if len(f.healthyLanes()) > 0 {
-				if !f.replayable.Load() {
-					// Part of the unacknowledged window was released to keep
-					// the application moving, so the replacement lane cannot be
-					// given a complete byte stream. Failing closed is required:
-					// replaying a gap would silently corrupt the flow.
+				if !f.replayComplete() {
+					// Bytes released from the retention window have still not
+					// been acknowledged, so a replacement lane cannot be given
+					// a complete stream. Failing closed is required: replaying
+					// a gap would silently corrupt the flow.
 					err = fmt.Errorf("lane failed (%v): flow is no longer replayable", err)
 				} else if replayErr := f.replayPending(ctx); replayErr == nil {
 					continue
@@ -1449,12 +1452,11 @@ func (f *multipathFlow) evictOldestReplayLocked(needed uint64) {
 		delete(f.replay, sequence)
 		f.replayBytes -= uint64(len(entry.Payload))
 		freed += uint64(len(entry.Payload))
-		f.replayEvictions.Add(1)
-		if f.metrics != nil {
-			f.metrics.ReplayEvicted(1, f.replayable.Swap(false))
-		} else {
-			f.replayable.Store(false)
+		if end := sequence + uint64(len(entry.Payload)); end > f.replayEvictedThrough {
+			f.replayEvictedThrough = end
 		}
+		first := f.replayEvictions.Add(1) == 1
+		f.metrics.ReplayEvicted(1, first)
 	}
 }
 
@@ -2072,4 +2074,19 @@ func (f *multipathFlow) releaseReplayBudget() {
 	f.replayMu.Unlock()
 	f.replayBudget.release(int64(granted))
 	f.metrics.ReplayBytes(-int64(granted))
+}
+
+// replayComplete reports whether every byte the peer has not acknowledged is
+// still retained, and so whether this flow can be moved onto a replacement
+// lane without delivering a gap.
+//
+// Eviction alone does not condemn a flow. Frames are released oldest first,
+// and the peer's cumulative acknowledgement keeps advancing over them; once it
+// passes everything that was released, the retained window is complete again.
+// Treating the first eviction as permanent turned transfers that had delivered
+// every byte into failures when a lane closed at teardown.
+func (f *multipathFlow) replayComplete() bool {
+	f.replayMu.Lock()
+	defer f.replayMu.Unlock()
+	return f.acked >= f.replayEvictedThrough
 }
