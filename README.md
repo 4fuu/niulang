@@ -92,8 +92,9 @@ connection exists at all.
 
 ### Recommended configuration
 
-The measured configuration is `--quic-pool --optimistic-open` with the default
-single bulk lane. Everything above was measured that way. Both remain opt-in
+The measured configuration is `--quic-pool --optimistic-open`. Lane count needs
+no configuration: the client probes for it and settles on one lane on paths
+that do not reward striping, which is every path measured so far. Both remain opt-in
 because this project's release gates are not met, not because they measured
 badly.
 
@@ -111,13 +112,14 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 - One local SOCKS5/TUN-facing agent and one fixed-egress US agent.
 - One application TCP flow can be framed, reordered, and striped over
-  multiple QUIC lanes. The framing and reassembly work; the striping does not
-  yet deliver a reliable gain, and one lane is the default and the supported
-  configuration.
+  multiple QUIC lanes. The framing and reassembly work; the client decides how
+  many lanes to use by measuring, and striping does not yet deliver a reliable
+  gain, so that measurement usually settles on one.
 - A PIAS-inspired policy that protects one-shot and interactive flows while
-  allocating additional lanes to bulk flows. `--max-lanes` bounds the lanes
-  carrying bulk payload; a negotiated control lane is additional, so one lane
-  still means a classified bulk flow gets its own connection.
+  allocating additional lanes to bulk flows. `--max-lanes` is the ceiling on a
+  measured search rather than a target; a negotiated control lane is
+  additional, so one lane still means a classified bulk flow gets its own
+  connection.
 - No HTTPS MITM: the optimizer forwards encrypted application bytes.
 - UDP health probing, UDP/TCP racing, fallback, and bounded mid-session lane
   replacement.
@@ -149,9 +151,10 @@ Established up front, lanes work: on a path policing each source address at
 25 Mbit/s, four lanes measure 33.5 Mbit/s against a single lane's 20.4 and
 native TUIC's 20.4, with every transfer completing. Reached by the automatic
 search on the same path, they measure 20.6 — the search is safe but does not
-yet earn its keep, because a lane opened mid-transfer has to handshake through
-a bottleneck the flow has already filled, which was measured taking 3.1s and
-then 6.7s. Pre-warmed connections are the fix and are not implemented.
+yet earn its keep, because a lane opened mid-transfer takes seconds to arrive.
+That cost is measured and is not congestion: the QUIC dial completes in 288ms
+and the lane's authentication exchange then takes 5.37s, an exchange that costs
+14 microseconds on an idle path. The cause is server-side and unidentified.
 `--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
 initial/control streams and lets multiple short flows share its congestion
 controller. On a capable peer, bulk promotion also lazily creates one

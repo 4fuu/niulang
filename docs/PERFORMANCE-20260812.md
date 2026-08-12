@@ -404,18 +404,31 @@ The search is safe and it does not pay. It holds parity with a single lane and
 completes every transfer, but it does not reach the 33.5 Mbit/s that four lanes
 established up front deliver on a 20 MiB object.
 
-The reason is in the join costs above. Lanes opened before a transfer starts
-handshake on an idle path; lanes opened during one handshake through a
-bottleneck the flow has already filled, and arrive seconds later with a
-congestion window that has to ramp from scratch. The search cannot buy what it
-is measuring for, so it correctly declines to keep buying.
+The reason is that a lane opened during a transfer takes seconds to arrive.
+Tracing one shows the probe requesting correctly and the lane landing at
+lanes=2 about thirteen seconds into a twenty-one second transfer, too late to
+repay itself, while the probe's subsequent experiments are cancelled because a
+join is already outstanding.
 
-Two things follow, and the second is the more interesting one. Pre-warmed
-connections would make a mid-transfer lane cheap, and are the fix worth
-building. And "just always use four lanes" is not the safe default it looks
-like: at 50 MiB the fixed four-lane configuration lost a transfer outright and
-its worst trial ran at 5.39 Mbit/s, a quarter of a single lane. The 33.5
-Mbit/s figure is real at 20 MiB and does not survive the object getting larger.
+Where those seconds go is measured, and it is not where it looks:
+
+    dial_duration=288ms   authentication_duration=5.37s   pooled=false
+
+The QUIC handshake is fast. What takes 5.37s is the lane's authentication
+exchange -- one HELLO written and one HELLO_OK read. The obvious explanation,
+that the join queues behind the flow's own data on a filled bottleneck, does
+not survive checking: each QUIC connection dials its own UDP socket
+(`net.ListenUDP` per dial), and the emulator polices per client address, so a
+new lane gets its own bucket and its own queue. The same exchange on an idle
+path completes in 14 microseconds. **This is a server-side latency under load,
+and its cause has not been identified.** It is the next thing to chase, and
+until it is, the automatic search cannot deliver what fixed lanes demonstrate.
+
+One more result is worth stating, because it argues against the obvious
+shortcut. "Just always use four lanes" is not the safe default it looks like:
+at 50 MiB the fixed four-lane configuration lost a transfer outright and its
+worst trial ran at 5.39 Mbit/s, a quarter of a single lane. The 33.5 Mbit/s
+figure is real at 20 MiB and does not survive the object getting larger.
 Measuring and declining is a worse headline than striping, and a better
 default.
 
