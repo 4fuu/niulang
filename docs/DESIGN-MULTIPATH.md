@@ -1,6 +1,6 @@
 # Multipath transport: design
 
-Status: design agreed, implementation in progress.
+Status: implemented and measured; single-lane parity outstanding.
 Supersedes the lane scheduler described in `docs/PERFORMANCE-20260812.md`.
 
 ## 1. What this is for
@@ -190,20 +190,39 @@ Self-pacing holds 37.53 with a worst trial of 36.37, tighter than the old
 design ever was and higher than it ever reached.
 
 **Shared bottleneck, 100 Mbit/s, 50 MiB, three trials.** Every configuration
-completed every trial.
+completed every trial. This path is where the self-paced sender was initially
+much worse, and chasing that found three separate limits that were binding
+instead of the windows:
 
-| Sender | 1 lane | 4 lanes |
+| | 1 lane | 4 lanes |
 | --- | ---: | ---: |
-| Self-pacing | 34.05 | 49.94 |
-| Pushing | 42.88 | 59.12 |
+| Self-pacing, first measurement | 34.05 | 49.94 |
+| after raising the read-ahead ceiling | 33.96 | 60.67 |
+| after charging admission by real chunk size | 31.04 | -- |
+| after raising the chunk-count cap | 36.76 | 56.96 |
+| Pushing (control) | 43.2 - 45.9 | 58.5 - 61.1 |
 
-Two things to read here. Four lanes beat one on a *shared* bottleneck, which is
-not a win: it is four connections claiming more of one pipe than one connection
-would, and it is exactly what coupled congestion control exists to prevent.
-And self-pacing was a fifth slower than pushing, which was a real defect: the
-read-ahead ceiling was 128 chunks, 4 MiB, while one lane at 100 Mbit/s and
-200ms needs 2.5 MB in flight and four need ten. The producer stopped reading
-before the windows ever bound.
+- The read-ahead ceiling was 128 chunks, 4 MiB, while one lane at 100 Mbit/s
+  and 200ms needs 2.5 MB in flight and four need ten. The producer stopped
+  reading before the windows ever bound.
+- Admission charged every chunk a nominal 32 KiB. A read from a TCP socket
+  usually returns far less, so a 2 MB window held about 224 KB of real data.
+- The per-lane chunk *count* cap was 96, which with small chunks is under
+  800 KB -- about 30 Mbit/s against a 210ms feedback loop, whatever the path
+  can do.
+
+Four lanes still beat one here, and that is not a win: it is four connections
+claiming more of one pipe than one would, which is what coupled congestion
+control exists to prevent.
+
+**The single-lane gap is not closed.** At 36.8 against the pushing sender's
+43-46 on this path, the self-paced sender is still about 15% behind on one
+lane, and the design's first requirement is that it must never be worse. The
+remaining suspect is the feedback loop itself: a chunk is not free until its
+bytes are acknowledged, which adds the acknowledgement delay to every window
+recycle, where the pushing sender was limited only by QUIC's own window. This
+is the open item, and it is why the self-paced sender is not yet the default
+for single-lane flows.
 
 ## 8. Phases
 

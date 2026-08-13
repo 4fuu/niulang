@@ -69,6 +69,22 @@ const (
 // A lane whose rate collapses gets a smaller product and a smaller window
 // without anything deciding to shrink it.
 func (l *mpLane) windowBytes() int {
+	// The lane's own congestion window is the right source, and the achieved
+	// rate is not. Deriving the window from measured throughput is circular: if
+	// the window is holding the lane back, the rate it measures is lower, which
+	// lowers the window again. The congestion window says what the path will
+	// accept rather than what this sender happened to achieve, which is also
+	// what MPTCP means by a subflow's window.
+	if cwnd := l.congestionWindow(); cwnd > 0 {
+		window := 2 * cwnd
+		if window < minLaneWindowBytes {
+			return minLaneWindowBytes
+		}
+		if window > maxLaneWindowBytes {
+			return maxLaneWindowBytes
+		}
+		return window
+	}
 	rate, rtt := l.sendRate()
 	if rate <= 0 || rtt <= 0 {
 		return minLaneWindowBytes
@@ -81,6 +97,19 @@ func (l *mpLane) windowBytes() int {
 		return maxLaneWindowBytes
 	}
 	return window
+}
+
+// congestionWindow reports what this lane's transport says the path will hold,
+// or zero when the transport does not expose it.
+func (l *mpLane) congestionWindow() int {
+	if l == nil || l.fc == nil {
+		return 0
+	}
+	provider, ok := l.fc.conn.(laneStatsProvider)
+	if !ok {
+		return 0
+	}
+	return int(provider.transportStats().controller.CongestionWindow)
 }
 
 // flowSource adapts the application connection to the scheduler's reader,
