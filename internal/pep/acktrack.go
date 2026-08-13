@@ -27,6 +27,9 @@ type ackTracker struct {
 	// outstanding until a slow lane filled the hole behind it.
 	ranges [][2]uint64
 	closed bool
+	// gen advances whenever the acknowledged set changes, so a watcher can
+	// wait for news without polling.
+	gen uint64
 }
 
 func newAckTracker() *ackTracker {
@@ -45,6 +48,7 @@ func (t *ackTracker) Advance(sequence uint64) {
 	}
 	t.cumulative = sequence
 	t.compactLocked()
+	t.gen++
 	t.cond.Broadcast()
 }
 
@@ -63,6 +67,7 @@ func (t *ackTracker) Add(ranges [][2]uint64) {
 	}
 	t.mergeLocked()
 	t.compactLocked()
+	t.gen++
 	t.cond.Broadcast()
 }
 
@@ -186,6 +191,35 @@ func (t *ackTracker) Wait(ctx context.Context, start, end uint64) error {
 	}
 }
 
+// WaitChange blocks until the acknowledged set has changed since the given
+// generation, and returns the new one. It lets a single watcher complete
+// chunks as their bytes land, instead of one goroutine per chunk sitting in
+// Wait.
+func (t *ackTracker) WaitChange(ctx context.Context, since uint64) (uint64, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	stop := context.AfterFunc(ctx, func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.cond.Broadcast()
+	})
+	defer stop()
+
+	for {
+		if t.gen != since {
+			return t.gen, nil
+		}
+		if t.closed {
+			return t.gen, errAckTrackerClosed
+		}
+		if err := ctx.Err(); err != nil {
+			return t.gen, err
+		}
+		t.cond.Wait()
+	}
+}
+
 // Close releases every waiter, for a flow that is tearing down.
 func (t *ackTracker) Close() {
 	t.mu.Lock()
@@ -197,3 +231,12 @@ func (t *ackTracker) Close() {
 // errAckTrackerClosed reports that a flow tore down while a lane worker was
 // waiting for its chunk to be acknowledged.
 var errAckTrackerClosed = errors.New("acknowledgement tracker closed")
+
+// Touch advances the generation without changing what is acknowledged, so a
+// watcher re-examines its list.
+func (t *ackTracker) Touch() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.gen++
+	t.cond.Broadcast()
+}

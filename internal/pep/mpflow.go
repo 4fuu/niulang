@@ -18,6 +18,7 @@ import (
 	"github.com/icourses-dev/wanopt/internal/multipath"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/session"
+	"github.com/icourses-dev/wanopt/internal/stripe"
 )
 
 var nextTelemetryID atomic.Uint64
@@ -96,7 +97,9 @@ type mpLane struct {
 	// writeSlots is a semaphore shared by both queues, so the total queued
 	// frames remain bounded by maxLaneWriteQueue rather than by the sum of
 	// both channel capacities.
-	writeQ            chan protocol.Frame
+	writeQ chan protocol.Frame
+	// pulling guards against two workers on one lane.
+	pulling           atomic.Bool
 	writeInteractiveQ chan protocol.Frame
 	writeSlots        chan struct{}
 	writeDone         chan struct{}
@@ -222,14 +225,26 @@ type multipathFlow struct {
 	bytesUp            atomic.Uint64
 	bytesDown          atomic.Uint64
 	class              atomic.Uint32
-	finSequence        atomic.Uint64
-	remoteFinSequence  atomic.Uint64
-	finSent            atomic.Bool
-	remoteFinSeen      atomic.Bool
-	localClosed        atomic.Bool
-	remoteAbort        atomic.Bool
-	localAbortSent     atomic.Bool
-	laneFailures       atomic.Uint64
+	// ackTrack answers "has this range arrived?", which is what clocks every
+	// lane. scheduler and sendCtx let a lane joined mid-flow start carrying
+	// data as soon as it is admitted.
+	ackTrack  *ackTracker
+	scheduler atomic.Pointer[stripe.Scheduler]
+	sendCtx   atomic.Pointer[context.Context]
+	// outstandingChunks are chunks written and not yet acknowledged. A single
+	// watcher completes them as acknowledgements arrive, because they complete
+	// out of order by design and a waiter goroutine per chunk would mean
+	// hundreds a second on a fast flow.
+	chunkMu           sync.Mutex
+	outstandingChunks []outstandingChunk
+	finSequence       atomic.Uint64
+	remoteFinSequence atomic.Uint64
+	finSent           atomic.Bool
+	remoteFinSeen     atomic.Bool
+	localClosed       atomic.Bool
+	remoteAbort       atomic.Bool
+	localAbortSent    atomic.Bool
+	laneFailures      atomic.Uint64
 	// openAckPending is set only for the opt-in optimistic OPEN path. The
 	// application may begin sending immediately, but the eventual OPEN_OK is
 	// still required on the authenticated stream and is consumed by the flow
@@ -322,6 +337,7 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 	f.lastActivity.Store(f.started.UnixNano())
 	f.telemetryID = nextTelemetryID.Add(1)
 	f.class.Store(uint32(protocol.ClassNew))
+	f.ackTrack = newAckTracker()
 	return f
 }
 
@@ -358,6 +374,13 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 	f.lanesMu.Unlock()
 	go f.readLane(lane)
 	go f.writeLane(lane)
+	// A lane admitted while the flow is sending starts carrying data at once;
+	// it does not wait for anything to notice it.
+	if sched := f.scheduler.Load(); sched != nil {
+		if ctx := f.sendCtx.Load(); ctx != nil {
+			f.startLanePuller(*ctx, lane, sched)
+		}
+	}
 	return nil
 }
 
@@ -665,6 +688,11 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 	if f.metrics != nil {
 		f.metrics.LaneFailure()
 	}
+	// Hand back whatever this lane was carrying so another lane can finish it.
+	// A lost lane costs its window, not the transfer.
+	if sched := f.scheduler.Load(); sched != nil {
+		sched.RetireLane(lane.id)
+	}
 	f.laneFailures.Add(1)
 	if f.logger != nil {
 		f.logger.Debug("multipath lane failed", "flow_id", f.flowID, "lane_id", lane.id, "transport", lane.kind, "error", err)
@@ -828,7 +856,13 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	defer f.finished.Store(true)
 	stats := FlowStats{Started: f.started}
 	results := make(chan error, 2)
-	go func() { results <- f.sendInner(runCtx) }()
+	go func() {
+		if selfPacedSend.Load() {
+			results <- f.sendInnerStriped(runCtx)
+			return
+		}
+		results <- f.sendInner(runCtx)
+	}()
 	go func() { results <- f.receiveInner(runCtx) }()
 	completed := 0
 	for completed < 2 {
@@ -1192,7 +1226,12 @@ func (f *multipathFlow) oldestRetainedLocked() (protocol.Frame, bool) {
 
 func (f *multipathFlow) signalDone() {
 	if f.done != nil {
-		f.doneOnce.Do(func() { close(f.done) })
+		f.doneOnce.Do(func() {
+			close(f.done)
+			if f.ackTrack != nil {
+				f.ackTrack.Close()
+			}
+		})
 	}
 }
 
@@ -1477,9 +1516,18 @@ func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.
 		if f.replay == nil {
 			f.replay = make(map[uint64]protocol.Frame)
 		}
-		if _, exists := f.replay[frame.Header.Sequence]; exists {
+		if existing, exists := f.replay[frame.Header.Sequence]; exists {
 			f.replayMu.Unlock()
-			return errors.New("duplicate replay sequence")
+			if len(existing.Payload) == len(frame.Payload) && existing.Header.Type == frame.Header.Type {
+				// Re-sending a chunk on a second lane is ordinary recovery
+				// under self-pacing, and the bytes are already retained. This
+				// used to be an error, which meant every re-issue failed its
+				// send, failed its chunk, and took the lane's worker down with
+				// it -- so a flow lost lanes one at a time exactly when it was
+				// trying to recover.
+				return nil
+			}
+			return errors.New("conflicting replay sequence")
 		}
 		if len(frame.Payload) > maxFlowReplayBytes {
 			f.replayMu.Unlock()
@@ -1570,6 +1618,9 @@ func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) error {
 		return nil // delayed ACK from a slower lane
 	}
 	f.acked = sequence
+	if f.ackTrack != nil {
+		f.ackTrack.Advance(sequence)
+	}
 	for start, frame := range f.replay {
 		end := start + uint64(len(frame.Payload))
 		if frame.Header.Type == protocol.TypeData && end <= sequence {
@@ -1613,6 +1664,23 @@ func (f *multipathFlow) pruneReplayOrderLocked() {
 		compacted := make([]uint64, len(f.replayOrder))
 		copy(compacted, f.replayOrder)
 		f.replayOrder = compacted
+	}
+}
+
+// noteSent records that bytes have been written without retaining them.
+//
+// Under self-pacing the scheduler already holds every unacknowledged chunk and
+// can re-issue it on any healthy lane, so retaining a second copy in the replay
+// window buys nothing and costs a great deal: the two have different limits, so
+// the scheduler outruns the window, the window evicts, the flow is marked
+// unreplayable, and the next lane failure kills a transfer the scheduler could
+// have finished. The acknowledgement path still needs to know how far the
+// stream has been written, which is all this records.
+func (f *multipathFlow) noteSent(sequence uint64, n int) {
+	f.replayMu.Lock()
+	defer f.replayMu.Unlock()
+	if end := sequence + uint64(n); end > f.highestSent {
+		f.highestSent = end
 	}
 }
 
@@ -2019,6 +2087,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 							return fmt.Errorf("acknowledgement ranges: %w", err)
 						}
 						f.releaseAcknowledgedRanges(ranges)
+						f.ackTrack.Add(ranges)
 					}
 					continue
 				}
@@ -2206,6 +2275,13 @@ func (f *multipathFlow) releaseReplayBudget() {
 // Treating the first eviction as permanent turned transfers that had delivered
 // every byte into failures when a lane closed at teardown.
 func (f *multipathFlow) replayComplete() bool {
+	if f.scheduler.Load() != nil {
+		// A self-paced flow keeps every unacknowledged chunk in the scheduler
+		// and hands the ones a dead lane was carrying to lanes that still
+		// work, so a replacement lane never needs a gap filled from this
+		// window.
+		return true
+	}
 	f.replayMu.Lock()
 	defer f.replayMu.Unlock()
 	return f.acked >= f.replayEvictedThrough

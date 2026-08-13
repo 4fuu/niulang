@@ -110,6 +110,15 @@ type Chunk struct {
 	// other, so the end of the stream is ordered with respect to the data
 	// rather than being a separate event that can overtake it.
 	Final bool
+
+	// urgent marks a chunk that came back from a lane which stalled or died.
+	// Such a chunk is admitted to a lane even when that lane is at its window,
+	// because it is almost certainly the one holding up the receiver's
+	// contiguous point: every other lane is then full of chunks that cannot be
+	// acknowledged until this one lands, so respecting the window here would
+	// deadlock the flow with every lane waiting on a chunk none of them is
+	// allowed to carry.
+	urgent bool
 }
 
 // End returns the offset one past this chunk's last byte.
@@ -158,6 +167,7 @@ type Scheduler struct {
 	eof        bool
 	srcErr     error
 	closed     bool
+	finished   chan struct{}
 	stats      Stats
 }
 
@@ -171,6 +181,7 @@ func New(src io.Reader, cfg Config) *Scheduler {
 		live:      make(map[uint64]*outstanding),
 		laneLoad:  make(map[uint64]int),
 		laneBytes: make(map[uint64]uint64),
+		finished:  make(chan struct{}),
 	}
 	s.stats.CompletedByLaneID = make(map[uint64]uint64)
 	s.ready.L = &s.mu
@@ -214,6 +225,7 @@ func (s *Scheduler) produce() {
 				s.srcErr = err
 				s.eof = true
 			}
+			s.signalIfDoneLocked()
 			s.ready.Broadcast()
 			s.mu.Unlock()
 			return
@@ -263,8 +275,8 @@ func (s *Scheduler) Next(ctx context.Context, laneID uint64, windowBytes int) (*
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if s.laneLoad[laneID] < s.cfg.LaneWindow && s.laneHasRoomLocked(laneID, windowBytes) {
-			if chunk := s.takeReadyLocked(laneID); chunk != nil {
+		if s.laneLoad[laneID] < s.cfg.LaneWindow {
+			if chunk := s.takeReadyLocked(laneID, s.laneHasRoomLocked(laneID, windowBytes)); chunk != nil {
 				return chunk, nil
 			}
 			if err := s.finishedLocked(); err != nil {
@@ -280,8 +292,14 @@ func (s *Scheduler) Next(ctx context.Context, laneID uint64, windowBytes int) (*
 // takeReadyLocked assigns the oldest ready chunk to a lane. Oldest first
 // matters: the receiver delivers contiguously, so the chunk nearest its
 // contiguous point is the one whose absence is holding up delivery.
-func (s *Scheduler) takeReadyLocked(laneID uint64) *Chunk {
+func (s *Scheduler) takeReadyLocked(laneID uint64, hasRoom bool) *Chunk {
 	for i, chunk := range s.pending {
+		if !hasRoom && !chunk.urgent {
+			// The lane is full. Only recovery work jumps the window, and it is
+			// always at the head of the ready set, so stopping here keeps the
+			// scan cheap.
+			return nil
+		}
 		if out, ok := s.live[chunk.Offset]; ok && laneHasAttempt(out, laneID) {
 			// Never re-issue a chunk on the lane already carrying it: that is
 			// the one lane whose failure it would not survive.
@@ -303,6 +321,7 @@ func (s *Scheduler) takeReadyLocked(laneID uint64) *Chunk {
 			deadline = s.cfg.Now().Add(s.cfg.RetransmitAfter)
 		}
 		out.attempts = append(out.attempts, attempt{lane: laneID, deadline: deadline})
+		chunk.urgent = false
 		s.laneLoad[laneID]++
 		s.laneBytes[laneID] += uint64(len(chunk.Data))
 		if len(s.live) > s.stats.PeakOutstanding {
@@ -353,6 +372,7 @@ func (s *Scheduler) Complete(laneID uint64, chunk *Chunk) {
 	delete(s.live, chunk.Offset)
 	s.stats.ChunksCompleted++
 	s.stats.CompletedByLaneID[laneID]++
+	s.signalIfDoneLocked()
 	s.produced.Signal()
 	s.ready.Broadcast()
 }
@@ -435,6 +455,9 @@ func (s *Scheduler) laneHasRoomLocked(laneID uint64, windowBytes int) bool {
 // requeueLocked returns a chunk to the ready set in offset order, so the
 // receiver's contiguous point is always what the next free lane works on.
 func (s *Scheduler) requeueLocked(chunk *Chunk) {
+	// A chunk only returns to the ready set because a lane stalled or failed,
+	// which makes it the work most likely to be blocking delivery.
+	chunk.urgent = true
 	i := 0
 	for i < len(s.pending) && s.pending[i].Offset < chunk.Offset {
 		i++
@@ -490,6 +513,30 @@ func (s *Scheduler) pendingHas(offset uint64) bool {
 		}
 	}
 	return false
+}
+
+// Done is closed once every byte of the source has been delivered. A caller
+// that must act at the end of the stream -- sending a FIN, for instance --
+// waits on this rather than on the lanes, because which lane carried the last
+// chunk is not knowable in advance and does not matter.
+func (s *Scheduler) Done() <-chan struct{} { return s.finished }
+
+// Err returns the source's read error, if the stream ended in one.
+func (s *Scheduler) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.srcErr
+}
+
+func (s *Scheduler) signalIfDoneLocked() {
+	if !s.doneLocked() {
+		return
+	}
+	select {
+	case <-s.finished:
+	default:
+		close(s.finished)
+	}
 }
 
 // Stats returns a snapshot.

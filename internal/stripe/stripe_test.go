@@ -452,3 +452,109 @@ func TestTinyWindowStillAdmitsOneChunk(t *testing.T) {
 		t.Fatalf("a window below one chunk stalled the lane: %v", err)
 	}
 }
+
+func TestDoneClosesWhenEveryChunkLands(t *testing.T) {
+	payload := make([]byte, 32*1024)
+	s := New(bytes.NewReader(payload), Config{ChunkSize: 4 * 1024, LaneWindow: 8})
+	defer s.Close()
+
+	ctx := context.Background()
+	go func() {
+		for {
+			chunk, err := s.Next(ctx, 0, 0)
+			if err != nil || chunk == nil {
+				return
+			}
+			s.Complete(0, chunk)
+		}
+	}()
+	select {
+	case <-s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done never closed after the stream was fully delivered")
+	}
+}
+
+// Done must not close while a chunk is still outstanding, or a caller would
+// send a FIN ahead of data still in flight.
+func TestDoneWaitsForOutstandingChunks(t *testing.T) {
+	payload := make([]byte, 8*1024)
+	s := New(bytes.NewReader(payload), Config{ChunkSize: 4 * 1024, LaneWindow: 8})
+	defer s.Close()
+
+	ctx := context.Background()
+	var held []*Chunk
+	for {
+		chunk, err := s.Next(ctx, 0, 0)
+		if err != nil {
+			t.Fatalf("next: %v", err)
+		}
+		if chunk == nil {
+			break
+		}
+		held = append(held, chunk)
+		if len(held) == 2 {
+			break
+		}
+	}
+	select {
+	case <-s.Done():
+		t.Fatal("Done closed with chunks still outstanding")
+	case <-time.After(100 * time.Millisecond):
+	}
+	for _, c := range held {
+		s.Complete(0, c)
+	}
+	select {
+	case <-s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done never closed")
+	}
+}
+
+// The deadlock this guards against: every lane's window fills with chunks that
+// cannot be acknowledged because an earlier chunk is missing, so no lane has
+// room to carry the missing one and the flow stops with every lane waiting on
+// work none of them is allowed to take.
+func TestRecoveredChunkBypassesAFullLaneWindow(t *testing.T) {
+	payload := make([]byte, 64*1024)
+	s := New(bytes.NewReader(payload), Config{ChunkSize: 4 * 1024, LaneWindow: 64})
+	defer s.Close()
+
+	ctx := context.Background()
+	window := 8 * 1024 // two chunks
+
+	// Lane 0 takes the head chunk and then dies holding it.
+	head, err := s.Next(ctx, 0, window)
+	if err != nil || head == nil {
+		t.Fatalf("head: %v", err)
+	}
+	// Lane 1 fills its window with later chunks.
+	for i := 0; i < 2; i++ {
+		if c, err := s.Next(ctx, 1, window); err != nil || c == nil {
+			t.Fatalf("lane 1 chunk %d: %v", i, err)
+		}
+	}
+	// Next blocks when the lane is full, so prove that with a deadline rather
+	// than by expecting a nil return.
+	probeCtx, probeCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	if c, _ := s.Next(probeCtx, 1, window); c != nil {
+		probeCancel()
+		t.Fatal("lane 1 exceeded its window before recovery was needed")
+	}
+	probeCancel()
+	s.RetireLane(0)
+
+	// Lane 1 is at its window, but the recovered head is what unblocks
+	// delivery, so it must be admitted anyway.
+	got, err := s.Next(ctx, 1, window)
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if got == nil {
+		t.Fatal("recovered chunk was not admitted; every lane would wait forever")
+	}
+	if got.Offset != head.Offset {
+		t.Fatalf("admitted offset %d, want the recovered head at %d", got.Offset, head.Offset)
+	}
+}
