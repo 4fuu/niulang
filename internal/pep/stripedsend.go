@@ -14,10 +14,17 @@ import (
 )
 
 const (
-	// maxLaneChunkWindow caps chunks outstanding on one lane. The binding limit
-	// is the lane's byte window; this only stops the bookkeeping growing without
-	// bound on a lane whose declared window is very large.
-	maxLaneChunkWindow = 96
+	// maxLaneChunkWindow caps chunks outstanding on one lane. The byte window is
+	// meant to be the binding limit and this only stops the bookkeeping growing
+	// without bound, so it has to be far above what the byte window admits.
+	//
+	// It was 96, which sounds generous and is not: a chunk is whatever one read
+	// from the application socket returned, often a few kilobytes rather than
+	// the 32 KiB maximum, so 96 chunks can be under 800 KB. Against a 210ms
+	// feedback loop that caps a lane near 30 Mbit/s regardless of the path, and
+	// it is why the self-paced sender measured a third below the pushing one on
+	// a single lane at 100 Mbit/s.
+	maxLaneChunkWindow = 1024
 	// maxFlowOutstandingChunks bounds chunks retained across every lane, which
 	// bounds a flow's memory: a chunk is held until acknowledged because it may
 	// have to be re-issued elsewhere.
@@ -29,7 +36,7 @@ const (
 	// purely because the producer stopped reading. The real limit on commitment
 	// is the per-lane window, which shrinks with the lane; this is the memory
 	// ceiling behind it.
-	maxFlowOutstandingChunks = 512
+	maxFlowOutstandingChunks = 2048
 	// chunkReissueDelay is how long a chunk may sit on one lane before it is
 	// also offered to another.
 	chunkReissueDelay = 1500 * time.Millisecond
