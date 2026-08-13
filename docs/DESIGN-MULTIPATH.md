@@ -168,7 +168,44 @@ capability negotiation, and no compatibility break.
   of reordering is real and the throughput gain is nil.
 - Beating TUIC on a shared bottleneck. The honest target there is parity.
 
-## 7. Phases
+## 7. What the redesign measured
+
+Both senders exist in one binary (`WANOPT_SELF_PACED=0` selects the previous
+one), so these are the same path, the same seed, and the same trials.
+
+**Policed path, 25 Mbit/s per source, 50 MiB, four trials.** This is the case
+striping exists for, at the size where the previous design's aggregation had
+collapsed.
+
+| Sender | 1 lane | 4 lanes | Completed |
+| --- | ---: | ---: | --- |
+| Self-pacing | 18.17 | **37.53** | 4/4 |
+| Pushing | 21.15 | 21.05 | 4/4 |
+
+The pushing scheduler aggregates nothing at this size: four lanes measure what
+one lane measures. It reached 33.5 at 20 MiB and lost that entirely by 50 MiB,
+which is the decay a longer transfer exposes -- more chances to commit bytes to
+a lane that then slows, and each one costs the receiver's contiguous point.
+Self-pacing holds 37.53 with a worst trial of 36.37, tighter than the old
+design ever was and higher than it ever reached.
+
+**Shared bottleneck, 100 Mbit/s, 50 MiB, three trials.** Every configuration
+completed every trial.
+
+| Sender | 1 lane | 4 lanes |
+| --- | ---: | ---: |
+| Self-pacing | 34.05 | 49.94 |
+| Pushing | 42.88 | 59.12 |
+
+Two things to read here. Four lanes beat one on a *shared* bottleneck, which is
+not a win: it is four connections claiming more of one pipe than one connection
+would, and it is exactly what coupled congestion control exists to prevent.
+And self-pacing was a fifth slower than pushing, which was a real defect: the
+read-ahead ceiling was 128 chunks, 4 MiB, while one lane at 100 Mbit/s and
+200ms needs 2.5 MB in flight and four need ten. The producer stopped reading
+before the windows ever bound.
+
+## 8. Phases
 
 1. **Coupled window** as a standalone, unit-tested component: LIA increase,
    rate-limited decrease, alpha from per-lane state. Tested against the three
