@@ -202,6 +202,18 @@ bucket, the same looseness arrives as a burst and is dropped. It is the same
 trade the window multiple showed -- four congestion windows: 43.3 buffered,
 10.5 policed -- appearing again in every other constant.
 
+**The adaptive search is implemented and does not fix this.** A per-lane search
+for burst tolerance (`internal/pep/commit.go`) now replaces the fixed multiple:
+it commits a little more each quiet round trip and backs off sharply on loss,
+with no input beyond whether the lane lost anything. Unit tests drive it against
+bottlenecks tolerating 5 and 1.2 bandwidth-delay products and confirm the same
+code reaches both answers, follows a path that degrades, and spends one backoff
+per loss episode. But end to end on the policed path it measures 20.0 Mbit/s on
+one lane and 17.0 on four -- aggregation still absent. So the search was
+necessary and is not sufficient, and the regression against the 37.5 result
+lies somewhere else in the changes listed above. Bisecting them against that
+commit is the next step and has not been done.
+
 The conclusion is that **commitment depth cannot be a constant**. A bottleneck's
 tolerance for a burst is a property of the path, it differs by more than an
 order of magnitude between the two paths measured here, and no single value
