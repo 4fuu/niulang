@@ -372,7 +372,55 @@ drained state. This is BBRv1 behaviour, shared with the reference and with
 native TUIC, not something this design introduced. Reducing it means a
 different startup, not a different scheduler.
 
-### 7.6 Corrections to the earlier record
+### 7.6 Scenarios outside the standard matrix
+
+The matrix covers one shape of path. These are the others, four to six trials
+each, medians in Mbit/s, reference then wanopt:
+
+| Scenario | Reference | wanopt |
+| --- | ---: | ---: |
+| 20 ms, 1 Gbit/s, 100 MiB | 685.24 | **708.12** |
+| 30 ms, 200 Mbit/s, 0.1% loss | 180.98 | 180.76 |
+| 200 ms, 20 ms jitter (reordering) | 2.93 | **8.39** |
+| 200 ms, 25% *upstream* loss, 32 MiB | 50.47 | **51.64** |
+| 200 ms, 256 KiB bottleneck queue | 39.10 | **39.80** |
+| 200 ms, 64 KiB object | 1.11 | **1.17** |
+
+The jitter row is the largest margin anywhere in this document and deserves a
+note, because it is structural rather than tuned. A 20 ms uniform jitter
+reorders packets, and a transport that relays one QUIC stream per connection
+pays for every reordering event with head-of-line blocking on that stream.
+Reassembling by byte offset across chunks does not: a chunk that arrives out of
+order is placed, not waited for. This is the same property that makes striping
+possible, showing up on a single lane.
+
+The reverse-loss row is worth stating too, because it is the case that should
+have been this design's worst: a transport that layers its own acknowledgements
+over QUIC puts application data on the return path, where 25% loss falls on it.
+It is at parity, which it would not have been while admission depended on those
+acknowledgements arriving.
+
+**Correlated loss remains the open weakness.** At 35% loss in 10-packet bursts,
+neither stack is reliable -- both lose connections during setup -- and wanopt
+completes more transfers than the reference but has a much worse tail: healthy
+trials run at 5-6 Mbit/s while others take 27 to 51 seconds for 4 MiB. The cause
+is now identified rather than mysterious. Lanes die of QUIC's idle timeout
+during a burst (`timeout: no recent network activity`), and the rejoin that
+follows is refused with `unknown session`, because the server's own connection
+idled out and took the session with it. The flow then re-sends what the dead
+lane was holding, on a path that is already dropping a third of everything. Two
+things would have to change: an idle timeout that tolerates a multi-second
+burst, and a session that outlives its last lane long enough to be rejoined.
+
+**A pre-existing flake in the TCP rescue path.** Roughly one run in eight of
+`go test ./internal/pep/ -run TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail`
+fails, and every run fails under `-race`. The rescue lane authenticates and is
+admitted by both endpoints, and then no application bytes cross it. It
+reproduces on the commit before this work as well, so it is not a regression,
+but it is the same subsystem as the correlated-loss weakness above and it means
+the rescue path is not race-checked.
+
+### 7.7 Corrections to the earlier record
 
 - The "5.37 s lane authentication exchange" is not reproducible. Measured now:
   the secondary QUIC pool authenticates in 404 ms and the lane join completes in

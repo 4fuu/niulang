@@ -112,11 +112,21 @@ ahead of its transport is a fraction of that transport's own congestion window,
 so it follows the path rather than a constant. Both flags remain opt-in because
 this project's release gates are not met, not because they measured badly.
 
+Outside the standard matrix, wanopt is ahead at 20 ms / 1 Gbit/s (708 against
+685 Mbit/s), at parity at 30 ms / 200 Mbit/s, ahead under 25% upstream loss
+(51.6 against 50.5), and far ahead where the path reorders: with 20 ms of
+jitter it measures 8.4 Mbit/s against 2.9, because reassembling by byte offset
+does not stall a stream on an out-of-order packet the way relaying one does.
+
 The prototype is still not safe to use as a general-purpose production tunnel.
 Broader loss/soak campaigns remain outstanding, and under extreme correlated
 loss (35% in 10-packet bursts) wanopt's behavior still differs from the
 reference's: it completes more transfers but is slower on the ones both
-finish. UDP is currently carried over reliable stream frames (native QUIC
+finish. That case is now diagnosed -- lanes die of QUIC's idle timeout mid-burst
+and the rejoin is refused because the server's session went with its own
+connection -- and a flake in the TCP rescue path (about one run in eight, and
+every run under `-race`) is recorded in
+[`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md). UDP is currently carried over reliable stream frames (native QUIC
 DATAGRAM and TUN/VLESS ingress are not yet implemented), and a mid-session
 rescue creates a fresh authenticated association rather than resuming the old
 remote relay. The project has not passed all controlled-loss/resource release
