@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/icourses-dev/wanopt/internal/mpcc"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/stripe"
 )
@@ -20,7 +21,15 @@ const (
 	// maxFlowOutstandingChunks bounds chunks retained across every lane, which
 	// bounds a flow's memory: a chunk is held until acknowledged because it may
 	// have to be re-issued elsewhere.
-	maxFlowOutstandingChunks = 128
+	//
+	// It has to clear the flow's bandwidth-delay product or it, rather than the
+	// windows, becomes the limit. At 100 Mbit/s and 200ms one lane alone needs
+	// 2.5 MB in flight and four need ten; the first value here was 4 MiB, and
+	// on that path the self-paced sender measured a fifth below the pushing one
+	// purely because the producer stopped reading. The real limit on commitment
+	// is the per-lane window, which shrinks with the lane; this is the memory
+	// ceiling behind it.
+	maxFlowOutstandingChunks = 512
 	// chunkReissueDelay is how long a chunk may sit on one lane before it is
 	// also offered to another.
 	chunkReissueDelay = 1500 * time.Millisecond
@@ -34,7 +43,9 @@ const (
 	// minLaneWindowBytes is the window given to a lane with no usable rate
 	// sample yet, and the floor for a lane whose rate has collapsed.
 	minLaneWindowBytes = 128 * 1024
-	// maxLaneWindowBytes caps what one lane may hold however fast it looks.
+	// maxLaneWindowBytes caps what one lane may hold however fast it looks. Four
+	// lanes at this bound is the flow's worst-case commitment, and it is why the
+	// chunk ceiling above is not simply unbounded.
 	maxLaneWindowBytes = 4 * 1024 * 1024
 )
 
@@ -102,13 +113,19 @@ func (s *flowSource) Read(p []byte) (int, error) {
 func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 	defer close(f.sendDone)
 
+	var cc *mpcc.Window
+	if coupledCongestion.Load() {
+		cc = mpcc.New(mpcc.Config{})
+	}
 	sched := stripe.New(&flowSource{flow: f}, stripe.Config{
 		ChunkSize:       f.chunkSize,
 		LaneWindow:      maxLaneChunkWindow,
 		MaxOutstanding:  maxFlowOutstandingChunks,
 		RetransmitAfter: chunkReissueDelay,
+		Windows:         &laneAdmission{flow: f, cc: cc},
 	})
 	defer sched.Close()
+	f.cc = cc
 
 	sendCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -121,6 +138,7 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 	}
 	go f.superviseChunks(sendCtx, sched)
 	go f.watchChunkCompletion(sendCtx, sched)
+	go f.sampleLaneCongestion(sendCtx, cc)
 
 	select {
 	case <-sched.Done():
@@ -254,6 +272,11 @@ func (f *multipathFlow) watchChunkCompletion(ctx context.Context, sched *stripe.
 		f.chunkMu.Unlock()
 		for _, done := range completed {
 			sched.Complete(done.lane, done.chunk)
+			if f.cc != nil {
+				// Acknowledged bytes are what the coupled window grows on, so
+				// it advances at the rate the path actually delivers.
+				f.cc.Acked(done.lane, len(done.chunk.Data))
+			}
 		}
 
 		var err error

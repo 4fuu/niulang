@@ -15,6 +15,7 @@ import (
 	"github.com/icourses-dev/wanopt/internal/classifier"
 	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/metrics"
+	"github.com/icourses-dev/wanopt/internal/mpcc"
 	"github.com/icourses-dev/wanopt/internal/multipath"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/session"
@@ -235,6 +236,7 @@ type multipathFlow struct {
 	// watcher completes them as acknowledgements arrive, because they complete
 	// out of order by design and a waiter goroutine per chunk would mean
 	// hundreds a second on a fast flow.
+	cc                *mpcc.Window
 	chunkMu           sync.Mutex
 	outstandingChunks []outstandingChunk
 	finSequence       atomic.Uint64
