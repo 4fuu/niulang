@@ -115,7 +115,15 @@ const (
 )
 
 func newLaneCommit() *laneCommit {
-	return &laneCommit{products: initialCommitProducts, ceiling: maxCommitProducts}
+	return newLaneCommitCeiling(maxCommitProducts)
+}
+
+// newLaneCommitCeiling builds a search with an explicit ceiling. Production
+// uses maxCommitProducts, which currently equals the floor so the search
+// cannot move; tests use a higher one to exercise the mechanism that ceiling
+// is holding back.
+func newLaneCommitCeiling(ceiling float64) *laneCommit {
+	return &laneCommit{products: initialCommitProducts, ceiling: ceiling}
 }
 
 // window returns how many bytes this lane may hold unacknowledged, given the
