@@ -1,6 +1,6 @@
 # Multipath transport: design
 
-Status: implemented and measured; single-lane parity reached.
+Status: implemented and measured; window sizing is the open item.
 Supersedes the lane scheduler described in `docs/PERFORMANCE-20260812.md`.
 
 ## 1. What this is for
@@ -215,7 +215,7 @@ Four lanes still beat one here, and that is not a win: it is four connections
 claiming more of one pipe than one would, which is what coupled congestion
 control exists to prevent.
 
-**The single-lane gap is closed, and the cause was the window depth.** A lane
+**The single-lane gap is understood, and the two paths want opposite things.** A lane
 was allowed two congestion windows of unacknowledged data, which would be right
 if a chunk left the window as soon as the path delivered it. It does not: a
 chunk holds window space from the moment it is handed to a lane until the
@@ -223,20 +223,31 @@ peer's acknowledgement returns -- the transport's own queueing delay, plus a
 round trip, plus the acknowledgement delay. Two windows could not keep the pipe
 full across that loop.
 
-At four congestion windows, one lane at 100 Mbit/s over 20 MiB, three trials:
+Deepening the window from two congestion windows to four closes it, and breaks
+something else. One lane, three trials each:
 
-| Sender | Median | Worst |
+| Window | 100 Mbit/s shared, 20 MiB | 25 Mbit/s policed, 50 MiB |
 | --- | ---: | ---: |
-| Self-pacing | **43.27** | 41.61 |
-| Pushing | 38.92 | 37.42 |
+| 2 congestion windows | 35.72 | 18.2 |
+| 4 congestion windows | **43.27** | **10.5** |
+| Pushing sender | 38.92 | 21.2 |
 
-Neither CPU nor the transport queries were the cause, which two earlier fixes
-had assumed: caching the congestion-window read and snapshotting the
-acknowledged set were both worth doing and neither moved this number.
+On a path with a deep buffer, two windows leave the pipe short across the
+acknowledgement loop and four fix it. On a path that polices each source at
+25 Mbit/s, four arrive as a burst at a shallow token bucket, are dropped, and
+cost far more than they gain. A fixed multiple cannot serve both, and the
+policed path is the one striping exists for, so the shipped value is two and
+the deficit against the pushing sender on high-bandwidth-delay paths stands at
+about 14%.
 
-The cost of the deeper window is a proportionally deeper commitment to a lane
-that may stall. It is bounded, and it shrinks with the lane's own congestion
-window, so a lane whose path collapses still stops being handed work.
+Sizing this from the path rather than by a constant -- the queue a policer will
+tolerate is measurable, and so is whether losses follow a burst -- is the
+obvious next step and is not implemented.
+
+Worth recording what was *not* the cause, because two commits assumed it was:
+the congestion-window read on every admission check and the per-chunk lock in
+the completion watcher were both real costs, both worth fixing, and neither
+moved this number at all.
 
 ## 8. Phases
 

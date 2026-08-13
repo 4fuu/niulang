@@ -61,12 +61,18 @@ const (
 	// delivered it. It does not: a chunk holds window space from the moment it
 	// is handed to the lane until the peer's acknowledgement comes back, which
 	// is the transport's own queueing delay plus a round trip plus the
-	// acknowledgement delay. Two congestion windows measured about 14% below
-	// the pushing sender on one lane, which is the deficit this is trying to
-	// close; the cost of raising it is a proportionally deeper commitment to a
-	// lane that may stall, bounded by maxLaneWindowBytes and shrinking with the
-	// lane's own congestion window.
-	laneWindowMultiple = 4
+	// acknowledgement delay.
+	//
+	// Two is a compromise between two paths that want opposite things, and the
+	// numbers are worth keeping because the answer is not intuitive. On a
+	// 100 Mbit/s path with a deep buffer, two windows leave the pipe short and
+	// four measured 43.3 Mbit/s against two's 35.7. On a path that polices each
+	// source at 25 Mbit/s, four measured 10.5 against two's 18.2: the extra
+	// commitment arrives as a burst at a shallow token bucket, is dropped, and
+	// costs far more than it gains. A fixed multiple cannot be right for both,
+	// and the policed path is the one striping exists to serve, so this stays
+	// at the value that does not harm it.
+	laneWindowMultiple = 2
 )
 
 // windowBytes is how much unacknowledged data this lane will accept.
