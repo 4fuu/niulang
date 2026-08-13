@@ -75,9 +75,16 @@ type Config struct {
 	// product and its window shrinks with it, without the scheduler estimating
 	// anything.
 	LaneWindow int
-	// MaxOutstanding bounds chunks held across all lanes, which bounds memory:
-	// a chunk is retained until it completes, because it may need re-issuing.
+	// MaxOutstanding bounds chunks held across all lanes.
 	MaxOutstanding int
+	// MaxOutstandingBytes bounds the same set by size, and is the bound that
+	// matters. Counting chunks cannot bound memory when a chunk is whatever one
+	// read returned: 2048 chunks is 64 MiB if they are full and a fraction of
+	// that if they are not, so a count generous enough to keep a fast path busy
+	// is also generous enough to let a flow retain tens of megabytes. Measured
+	// with a count-only bound, throughput fell across successive transfers in
+	// one process as the heap grew.
+	MaxOutstandingBytes int
 	// RetransmitAfter is how long a chunk may be outstanding on a lane before
 	// it is also offered to another. Re-issuing duplicates bytes the receiver
 	// discards, so this trades a little bandwidth for not waiting on a lane
@@ -94,10 +101,11 @@ type Config struct {
 // DefaultConfig returns bounds suitable for a long-haul path.
 func DefaultConfig() Config {
 	return Config{
-		ChunkSize:       64 * 1024,
-		LaneWindow:      4,
-		MaxOutstanding:  64,
-		RetransmitAfter: 2 * time.Second,
+		ChunkSize:           64 * 1024,
+		LaneWindow:          4,
+		MaxOutstanding:      64,
+		MaxOutstandingBytes: 16 * 1024 * 1024,
+		RetransmitAfter:     2 * time.Second,
 	}
 }
 
@@ -114,6 +122,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MaxOutstanding < c.LaneWindow {
 		c.MaxOutstanding = c.LaneWindow
+	}
+	if c.MaxOutstandingBytes <= 0 {
+		c.MaxOutstandingBytes = d.MaxOutstandingBytes
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -216,7 +227,8 @@ func New(src io.Reader, cfg Config) *Scheduler {
 func (s *Scheduler) produce() {
 	for {
 		s.mu.Lock()
-		for !s.closed && len(s.pending)+len(s.live) >= s.cfg.MaxOutstanding {
+		for !s.closed && (len(s.pending)+len(s.live) >= s.cfg.MaxOutstanding ||
+			s.retainedBytes() >= uint64(s.cfg.MaxOutstandingBytes)) {
 			s.produced.Wait()
 		}
 		if s.closed {
@@ -254,6 +266,16 @@ func (s *Scheduler) produce() {
 		s.ready.Broadcast()
 		s.mu.Unlock()
 	}
+}
+
+// retainedBytes is what the flow is holding: chunks read but not yet
+// acknowledged. Must be called with the lock held.
+func (s *Scheduler) retainedBytes() uint64 {
+	total := s.totalBytes
+	for _, chunk := range s.pending {
+		total += uint64(len(chunk.Data))
+	}
+	return total
 }
 
 // markEOFLocked records the end of the stream. The final marker rides on the

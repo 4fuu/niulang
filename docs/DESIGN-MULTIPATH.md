@@ -1,6 +1,6 @@
 # Multipath transport: design
 
-Status: implemented and measured; window sizing is the open item.
+Status: implemented; commitment depth is an open regression on policed paths.
 Supersedes the lane scheduler described in `docs/PERFORMANCE-20260812.md`.
 
 ## 1. What this is for
@@ -181,6 +181,33 @@ collapsed.
 | --- | ---: | ---: | --- |
 | Self-pacing | 18.17 | **37.53** | 4/4 |
 | Pushing | 21.15 | 21.05 | 4/4 |
+
+**This result does not reproduce on current code, and that is a regression, not
+a measurement error.** The same configuration at 20 MiB now measures 18.0
+Mbit/s on four lanes against 20.2 on one -- aggregation gone, and striping
+slightly harmful. The 37.53 above was measured before a series of changes made
+to close a single-lane deficit on a 100 Mbit/s path with a deep buffer:
+
+| Change | Then | Now |
+| --- | ---: | ---: |
+| Read-ahead ceiling | 128 chunks | 2048 chunks / 16 MiB |
+| Per-lane chunk count | 96 | 1024 |
+| Per-lane window ceiling | 4 MiB | 8 MiB |
+| Acknowledgement delay | 50ms / 256 KiB | 10ms / 64 KiB |
+
+Every one of those loosens how much a flow may commit before an acknowledgement
+comes back, and every one of them measured as an improvement on the buffered
+path. On a path that polices each source at 25 Mbit/s with a shallow token
+bucket, the same looseness arrives as a burst and is dropped. It is the same
+trade the window multiple showed -- four congestion windows: 43.3 buffered,
+10.5 policed -- appearing again in every other constant.
+
+The conclusion is that **commitment depth cannot be a constant**. A bottleneck's
+tolerance for a burst is a property of the path, it differs by more than an
+order of magnitude between the two paths measured here, and no single value
+serves both. Deriving it -- from whether loss follows a burst, which is
+observable -- is the work this design still needs. Until then the constants
+above are tuned for the buffered path and the policed path pays for it.
 
 The pushing scheduler aggregates nothing at this size: four lanes measure what
 one lane measures. It reached 33.5 at 20 MiB and lost that entirely by 50 MiB,

@@ -37,6 +37,10 @@ const (
 	// is the per-lane window, which shrinks with the lane; this is the memory
 	// ceiling behind it.
 	maxFlowOutstandingChunks = 2048
+	// maxFlowOutstandingBytes is the real read-ahead bound. It has to clear the
+	// lanes' combined windows so it does not become the limit, and stay well
+	// under what a count-based bound would allow a flow to retain.
+	maxFlowOutstandingBytes = 16 * 1024 * 1024
 	// chunkReissueDelay is how long a chunk may sit on one lane before it is
 	// also offered to another.
 	chunkReissueDelay = 1500 * time.Millisecond
@@ -88,22 +92,20 @@ const (
 // A lane whose rate collapses gets a smaller product and a smaller window
 // without anything deciding to shrink it.
 func (l *mpLane) windowBytes() int {
-	// The lane's own congestion window is the right source, and the achieved
-	// rate is not. Deriving the window from measured throughput is circular: if
-	// the window is holding the lane back, the rate it measures is lower, which
-	// lowers the window again. The congestion window says what the path will
-	// accept rather than what this sender happened to achieve, which is also
-	// what MPTCP means by a subflow's window.
-	if cwnd := l.congestionWindow(); cwnd > 0 {
-		window := laneWindowMultiple * cwnd
-		if window < minLaneWindowBytes {
-			return minLaneWindowBytes
-		}
-		if window > maxLaneWindowBytes {
-			return maxLaneWindowBytes
-		}
-		return window
-	}
+	// The delivered rate, not the congestion window, is the right source here.
+	//
+	// The congestion window looks more principled -- it is what MPTCP means by
+	// a subflow's window, and deriving a window from measured throughput is
+	// circular in a way that should settle low. Measurement says otherwise, and
+	// it says so loudly: on a path that polices each source at 25 Mbit/s, BBR's
+	// congestion window sits well above what the policer will pass, so two of
+	// them arrive as a burst at a shallow token bucket and are dropped. Four
+	// lanes measured 15.4 Mbit/s that way, below a single lane's 20.2 and
+	// against 37.5 with the rate-derived window.
+	//
+	// The pacing rate already reflects what the path delivered, which on a
+	// policed path is the policer's allowance rather than the queue's depth.
+	// That is the quantity worth two round trips of commitment.
 	rate, rtt := l.sendRate()
 	if rate <= 0 || rtt <= 0 {
 		return minLaneWindowBytes
@@ -187,11 +189,12 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 		cc = mpcc.New(mpcc.Config{})
 	}
 	sched := stripe.New(&flowSource{flow: f}, stripe.Config{
-		ChunkSize:       f.chunkSize,
-		LaneWindow:      maxLaneChunkWindow,
-		MaxOutstanding:  maxFlowOutstandingChunks,
-		RetransmitAfter: chunkReissueDelay,
-		Windows:         &laneAdmission{flow: f, cc: cc},
+		ChunkSize:           f.chunkSize,
+		LaneWindow:          maxLaneChunkWindow,
+		MaxOutstanding:      maxFlowOutstandingChunks,
+		MaxOutstandingBytes: maxFlowOutstandingBytes,
+		RetransmitAfter:     chunkReissueDelay,
+		Windows:             &laneAdmission{flow: f, cc: cc},
 	})
 	defer sched.Close()
 	f.cc = cc
