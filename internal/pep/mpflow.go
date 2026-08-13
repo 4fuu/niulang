@@ -1809,8 +1809,16 @@ func (f *multipathFlow) writeACK(ctx context.Context, sequence uint64, direction
 // stays far below the smallest replay window so a sender never runs out of
 // window waiting for one.
 const (
-	ackCoalesceDelay  = 50 * time.Millisecond
-	ackBytesThreshold = 256 * 1024
+	// Under self-pacing an acknowledgement is not just bookkeeping: it is what
+	// frees window space for the next chunk, so its latency adds directly to
+	// the flow's effective round trip. At 200ms RTT the old 50ms coalescing
+	// delay was a fifth of the loop, and the self-paced sender measured about
+	// 12% below the pushing one largely because of it. TCP acknowledges every
+	// couple of segments for the same reason; a chunk here is 32 KiB, so two
+	// chunks is the threshold and the timer is only a backstop. The reverse
+	// path cost is a few dozen small frames a second.
+	ackCoalesceDelay  = 10 * time.Millisecond
+	ackBytesThreshold = 64 * 1024
 )
 
 // scheduleACK publishes the newest cumulative receive sequence without

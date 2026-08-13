@@ -558,3 +558,58 @@ func TestRecoveredChunkBypassesAFullLaneWindow(t *testing.T) {
 		t.Fatalf("admitted offset %d, want the recovered head at %d", got.Offset, head.Offset)
 	}
 }
+
+// fixedWindows is a Windows that reports constant limits.
+type fixedWindows struct{ lane, total int }
+
+func (w fixedWindows) Lane(uint64) int { return w.lane }
+func (w fixedWindows) Total() int      { return w.total }
+
+// The flow window is what stops N lanes claiming N times a single connection's
+// share, so it must bind even when every individual lane still has room.
+func TestFlowWindowBoundsEveryLaneTogether(t *testing.T) {
+	payload := make([]byte, 1024*1024)
+	s := New(bytes.NewReader(payload), Config{
+		ChunkSize: 4 * 1024, LaneWindow: 64,
+		// Each lane could hold 64 KiB, but the flow may only hold 16 KiB.
+		Windows: fixedWindows{lane: 64 * 1024, total: 16 * 1024},
+	})
+	defer s.Close()
+
+	ctx := context.Background()
+	admitted := 0
+	for lane := uint64(0); lane < 4; lane++ {
+		for {
+			probeCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+			chunk, _ := s.Next(probeCtx, lane, 0)
+			cancel()
+			if chunk == nil {
+				break
+			}
+			admitted++
+		}
+	}
+	if admitted > 4 {
+		t.Fatalf("admitted %d chunks (%d KiB) against a 16 KiB flow window",
+			admitted, admitted*4)
+	}
+	if admitted == 0 {
+		t.Fatal("flow window admitted nothing at all")
+	}
+}
+
+// A collapsed flow window must not deadlock the transfer: a lane holding
+// nothing is always allowed one chunk.
+func TestCollapsedFlowWindowStillMakesProgress(t *testing.T) {
+	payload := make([]byte, 64*1024)
+	s := New(bytes.NewReader(payload), Config{
+		ChunkSize: 8 * 1024, LaneWindow: 8,
+		Windows: fixedWindows{lane: 1, total: 1},
+	})
+	defer s.Close()
+
+	chunk, err := s.Next(context.Background(), 0, 0)
+	if err != nil || chunk == nil {
+		t.Fatalf("a collapsed window stalled the flow entirely: %v", err)
+	}
+}

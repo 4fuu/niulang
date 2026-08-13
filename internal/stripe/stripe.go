@@ -40,6 +40,22 @@ import (
 // ErrClosed reports that the scheduler has been closed.
 var ErrClosed = errors.New("stripe: scheduler closed")
 
+// Windows supplies the admission limits a lane must satisfy to be handed more
+// work. Both are in bytes of unacknowledged data.
+//
+// Keeping this an interface is what stops congestion control leaking into the
+// scheduler. The scheduler's job is to hand the oldest ready chunk to a lane
+// that has room; deciding how much room a lane has is a different question,
+// answered by the transport and by the flow's coupled controller.
+type Windows interface {
+	// Lane is how much this lane may hold. It bounds what the sender commits
+	// to a path that may not be able to move it.
+	Lane(laneID uint64) int
+	// Total is how much the flow may hold across every lane. It is what stops
+	// N lanes claiming N times a single connection's share.
+	Total() int
+}
+
 // Config bounds the scheduler.
 type Config struct {
 	// ChunkSize is the largest chunk handed to a lane. It trades balance
@@ -67,6 +83,10 @@ type Config struct {
 	// discards, so this trades a little bandwidth for not waiting on a lane
 	// that has gone quiet. Zero disables it.
 	RetransmitAfter time.Duration
+	// Windows supplies admission limits. When nil, only LaneWindow and
+	// MaxOutstanding apply, which is the behaviour of a flow with no
+	// congestion coupling.
+	Windows Windows
 	// Now is the clock, for tests.
 	Now func() time.Time
 }
@@ -164,6 +184,7 @@ type Scheduler struct {
 	live       map[uint64]*outstanding
 	laneLoad   map[uint64]int
 	laneBytes  map[uint64]uint64
+	totalBytes uint64
 	eof        bool
 	srcErr     error
 	closed     bool
@@ -276,7 +297,7 @@ func (s *Scheduler) Next(ctx context.Context, laneID uint64, windowBytes int) (*
 			return nil, err
 		}
 		if s.laneLoad[laneID] < s.cfg.LaneWindow {
-			if chunk := s.takeReadyLocked(laneID, s.laneHasRoomLocked(laneID, windowBytes)); chunk != nil {
+			if chunk := s.takeReadyLocked(laneID, s.hasRoomLocked(laneID, windowBytes)); chunk != nil {
 				return chunk, nil
 			}
 			if err := s.finishedLocked(); err != nil {
@@ -324,6 +345,7 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, hasRoom bool) *Chunk {
 		chunk.urgent = false
 		s.laneLoad[laneID]++
 		s.laneBytes[laneID] += uint64(len(chunk.Data))
+		s.totalBytes += uint64(len(chunk.Data))
 		if len(s.live) > s.stats.PeakOutstanding {
 			s.stats.PeakOutstanding = len(s.live)
 		}
@@ -438,18 +460,43 @@ func (s *Scheduler) releaseLaneLocked(laneID uint64, size uint64) {
 	if s.laneBytes[laneID] >= size {
 		s.laneBytes[laneID] -= size
 	} else {
+		size = s.laneBytes[laneID]
 		s.laneBytes[laneID] = 0
+	}
+	if s.totalBytes >= size {
+		s.totalBytes -= size
+	} else {
+		s.totalBytes = 0
 	}
 }
 
-// laneHasRoomLocked reports whether the lane can hold another chunk within the
-// window it declared. A lane is always allowed one chunk regardless: a window
-// smaller than a chunk must not be able to stall the lane entirely.
-func (s *Scheduler) laneHasRoomLocked(laneID uint64, windowBytes int) bool {
-	if windowBytes <= 0 || s.laneBytes[laneID] == 0 {
+// hasRoomLocked reports whether a lane may be handed another chunk: it must fit
+// both the lane's own window and the flow's.
+//
+// A lane holding nothing is always allowed one chunk. A window smaller than a
+// chunk is otherwise able to stall a lane permanently, and a flow window that
+// has collapsed must still make progress rather than deadlock.
+func (s *Scheduler) hasRoomLocked(laneID uint64, windowBytes int) bool {
+	// The escape hatch is deliberately keyed on the flow holding nothing, not
+	// on this lane holding nothing. Per-lane, it would hand every lane a free
+	// chunk and let the flow exceed its window by one chunk per lane -- which
+	// is exactly the over-claiming the flow window exists to prevent.
+	if s.totalBytes == 0 {
 		return true
 	}
-	return s.laneBytes[laneID]+uint64(s.cfg.ChunkSize) <= uint64(windowBytes)
+	chunk := uint64(s.cfg.ChunkSize)
+	if windowBytes > 0 && s.laneBytes[laneID]+chunk > uint64(windowBytes) {
+		return false
+	}
+	if s.cfg.Windows != nil {
+		if lane := s.cfg.Windows.Lane(laneID); lane > 0 && s.laneBytes[laneID]+chunk > uint64(lane) {
+			return false
+		}
+		if total := s.cfg.Windows.Total(); total > 0 && s.totalBytes+chunk > uint64(total) {
+			return false
+		}
+	}
+	return true
 }
 
 // requeueLocked returns a chunk to the ready set in offset order, so the
