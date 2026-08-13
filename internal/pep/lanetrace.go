@@ -38,13 +38,15 @@ func traceLane(f *multipathFlow, laneID uint64, stats laneTransportStats) {
 	var held, queued uint64
 	var chunks, ready int
 	var flowHeld uint64
-	var issued, reissued, bytesIssued, bytesReissued, laneFailures uint64
+	var issued, reissued, sourceBytes, reissuedBytes, laneFailures uint64
 	if sched := f.scheduler.Load(); sched != nil {
 		chunks, held, queued = sched.LaneOutstanding(laneID)
 		ready, flowHeld = sched.Pending()
 		st := sched.Stats()
+		// issued against source bytes is the check that found a completed chunk
+		// being sent twice: a 320-chunk object cannot be issued 481 times.
 		issued, reissued = st.ChunksIssued, st.ChunksRetransmit
-		bytesIssued, bytesReissued = st.SourceBytes, st.BytesRetransmit
+		sourceBytes, reissuedBytes = st.SourceBytes, st.BytesRetransmit
 		laneFailures = st.LaneFailures
 	}
 	meanResidency, maxResidency := f.takeResidency()
@@ -54,7 +56,7 @@ func traceLane(f *multipathFlow, laneID uint64, stats laneTransportStats) {
 		c.CongestionWindow, c.BytesInFlight,
 		float64(c.MinRTT.Microseconds())/1000, float64(stats.smoothedRTT.Microseconds())/1000,
 		c.PacingRate, c.MaxBandwidth, c.Round, c.AppSamples, c.NonAppSamples,
-		window, held, queued, chunks, ready, flowHeld, issued, reissued, bytesIssued, bytesReissued, laneFailures,
+		window, held, queued, chunks, ready, flowHeld, issued, reissued, sourceBytes, reissuedBytes, laneFailures,
 		float64(meanResidency.Microseconds())/1000, float64(maxResidency.Microseconds())/1000,
 		f.acksIn.Swap(0), f.acksOut.Swap(0), f.acksSched.Swap(0), float64(f.ackWriteNS.Swap(0))/1e6,
 		stats.bytesSent, stats.packetsLost, c.Mode)

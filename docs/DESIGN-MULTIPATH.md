@@ -310,7 +310,8 @@ transfer completing on both stacks), medians in Mbit/s:
 | 256 MiB, no impairment (datapath cost) | 879.94 | **905.94** |
 
 Parity or better everywhere; the two cells below the reference (4 flows, 10%
-loss) are inside the spread of repeated runs.
+loss) are inside the spread of repeated runs. `bench_matrix.sh --gate
+--tolerance 0.10` passes, which is the first time it has.
 
 The striping regime -- a path policing each source address at 25 Mbit/s, 200 ms,
 1% loss:
