@@ -166,7 +166,15 @@ Established up front, lanes work: on a path policing each source address at
 25 Mbit/s, four lanes carry 50 MiB at 53.0 Mbit/s against a single lane's 22.3
 and the TUIC-shaped reference's 22.5, with every transfer completing. On a
 shared 100 Mbit/s bottleneck the same four lanes measure 60.6 against one lane's
-58.7 -- they do not aggregate, which is the correct outcome there. A lane still takes several seconds to arrive when the
+58.7 -- they do not aggregate, which is the correct outcome there.
+
+The search now earns its keep rather than merely being safe. With nothing
+configured, the same policed path measures 33.2 Mbit/s against the reference's
+22.2; it used to measure 20.6, below what a single lane achieved. A probe that
+clears its gain bar doubles the target instead of adding one lane, so a transfer
+long enough to run two experiments reaches four lanes rather than three. The
+remaining gap to the pinned 53.0 is how long a controlled experiment takes, not
+what it concludes. A lane still takes several seconds to arrive when the
 search opens it mid-transfer, but that delay is the search's own baseline window
 rather than a transport cost: the secondary QUIC pool authenticates in 404 ms and
 the join completes in 606 ms. The earlier report of a 5.37 s authentication

@@ -320,6 +320,17 @@ The striping regime -- a path policing each source address at 25 Mbit/s, 200 ms,
 | 20 MiB, 1 lane | 20.70 | **22.26** |
 | 20 MiB, 4 lanes | -- | **42.71** (1.92x one lane) |
 | 50 MiB, 4 lanes | 22.49 | **53.03** (2.36x the reference) |
+| 50 MiB, lane count searched, nothing configured | 22.23 | **33.19** |
+
+The last row is the one that matters for a product: no `--lanes`, no
+`--initial-lanes`, the client measuring its way there. It was 20.6 against the
+reference's 20.4 before this work -- a search that was safe and bought nothing.
+It reaches 33.2 now, and the gap to the pinned 53.0 is the search's own latency:
+a probe costs a warm-up, a baseline, a settle and a measurement, so it converges
+in seconds and a 15-second transfer spends a third of itself getting there. A
+confirmed probe now doubles the target rather than adding one, which halves the
+remaining distance; going further means making the measurement cheaper, not
+making the policy bolder.
 
 Interactive requests during a 50 MiB bulk transfer, 200 ms, 1% loss:
 

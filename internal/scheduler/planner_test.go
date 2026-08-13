@@ -89,3 +89,35 @@ func TestPlannerFallsBackToOneLaneWhenUDPUnhealthy(t *testing.T) {
 		t.Fatalf("target lanes = %d, want 1", d.TargetLanes)
 	}
 }
+
+// A probe that clears the gain bar has measured that this path rewards
+// striping, so the next step is a doubling rather than another five-second
+// experiment for one more lane. The first probe, which has nothing to compare
+// against yet, still adds exactly one.
+func TestConfirmedGainDoublesTheLaneTarget(t *testing.T) {
+	p := New(Config{MaxLanes: 8, InteractiveLanes: 1, BulkStartLanes: 1, MinimumMarginalGain: 0.15})
+	base := Metrics{CurrentLanes: 1, HealthyLanes: 1, AvailableLanes: 8, ProbeReady: true, UDPHealthy: true}
+
+	speculative := p.Decide(classifier.ClassBulk, base)
+	if speculative.TargetLanes != 2 {
+		t.Fatalf("first probe asked for %d lanes, want 2", speculative.TargetLanes)
+	}
+
+	confirmed := base
+	confirmed.CurrentLanes, confirmed.HealthyLanes, confirmed.MarginalGain = 2, 2, 0.4
+	if got := p.Decide(classifier.ClassBulk, confirmed).TargetLanes; got != 4 {
+		t.Fatalf("a probe measuring 40%% gain asked for %d lanes, want 4", got)
+	}
+
+	weak := base
+	weak.CurrentLanes, weak.HealthyLanes, weak.MarginalGain = 2, 2, 0.05
+	if got := p.Decide(classifier.ClassBulk, weak).TargetLanes; got != 3 {
+		t.Fatalf("a probe below the gain bar asked for %d lanes, want 3", got)
+	}
+
+	capped := base
+	capped.CurrentLanes, capped.HealthyLanes, capped.MarginalGain = 6, 6, 0.4
+	if got := p.Decide(classifier.ClassBulk, capped).TargetLanes; got != 8 {
+		t.Fatalf("doubling past the ceiling asked for %d lanes, want 8", got)
+	}
+}

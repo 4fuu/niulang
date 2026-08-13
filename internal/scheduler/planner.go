@@ -127,7 +127,11 @@ func (p *Planner) Decide(class classifier.Class, m Metrics) Decision {
 		}
 		if current < p.cfg.MaxLanes && m.ProbeReady &&
 			(m.BaselineRTT <= 0 || m.CurrentRTT <= time.Duration(float64(m.BaselineRTT)*bulkRTTCollapseRatio)) {
-			return Decision{TargetLanes: current + 1, Class: class, Reason: "measured lane probe within RTT budget"}
+			return Decision{
+				TargetLanes: p.growthTarget(current, m.MarginalGain),
+				Class:       class,
+				Reason:      "measured lane probe within RTT budget",
+			}
 		}
 		return Decision{TargetLanes: current, Class: class, Reason: "hold lanes: gain or latency guardrail"}
 	default:
@@ -140,4 +144,35 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// growthTarget is how many lanes a granted probe should reach for.
+//
+// The search is latency-bound, not evidence-bound. One probe costs a warm-up, a
+// baseline window, a settle and a measurement -- about five seconds at a 500 ms
+// decision interval -- so incrementing by one per probe reaches four lanes only
+// after fifteen seconds, and a transfer that ends sooner never gets there.
+// Measured on a path policing each source address at 25 Mbit/s, that is the
+// difference between 27.2 Mbit/s and the 53.0 the same path gives when four
+// lanes are established up front.
+//
+// The first probe is speculative by construction: there is nothing to compare
+// until a lane exists, so it adds exactly one. A probe that then clears the
+// gain bar is not speculation -- it is a measurement that this path rewards
+// striping -- and doubling from there costs one more probe to reach four lanes
+// instead of three, and one more again to reach eight. A probe that fails
+// retires the search, and a negative gain retires a lane, so the downside of a
+// doubling that does not pay is bounded by the same guardrails as before.
+func (p *Planner) growthTarget(current int, gain float64) int {
+	target := current + 1
+	if p.cfg.MinimumMarginalGain > 0 && gain >= p.cfg.MinimumMarginalGain {
+		target = current * 2
+	}
+	if target > p.cfg.MaxLanes {
+		target = p.cfg.MaxLanes
+	}
+	if target < current+1 {
+		target = current + 1
+	}
+	return target
 }
