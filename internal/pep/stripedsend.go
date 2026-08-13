@@ -58,8 +58,12 @@ const (
 	// lanes at this bound is the flow's worst-case commitment, and it is why the
 	// chunk ceiling above is not simply unbounded.
 	maxLaneWindowBytes = 8 * 1024 * 1024
-	// laneWindowMultiple is how many congestion windows of application data a
-	// lane may hold unacknowledged.
+	// (The fixed window multiple that used to live here is gone: it is now
+	// searched for per lane by laneCommit, because no constant served both a
+	// deeply buffered path and a shallow policer.)
+	//
+	// Historical note kept deliberately, since the numbers are what justify the
+	// search:
 	//
 	// One would be right if a chunk left the window as soon as the path
 	// delivered it. It does not: a chunk holds window space from the moment it
@@ -67,16 +71,9 @@ const (
 	// is the transport's own queueing delay plus a round trip plus the
 	// acknowledgement delay.
 	//
-	// Two is a compromise between two paths that want opposite things, and the
-	// numbers are worth keeping because the answer is not intuitive. On a
-	// 100 Mbit/s path with a deep buffer, two windows leave the pipe short and
-	// four measured 43.3 Mbit/s against two's 35.7. On a path that polices each
-	// source at 25 Mbit/s, four measured 10.5 against two's 18.2: the extra
-	// commitment arrives as a burst at a shallow token bucket, is dropped, and
-	// costs far more than it gains. A fixed multiple cannot be right for both,
-	// and the policed path is the one striping exists to serve, so this stays
-	// at the value that does not harm it.
-	laneWindowMultiple = 2
+	// on a 100 Mbit/s path with a deep buffer, four bandwidth-delay products
+	// measured 43.3 Mbit/s and two measured 35.7; on a path policing each
+	// source at 25 Mbit/s, four measured 10.5 and two measured 18.2.
 )
 
 // windowBytes is how much unacknowledged data this lane will accept.
@@ -92,32 +89,19 @@ const (
 // A lane whose rate collapses gets a smaller product and a smaller window
 // without anything deciding to shrink it.
 func (l *mpLane) windowBytes() int {
-	// The delivered rate, not the congestion window, is the right source here.
-	//
-	// The congestion window looks more principled -- it is what MPTCP means by
-	// a subflow's window, and deriving a window from measured throughput is
-	// circular in a way that should settle low. Measurement says otherwise, and
-	// it says so loudly: on a path that polices each source at 25 Mbit/s, BBR's
-	// congestion window sits well above what the policer will pass, so two of
-	// them arrive as a burst at a shallow token bucket and are dropped. Four
-	// lanes measured 15.4 Mbit/s that way, below a single lane's 20.2 and
-	// against 37.5 with the rate-derived window.
-	//
-	// The pacing rate already reflects what the path delivered, which on a
-	// policed path is the policer's allowance rather than the queue's depth.
-	// That is the quantity worth two round trips of commitment.
 	rate, rtt := l.sendRate()
 	if rate <= 0 || rtt <= 0 {
-		return minLaneWindowBytes
+		if cwnd := l.congestionWindow(); cwnd > 0 {
+			rate, rtt = float64(cwnd), 200*time.Millisecond
+		}
 	}
-	window := int(2 * rate * rtt.Seconds())
-	if window < minLaneWindowBytes {
-		return minLaneWindowBytes
-	}
-	if window > maxLaneWindowBytes {
-		return maxLaneWindowBytes
-	}
-	return window
+	return l.commit().window(rate, rtt)
+}
+
+// commit returns this lane's burst-tolerance search, creating it on first use.
+func (l *mpLane) commit() *laneCommit {
+	l.commitOnce.Do(func() { l.commitSearch = newLaneCommit() })
+	return l.commitSearch
 }
 
 // congestionWindow reports what this lane's transport says the path will hold,
@@ -145,6 +129,24 @@ func (l *mpLane) congestionWindow() int {
 	l.cwndBytes = int(provider.transportStats().controller.CongestionWindow)
 	l.cwndSampled = now
 	return l.cwndBytes
+}
+
+// readAheadBytes is how far ahead of the lanes the producer may read: enough to
+// keep every lane's window full and refill it, and no more. Deriving it from
+// the windows rather than fixing it keeps one constant from having to suit both
+// a 25 Mbit/s policer and a 100 Mbit/s path.
+func (f *multipathFlow) readAheadBytes() int {
+	total := 0
+	for _, lane := range f.healthyLanes() {
+		total += lane.windowBytes()
+	}
+	if total <= 0 {
+		return minLaneWindowBytes * 2
+	}
+	if readAhead := 2 * total; readAhead < maxFlowOutstandingBytes {
+		return readAhead
+	}
+	return maxFlowOutstandingBytes
 }
 
 // flowSource adapts the application connection to the scheduler's reader,
@@ -193,6 +195,7 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 		LaneWindow:          maxLaneChunkWindow,
 		MaxOutstanding:      maxFlowOutstandingChunks,
 		MaxOutstandingBytes: maxFlowOutstandingBytes,
+		ReadAhead:           f.readAheadBytes,
 		RetransmitAfter:     chunkReissueDelay,
 		Windows:             &laneAdmission{flow: f, cc: cc},
 	})

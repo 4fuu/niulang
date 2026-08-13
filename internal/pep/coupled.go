@@ -85,9 +85,8 @@ func (f *multipathFlow) laneByID(laneID uint64) *mpLane {
 // decrease. Reading it on a timer rather than hooking the transport keeps this
 // dependency-free enough that a TCP rescue lane needs no special case.
 func (f *multipathFlow) sampleLaneCongestion(ctx context.Context, cc *mpcc.Window) {
-	if cc == nil {
-		return
-	}
+	// Runs whether or not coupling is enabled: the per-lane burst-tolerance
+	// search needs the same loss samples, and it is not optional.
 	ticker := time.NewTicker(laneSampleInterval)
 	defer ticker.Stop()
 	lost := make(map[uint64]uint64)
@@ -111,17 +110,27 @@ func (f *multipathFlow) sampleLaneCongestion(ctx context.Context, cc *mpcc.Windo
 			if rtt <= 0 {
 				rtt = stats.latestRTT
 			}
-			cc.Observe(lane.id, rtt)
 			previous, known := lost[lane.id]
 			lost[lane.id] = stats.packetsLost
-			if known && stats.packetsLost > previous {
-				cc.Congestion(lane.id)
+			losing := known && stats.packetsLost > previous
+			// The search for how much this bottleneck will absorb. Its only
+			// input is whether the lane lost anything since the last sample:
+			// nothing distinguishes a token bucket from a deep queue here, and
+			// nothing about the path is supplied in advance.
+			lane.commit().observe(losing, time.Now(), rtt)
+			if cc != nil {
+				cc.Observe(lane.id, rtt)
+				if losing {
+					cc.Congestion(lane.id)
+				}
 			}
 		}
 		for id := range lost {
 			if !seen[id] {
 				delete(lost, id)
-				cc.Forget(id)
+				if cc != nil {
+					cc.Forget(id)
+				}
 			}
 		}
 	}

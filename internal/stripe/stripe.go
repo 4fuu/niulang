@@ -90,6 +90,10 @@ type Config struct {
 	// discards, so this trades a little bandwidth for not waiting on a lane
 	// that has gone quiet. Zero disables it.
 	RetransmitAfter time.Duration
+	// ReadAhead, when set, reports how far ahead of the lanes the producer may
+	// read. It is consulted rather than fixed because the right amount is the
+	// lanes' combined windows, which change with the path.
+	ReadAhead func() int
 	// Windows supplies admission limits. When nil, only LaneWindow and
 	// MaxOutstanding apply, which is the behaviour of a flow with no
 	// congestion coupling.
@@ -228,7 +232,7 @@ func (s *Scheduler) produce() {
 	for {
 		s.mu.Lock()
 		for !s.closed && (len(s.pending)+len(s.live) >= s.cfg.MaxOutstanding ||
-			s.retainedBytes() >= uint64(s.cfg.MaxOutstandingBytes)) {
+			s.retainedBytes() >= uint64(s.readAheadLimit())) {
 			s.produced.Wait()
 		}
 		if s.closed {
@@ -266,6 +270,18 @@ func (s *Scheduler) produce() {
 		s.ready.Broadcast()
 		s.mu.Unlock()
 	}
+}
+
+// readAheadLimit is the smaller of the configured ceiling and what the lanes
+// can currently use.
+func (s *Scheduler) readAheadLimit() int {
+	limit := s.cfg.MaxOutstandingBytes
+	if s.cfg.ReadAhead != nil {
+		if want := s.cfg.ReadAhead(); want > 0 && want < limit {
+			limit = want
+		}
+	}
+	return limit
 }
 
 // retainedBytes is what the flow is holding: chunks read but not yet

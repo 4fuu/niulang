@@ -103,6 +103,10 @@ type mpLane struct {
 	pulling atomic.Bool
 	// cwnd caches the transport's congestion window. Admission reads it for
 	// every chunk offered to every lane.
+	// commitSearch adapts how far ahead of acknowledgements this lane may be
+	// committed, which is a property of the bottleneck rather than a constant.
+	commitOnce        sync.Once
+	commitSearch      *laneCommit
 	cwndMu            sync.Mutex
 	cwndBytes         int
 	cwndSampled       time.Time
