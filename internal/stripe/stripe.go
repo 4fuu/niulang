@@ -47,11 +47,17 @@ type Config struct {
 	// any single lane can hold up is C bytes of the receiver's contiguous
 	// point, so this is the head-of-line exposure of one stalled lane.
 	ChunkSize int
-	// LaneWindow is how many chunks a lane may hold at once. One would be
-	// purely self-paced but leaves the lane idle for a round trip between
-	// finishing a chunk and being handed the next; a small window keeps the
-	// lane busy across that gap. It is the per-lane commitment, so it is
-	// deliberately small.
+	// LaneWindow caps how many chunks a lane may hold at once, as a backstop on
+	// bookkeeping. The binding limit is normally the window in bytes the lane
+	// passes to Next.
+	//
+	// A window of one would be purely self-paced but leaves the lane idle for a
+	// round trip between finishing a chunk and being handed the next, so the
+	// window has to cover the lane's bandwidth-delay product or the lane
+	// under-runs. That number is a property of the lane, not of the scheduler,
+	// which is why the lane supplies it: a lane that slows down has a smaller
+	// product and its window shrinks with it, without the scheduler estimating
+	// anything.
 	LaneWindow int
 	// MaxOutstanding bounds chunks held across all lanes, which bounds memory:
 	// a chunk is retained until it completes, because it may need re-issuing.
@@ -148,6 +154,7 @@ type Scheduler struct {
 	pending    []*Chunk
 	live       map[uint64]*outstanding
 	laneLoad   map[uint64]int
+	laneBytes  map[uint64]uint64
 	eof        bool
 	srcErr     error
 	closed     bool
@@ -159,10 +166,11 @@ type Scheduler struct {
 func New(src io.Reader, cfg Config) *Scheduler {
 	cfg.applyDefaults()
 	s := &Scheduler{
-		cfg:      cfg,
-		src:      src,
-		live:     make(map[uint64]*outstanding),
-		laneLoad: make(map[uint64]int),
+		cfg:       cfg,
+		src:       src,
+		live:      make(map[uint64]*outstanding),
+		laneLoad:  make(map[uint64]int),
+		laneBytes: make(map[uint64]uint64),
 	}
 	s.stats.CompletedByLaneID = make(map[uint64]uint64)
 	s.ready.L = &s.mu
@@ -241,7 +249,7 @@ func (s *Scheduler) markEOFLocked() {
 // more work, so the lane's own speed decides its share. There is no rate
 // estimate here, and no decision about which lane deserves the chunk -- the
 // lane that asks first gets it, and a lane asks when it is free.
-func (s *Scheduler) Next(ctx context.Context, laneID uint64) (*Chunk, error) {
+func (s *Scheduler) Next(ctx context.Context, laneID uint64, windowBytes int) (*Chunk, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -255,7 +263,7 @@ func (s *Scheduler) Next(ctx context.Context, laneID uint64) (*Chunk, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if s.laneLoad[laneID] < s.cfg.LaneWindow {
+		if s.laneLoad[laneID] < s.cfg.LaneWindow && s.laneHasRoomLocked(laneID, windowBytes) {
 			if chunk := s.takeReadyLocked(laneID); chunk != nil {
 				return chunk, nil
 			}
@@ -296,6 +304,7 @@ func (s *Scheduler) takeReadyLocked(laneID uint64) *Chunk {
 		}
 		out.attempts = append(out.attempts, attempt{lane: laneID, deadline: deadline})
 		s.laneLoad[laneID]++
+		s.laneBytes[laneID] += uint64(len(chunk.Data))
 		if len(s.live) > s.stats.PeakOutstanding {
 			s.stats.PeakOutstanding = len(s.live)
 		}
@@ -339,7 +348,7 @@ func (s *Scheduler) Complete(laneID uint64, chunk *Chunk) {
 		return
 	}
 	for _, a := range out.attempts {
-		s.releaseLaneLocked(a.lane)
+		s.releaseLaneLocked(a.lane, uint64(len(out.chunk.Data)))
 	}
 	delete(s.live, chunk.Offset)
 	s.stats.ChunksCompleted++
@@ -387,6 +396,7 @@ func (s *Scheduler) RetireLane(laneID uint64) {
 		}
 	}
 	delete(s.laneLoad, laneID)
+	delete(s.laneBytes, laneID)
 	s.ready.Broadcast()
 }
 
@@ -396,15 +406,30 @@ func (s *Scheduler) dropAttemptLocked(out *outstanding, laneID uint64) {
 			continue
 		}
 		out.attempts = append(out.attempts[:i], out.attempts[i+1:]...)
-		s.releaseLaneLocked(laneID)
+		s.releaseLaneLocked(laneID, uint64(len(out.chunk.Data)))
 		return
 	}
 }
 
-func (s *Scheduler) releaseLaneLocked(laneID uint64) {
+func (s *Scheduler) releaseLaneLocked(laneID uint64, size uint64) {
 	if s.laneLoad[laneID] > 0 {
 		s.laneLoad[laneID]--
 	}
+	if s.laneBytes[laneID] >= size {
+		s.laneBytes[laneID] -= size
+	} else {
+		s.laneBytes[laneID] = 0
+	}
+}
+
+// laneHasRoomLocked reports whether the lane can hold another chunk within the
+// window it declared. A lane is always allowed one chunk regardless: a window
+// smaller than a chunk must not be able to stall the lane entirely.
+func (s *Scheduler) laneHasRoomLocked(laneID uint64, windowBytes int) bool {
+	if windowBytes <= 0 || s.laneBytes[laneID] == 0 {
+		return true
+	}
+	return s.laneBytes[laneID]+uint64(s.cfg.ChunkSize) <= uint64(windowBytes)
 }
 
 // requeueLocked returns a chunk to the ready set in offset order, so the

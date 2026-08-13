@@ -29,7 +29,7 @@ func drainLanes(t *testing.T, s *Scheduler, rates []time.Duration) (map[uint64]u
 		go func(laneID uint64, perByte time.Duration) {
 			defer wg.Done()
 			for {
-				chunk, err := s.Next(ctx, laneID)
+				chunk, err := s.Next(ctx, laneID, 0)
 				if err != nil || chunk == nil {
 					return
 				}
@@ -135,7 +135,7 @@ func TestStalledLaneDoesNotHoldUpTheTransfer(t *testing.T) {
 	// returns, which is the point: only the healthy lane's progress is waited
 	// on, because a real stalled lane does not politely exit either.
 	go func() {
-		if _, err := s.Next(ctx, 0); err != nil {
+		if _, err := s.Next(ctx, 0, 0); err != nil {
 			return
 		}
 		<-ctx.Done()
@@ -146,7 +146,7 @@ func TestStalledLaneDoesNotHoldUpTheTransfer(t *testing.T) {
 	go func() {
 		defer close(finished)
 		for {
-			chunk, err := s.Next(ctx, 1)
+			chunk, err := s.Next(ctx, 1, 0)
 			if err != nil || chunk == nil {
 				return
 			}
@@ -193,7 +193,7 @@ func TestRetiredLaneReleasesItsChunks(t *testing.T) {
 	// Lane 0 takes its window and dies.
 	var held []*Chunk
 	for i := 0; i < 3; i++ {
-		chunk, err := s.Next(ctx, 0)
+		chunk, err := s.Next(ctx, 0, 0)
 		if err != nil || chunk == nil {
 			t.Fatalf("lane 0 next: %v", err)
 		}
@@ -204,7 +204,7 @@ func TestRetiredLaneReleasesItsChunks(t *testing.T) {
 	// Every chunk it held must be available to lane 1.
 	seen := make(map[uint64]bool)
 	for range held {
-		chunk, err := s.Next(ctx, 1)
+		chunk, err := s.Next(ctx, 1, 0)
 		if err != nil || chunk == nil {
 			t.Fatalf("lane 1 next: %v", err)
 		}
@@ -230,7 +230,7 @@ func TestReissueAvoidsTheLaneAlreadyCarryingIt(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
-	first, err := s.Next(ctx, 0)
+	first, err := s.Next(ctx, 0, 0)
 	if err != nil || first == nil {
 		t.Fatalf("next: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestReissueAvoidsTheLaneAlreadyCarryingIt(t *testing.T) {
 		t.Fatalf("re-offered %d chunks, want 1", n)
 	}
 	// Lane 0 must not be handed the same chunk back.
-	next, err := s.Next(ctx, 0)
+	next, err := s.Next(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("next: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestReissueAvoidsTheLaneAlreadyCarryingIt(t *testing.T) {
 		t.Fatal("re-issued a chunk on the lane already carrying it")
 	}
 	// Lane 1 must be.
-	other, err := s.Next(ctx, 1)
+	other, err := s.Next(ctx, 1, 0)
 	if err != nil || other == nil {
 		t.Fatalf("lane 1 next: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestOutstandingIsBounded(t *testing.T) {
 	ctx := context.Background()
 	var held []*Chunk
 	for i := 0; i < 2; i++ {
-		chunk, err := s.Next(ctx, 0)
+		chunk, err := s.Next(ctx, 0, 0)
 		if err != nil || chunk == nil {
 			t.Fatalf("next: %v", err)
 		}
@@ -309,7 +309,7 @@ func TestFinalChunkIsTheLastByteRange(t *testing.T) {
 	var last *Chunk
 	var end uint64
 	for {
-		chunk, err := s.Next(ctx, 0)
+		chunk, err := s.Next(ctx, 0, 0)
 		if err != nil {
 			t.Fatalf("next: %v", err)
 		}
@@ -340,7 +340,7 @@ func TestSourceErrorIsReported(t *testing.T) {
 	s := New(&failingReader{err: want}, Config{ChunkSize: 1024, LaneWindow: 1})
 	defer s.Close()
 
-	_, err := s.Next(context.Background(), 0)
+	_, err := s.Next(context.Background(), 0, 0)
 	if !errors.Is(err, want) {
 		t.Fatalf("next error = %v, want %v", err, want)
 	}
@@ -366,7 +366,7 @@ func TestCloseReleasesWaiters(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		_, err := s.Next(context.Background(), 0)
+		_, err := s.Next(context.Background(), 0, 0)
 		errs <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -390,7 +390,7 @@ func TestNextRespectsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errs := make(chan error, 1)
 	go func() {
-		_, err := s.Next(ctx, 0)
+		_, err := s.Next(ctx, 0, 0)
 		errs <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -402,5 +402,53 @@ func TestNextRespectsContext(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Next ignored context cancellation")
+	}
+}
+
+// The lane declares how much it can hold, so a lane whose capacity collapses
+// stops being handed work without the scheduler measuring it.
+func TestLaneWindowInBytesBoundsCommitment(t *testing.T) {
+	payload := make([]byte, 256*1024)
+	s := New(bytes.NewReader(payload), Config{ChunkSize: 4 * 1024, LaneWindow: 64})
+	defer s.Close()
+
+	ctx := context.Background()
+	// A 16 KiB window admits four 4 KiB chunks and no more.
+	var held []*Chunk
+	for i := 0; i < 4; i++ {
+		chunk, err := s.Next(ctx, 0, 16*1024)
+		if err != nil || chunk == nil {
+			t.Fatalf("chunk %d: %v", i, err)
+		}
+		held = append(held, chunk)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Next(ctx, 0, 16*1024)
+	}()
+	select {
+	case <-done:
+		t.Fatal("lane was handed a fifth chunk beyond its declared window")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// Completing one frees exactly one chunk's worth of room.
+	s.Complete(0, held[0])
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("completing a chunk did not free window space")
+	}
+}
+
+// A window smaller than one chunk must not deadlock the lane.
+func TestTinyWindowStillAdmitsOneChunk(t *testing.T) {
+	payload := make([]byte, 64*1024)
+	s := New(bytes.NewReader(payload), Config{ChunkSize: 8 * 1024, LaneWindow: 4})
+	defer s.Close()
+
+	chunk, err := s.Next(context.Background(), 0, 128)
+	if err != nil || chunk == nil {
+		t.Fatalf("a window below one chunk stalled the lane: %v", err)
 	}
 }
