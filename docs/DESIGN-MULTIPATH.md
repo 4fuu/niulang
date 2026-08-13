@@ -1,6 +1,6 @@
 # Multipath transport: design
 
-Status: implemented and measured; single-lane parity outstanding.
+Status: implemented and measured; single-lane parity reached.
 Supersedes the lane scheduler described in `docs/PERFORMANCE-20260812.md`.
 
 ## 1. What this is for
@@ -215,14 +215,28 @@ Four lanes still beat one here, and that is not a win: it is four connections
 claiming more of one pipe than one would, which is what coupled congestion
 control exists to prevent.
 
-**The single-lane gap is not closed.** At 36.8 against the pushing sender's
-43-46 on this path, the self-paced sender is still about 15% behind on one
-lane, and the design's first requirement is that it must never be worse. The
-remaining suspect is the feedback loop itself: a chunk is not free until its
-bytes are acknowledged, which adds the acknowledgement delay to every window
-recycle, where the pushing sender was limited only by QUIC's own window. This
-is the open item, and it is why the self-paced sender is not yet the default
-for single-lane flows.
+**The single-lane gap is closed, and the cause was the window depth.** A lane
+was allowed two congestion windows of unacknowledged data, which would be right
+if a chunk left the window as soon as the path delivered it. It does not: a
+chunk holds window space from the moment it is handed to a lane until the
+peer's acknowledgement returns -- the transport's own queueing delay, plus a
+round trip, plus the acknowledgement delay. Two windows could not keep the pipe
+full across that loop.
+
+At four congestion windows, one lane at 100 Mbit/s over 20 MiB, three trials:
+
+| Sender | Median | Worst |
+| --- | ---: | ---: |
+| Self-pacing | **43.27** | 41.61 |
+| Pushing | 38.92 | 37.42 |
+
+Neither CPU nor the transport queries were the cause, which two earlier fixes
+had assumed: caching the congestion-window read and snapshotting the
+acknowledged set were both worth doing and neither moved this number.
+
+The cost of the deeper window is a proportionally deeper commitment to a lane
+that may stall. It is bounded, and it shrinks with the lane's own congestion
+window, so a lane whose path collapses still stops being handed work.
 
 ## 8. Phases
 

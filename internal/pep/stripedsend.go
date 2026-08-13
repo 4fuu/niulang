@@ -53,7 +53,20 @@ const (
 	// maxLaneWindowBytes caps what one lane may hold however fast it looks. Four
 	// lanes at this bound is the flow's worst-case commitment, and it is why the
 	// chunk ceiling above is not simply unbounded.
-	maxLaneWindowBytes = 4 * 1024 * 1024
+	maxLaneWindowBytes = 8 * 1024 * 1024
+	// laneWindowMultiple is how many congestion windows of application data a
+	// lane may hold unacknowledged.
+	//
+	// One would be right if a chunk left the window as soon as the path
+	// delivered it. It does not: a chunk holds window space from the moment it
+	// is handed to the lane until the peer's acknowledgement comes back, which
+	// is the transport's own queueing delay plus a round trip plus the
+	// acknowledgement delay. Two congestion windows measured about 14% below
+	// the pushing sender on one lane, which is the deficit this is trying to
+	// close; the cost of raising it is a proportionally deeper commitment to a
+	// lane that may stall, bounded by maxLaneWindowBytes and shrinking with the
+	// lane's own congestion window.
+	laneWindowMultiple = 4
 )
 
 // windowBytes is how much unacknowledged data this lane will accept.
@@ -76,7 +89,7 @@ func (l *mpLane) windowBytes() int {
 	// accept rather than what this sender happened to achieve, which is also
 	// what MPTCP means by a subflow's window.
 	if cwnd := l.congestionWindow(); cwnd > 0 {
-		window := 2 * cwnd
+		window := laneWindowMultiple * cwnd
 		if window < minLaneWindowBytes {
 			return minLaneWindowBytes
 		}
