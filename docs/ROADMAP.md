@@ -50,11 +50,13 @@ not what produced this result.
 Gate: single-flow bulk improvement is demonstrated on at least three separate
 time windows without unacceptable interactive tail latency.
 
-Status: not met. Striping raises single-flow goodput only where the path
-polices per source address; on the emulated per-flow-policed path four lanes
-reach 67.2 Mbit/s against one lane's 22.5, but on a shared bottleneck extra
-lanes cannot help and are not expected to. No live campaign has demonstrated
-this across three windows.
+Status: not met, but for a narrower reason than before. Striping raises
+single-flow goodput only where the path polices per source address; on the
+emulated per-flow-policed path four lanes carry 50 MiB at 53.0 Mbit/s against
+one lane's 22.3 and a TUIC-shaped reference's 22.5, every transfer completing.
+On a shared bottleneck extra lanes measure 60.6 against one lane's 58.7, which
+is the correct outcome rather than a shortfall. What remains outstanding is the
+gate itself: no live campaign has demonstrated this across three windows.
 
 ## Stage 4 — automatic fallback and resumption
 

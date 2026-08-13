@@ -1,7 +1,7 @@
 # Multipath transport: design
 
-Status: implemented; commitment depth is an open regression on policed paths.
-Supersedes the lane scheduler described in `docs/PERFORMANCE-20260812.md`.
+Status: implemented and measured. Supersedes the lane scheduler described in
+`docs/PERFORMANCE-20260812.md`.
 
 ## 1. What this is for
 
@@ -12,10 +12,11 @@ that interactive traffic needs.
 The narrow claim is worth stating first, because it bounds everything else.
 **Striping one flow only pays where a single connection is policed below the
 path's capacity.** On the emulated path that polices each source address at
-25 Mbit/s, four lanes measured 33.5 Mbit/s against a single lane's 20.4. On a
-shared bottleneck it measured nothing, and at 50 MiB the fixed four-lane
-configuration lost a transfer outright with a worst trial of 5.39 Mbit/s
-against a single lane's 20.1.
+25 Mbit/s, 50 MiB over four lanes measures 53.0 Mbit/s against the TUIC-shaped
+reference's 22.5, every transfer completing. On a shared 100 Mbit/s bottleneck
+the same four lanes measure 60.6 against one lane's 58.7 -- which is the
+*intended* result, not a disappointing one: four connections should not take
+four shares of one pipe.
 
 TUIC, the reference this is measured against, does not stripe at all: it opens
 one bidirectional QUIC stream per proxied TCP connection and relays raw bytes.
@@ -45,10 +46,14 @@ shares, overshoot together, and drive each other into loss. That is what the
 50 MiB result above is: not a tuning problem but a structural one, and the
 problem MPTCP solved with coupled congestion control.
 
-**Buffered writes are not a pacing signal.** A QUIC stream with an 8 MiB
-flow-control window accepts megabytes before it pushes back, so a lane worker
-that treats a returned `Write` as progress measures its own send buffer and
-concludes every lane is infinitely fast.
+**Buffered writes are not a pacing signal -- but a blocking write is.** A lane
+worker that treats bytes accepted into a send buffer as progress is measuring
+its own buffer. quic-go's stream write is not that: it returns only once the
+packer has consumed the bytes, which requires congestion-window and pacer room.
+The first version of this design read the observation as "the transport cannot
+be trusted to clock a lane" and built an application-level acknowledgement loop
+instead. That cost a full extra round trip in the admission path and was the
+larger of the two mistakes; see 3.2 and 7.1.
 
 ## 3. Design
 
@@ -70,24 +75,59 @@ deciding to exclude it. This is MPTCP's scheduler -- send on a subflow that has
 congestion window space -- and it removes rate estimation from the data path
 entirely.
 
-"Room" is defined by the windows in 3.3, and a chunk is outstanding until the
-peer acknowledges its bytes. Acknowledgement, not a completed write, is what
-frees room.
+"Room" is what the lane's transport has not yet taken. A chunk is *committed*
+to a lane from the moment the lane takes it until the lane's QUIC stream write
+returns, and that write returns only once quic-go's packer has consumed the
+bytes into packets -- which it does only when the congestion window and the
+pacer allow. So the transport's own congestion control is the clock, directly,
+with nothing estimating anything.
 
-### 3.3 Coupled congestion control
+This is the correction that mattered most, and it took three wrong answers to
+find. A completed *buffered* write is not a signal, which is true and is what
+the original design said. The conclusion drawn from it -- that the peer's
+application-level acknowledgement must be the signal instead -- is wrong, and
+expensively so: that acknowledgement arrives a full round trip after the
+transport already knew, so a window sized to keep the lane busy across it has to
+cover two round trips rather than one. Every byte of that window is a byte
+numbered into the application stream and committed to one lane, where no other
+lane can take it back if that lane slows. Sizing it is not a tuning problem to
+be solved with a better constant; it is a cost that should not be paid.
 
-This is the part the previous design lacked, and the reason it was unstable.
+A blocking write has neither problem. It returns at the transport's clock, and
+the queue in front of it is the only thing committed in advance -- bounded, in
+3.3, at a fraction of the lane's congestion window.
 
-Two windows govern admission. A lane may take a chunk when **both** allow it:
+The peer's acknowledgement is still needed, for a narrower job: a chunk must be
+retained until the peer has it, because a lane that dies may not have delivered
+what its transport accepted. That is a memory bound, not a throughput bound, and
+it does not gate admission.
+
+### 3.3 Admission, and coupled congestion control
+
+Two limits govern admission. A lane may take a chunk when **both** allow it:
 
     flow.outstanding + chunk <= W          (the coupled, flow-level window)
-    lane.outstanding + chunk <= A(lane)    (the lane's own allowance)
+    lane.uncollected  + chunk <= Q(lane)   (the lane's write-ahead queue)
 
-**A(lane)** is the lane's QUIC congestion window less what QUIC already has in
-flight. It answers "can this path hold more right now?" and is read from the
-transport rather than estimated, so a lane whose path collapses stops being
-handed work immediately. It exists to stop the sender committing bytes to a
-lane's send buffer that the path cannot move.
+**Q(lane)** is a quarter of the lane's QUIC congestion window, bounded to
+[64 KiB, 512 KiB], and `lane.uncollected` is what the lane has been handed that
+its transport has not yet taken. It is not a congestion window and must not be
+read as one -- the transport already has one of those, and two nested
+controllers would be a mistake. It is a jitter buffer: enough that the writer
+always has the next chunk ready, and no more.
+
+It cannot be zero. A QUIC sender that runs out of data marks its bandwidth
+samples application-limited, BBR discards those samples, and its
+full-bandwidth test skips those rounds -- so a lane starved even momentarily can
+stop its controller ever leaving startup. Measured on a path policing each
+source at 25 Mbit/s, that held a lane at 2.9 bandwidth-delay products for a
+whole 20 MiB transfer and doubled the round trip with standing queue.
+
+It also cannot be large, and this is the constraint the earlier design missed. A
+lane's queue is head-of-line exposure: bytes already numbered into the
+application stream that only this lane can deliver. A quarter of a congestion
+window shrinks with a lane that slows, is bounded above so a lane with a very
+large window cannot turn its queue into a buffer, and needs nothing configured.
 
 **W** is the flow's shared window across all lanes, and it is what couples
 them. It follows MPTCP's Linked Increase Algorithm (RFC 6356):
@@ -142,10 +182,11 @@ The measure of this design is how much it removes.
 | Mechanism | Why it goes |
 | --- | --- |
 | Virtual transmit clock, predicted-arrival lane ranking | Replaced by pulling |
-| Per-lane 56-frame push queues (1.75 MiB) | The windows bound commitment |
+| Per-lane 56-frame push queues (1.75 MiB) | The write-ahead queue bounds commitment |
 | Replay buffer, budget, growth, eviction, unreplayable state | The scheduler retains unacknowledged chunks and re-issues them |
 | Timer-based head reinjection with pressure heuristic | Reinjection is a scheduler property |
 | Lane-count A/B probe, its exhaustion and RTT-collapse guards | A useless lane is never pulled from, so lane count stops being a dangerous decision |
+| Per-lane burst-tolerance search (`commit.go`) | It was scaling a quantity that had already run away; see 7.1 |
 
 That last one deserves a note. A whole measurement apparatus was built to decide
 whether to add a lane, because under a pushing scheduler a bad lane actively
@@ -170,131 +211,174 @@ capability negotiation, and no compatibility break.
 
 ## 7. What the redesign measured
 
-Both senders exist in one binary (`WANOPT_SELF_PACED=0` selects the previous
-one), so these are the same path, the same seed, and the same trials.
+All figures below are `cmd/wanoptbench` against the seeded path emulator, both
+stacks in one process, same path and same seed. "Reference" is
+`internal/baseline`, the TUIC-shaped control: one authenticated QUIC connection,
+one stream per relayed connection, unframed copying, on the same QUIC stack and
+the same controller.
 
-**Policed path, 25 Mbit/s per source, 50 MiB, four trials.** This is the case
-striping exists for, at the size where the previous design's aggregation had
-collapsed.
+### 7.1 Where the aggregation regression came from
 
-| Sender | 1 lane | 4 lanes | Completed |
-| --- | ---: | ---: | --- |
-| Self-pacing | 18.17 | **37.53** | 4/4 |
-| Pushing | 21.15 | 21.05 | 4/4 |
+A 37.5 Mbit/s four-lane result on the policed path had stopped reproducing, and
+the recorded explanation -- that a bottleneck's tolerance for a burst is a
+property of the path that no constant can capture -- was wrong. Instrumenting
+per-lane state over time (`WANOPT_LANE_TRACE=1`) found three separate faults,
+none of which is about burst tolerance.
 
-**This result does not reproduce on current code, and that is a regression, not
-a measurement error.** The same configuration at 20 MiB now measures 18.0
-Mbit/s on four lanes against 20.2 on one -- aggregation gone, and striping
-slightly harmful. The 37.53 above was measured before a series of changes made
-to close a single-lane deficit on a 100 Mbit/s path with a deep buffer:
+**The lane window was computed from quantities the window itself inflated.** It
+was `2 x pacing_rate x smoothed_RTT`. BBR's pacing rate carries the startup gain
+of 2.885, and the smoothed round trip carries the queueing delay that the window
+had just created, so the product is a positive feedback loop: on a path policing
+each source at 25 Mbit/s it reached 7.1 MB against that lane's true
+bandwidth-delay product of 625 KB, and every path measured ran the per-lane
+commitment to its 8 MiB ceiling. No search over "how much of a burst does this
+bottleneck absorb" can succeed while the quantity being scaled is a runaway; the
+search added in `internal/pep/commit.go` is deleted rather than fixed.
 
-| Change | Then | Now |
+**Admission was clocked a round trip too late.** Even sized correctly, a window
+released by the peer's application-level acknowledgement must cover two round
+trips rather than one. Instrumenting chunk residency -- hand-off to release --
+measured 600 to 1000 ms against a 200 ms path. That is why every constant wanted
+to be large, and why every one of them cost the policed path: a large window is
+a large per-lane commitment, and a striped flow pays for that in head-of-line
+blocking. Admission now bounds only what the lane's transport has not yet taken
+(3.2), so the acknowledgement is out of the throughput path entirely.
+
+**The controller never left startup.** `bbr-tuic` classified the sender as
+application-limited whenever bytes in flight were below the congestion window,
+which for a *paced* sender is nearly every acknowledgement. The full-bandwidth
+test skips application-limited rounds, so it never counted one: on the policed
+path the controller stayed in STARTUP for an entire 20 MiB transfer, held 2.9
+bandwidth-delay products in flight, and ran the round trip at 400 ms against the
+path's 200. Requiring a full burst of unused window -- the rule the code already
+applied in DRAIN -- fixes it; the transfer now reaches ProbeBW and the round trip
+returns to 201 ms. This affected the reference equally, so it never showed up in
+a wanopt-versus-reference comparison, which is exactly why it survived.
+
+### 7.2 A fourth fault: a completed chunk stayed in the ready set
+
+Re-offering a chunk to a second lane leaves it in two places at once: in flight
+on the first lane, and waiting in the ready set for the second. If it then
+arrived by the first route, nothing removed the copy still waiting -- so a later
+lane picked it up and sent bytes the peer already had.
+
+It hid from its own counter. A chunk taken while still in flight is recorded as
+a re-issue; one taken after it completed is no longer in flight, so it was
+recorded as a *new* issue. The re-issue counter therefore read zero throughout.
+What gave it away was arithmetic: on a 264 ms path at 20% loss, a 320-chunk
+object was issued 481 times, and the emulator counted 74% more packets crossing
+the path than the reference needed for the same bytes.
+
+`Complete` now drops the chunk from the ready set. At 20% loss that took wanopt
+from 13.1 Mbit/s to 15.2 against the reference's 14.6, and the packet counts
+match the reference's to within half a percent. It also closed most of the
+concurrent-flow gap, from 4 and 8 flows at 59.2 Mbit/s against 62.1 and 68.3 to
+61.6 and 68.8.
+
+### 7.3 A fifth fault: isolation threw away the warmed-up lane
+
+A bulk flow moves off the shared control connection so its congestion window
+cannot queue interactive traffic. The implementation excluded lane 0 from bulk
+the instant any joined lane existed -- including when the joined lane had just
+been created and had a fresh congestion window, and including when nothing else
+was using the control connection at all.
+
+Measured on the policed path: a lane arrived five seconds into a 20 MiB
+transfer, the flow abandoned a lane running at the full policed rate, and the
+remaining quarter of the transfer took nearly half of its total time.
+
+Isolation is now paid only while another flow is actually using the pooled
+connection, tested per lane selection rather than once per flow. A flow alone on
+the pool keeps the control lane; a flow sharing it yields within one chunk.
+
+### 7.4 Result
+
+The standard matrix (`scripts/bench_matrix.sh`, five trials per cell, every
+transfer completing on both stacks), medians in Mbit/s:
+
+| Block | Reference | wanopt |
 | --- | ---: | ---: |
-| Read-ahead ceiling | 128 chunks | 2048 chunks / 16 MiB |
-| Per-lane chunk count | 96 | 1024 |
-| Per-lane window ceiling | 4 MiB | 8 MiB |
-| Acknowledgement delay | 50ms / 256 KiB | 10ms / 64 KiB |
+| 10 MiB, 200 ms, 0% loss | 37.94 | 38.05 |
+| 10 MiB, 200 ms, 1% loss | 30.49 | **32.11** |
+| 10 MiB, 200 ms, 3% loss | 29.19 | 29.24 |
+| 10 MiB, 200 ms, 5% loss | 28.39 | 28.85 |
+| 50 MiB steady state, 1% loss | 58.40 | 58.73 |
+| 10 MiB x 4 concurrent flows | 62.18 | 61.66 |
+| 10 MiB x 8 concurrent flows | 70.40 | 70.72 |
+| 10 MiB, 264 ms, 10% loss | 17.92 | 17.58 |
+| 10 MiB, 264 ms, 20% loss | 15.12 | **15.68** |
+| 256 MiB, no impairment (datapath cost) | 879.94 | **905.94** |
 
-Every one of those loosens how much a flow may commit before an acknowledgement
-comes back, and every one of them measured as an improvement on the buffered
-path. On a path that polices each source at 25 Mbit/s with a shallow token
-bucket, the same looseness arrives as a burst and is dropped. It is the same
-trade the window multiple showed -- four congestion windows: 43.3 buffered,
-10.5 policed -- appearing again in every other constant.
+Parity or better everywhere; the two cells below the reference (4 flows, 10%
+loss) are inside the spread of repeated runs.
 
-**The adaptive search is implemented and does not fix this.** A per-lane search
-for burst tolerance (`internal/pep/commit.go`) now replaces the fixed multiple:
-it commits a little more each quiet round trip and backs off sharply on loss,
-with no input beyond whether the lane lost anything. Unit tests drive it against
-bottlenecks tolerating 5 and 1.2 bandwidth-delay products and confirm the same
-code reaches both answers, follows a path that degrades, and spends one backoff
-per loss episode. But end to end on the policed path it measures 20.0 Mbit/s on
-one lane and 17.0 on four -- aggregation still absent. So the search was
-necessary and is not sufficient, and the regression against the 37.5 result
-lies somewhere else in the changes listed above. Bisecting them against that
-commit is the next step and has not been done.
+The striping regime -- a path policing each source address at 25 Mbit/s, 200 ms,
+1% loss:
 
-The conclusion is that **commitment depth cannot be a constant**. A bottleneck's
-tolerance for a burst is a property of the path, it differs by more than an
-order of magnitude between the two paths measured here, and no single value
-serves both. Deriving it -- from whether loss follows a burst, which is
-observable -- is the work this design still needs. Until then the constants
-above are tuned for the buffered path and the policed path pays for it.
-
-The pushing scheduler aggregates nothing at this size: four lanes measure what
-one lane measures. It reached 33.5 at 20 MiB and lost that entirely by 50 MiB,
-which is the decay a longer transfer exposes -- more chances to commit bytes to
-a lane that then slows, and each one costs the receiver's contiguous point.
-Self-pacing holds 37.53 with a worst trial of 36.37, tighter than the old
-design ever was and higher than it ever reached.
-
-**Shared bottleneck, 100 Mbit/s, 50 MiB, three trials.** Every configuration
-completed every trial. This path is where the self-paced sender was initially
-much worse, and chasing that found three separate limits that were binding
-instead of the windows:
-
-| | 1 lane | 4 lanes |
+| | Reference | wanopt |
 | --- | ---: | ---: |
-| Self-pacing, first measurement | 34.05 | 49.94 |
-| after raising the read-ahead ceiling | 33.96 | 60.67 |
-| after charging admission by real chunk size | 31.04 | -- |
-| after raising the chunk-count cap | 36.76 | 56.96 |
-| Pushing (control) | 43.2 - 45.9 | 58.5 - 61.1 |
+| 20 MiB, 1 lane | 20.70 | **22.26** |
+| 20 MiB, 4 lanes | -- | **42.71** (1.92x one lane) |
+| 50 MiB, 4 lanes | 22.49 | **53.03** (2.36x the reference) |
 
-- The read-ahead ceiling was 128 chunks, 4 MiB, while one lane at 100 Mbit/s
-  and 200ms needs 2.5 MB in flight and four need ten. The producer stopped
-  reading before the windows ever bound.
-- Admission charged every chunk a nominal 32 KiB. A read from a TCP socket
-  usually returns far less, so a 2 MB window held about 224 KB of real data.
-- The per-lane chunk *count* cap was 96, which with small chunks is under
-  800 KB -- about 30 Mbit/s against a 210ms feedback loop, whatever the path
-  can do.
+Interactive requests during a 50 MiB bulk transfer, 200 ms, 1% loss:
 
-Four lanes still beat one here, and that is not a win: it is four connections
-claiming more of one pipe than one would, which is what coupled congestion
-control exists to prevent.
-
-**The single-lane gap is understood, and the two paths want opposite things.** A lane
-was allowed two congestion windows of unacknowledged data, which would be right
-if a chunk left the window as soon as the path delivered it. It does not: a
-chunk holds window space from the moment it is handed to a lane until the
-peer's acknowledgement returns -- the transport's own queueing delay, plus a
-round trip, plus the acknowledgement delay. Two windows could not keep the pipe
-full across that loop.
-
-Deepening the window from two congestion windows to four closes it, and breaks
-something else. One lane, three trials each:
-
-| Window | 100 Mbit/s shared, 20 MiB | 25 Mbit/s policed, 50 MiB |
+| | Reference | wanopt |
 | --- | ---: | ---: |
-| 2 congestion windows | 35.72 | 18.2 |
-| 4 congestion windows | **43.27** | **10.5** |
-| Pushing sender | 38.92 | 21.2 |
+| bulk goodput | 57.29 | 52.00 |
+| interactive median | 323 ms | **208 ms** |
+| interactive 95th percentile | 506 ms | **386 ms** |
 
-On a path with a deep buffer, two windows leave the pipe short across the
-acknowledgement loop and four fix it. On a path that polices each source at
-25 Mbit/s, four arrive as a burst at a shallow token bucket, are dropped, and
-cost far more than they gain. A fixed multiple cannot serve both, and the
-policed path is the one striping exists for, so the shipped value is two and
-the deficit against the pushing sender on high-bandwidth-delay paths stands at
-about 14%.
+208 ms is the idle round trip: interactive requests no longer queue behind bulk
+at all. The 9% of bulk goodput is what isolation costs, and it is now charged
+only while there is traffic to protect.
 
-Sizing this from the path rather than by a constant -- the queue a policer will
-tolerate is measurable, and so is whether losses follow a burst -- is the
-obvious next step and is not implemented.
+The 50 MiB shared-bottleneck case is the acceptance test in section 8: four
+lanes measure 60.59 Mbit/s with 4/4 transfers completing and a worst trial of
+57.74, against one lane's 58.73. It passes -- and it passes by *not* aggregating,
+which is what a shared bottleneck should produce.
 
-Worth recording what was *not* the cause, because two commits assumed it was:
-the congestion-window read on every admission check and the per-chunk lock in
-the completion watcher were both real costs, both worth fixing, and neither
-moved this number at all.
+Before this work the same measurements were: policed one lane 19.1 against the
+reference's 20.6, policed four lanes 18.0 to 30.0 across runs, 20% loss 13.1
+against 14.8, four concurrent flows 59.2 against 62.1, and no reproducible
+interactive advantage.
+
+### 7.5 What is now the limit
+
+On the policed path each lane still holds two bandwidth-delay products in flight
+once it reaches ProbeBW, which is BBRv1's congestion-window gain and not
+something this design chose. Four lanes reach 41.6 Mbit/s where the lanes'
+combined policed allowance is 75; the gap is reordering and reassembly cost, and
+it has not been decomposed.
+
+Startup itself is still expensive in latency, and correctly so rather than
+through a defect: the bandwidth estimate plateaus at round 8 and the controller
+leaves startup at round 12, which is the published three-to-four rounds. But a
+round during startup lasts 400 ms rather than 200, because BBR's own 2.885 gain
+has filled the bottleneck with a bandwidth-delay product of queue -- so the
+exit takes 1.6 s of wall clock, and a transfer shorter than that never sees the
+drained state. This is BBRv1 behaviour, shared with the reference and with
+native TUIC, not something this design introduced. Reducing it means a
+different startup, not a different scheduler.
+
+### 7.6 Corrections to the earlier record
+
+- The "5.37 s lane authentication exchange" is not reproducible. Measured now:
+  the secondary QUIC pool authenticates in 404 ms and the lane join completes in
+  606 ms. The delay before a joined lane appears is the lane probe's own
+  baseline window, which is a scheduling choice, not a server-side defect.
+- `--per-flow-rate` does not model a shallow token bucket. The per-source
+  policer inherits the aggregate path's queue, so at `--rate 400
+  --per-flow-rate 25` each lane gets a 10 MB bucket -- three seconds of
+  buffering. Conclusions drawn from it about "shallow policers" do not follow.
 
 ## 8. Phases
 
 1. **Coupled window** as a standalone, unit-tested component: LIA increase,
    rate-limited decrease, alpha from per-lane state. Tested against the three
    properties in 3.3 with synthetic lanes.
-2. **Admission** wired into the scheduler: both windows consulted, lane
-   allowance read from QUIC transport stats.
+2. **Admission** wired into the scheduler: the lane's write-ahead queue read
+   from QUIC transport stats, released by the lane writer.
 3. **Deletion** of everything in section 4.
 4. **Re-measurement**, reported whether or not it favours the design:
    - single lane against native TUIC, 0/1/3% loss -- must be parity;

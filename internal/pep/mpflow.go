@@ -98,19 +98,19 @@ type mpLane struct {
 	// writeSlots is a semaphore shared by both queues, so the total queued
 	// frames remain bounded by maxLaneWriteQueue rather than by the sum of
 	// both channel capacities.
-	writeQ chan protocol.Frame
+	writeQ chan laneFrame
 	// pulling guards against two workers on one lane.
 	pulling atomic.Bool
 	// cwnd caches the transport's congestion window. Admission reads it for
 	// every chunk offered to every lane.
-	// commitSearch adapts how far ahead of acknowledgements this lane may be
-	// committed, which is a property of the bottleneck rather than a constant.
-	commitOnce        sync.Once
-	commitSearch      *laneCommit
-	cwndMu            sync.Mutex
-	cwndBytes         int
-	cwndSampled       time.Time
-	writeInteractiveQ chan protocol.Frame
+	cwndMu        sync.Mutex
+	cwndBytes     int
+	inFlightBytes int
+	cwndSampled   time.Time
+	// admitted is when this lane joined the flow, which is what bounds the
+	// handover of bulk traffic off the shared control lane.
+	admitted          time.Time
+	writeInteractiveQ chan laneFrame
 	writeSlots        chan struct{}
 	writeDone         chan struct{}
 	closed            atomic.Bool
@@ -184,6 +184,13 @@ func (l *mpLane) sendRate() (float64, time.Duration) {
 	return rate, rtt
 }
 
+// laneFrame is a frame queued for one lane's writer, with an optional
+// notification for when the transport has taken its bytes.
+type laneFrame struct {
+	frame     protocol.Frame
+	onWritten func()
+}
+
 type inboundEvent struct {
 	lane  *mpLane
 	frame protocol.Frame
@@ -230,11 +237,15 @@ type multipathFlow struct {
 	// cannot monopolize the interactive connection. If no joined lane is
 	// healthy, selection deliberately falls back to lane 0 for availability.
 	reserveControlLane bool
-	started            time.Time
-	completionGrace    time.Duration
-	bytesUp            atomic.Uint64
-	bytesDown          atomic.Uint64
-	class              atomic.Uint32
+	// controlLaneShared reports whether another flow is currently using the
+	// pooled control connection. Nil means "no", which is what a flow on a
+	// dedicated connection should answer.
+	controlLaneShared func() bool
+	started           time.Time
+	completionGrace   time.Duration
+	bytesUp           atomic.Uint64
+	bytesDown         atomic.Uint64
+	class             atomic.Uint32
 	// ackTrack answers "has this range arrived?", which is what clocks every
 	// lane. scheduler and sendCtx let a lane joined mid-flow start carrying
 	// data as soon as it is admitted.
@@ -248,6 +259,11 @@ type multipathFlow struct {
 	cc                *mpcc.Window
 	chunkMu           sync.Mutex
 	outstandingChunks []outstandingChunk
+	residency         residency
+	acksIn            atomic.Uint64
+	acksOut           atomic.Uint64
+	acksSched         atomic.Uint64
+	ackWriteNS        atomic.Uint64
 	finSequence       atomic.Uint64
 	remoteFinSequence atomic.Uint64
 	finSent           atomic.Bool
@@ -367,10 +383,10 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 		return errors.New("duplicate lane id")
 	}
 	if lane.writeQ == nil {
-		lane.writeQ = make(chan protocol.Frame, maxLaneBulkQueue)
+		lane.writeQ = make(chan laneFrame, maxLaneBulkQueue)
 	}
 	if lane.writeInteractiveQ == nil {
-		lane.writeInteractiveQ = make(chan protocol.Frame, maxLaneWriteQueue)
+		lane.writeInteractiveQ = make(chan laneFrame, maxLaneWriteQueue)
 	}
 	if lane.writeSlots == nil {
 		lane.writeSlots = make(chan struct{}, maxLaneWriteQueue)
@@ -378,6 +394,7 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 	if lane.writeDone == nil {
 		lane.writeDone = make(chan struct{})
 	}
+	lane.admitted = time.Now()
 	f.lanes[lane.id] = lane
 	if lane.id >= f.nextJoinID {
 		f.nextJoinID = lane.id + 1
@@ -404,10 +421,11 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 func (f *multipathFlow) writeLane(lane *mpLane) {
 	defer close(lane.writeDone)
 	for {
-		frame, ok := nextLaneFrame(lane, f.done, f.ctx.Done())
+		queued, ok := nextLaneFrame(lane, f.done, f.ctx.Done())
 		if !ok {
 			return
 		}
+		frame := queued.frame
 		if lane.writeSlots != nil {
 			// A slot is released when the writer takes ownership of a frame.
 			// The non-blocking receive is safe because every initialized queue
@@ -431,6 +449,12 @@ func (f *multipathFlow) writeLane(lane *mpLane) {
 		if frame.Header.Type == protocol.TypeData {
 			lane.sent.Add(uint64(len(frame.Payload)))
 		}
+		// The transport has taken these bytes, which is what frees the lane to
+		// accept more. A QUIC stream write returns only once the packer has
+		// consumed the data, so this is the transport's own congestion clock.
+		if queued.onWritten != nil {
+			queued.onWritten()
+		}
 	}
 }
 
@@ -438,7 +462,7 @@ func (f *multipathFlow) writeLane(lane *mpLane) {
 // starving shutdown: check it once before allowing the bulk queue to win a
 // select, then check both queues while waiting. The non-blocking first check
 // closes the common race where both queues already have work.
-func nextLaneFrame(lane *mpLane, done <-chan struct{}, ctxDone <-chan struct{}) (protocol.Frame, bool) {
+func nextLaneFrame(lane *mpLane, done <-chan struct{}, ctxDone <-chan struct{}) (laneFrame, bool) {
 	if lane.writeInteractiveQ != nil {
 		select {
 		case frame := <-lane.writeInteractiveQ:
@@ -449,9 +473,9 @@ func nextLaneFrame(lane *mpLane, done <-chan struct{}, ctxDone <-chan struct{}) 
 	for {
 		select {
 		case <-done:
-			return protocol.Frame{}, false
+			return laneFrame{}, false
 		case <-ctxDone:
-			return protocol.Frame{}, false
+			return laneFrame{}, false
 		default:
 		}
 		if lane.writeInteractiveQ != nil {
@@ -467,9 +491,9 @@ func nextLaneFrame(lane *mpLane, done <-chan struct{}, ctxDone <-chan struct{}) 
 		case frame := <-lane.writeQ:
 			return frame, true
 		case <-done:
-			return protocol.Frame{}, false
+			return laneFrame{}, false
 		case <-ctxDone:
-			return protocol.Frame{}, false
+			return laneFrame{}, false
 		}
 	}
 }
@@ -756,17 +780,45 @@ func (f *multipathFlow) laneCandidates(bulk bool) ([]*mpLane, error) {
 		// Lane zero is the initial authenticated stream by protocol. Exclude
 		// it only when at least one independent lane is healthy; retaining the
 		// fallback is essential during join failure and lane recovery.
-		bulkLanes := lanes[:0]
+		bulkLanes := make([]*mpLane, 0, len(lanes))
+		var control *mpLane
 		for _, lane := range lanes {
 			if lane.id != 0 {
 				bulkLanes = append(bulkLanes, lane)
+				continue
 			}
+			control = lane
 		}
-		if len(bulkLanes) > 0 {
+		if len(bulkLanes) > 0 && f.isolateFromControlLane(control) {
 			lanes = bulkLanes
 		}
 	}
 	return f.orderLanesByArrival(lanes, f.chunkSize), nil
+}
+
+// isolateFromControlLane reports whether a bulk flow should stop putting
+// payload on the pooled control lane now that it has one of its own.
+//
+// Isolation exists to keep a bulk congestion window out of the connection that
+// short and interactive flows share, and it is not free: the flow gives up a
+// warmed-up path for one with a fresh congestion window. Measured on a path
+// policing each source at 25 Mbit/s, a lane arrived five seconds into a 20 MiB
+// transfer and the flow abandoned a lane running at the full policed rate for a
+// cold one; the last quarter of the transfer then took nearly half its total
+// time, 19.1 Mbit/s against 23.0 without the handover.
+//
+// So it is paid only when there is something to protect. While no other flow is
+// using the pooled connection, a bulk flow's window is inconveniencing nobody
+// and the control lane carries payload like any other. The moment another flow
+// arrives, the next chunk goes elsewhere -- the test is per selection, not once
+// per flow, so yielding takes one chunk rather than a policy epoch.
+func (f *multipathFlow) isolateFromControlLane(control *mpLane) bool {
+	if control == nil || f.controlLaneShared == nil {
+		// Nothing to weigh, or no way to tell. Protect the control lane, which
+		// is what a flow that has not been told otherwise should do.
+		return true
+	}
+	return f.controlLaneShared()
 }
 
 // orderLanesByArrival sorts lanes by when each would deliver the next frame.
@@ -1357,6 +1409,12 @@ func (f *multipathFlow) enqueueFrame(ctx context.Context, lane *mpLane, frame pr
 }
 
 func (f *multipathFlow) enqueueFrameClass(ctx context.Context, lane *mpLane, frame protocol.Frame, bulk bool) error {
+	return f.enqueueFrameWritten(ctx, lane, frame, bulk, nil)
+}
+
+// enqueueFrameWritten is enqueueFrameClass with a callback invoked once the
+// lane's transport has taken the frame's bytes.
+func (f *multipathFlow) enqueueFrameWritten(ctx context.Context, lane *mpLane, frame protocol.Frame, bulk bool, onWritten func()) error {
 	if lane == nil || lane.closed.Load() {
 		return errors.New("lane is closed")
 	}
@@ -1382,7 +1440,7 @@ func (f *multipathFlow) enqueueFrameClass(ctx context.Context, lane *mpLane, fra
 		}
 	}
 	select {
-	case queue <- frame:
+	case queue <- laneFrame{frame: frame, onWritten: onWritten}:
 		return nil
 	case <-lane.writeDone:
 		if acquired {
@@ -1467,7 +1525,7 @@ func (f *multipathFlow) tryEnqueueFrameClass(lane *mpLane, frame protocol.Frame,
 		}
 	}
 	select {
-	case queue <- frame:
+	case queue <- laneFrame{frame: frame}:
 		return true, nil
 	case <-lane.writeDone:
 		if acquired {
@@ -1842,6 +1900,7 @@ func (f *multipathFlow) scheduleACK(sequence uint64) {
 	if sequence == 0 || f.ackClosing.Load() {
 		return
 	}
+	f.acksSched.Add(1)
 	for {
 		old := f.ackSequence.Load()
 		if sequence <= old || f.ackSequence.CompareAndSwap(old, sequence) {
@@ -1896,7 +1955,11 @@ func (f *multipathFlow) ackLoop(ctx context.Context) {
 			if sequence <= sent {
 				break
 			}
-			if err := f.writeACK(ctx, sequence, f.recvAckFlag, false); err != nil {
+			ackStart := time.Now()
+			err := f.writeACK(ctx, sequence, f.recvAckFlag, false)
+			f.ackWriteNS.Add(uint64(time.Since(ackStart)))
+			f.acksOut.Add(1)
+			if err != nil {
 				// A failed ACK write already transitions the affected lane and
 				// publishes laneErr. Let run perform its normal bounded rescue when
 				// no lane remains; only surface an independent write error while a
@@ -2093,6 +2156,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 				}
 			case protocol.TypeAck:
+				f.acksIn.Add(1)
 				if frame.Header.Flags&f.sendAckFlag == 0 {
 					return errors.New("acknowledgement has wrong direction")
 				}

@@ -92,11 +92,11 @@ func TestEnqueueSpillsToTheNextLaneWhenPreferredIsFull(t *testing.T) {
 		chunkSize: defaultChunkSize, lanes: map[uint64]*mpLane{},
 	}
 	full := &mpLane{
-		id: 0, writeQ: make(chan protocol.Frame, 1), writeSlots: make(chan struct{}, 1),
+		id: 0, writeQ: make(chan laneFrame, 1), writeSlots: make(chan struct{}, 1),
 		writeDone: make(chan struct{}),
 	}
 	idle := &mpLane{
-		id: 1, writeQ: make(chan protocol.Frame, 4), writeSlots: make(chan struct{}, 4),
+		id: 1, writeQ: make(chan laneFrame, 4), writeSlots: make(chan struct{}, 4),
 		writeDone: make(chan struct{}),
 	}
 	flow.lanes[0], flow.lanes[1] = full, idle
@@ -104,7 +104,7 @@ func TestEnqueueSpillsToTheNextLaneWhenPreferredIsFull(t *testing.T) {
 	laneRate(full, 1<<30, time.Millisecond)
 	laneRate(idle, 1<<20, 10*time.Millisecond)
 	full.writeSlots <- struct{}{}
-	full.writeQ <- protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeData}}
+	full.writeQ <- laneFrame{frame: protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeData}}}
 
 	frame := protocol.Frame{
 		Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Class: protocol.ClassBulk},

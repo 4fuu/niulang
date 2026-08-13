@@ -544,23 +544,55 @@ func TestTUICStartupDoesNotExitOnOnePostModelLoss(t *testing.T) {
 	}
 }
 
-func TestTUICAppLimitedUsesCongestionWindowHeadroom(t *testing.T) {
+// A paced sender sits just below its congestion window at almost every
+// acknowledgement, because the pacer is holding packets back on purpose. That
+// is not the application running out of data, and classifying it as such is
+// what stopped this controller ever leaving startup: the full-bandwidth test
+// skips application-limited rounds, so every round was skipped.
+func TestTUICAppLimitedNeedsMoreThanABurstOfUnusedWindow(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
+	sender.cwnd = 64 * sender.maxDatagramSize
 	window := sender.GetCongestionWindow()
 	if sender.appLimited(window) {
 		t.Fatal("full congestion window was classified as application-limited")
 	}
-	if !sender.appLimited(window - sender.maxDatagramSize) {
-		t.Fatal("non-drain headroom was not classified as application-limited")
+	if sender.appLimited(window - sender.maxDatagramSize) {
+		t.Fatal("a paced sender one packet below its window was classified as application-limited")
 	}
+	if !sender.appLimited(window - 11*sender.maxDatagramSize) {
+		t.Fatal("a sender leaving a full burst of window unused was not classified as application-limited")
+	}
+	// The rule that used to apply only in DRAIN now applies in every mode, so
+	// DRAIN's own behaviour is unchanged.
 	sender.mode = tuicBbrDrain
 	if sender.appLimited(window - sender.maxDatagramSize) {
-		t.Fatal("small headroom in DRAIN was incorrectly classified as application-limited")
+		t.Fatal("small headroom in DRAIN was classified as application-limited")
 	}
-	sender.cwnd = 64 * sender.maxDatagramSize
-	window = sender.GetCongestionWindow()
 	if !sender.appLimited(window - 11*sender.maxDatagramSize) {
 		t.Fatal("large DRAIN headroom was not classified as application-limited")
+	}
+}
+
+// The end of startup is what stops BBR holding several bandwidth-delay
+// products in flight. A sender whose bandwidth has plateaued must reach it
+// within the published three rounds, and a paced sender must not be excused
+// from counting those rounds.
+func TestTUICStartupEndsWhenBandwidthStopsGrowing(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.cwnd = 64 * sender.maxDatagramSize
+	sender.estimator.maxFilter.updateMax(1_000_000, 0)
+	sender.bwAtLastRound = 1_000_000
+	// The sender is paced: one packet of its window is unused at each round.
+	paced := tuicSendState{valid: true, appLimited: sender.appLimited(sender.GetCongestionWindow() - sender.maxDatagramSize)}
+	for round := 0; round < tuicStartupNoGainRounds; round++ {
+		if sender.fullBandwidth {
+			t.Fatalf("startup ended after %d rounds without gain, want %d", round, tuicStartupNoGainRounds)
+		}
+		sender.lastSampleAppLimited = paced.appLimited
+		sender.checkFullBandwidth(paced)
+	}
+	if !sender.fullBandwidth {
+		t.Fatal("startup did not end after three rounds without bandwidth growth")
 	}
 }
 

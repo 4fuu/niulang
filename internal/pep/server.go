@@ -92,7 +92,21 @@ type serverFlow struct {
 // that succeeds, later streams may use TypeOpenFast; they remain isolated by
 // their own random session and flow IDs. Dedicated lanes never share this
 // state with another QUIC connection.
-type quicAuthState struct{ authenticated atomic.Bool }
+// quicAuthState is per accepted QUIC connection. flows counts the sessions
+// currently multiplexed on it, which is what tells a bulk flow whether keeping
+// its payload off the shared control lane protects anything.
+type quicAuthState struct {
+	authenticated atomic.Bool
+	flows         atomic.Int64
+}
+
+// shared reports whether more than one flow is using this connection.
+func (a *quicAuthState) shared() bool {
+	if a == nil {
+		return false
+	}
+	return a.flows.Load() > 1
+}
 
 // serverLaneBudget is the total lanes this endpoint will admit for one flow.
 // It must match the client's split in bulkLaneBudget: counting the reserved
@@ -395,6 +409,10 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 
 func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicAuthState) {
 	defer conn.Close()
+	if auth != nil {
+		auth.flows.Add(1)
+		defer auth.flows.Add(-1)
+	}
 	sessionStarted := time.Now()
 	authFinished := time.Time{}
 	openFinished := time.Time{}
@@ -549,6 +567,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0
+	flow.controlLaneShared = auth.shared
 	serverSession := &serverFlow{flow: flow, maxLanes: serverLaneBudget(s.cfg.MaxLanes, flow.reserveControlLane)}
 	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
 		flow.closeAll()

@@ -275,7 +275,13 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	}
 	up, down := harness.relay.Stats()
 	if note == "" {
-		note = fmt.Sprintf("up=%d/%d down=%d/%d", up.PacketsOut, up.PacketsIn, down.PacketsOut, down.PacketsIn)
+		// Loss and tail drop are separated because they mean opposite things
+		// about the sender: ambient loss is the path's, a tail drop is the
+		// sender's own overshoot of a queue. Reporting only the delivered
+		// fraction hides which one a change moved.
+		note = fmt.Sprintf("up=%d/%d,lost=%d,tail=%d down=%d/%d,lost=%d,tail=%d",
+			up.PacketsOut, up.PacketsIn, up.PacketsLost, up.PacketsDropped,
+			down.PacketsOut, down.PacketsIn, down.PacketsLost, down.PacketsDropped)
 	}
 	var interactive *InteractiveReport
 	if opts.interactive {

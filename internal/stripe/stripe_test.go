@@ -562,8 +562,8 @@ func TestRecoveredChunkBypassesAFullLaneWindow(t *testing.T) {
 // fixedWindows is a Windows that reports constant limits.
 type fixedWindows struct{ lane, total int }
 
-func (w fixedWindows) Lane(uint64) int { return w.lane }
-func (w fixedWindows) Total() int      { return w.total }
+func (w fixedWindows) Lane(uint64, uint64) int { return w.lane }
+func (w fixedWindows) Total() int              { return w.total }
 
 // The flow window is what stops N lanes claiming N times a single connection's
 // share, so it must bind even when every individual lane still has room.
@@ -611,5 +611,96 @@ func TestCollapsedFlowWindowStillMakesProgress(t *testing.T) {
 	chunk, err := s.Next(context.Background(), 0, 0)
 	if err != nil || chunk == nil {
 		t.Fatalf("a collapsed window stalled the flow entirely: %v", err)
+	}
+}
+
+// A lane is paced by its transport, not by the peer's acknowledgement: what
+// bounds admission is how much the lane has been handed that its transport has
+// not yet taken. Chunks already written stay retained so they can be re-issued
+// if the lane dies, and must not go on bounding the lane.
+func TestAdmissionCountsUnwrittenBytesNotUnacknowledgedOnes(t *testing.T) {
+	payload := make([]byte, 512*1024)
+	s := New(bytes.NewReader(payload), Config{
+		ChunkSize: 4 * 1024, LaneWindow: 1024,
+		Windows: fixedWindows{lane: 8 * 1024},
+	})
+	defer s.Close()
+
+	ctx := context.Background()
+	var carried []*Chunk
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		chunk, _ := s.Next(probeCtx, 1, 0)
+		cancel()
+		if chunk == nil {
+			break
+		}
+		carried = append(carried, chunk)
+	}
+	if len(carried) == 0 {
+		t.Fatal("admitted nothing at all")
+	}
+	if len(carried) > 3 {
+		t.Fatalf("admitted %d chunks against an 8 KiB write-ahead bound", len(carried))
+	}
+
+	// Reporting them written frees the lane even though none is acknowledged.
+	for _, chunk := range carried {
+		s.Wrote(1, chunk)
+	}
+	if _, _, queued := s.LaneOutstanding(1); queued != 0 {
+		t.Fatalf("lane still holds %d unwritten bytes after every chunk was written", queued)
+	}
+	if _, retained, _ := s.LaneOutstanding(1); retained == 0 {
+		t.Fatal("written chunks were not retained for re-issue")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	next, _ := s.Next(probeCtx, 1, 0)
+	cancel()
+	if next == nil {
+		t.Fatal("a lane whose transport took everything was not handed more work")
+	}
+}
+
+// A chunk can be waiting in the ready set and in flight at the same time: that
+// is what re-offering a slow lane's chunk means. If it arrives by the first
+// route, the copy in the ready set is bytes the peer already has, and sending
+// them again is pure overhead the retransmit counter does not even record.
+func TestCompletedChunkLeavesTheReadySet(t *testing.T) {
+	now := time.Now()
+	clock := func() time.Time { return now }
+	payload := make([]byte, 8*1024)
+	s := New(bytes.NewReader(payload), Config{
+		ChunkSize: 4 * 1024, LaneWindow: 4, RetransmitAfter: time.Second, Now: clock,
+	})
+	defer s.Close()
+
+	ctx := context.Background()
+	first, err := s.Next(ctx, 0, 0)
+	if err != nil || first == nil {
+		t.Fatalf("next: %v", err)
+	}
+	now = now.Add(2 * time.Second)
+	if n := s.ReissueExpired(); n != 1 {
+		t.Fatalf("re-offered %d chunks, want 1", n)
+	}
+	// It arrives on the lane that already had it, while the re-offered copy is
+	// still waiting for a lane to pick up.
+	s.Complete(0, first)
+
+	// No lane may now be handed those bytes.
+	for lane := uint64(1); lane < 3; lane++ {
+		for {
+			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+			chunk, _ := s.Next(probeCtx, lane, 0)
+			cancel()
+			if chunk == nil {
+				break
+			}
+			if chunk.Offset == first.Offset {
+				t.Fatal("a completed chunk was handed to a lane again")
+			}
+			s.Complete(lane, chunk)
+		}
 	}
 }

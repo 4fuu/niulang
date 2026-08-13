@@ -407,6 +407,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	flowSession.helloAckPending = flow.helloPending
 	flowSession.onHelloOK = flow.onHelloOK
 	flowSession.reserveControlLane = flow.reserveControl
+	flowSession.controlLaneShared = func() bool { return c.quicPoolActive.Load() > 1 }
 	if err := flowSession.addLane(&mpLane{id: flow.laneID, kind: flow.kind, fc: flow.fc}); err != nil {
 		_ = flow.fc.Close()
 		flowSession.closeAll()

@@ -20,6 +20,7 @@ relay in place of the server. It applies, per direction:
 | `LossBurstPackets` | correlated loss: a Gilbert chain with this mean burst |
 | `RateBytesPerSec` | a bottleneck with tail-drop queueing |
 | `PerFlowRateBytesPerSec` | a policer applied per source address |
+| | It inherits `QueueBytes` from the aggregate path, so at `--rate 400 --per-flow-rate 25` each lane gets a 10 MB bucket -- three seconds of buffering, not a shallow token bucket. Set `--queue` explicitly to model a shallow one. |
 | `QueueBytes` | the bottleneck buffer; zero selects one BDP |
 | `Seed` | makes the loss pattern reproducible |
 

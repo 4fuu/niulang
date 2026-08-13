@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,7 +209,7 @@ func TestFlowIdleTimeoutReleasesResources(t *testing.T) {
 func TestLaneWriterStopsWhenFlowCompletes(t *testing.T) {
 	flow := &multipathFlow{ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1)}
 	lane := &mpLane{
-		writeQ:    make(chan protocol.Frame, 1),
+		writeQ:    make(chan laneFrame, 1),
 		writeDone: make(chan struct{}),
 	}
 	go flow.writeLane(lane)
@@ -250,8 +251,8 @@ func TestLaneWriterPrioritizesInteractiveFrames(t *testing.T) {
 	lane := &mpLane{
 		id:                1,
 		fc:                newFrameConn(conn, protocol.DefaultMaxPayload),
-		writeQ:            make(chan protocol.Frame, maxLaneWriteQueue),
-		writeInteractiveQ: make(chan protocol.Frame, maxLaneWriteQueue),
+		writeQ:            make(chan laneFrame, maxLaneWriteQueue),
+		writeInteractiveQ: make(chan laneFrame, maxLaneWriteQueue),
 		writeSlots:        make(chan struct{}, maxLaneWriteQueue),
 		writeDone:         make(chan struct{}),
 	}
@@ -383,8 +384,8 @@ func TestBulkLanePrewarmRequiresAgeBytesAndDirectionality(t *testing.T) {
 func TestLaneQueueHasGlobalBound(t *testing.T) {
 	flow := &multipathFlow{ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1)}
 	lane := &mpLane{
-		writeQ:            make(chan protocol.Frame, maxLaneWriteQueue),
-		writeInteractiveQ: make(chan protocol.Frame, maxLaneWriteQueue),
+		writeQ:            make(chan laneFrame, maxLaneWriteQueue),
+		writeInteractiveQ: make(chan laneFrame, maxLaneWriteQueue),
 		writeSlots:        make(chan struct{}, maxLaneWriteQueue),
 		writeDone:         make(chan struct{}),
 	}
@@ -467,7 +468,7 @@ func TestReplayPendingUsesSurvivingLane(t *testing.T) {
 		ctx: context.Background(), done: make(chan struct{}),
 		lanes: make(map[uint64]*mpLane), replay: make(map[uint64]protocol.Frame),
 	}
-	lane := &mpLane{writeQ: make(chan protocol.Frame, 2), writeDone: make(chan struct{})}
+	lane := &mpLane{writeQ: make(chan laneFrame, 2), writeDone: make(chan struct{})}
 	flow.lanes[1] = lane
 	if err := flow.recordReplay(protocol.Frame{Header: protocol.Header{Type: protocol.TypeData, Sequence: 0}, Payload: []byte("abc")}); err != nil {
 		t.Fatal(err)
@@ -477,7 +478,7 @@ func TestReplayPendingUsesSurvivingLane(t *testing.T) {
 	}
 	select {
 	case got := <-lane.writeQ:
-		if string(got.Payload) != "abc" || got.Header.Sequence != 0 {
+		if string(got.frame.Payload) != "abc" || got.frame.Header.Sequence != 0 {
 			t.Fatalf("unexpected replayed frame: %+v", got)
 		}
 	default:
@@ -488,7 +489,7 @@ func TestReplayPendingUsesSurvivingLane(t *testing.T) {
 func TestEnqueueFrameStopsWhenLaneWriterStops(t *testing.T) {
 	flow := &multipathFlow{ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1)}
 	lane := &mpLane{
-		writeQ:    make(chan protocol.Frame),
+		writeQ:    make(chan laneFrame),
 		writeDone: make(chan struct{}),
 	}
 	close(lane.writeDone)
@@ -545,5 +546,39 @@ func TestProvenCompleteFlowDoesNotWaitForLaneReplacementForFinalACK(t *testing.T
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("final ACK cleanup took %s; lane replacement was not bounded", elapsed)
+	}
+}
+
+// Isolation costs a bulk flow its warmed-up path, so it is paid only while
+// another flow is actually using the pooled control connection. A flow alone on
+// the pool keeps the control lane in its bulk set; the moment a second flow
+// arrives, the next selection moves off it.
+func TestBulkSelectionYieldsControlLaneOnlyWhenPoolIsShared(t *testing.T) {
+	var shared atomic.Bool
+	flow := &multipathFlow{
+		done: make(chan struct{}),
+		lanes: map[uint64]*mpLane{
+			0: {id: 0},
+			1: {id: 1},
+		},
+		reserveControlLane: true,
+		controlLaneShared:  shared.Load,
+	}
+
+	candidates, err := flow.laneCandidates(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("a flow alone on the pool got %d bulk lanes, want both", len(candidates))
+	}
+
+	shared.Store(true)
+	candidates, err = flow.laneCandidates(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].id != 1 {
+		t.Fatalf("a shared pool did not move bulk off lane 0: got %d lanes", len(candidates))
 	}
 }

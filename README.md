@@ -59,8 +59,13 @@ on a real link. [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) explains what
 each knob models and how to read the numbers. On the emulated matrix, wanopt is
 at or above the reference for single-flow goodput at 0-20% loss, for 4 and 8
 concurrent flows, for cold and warm request latency, and for CPU-bound datapath
-cost; see [`docs/PERFORMANCE-20260812.md`](docs/PERFORMANCE-20260812.md) for
-the numbers, the defects they exposed, and the limits of that evidence.
+cost. Where a single connection is policed below the path's capacity -- the case
+striping exists for -- four lanes carry 50 MiB at 53.0 Mbit/s against the
+reference's 22.5. See
+[`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md) for the current numbers
+and the five transport defects that measuring them exposed, and
+[`docs/PERFORMANCE-20260812.md`](docs/PERFORMANCE-20260812.md) for the earlier
+campaign.
 
 On the live China-US link at 33% measured loss, 20 alternating 4 MiB trials
 with both stacks on the same controller completed 10/10 each, with wanopt 23%
@@ -77,26 +82,35 @@ wanopt moves it onto its own QUIC connection and keeps the pooled control
 connection for short and interactive flows.
 
 Measured at 200 ms and 1% loss with a 50 MiB transfer running and small requests
-alongside (medians, reference / wanopt):
+alongside, five trials (medians, reference / wanopt):
 
 | | Reference | wanopt |
 | --- | ---: | ---: |
-| bulk goodput | 56.6 Mbit/s | 52.0 Mbit/s |
-| interactive median | 324 ms | 206 ms |
-| interactive 95th percentile | 517 ms | 367 ms |
+| bulk goodput | 57.3 Mbit/s | 52.0 Mbit/s |
+| interactive median | 323 ms | 208 ms |
+| interactive 95th percentile | 506 ms | 386 ms |
 
-Isolation is demand-driven: a bulk flow alone on the control connection has
-nothing to protect, so it stays there and keeps full goodput (57.7 Mbit/s
-measured). It requires `--quic-pool`, which is where the shared control
-connection exists at all.
+208 ms is the idle round trip, so interactive requests do not queue behind bulk
+at all.
+
+Isolation is demand-driven, and the test is made per lane selection rather than
+once per flow: a bulk flow alone on the control connection has nothing to
+protect, so it keeps using it and keeps full goodput; the moment another flow
+appears, the next chunk goes elsewhere. Paying it unconditionally was measurably
+wrong -- a bulk flow that gained a lane mid-transfer used to abandon a
+fully-warmed path for one with a fresh congestion window, which on the policed
+path cost 17% of the transfer. It requires `--quic-pool`, which is where the
+shared control connection exists at all.
 
 ### Recommended configuration
 
 The measured configuration is `--quic-pool --optimistic-open`. Lane count needs
-no configuration: the client probes for it and settles on one lane on paths
-that do not reward striping, which is every path measured so far. Both remain opt-in
-because this project's release gates are not met, not because they measured
-badly.
+no configuration: the client probes for it, settles on one lane on paths that do
+not reward striping, and grows where a per-source policer makes striping pay.
+Nothing else in the transport is tuned to a path either -- what a lane may commit
+ahead of its transport is a fraction of that transport's own congestion window,
+so it follows the path rather than a constant. Both flags remain opt-in because
+this project's release gates are not met, not because they measured badly.
 
 The prototype is still not safe to use as a general-purpose production tunnel.
 Broader loss/soak campaigns remain outstanding, and under extreme correlated
@@ -113,8 +127,9 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 - One local SOCKS5/TUN-facing agent and one fixed-egress US agent.
 - One application TCP flow can be framed, reordered, and striped over
   multiple QUIC lanes. The framing and reassembly work; the client decides how
-  many lanes to use by measuring, and striping does not yet deliver a reliable
-  gain, so that measurement usually settles on one.
+  many lanes to use by measuring. Striping delivers a large, reproducible gain
+  where a path polices each source address and none at all on a shared
+  bottleneck, which is what the measurement settles on in each case.
 - A PIAS-inspired policy that protects one-shot and interactive flows while
   allocating additional lanes to bulk flows. `--max-lanes` is the ceiling on a
   measured search rather than a target; a negotiated control lane is
@@ -148,13 +163,14 @@ transport. `--max-lanes` is the ceiling on that search (default 4, not a
 target); `--max-lanes 1` disables striping outright.
 
 Established up front, lanes work: on a path policing each source address at
-25 Mbit/s, four lanes measure 33.5 Mbit/s against a single lane's 20.4 and
-native TUIC's 20.4, with every transfer completing. Reached by the automatic
-search on the same path, they measure 20.6 — the search is safe but does not
-yet earn its keep, because a lane opened mid-transfer takes seconds to arrive.
-That cost is measured and is not congestion: the QUIC dial completes in 288ms
-and the lane's authentication exchange then takes 5.37s, an exchange that costs
-14 microseconds on an idle path. The cause is server-side and unidentified.
+25 Mbit/s, four lanes carry 50 MiB at 53.0 Mbit/s against a single lane's 22.3
+and the TUIC-shaped reference's 22.5, with every transfer completing. On a
+shared 100 Mbit/s bottleneck the same four lanes measure 60.6 against one lane's
+58.7 -- they do not aggregate, which is the correct outcome there. A lane still takes several seconds to arrive when the
+search opens it mid-transfer, but that delay is the search's own baseline window
+rather than a transport cost: the secondary QUIC pool authenticates in 404 ms and
+the join completes in 606 ms. The earlier report of a 5.37 s authentication
+exchange does not reproduce.
 `--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
 initial/control streams and lets multiple short flows share its congestion
 controller. On a capable peer, bulk promotion also lazily creates one

@@ -19,10 +19,12 @@
 //
 // Two properties follow, and both are the point:
 //
-//   - A lane's commitment is bounded by its window (chunks it has been handed
-//     and not yet completed), not by a queue depth chosen in advance. Losing a
-//     lane costs that much data, and the loss is recoverable because any chunk
-//     may be re-issued on any other lane.
+//   - A lane's commitment is bounded by what its transport has not yet taken,
+//     not by a queue depth chosen in advance. The transport's own congestion
+//     control is therefore the clock: a stream write returns when the packer
+//     has consumed the bytes, which it does only when the congestion window and
+//     the pacer allow. Losing a lane costs that commitment and nothing more,
+//     and the loss is recoverable because any chunk may be re-issued anywhere.
 //   - Lanes are time-independent. Nothing about chunk N's placement constrains
 //     chunk N+1, so there is no ordering to violate and no schedule to fall
 //     behind. Order is reconstructed at the receiver from byte offsets, which
@@ -41,18 +43,21 @@ import (
 var ErrClosed = errors.New("stripe: scheduler closed")
 
 // Windows supplies the admission limits a lane must satisfy to be handed more
-// work. Both are in bytes of unacknowledged data.
+// work.
 //
 // Keeping this an interface is what stops congestion control leaking into the
 // scheduler. The scheduler's job is to hand the oldest ready chunk to a lane
 // that has room; deciding how much room a lane has is a different question,
 // answered by the transport and by the flow's coupled controller.
 type Windows interface {
-	// Lane is how much this lane may hold. It bounds what the sender commits
-	// to a path that may not be able to move it.
-	Lane(laneID uint64) int
-	// Total is how much the flow may hold across every lane. It is what stops
-	// N lanes claiming N times a single connection's share.
+	// Lane is how many bytes this lane may hold that its transport has not yet
+	// taken, given how many it holds now. It is a write-ahead bound, not a
+	// congestion window: the transport already has one of those, and what this
+	// governs is how far ahead of it the sender commits bytes that no other
+	// lane can then take back.
+	Lane(laneID uint64, queued uint64) int
+	// Total is how much the flow may hold unacknowledged across every lane. It
+	// is what stops N lanes claiming N times a single connection's share.
 	Total() int
 }
 
@@ -63,17 +68,10 @@ type Config struct {
 	// any single lane can hold up is C bytes of the receiver's contiguous
 	// point, so this is the head-of-line exposure of one stalled lane.
 	ChunkSize int
-	// LaneWindow caps how many chunks a lane may hold at once, as a backstop on
-	// bookkeeping. The binding limit is normally the window in bytes the lane
-	// passes to Next.
-	//
-	// A window of one would be purely self-paced but leaves the lane idle for a
-	// round trip between finishing a chunk and being handed the next, so the
-	// window has to cover the lane's bandwidth-delay product or the lane
-	// under-runs. That number is a property of the lane, not of the scheduler,
-	// which is why the lane supplies it: a lane that slows down has a smaller
-	// product and its window shrinks with it, without the scheduler estimating
-	// anything.
+	// LaneWindow caps how many chunks a lane may hold unacknowledged, as a
+	// backstop on bookkeeping. The binding limits are the byte bounds: Windows
+	// for what a lane may commit ahead of its transport, and
+	// MaxOutstandingBytes for what the flow may retain.
 	LaneWindow int
 	// MaxOutstanding bounds chunks held across all lanes.
 	MaxOutstanding int
@@ -90,10 +88,6 @@ type Config struct {
 	// discards, so this trades a little bandwidth for not waiting on a lane
 	// that has gone quiet. Zero disables it.
 	RetransmitAfter time.Duration
-	// ReadAhead, when set, reports how far ahead of the lanes the producer may
-	// read. It is consulted rather than fixed because the right amount is the
-	// lanes' combined windows, which change with the path.
-	ReadAhead func() int
 	// Windows supplies admission limits. When nil, only LaneWindow and
 	// MaxOutstanding apply, which is the behaviour of a flow with no
 	// congestion coupling.
@@ -162,6 +156,11 @@ func (c *Chunk) End() uint64 { return c.Offset + uint64(len(c.Data)) }
 type attempt struct {
 	lane     uint64
 	deadline time.Time
+	// written records that the lane's transport has taken these bytes. Until
+	// then they are the lane's queued commitment and bound its admission;
+	// afterwards they are the transport's problem, and the scheduler retains
+	// them only so they can be re-issued if the lane dies.
+	written bool
 }
 
 type outstanding struct {
@@ -199,6 +198,7 @@ type Scheduler struct {
 	live       map[uint64]*outstanding
 	laneLoad   map[uint64]int
 	laneBytes  map[uint64]uint64
+	laneQueued map[uint64]uint64
 	totalBytes uint64
 	eof        bool
 	srcErr     error
@@ -212,12 +212,13 @@ type Scheduler struct {
 func New(src io.Reader, cfg Config) *Scheduler {
 	cfg.applyDefaults()
 	s := &Scheduler{
-		cfg:       cfg,
-		src:       src,
-		live:      make(map[uint64]*outstanding),
-		laneLoad:  make(map[uint64]int),
-		laneBytes: make(map[uint64]uint64),
-		finished:  make(chan struct{}),
+		cfg:        cfg,
+		src:        src,
+		live:       make(map[uint64]*outstanding),
+		laneLoad:   make(map[uint64]int),
+		laneBytes:  make(map[uint64]uint64),
+		laneQueued: make(map[uint64]uint64),
+		finished:   make(chan struct{}),
 	}
 	s.stats.CompletedByLaneID = make(map[uint64]uint64)
 	s.ready.L = &s.mu
@@ -272,17 +273,11 @@ func (s *Scheduler) produce() {
 	}
 }
 
-// readAheadLimit is the smaller of the configured ceiling and what the lanes
-// can currently use.
-func (s *Scheduler) readAheadLimit() int {
-	limit := s.cfg.MaxOutstandingBytes
-	if s.cfg.ReadAhead != nil {
-		if want := s.cfg.ReadAhead(); want > 0 && want < limit {
-			limit = want
-		}
-	}
-	return limit
-}
+// readAheadLimit is how much the flow may retain: chunks read and not yet
+// acknowledged, because a lane that dies may not have delivered what its
+// transport accepted. It is a memory bound and nothing else -- what a lane may
+// commit is bounded separately, by Windows.
+func (s *Scheduler) readAheadLimit() int { return s.cfg.MaxOutstandingBytes }
 
 // retainedBytes is what the flow is holding: chunks read but not yet
 // acknowledged. Must be called with the lock held.
@@ -389,6 +384,7 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 		chunk.urgent = false
 		s.laneLoad[laneID]++
 		s.laneBytes[laneID] += uint64(len(chunk.Data))
+		s.laneQueued[laneID] += uint64(len(chunk.Data))
 		s.totalBytes += uint64(len(chunk.Data))
 		if len(s.live) > s.stats.PeakOutstanding {
 			s.stats.PeakOutstanding = len(s.live)
@@ -428,16 +424,27 @@ func (s *Scheduler) Complete(laneID uint64, chunk *Chunk) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out, ok := s.live[chunk.Offset]
-	if !ok {
+	live, ok := s.live[chunk.Offset]
+	if ok {
+		for _, a := range live.attempts {
+			s.releaseLaneLocked(a.lane, uint64(len(live.chunk.Data)), !a.written)
+		}
+		delete(s.live, chunk.Offset)
+		s.stats.ChunksCompleted++
+		s.stats.CompletedByLaneID[laneID]++
+	}
+	// A chunk can be in the ready set and in flight at the same time: that is
+	// what re-offering a slow lane's chunk to another lane means. If it then
+	// arrives by the first route, the copy waiting in the ready set is bytes
+	// the peer already has, and handing it to a lane sends them again. Left
+	// unremoved, this measured a 50% overhead on a 20% loss path -- 481 chunks
+	// issued for a 320-chunk object -- and it was invisible in the retransmit
+	// counter, because a chunk taken after its completion is no longer live and
+	// counts as a new issue rather than a re-issue.
+	dropped := s.removePendingLocked(chunk.Offset)
+	if !ok && !dropped {
 		return
 	}
-	for _, a := range out.attempts {
-		s.releaseLaneLocked(a.lane, uint64(len(out.chunk.Data)))
-	}
-	delete(s.live, chunk.Offset)
-	s.stats.ChunksCompleted++
-	s.stats.CompletedByLaneID[laneID]++
 	s.signalIfDoneLocked()
 	s.produced.Signal()
 	s.ready.Broadcast()
@@ -483,6 +490,7 @@ func (s *Scheduler) RetireLane(laneID uint64) {
 	}
 	delete(s.laneLoad, laneID)
 	delete(s.laneBytes, laneID)
+	delete(s.laneQueued, laneID)
 	s.ready.Broadcast()
 }
 
@@ -491,15 +499,19 @@ func (s *Scheduler) dropAttemptLocked(out *outstanding, laneID uint64) {
 		if a.lane != laneID {
 			continue
 		}
+		queued := !a.written
 		out.attempts = append(out.attempts[:i], out.attempts[i+1:]...)
-		s.releaseLaneLocked(laneID, uint64(len(out.chunk.Data)))
+		s.releaseLaneLocked(laneID, uint64(len(out.chunk.Data)), queued)
 		return
 	}
 }
 
-func (s *Scheduler) releaseLaneLocked(laneID uint64, size uint64) {
+func (s *Scheduler) releaseLaneLocked(laneID uint64, size uint64, queued bool) {
 	if s.laneLoad[laneID] > 0 {
 		s.laneLoad[laneID]--
+	}
+	if queued {
+		s.releaseQueuedLocked(laneID, size)
 	}
 	if s.laneBytes[laneID] >= size {
 		s.laneBytes[laneID] -= size
@@ -531,14 +543,27 @@ func (s *Scheduler) hasRoomLocked(laneID uint64, windowBytes int, chunk uint64) 
 	if chunk == 0 {
 		chunk = 1
 	}
-	if windowBytes > 0 && s.laneBytes[laneID]+chunk > uint64(windowBytes) {
+	// The flow's own window binds first and has no per-lane escape: it is what
+	// stops N lanes claiming N times a single connection's share, so a lane
+	// with nothing queued must not be able to step over it.
+	if s.cfg.Windows != nil {
+		if total := s.cfg.Windows.Total(); total > 0 && s.totalBytes+chunk > uint64(total) {
+			return false
+		}
+	}
+	queued := s.laneQueued[laneID]
+	if queued == 0 {
+		// A lane whose transport has taken everything it was given always gets
+		// one more chunk. Otherwise a bound smaller than a chunk stalls that
+		// lane permanently, and the flow can deadlock with every lane waiting
+		// for room none of them will get.
+		return true
+	}
+	if windowBytes > 0 && queued+chunk > uint64(windowBytes) {
 		return false
 	}
 	if s.cfg.Windows != nil {
-		if lane := s.cfg.Windows.Lane(laneID); lane > 0 && s.laneBytes[laneID]+chunk > uint64(lane) {
-			return false
-		}
-		if total := s.cfg.Windows.Total(); total > 0 && s.totalBytes+chunk > uint64(total) {
+		if lane := s.cfg.Windows.Lane(laneID, queued); lane > 0 && queued+chunk > uint64(lane) {
 			return false
 		}
 	}
@@ -599,6 +624,19 @@ func (s *Scheduler) ReissueExpired() int {
 	return reissued
 }
 
+// removePendingLocked drops a chunk from the ready set, for a chunk that has
+// arrived by another route.
+func (s *Scheduler) removePendingLocked(offset uint64) bool {
+	for i, chunk := range s.pending {
+		if chunk.Offset != offset {
+			continue
+		}
+		s.pending = append(s.pending[:i], s.pending[i+1:]...)
+		return true
+	}
+	return false
+}
+
 func (s *Scheduler) pendingHas(offset uint64) bool {
 	for _, c := range s.pending {
 		if c.Offset == offset {
@@ -630,6 +668,68 @@ func (s *Scheduler) signalIfDoneLocked() {
 	default:
 		close(s.finished)
 	}
+}
+
+// releaseQueuedLocked drops bytes from a lane's queued commitment.
+func (s *Scheduler) releaseQueuedLocked(laneID uint64, size uint64) {
+	if s.laneQueued[laneID] >= size {
+		s.laneQueued[laneID] -= size
+		return
+	}
+	s.laneQueued[laneID] = 0
+}
+
+// Wrote reports that a lane's transport has taken a chunk's bytes.
+//
+// This is what paces a lane, and it is deliberately not the same event as
+// acknowledgement. A QUIC stream write returns once the transport has packed
+// the bytes into packets, which it does only when its congestion window and
+// pacer allow -- so a lane that cannot move data stops accepting it, at the
+// transport's own clock rather than a round trip later. Waiting for the peer's
+// application-level acknowledgement instead adds a whole return trip to that
+// loop, and a sender that must cover it commits several times as much to one
+// lane, where no other lane can take it back.
+//
+// The chunk stays retained until Complete, because a lane that dies may not
+// have delivered what its transport accepted.
+func (s *Scheduler) Wrote(laneID uint64, chunk *Chunk) {
+	if chunk == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out, ok := s.live[chunk.Offset]
+	if !ok {
+		return
+	}
+	for i := range out.attempts {
+		if out.attempts[i].lane != laneID || out.attempts[i].written {
+			continue
+		}
+		out.attempts[i].written = true
+		s.releaseQueuedLocked(laneID, uint64(len(out.chunk.Data)))
+		s.ready.Broadcast()
+		return
+	}
+}
+
+// LaneOutstanding reports what one lane is holding: chunks handed to it and
+// not yet acknowledged, their total size, and how much of that its transport
+// has not yet taken. It answers the question a throughput number cannot --
+// whether a lane is short of work or full of it -- and the last of the three is
+// what admission is compared against.
+func (s *Scheduler) LaneOutstanding(laneID uint64) (chunks int, retained, queued uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.laneLoad[laneID], s.laneBytes[laneID], s.laneQueued[laneID]
+}
+
+// Pending reports chunks read from the source and not yet handed to any lane,
+// and the flow's total unacknowledged bytes.
+func (s *Scheduler) Pending() (ready int, outstandingBytes uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pending), s.totalBytes
 }
 
 // Stats returns a snapshot.

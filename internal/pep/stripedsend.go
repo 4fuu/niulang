@@ -31,7 +31,7 @@ const (
 	// a bound on how many *separate* pieces of the receiver's contiguous point
 	// one lane can be holding, and that is what a striped flow pays for when a
 	// lane slows.
-	maxLaneChunkWindow = 96
+	maxLaneChunkWindow = 2048
 	// maxFlowOutstandingChunks bounds chunks retained across every lane, which
 	// bounds a flow's memory: a chunk is held until acknowledged because it may
 	// have to be re-issued elsewhere.
@@ -58,57 +58,56 @@ const (
 	// the flow's class now lets it carry data. Classification changes at most
 	// once or twice in a flow's life, so polling is cheaper than a broadcast.
 	laneEligibilityPoll = 20 * time.Millisecond
-	// minLaneWindowBytes is the window given to a lane with no usable rate
-	// sample yet, and the floor for a lane whose rate has collapsed.
-	minLaneWindowBytes = 128 * 1024
-	// maxLaneWindowBytes caps what one lane may hold however fast it looks. Four
-	// lanes at this bound is the flow's worst-case commitment, and it is why the
-	// chunk ceiling above is not simply unbounded.
-	maxLaneWindowBytes = 8 * 1024 * 1024
-	// (The fixed window multiple that used to live here is gone: it is now
-	// searched for per lane by laneCommit, because no constant served both a
-	// deeply buffered path and a shallow policer.)
-	//
-	// Historical note kept deliberately, since the numbers are what justify the
-	// search:
-	//
-	// One would be right if a chunk left the window as soon as the path
-	// delivered it. It does not: a chunk holds window space from the moment it
-	// is handed to the lane until the peer's acknowledgement comes back, which
-	// is the transport's own queueing delay plus a round trip plus the
-	// acknowledgement delay.
-	//
-	// on a 100 Mbit/s path with a deep buffer, four bandwidth-delay products
-	// measured 43.3 Mbit/s and two measured 35.7; on a path policing each
-	// source at 25 Mbit/s, four measured 10.5 and two measured 18.2.
+	// minLaneQueueBytes and maxLaneQueueBytes bound that queue. Two chunks is
+	// the floor because one leaves the writer idle while the next is fetched;
+	// the ceiling stops a lane with a very large congestion window turning the
+	// queue into a buffer no other lane can reach into.
+	minLaneQueueBytes = 2 * defaultChunkSize
+	maxLaneQueueBytes = 512 * 1024
 )
 
-// windowBytes is how much unacknowledged data this lane will accept.
+// windowBytes is how many bytes this lane may hold that its transport has not
+// yet taken. It is deliberately small.
 //
-// It must cover the lane's bandwidth-delay product or the lane under-runs: it
-// would finish a chunk and then sit idle for a round trip waiting to be handed
-// the next one. Twice the product leaves room for the acknowledgement to be
-// in flight while the lane keeps working.
+// A lane is paced by its transport: a QUIC stream write returns once the packer
+// has consumed the bytes, and the packer consumes them only when the congestion
+// window and pacer allow. So the queue in front of that write is the only
+// commitment the scheduler makes to one lane in advance, and every byte of it is
+// head-of-line exposure -- bytes numbered into the application stream that no
+// other lane can take back if this one slows.
 //
-// This estimate cannot misroute anything. It sets how deeply one lane
-// pipelines, not which lane gets the data, so getting it wrong costs that
-// lane's throughput and never puts bytes behind a lane that cannot move them.
-// A lane whose rate collapses gets a smaller product and a smaller window
-// without anything deciding to shrink it.
+// It has to be more than nothing, because a lane whose queue empties leaves its
+// transport with nothing to send, and a QUIC sender with nothing to send marks
+// its bandwidth samples application-limited. BBR discards those, so a lane
+// starved even briefly can stop its controller ever leaving startup: measured on
+// a path policing each source at 25 Mbit/s, that held a lane at 2.9 times its
+// bandwidth-delay product for four seconds and doubled the round trip.
+//
+// A quarter of the congestion window covers the writer's own scheduling jitter
+// on any path, shrinks with a lane that slows, and is bounded above so a fast
+// lane cannot turn it into a buffer.
 func (l *mpLane) windowBytes() int {
-	rate, rtt := l.sendRate()
-	if rate <= 0 || rtt <= 0 {
-		if cwnd := l.congestionWindow(); cwnd > 0 {
-			rate, rtt = float64(cwnd), 200*time.Millisecond
+	cwnd, _ := l.congestionState()
+	if cwnd <= 0 {
+		// No transport telemetry: a TCP rescue lane, or a QUIC connection
+		// before its first acknowledgement.
+		if rate, rtt := l.sendRate(); rate > 0 && rtt > 0 {
+			cwnd = int(rate * rtt.Seconds())
 		}
 	}
-	return l.commit().window(rate, rtt)
+	return laneQueueBytes(cwnd)
 }
 
-// commit returns this lane's burst-tolerance search, creating it on first use.
-func (l *mpLane) commit() *laneCommit {
-	l.commitOnce.Do(func() { l.commitSearch = newLaneCommit() })
-	return l.commitSearch
+// laneQueueBytes is how far ahead of its transport a lane may be committed.
+func laneQueueBytes(cwnd int) int {
+	queue := cwnd / 4
+	if queue < minLaneQueueBytes {
+		queue = minLaneQueueBytes
+	}
+	if queue > maxLaneQueueBytes {
+		queue = maxLaneQueueBytes
+	}
+	return queue
 }
 
 // congestionWindow reports what this lane's transport says the path will hold,
@@ -120,40 +119,31 @@ func (l *mpLane) commit() *laneCommit {
 // squarely in the throughput path, and the answer cannot meaningfully change
 // within a few milliseconds of a long-haul round trip.
 func (l *mpLane) congestionWindow() int {
+	cwnd, _ := l.congestionState()
+	return cwnd
+}
+
+// congestionState reports the transport's congestion window and what it
+// currently has in flight.
+func (l *mpLane) congestionState() (cwnd, inFlight int) {
 	if l == nil || l.fc == nil {
-		return 0
+		return 0, 0
 	}
 	l.cwndMu.Lock()
 	defer l.cwndMu.Unlock()
 	now := time.Now()
 	if !l.cwndSampled.IsZero() && now.Sub(l.cwndSampled) < laneRateCacheTTL {
-		return l.cwndBytes
+		return l.cwndBytes, l.inFlightBytes
 	}
 	provider, ok := l.fc.conn.(laneStatsProvider)
 	if !ok {
-		return 0
+		return 0, 0
 	}
-	l.cwndBytes = int(provider.transportStats().controller.CongestionWindow)
+	controller := provider.transportStats().controller
+	l.cwndBytes = int(controller.CongestionWindow)
+	l.inFlightBytes = int(controller.BytesInFlight)
 	l.cwndSampled = now
-	return l.cwndBytes
-}
-
-// readAheadBytes is how far ahead of the lanes the producer may read: enough to
-// keep every lane's window full and refill it, and no more. Deriving it from
-// the windows rather than fixing it keeps one constant from having to suit both
-// a 25 Mbit/s policer and a 100 Mbit/s path.
-func (f *multipathFlow) readAheadBytes() int {
-	total := 0
-	for _, lane := range f.healthyLanes() {
-		total += lane.windowBytes()
-	}
-	if total <= 0 {
-		return minLaneWindowBytes * 2
-	}
-	if readAhead := 2 * total; readAhead < maxFlowOutstandingBytes {
-		return readAhead
-	}
-	return maxFlowOutstandingBytes
+	return l.cwndBytes, l.inFlightBytes
 }
 
 // flowSource adapts the application connection to the scheduler's reader,
@@ -198,11 +188,15 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 		cc = mpcc.New(mpcc.Config{})
 	}
 	sched := stripe.New(&flowSource{flow: f}, stripe.Config{
-		ChunkSize:           f.chunkSize,
-		LaneWindow:          maxLaneChunkWindow,
-		MaxOutstanding:      maxFlowOutstandingChunks,
+		ChunkSize:      f.chunkSize,
+		LaneWindow:     maxLaneChunkWindow,
+		MaxOutstanding: maxFlowOutstandingChunks,
+		// The flow's memory bound is also its read-ahead bound: a chunk is
+		// retained from the moment it is read until the peer acknowledges it,
+		// because a lane that dies may not have delivered what its transport
+		// accepted. Nothing narrower is needed now that a lane's admission is
+		// bounded by what its transport has not yet taken.
 		MaxOutstandingBytes: maxFlowOutstandingBytes,
-		ReadAhead:           f.readAheadBytes,
 		RetransmitAfter:     chunkReissueDelay,
 		Windows:             &laneAdmission{flow: f, cc: cc},
 	})
@@ -297,7 +291,9 @@ func (f *multipathFlow) runLanePuller(ctx context.Context, lane *mpLane, sched *
 				return
 			}
 		}
-		chunk, err := sched.Next(ctx, lane.id, lane.windowBytes())
+		// The window is supplied by laneAdmission, which sees what the lane is
+		// already holding; passing a second copy here would apply a stale one.
+		chunk, err := sched.Next(ctx, lane.id, 0)
 		if err != nil || chunk == nil {
 			return
 		}
@@ -317,13 +313,18 @@ func (f *multipathFlow) runLanePuller(ctx context.Context, lane *mpLane, sched *
 
 // outstandingChunk is a chunk written to a lane and not yet acknowledged.
 type outstandingChunk struct {
-	lane  uint64
-	chunk *stripe.Chunk
+	lane   uint64
+	chunk  *stripe.Chunk
+	issued time.Time
 }
 
 func (f *multipathFlow) trackChunk(laneID uint64, chunk *stripe.Chunk) {
+	var issued time.Time
+	if laneTrace.Load() {
+		issued = time.Now()
+	}
 	f.chunkMu.Lock()
-	f.outstandingChunks = append(f.outstandingChunks, outstandingChunk{lane: laneID, chunk: chunk})
+	f.outstandingChunks = append(f.outstandingChunks, outstandingChunk{lane: laneID, chunk: chunk, issued: issued})
 	f.chunkMu.Unlock()
 	// An empty final chunk is covered the moment it is tracked, so nudge the
 	// watcher rather than leaving it until the next acknowledgement.
@@ -359,6 +360,9 @@ func (f *multipathFlow) watchChunkCompletion(ctx context.Context, sched *stripe.
 		f.outstandingChunks = kept
 		f.chunkMu.Unlock()
 		for _, done := range completed {
+			if !done.issued.IsZero() {
+				f.observeResidency(time.Since(done.issued))
+			}
 			sched.Complete(done.lane, done.chunk)
 			if f.cc != nil {
 				// Acknowledged bytes are what the coupled window grows on, so
@@ -407,7 +411,11 @@ func (f *multipathFlow) sendChunk(ctx context.Context, lane *mpLane, chunk *stri
 	// it is acknowledged, and is the thing that will re-issue it if this lane
 	// stops. Recording it again would put the same bytes under two limits.
 	f.noteSent(chunk.Offset, len(chunk.Data))
-	return f.enqueueFrameClass(ctx, lane, frame, bulk)
+	var written func()
+	if sched := f.scheduler.Load(); sched != nil {
+		written = func() { sched.Wrote(lane.id, chunk) }
+	}
+	return f.enqueueFrameWritten(ctx, lane, frame, bulk, written)
 }
 
 // sendFinal closes the outbound direction once every byte has been

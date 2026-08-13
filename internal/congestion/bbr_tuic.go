@@ -421,14 +421,30 @@ func saturatingByteAdd(a quiccongestion.ByteCount, b uint64) quiccongestion.Byte
 	return a + quiccongestion.ByteCount(b)
 }
 
+// appLimited reports whether the sender had window it did not use, which marks
+// the packets sent after this event as application-limited.
+//
+// The threshold is what makes this usable rather than a formality. Any unused
+// window at all is the wrong test: a paced sender is below its congestion
+// window at almost every acknowledgement, because the pacer is deliberately
+// spacing packets out, so "in flight is below the window" marks nearly every
+// packet application-limited. Application-limited samples are the ones the
+// full-bandwidth test skips, so with that test the controller never counts a
+// round without gain and never leaves startup at all -- measured on a path
+// policing each source at 25 Mbit/s, it stayed in startup for an entire 20 MiB
+// transfer, held 2.9 congestion windows in flight, and doubled the round trip
+// with standing queue.
+//
+// Requiring a full burst of unused window separates the two: a sender that ran
+// out of data leaves the whole window unused, while a paced one is short by at
+// most the packets the pacer has not yet released. This is the rule the drain
+// case already applied; it belongs in every mode.
 func (b *TUICBBRSender) appLimited(priorInFlight quiccongestion.ByteCount) bool {
 	window := b.GetCongestionWindow()
 	if priorInFlight >= window {
 		return false
 	}
-	available := window - priorInFlight
-	drainLimited := b.mode == tuicBbrDrain && priorInFlight > window/2
-	return !drainLimited || available > tuicMaxBurstPackets*b.maxDatagramSize
+	return window-priorInFlight > tuicMaxBurstPackets*b.maxDatagramSize
 }
 
 func obsoletePacketNumber(acked []quiccongestion.AckedPacketInfo, lost []quiccongestion.LostPacketInfo) (quiccongestion.PacketNumber, bool) {
