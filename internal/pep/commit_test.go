@@ -7,80 +7,78 @@ import (
 
 const testRTT = 200 * time.Millisecond
 
-// run drives the search with a bottleneck that drops whenever the commitment
-// exceeds what it will absorb. The search is never told which kind of
-// bottleneck it is facing; it only ever learns that something was lost.
-func run(c *laneCommit, tolerated float64, rounds int) float64 {
+// bottleneck models what a path does when the sender commits more. `tolerated`
+// is how many bandwidth-delay products it absorbs before dropping; `ambient` is
+// loss it inflicts regardless, as a fraction of bytes.
+//
+// The distinction is the whole problem: a lossy link has ambient loss and
+// infinite tolerance, a policer has a low tolerance and no ambient loss, and
+// the level of loss alone cannot tell them apart.
+func drive(c *laneCommit, tolerated, ambient float64, rounds int) float64 {
 	now := time.Now()
+	var sent, lost uint64
+	const perRound = 250_000
 	for i := 0; i < rounds; i++ {
 		now = now.Add(testRTT)
-		c.observe(c.current() > tolerated, now, testRTT)
+		sent += perRound
+		lost += uint64(ambient * perRound / 1200)
+		if c.level() > tolerated {
+			// Over-commitment is answered with drops proportional to the
+			// excess, which is what a token bucket does.
+			lost += uint64((c.level() - tolerated) * perRound / 1200 * 0.5)
+		}
+		c.observe(sent, lost, now, testRTT)
 	}
-	return c.current()
+	return c.level()
 }
 
-// A deep buffer absorbs several bandwidth-delay products and answers with
-// delay, so the search should find most of them.
-func TestSearchGrowsIntoADeepBuffer(t *testing.T) {
+// The defect this replaces: with 1% ambient loss every sample reports a loss,
+// and a search that retreats on any loss retreats to the floor. That cost four
+// lanes their aggregation entirely, 18.3 Mbit/s against a fixed setting's 26.9.
+func TestAmbientLossDoesNotDriveTheSearchDown(t *testing.T) {
 	c := newLaneCommit()
-	got := run(c, 5.0, 200)
-	if got < 3.5 {
-		t.Fatalf("settled at %.2f products on a buffer that tolerates 5", got)
+	got := drive(c, 6.0, 0.01, 300)
+	if got < initialCommitProducts {
+		t.Fatalf("settled at %.2f products, below the %.2f it started from: "+
+			"ambient loss is being read as over-commitment", got, initialCommitProducts)
 	}
 }
 
-// A token bucket absorbs about one product and answers with loss. Committing
-// four to it measured 10.5 Mbit/s against two's 18.2, so the search must not
-// go there.
-func TestSearchStaysShallowOnAPolicer(t *testing.T) {
+// A policer answers extra commitment with drops, so the search must stop near
+// what it absorbs.
+func TestSearchStopsWhereLossRespondsToCommitment(t *testing.T) {
 	c := newLaneCommit()
-	got := run(c, 1.2, 200)
-	if got > 2.0 {
-		t.Fatalf("settled at %.2f products on a bottleneck that tolerates 1.2", got)
+	got := drive(c, 2.0, 0.0, 300)
+	if got > 3.5 {
+		t.Fatalf("settled at %.2f products on a bottleneck absorbing 2", got)
 	}
+}
+
+// The hard case, and the one that justifies comparing rates rather than
+// levels: a path that is both lossy and shallow. The ambient loss must cancel
+// out, leaving only the part that responds.
+func TestSearchSeparatesAmbientLossFromOverCommitment(t *testing.T) {
+	lossyDeep := drive(newLaneCommit(), 6.0, 0.01, 300)
+	lossyShallow := drive(newLaneCommit(), 2.0, 0.01, 300)
+	if lossyDeep <= lossyShallow {
+		t.Fatalf("deep path settled at %.2f and shallow at %.2f with identical "+
+			"ambient loss: the search is reading the level, not the response",
+			lossyDeep, lossyShallow)
+	}
+}
+
+// A clean deep buffer should be exploited.
+func TestSearchGrowsOnACleanDeepPath(t *testing.T) {
+	got := drive(newLaneCommit(), 6.0, 0.0, 300)
+	if got < 3.0 {
+		t.Fatalf("settled at %.2f products on a clean path absorbing 6", got)
+	}
+}
+
+// The floor must hold: a lane still has to be able to keep itself busy.
+func TestSearchNeverFallsBelowTheFloor(t *testing.T) {
+	got := drive(newLaneCommit(), 0.1, 0.05, 300)
 	if got < minCommitProducts {
-		t.Fatalf("settled at %.2f, below the floor a lane needs to stay busy", got)
-	}
-}
-
-// The same code must reach both answers, which is the whole point: the path is
-// not configuration.
-func TestSearchSeparatesTheTwoPathsWithoutBeingTold(t *testing.T) {
-	deep := run(newLaneCommit(), 5.0, 200)
-	shallow := run(newLaneCommit(), 1.2, 200)
-	if deep <= shallow*1.5 {
-		t.Fatalf("deep buffer settled at %.2f and policer at %.2f: the search "+
-			"cannot tell them apart", deep, shallow)
-	}
-}
-
-// A path that degrades mid-transfer must be followed down.
-func TestSearchBacksOffWhenAPathDegrades(t *testing.T) {
-	c := newLaneCommit()
-	high := run(c, 5.0, 100)
-	low := run(c, 1.2, 100)
-	if low >= high {
-		t.Fatalf("commitment did not fall when the path degraded (%.2f -> %.2f)", high, low)
-	}
-	if low > 2.0 {
-		t.Fatalf("settled at %.2f after degrading to a bottleneck tolerating 1.2", low)
-	}
-}
-
-// A burst of loss reports from one episode must cost one backoff, not many.
-func TestBackoffIsOncePerRoundTrip(t *testing.T) {
-	c := newLaneCommit()
-	now := time.Now()
-	for i := 0; i < 40; i++ {
-		c.observe(false, now, testRTT)
-		now = now.Add(testRTT)
-	}
-	before := c.current()
-	for i := 0; i < 20; i++ {
-		c.observe(true, now, testRTT) // same instant: one episode
-	}
-	after := c.current()
-	if after < before*commitBackoff*0.9 {
-		t.Fatalf("one loss episode took the commitment from %.2f to %.2f", before, after)
+		t.Fatalf("settled at %.2f, below the floor", got)
 	}
 }

@@ -117,7 +117,7 @@ func (f *multipathFlow) sampleLaneCongestion(ctx context.Context, cc *mpcc.Windo
 			// input is whether the lane lost anything since the last sample:
 			// nothing distinguishes a token bucket from a deep queue here, and
 			// nothing about the path is supplied in advance.
-			lane.commit().observe(losing, time.Now(), rtt)
+			lane.commit().observe(stats.bytesSent, stats.packetsLost, time.Now(), rtt)
 			if cc != nil {
 				cc.Observe(lane.id, rtt)
 				if losing {

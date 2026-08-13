@@ -24,7 +24,14 @@ const (
 	// feedback loop that caps a lane near 30 Mbit/s regardless of the path, and
 	// it is why the self-paced sender measured a third below the pushing one on
 	// a single lane at 100 Mbit/s.
-	maxLaneChunkWindow = 1024
+	// Measured, not reasoned: with the commitment level pinned at two
+	// bandwidth-delay products, 96 chunks per lane measured 26.9 Mbit/s on four
+	// lanes over the policed path and 1024 measured 19.3. A chunk is whatever
+	// one read returned, so a count is a crude bound on bytes -- but it is also
+	// a bound on how many *separate* pieces of the receiver's contiguous point
+	// one lane can be holding, and that is what a striped flow pays for when a
+	// lane slows.
+	maxLaneChunkWindow = 96
 	// maxFlowOutstandingChunks bounds chunks retained across every lane, which
 	// bounds a flow's memory: a chunk is held until acknowledged because it may
 	// have to be re-issued elsewhere.
