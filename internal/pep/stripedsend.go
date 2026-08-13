@@ -101,15 +101,29 @@ func (l *mpLane) windowBytes() int {
 
 // congestionWindow reports what this lane's transport says the path will hold,
 // or zero when the transport does not expose it.
+//
+// Cached on the same short TTL the rate sample uses. Admission asks this for
+// every chunk offered to every lane, and reading it means a call into the QUIC
+// connection's statistics; at a few hundred chunks a second that cost lands
+// squarely in the throughput path, and the answer cannot meaningfully change
+// within a few milliseconds of a long-haul round trip.
 func (l *mpLane) congestionWindow() int {
 	if l == nil || l.fc == nil {
 		return 0
+	}
+	l.cwndMu.Lock()
+	defer l.cwndMu.Unlock()
+	now := time.Now()
+	if !l.cwndSampled.IsZero() && now.Sub(l.cwndSampled) < laneRateCacheTTL {
+		return l.cwndBytes
 	}
 	provider, ok := l.fc.conn.(laneStatsProvider)
 	if !ok {
 		return 0
 	}
-	return int(provider.transportStats().controller.CongestionWindow)
+	l.cwndBytes = int(provider.transportStats().controller.CongestionWindow)
+	l.cwndSampled = now
+	return l.cwndBytes
 }
 
 // flowSource adapts the application connection to the scheduler's reader,
@@ -294,11 +308,17 @@ func (f *multipathFlow) trackChunk(laneID uint64, chunk *stripe.Chunk) {
 func (f *multipathFlow) watchChunkCompletion(ctx context.Context, sched *stripe.Scheduler) {
 	var gen uint64
 	for {
+		// One snapshot per pass rather than a locked query per chunk. With
+		// hundreds of chunks outstanding and an acknowledgement arriving every
+		// few milliseconds, the per-chunk form takes the tracker's lock tens of
+		// thousands of times a second for an answer that cannot change during
+		// the pass.
+		acked := f.ackTrack.Snapshot()
 		f.chunkMu.Lock()
 		kept := f.outstandingChunks[:0]
 		var completed []outstandingChunk
 		for _, pending := range f.outstandingChunks {
-			if f.ackTrack.Covered(pending.chunk.Offset, pending.chunk.End()) {
+			if acked.covers(pending.chunk.Offset, pending.chunk.End()) {
 				completed = append(completed, pending)
 				continue
 			}

@@ -100,7 +100,12 @@ type mpLane struct {
 	// both channel capacities.
 	writeQ chan protocol.Frame
 	// pulling guards against two workers on one lane.
-	pulling           atomic.Bool
+	pulling atomic.Bool
+	// cwnd caches the transport's congestion window. Admission reads it for
+	// every chunk offered to every lane.
+	cwndMu            sync.Mutex
+	cwndBytes         int
+	cwndSampled       time.Time
 	writeInteractiveQ chan protocol.Frame
 	writeSlots        chan struct{}
 	writeDone         chan struct{}

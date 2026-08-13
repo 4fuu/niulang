@@ -240,3 +240,43 @@ func (t *ackTracker) Touch() {
 	t.gen++
 	t.cond.Broadcast()
 }
+
+// ackSnapshot is a copy of the acknowledged set, taken once so a caller can
+// test many ranges against it without holding the tracker's lock.
+type ackSnapshot struct {
+	cumulative uint64
+	ranges     [][2]uint64
+}
+
+// Snapshot copies the acknowledged set.
+func (t *ackTracker) Snapshot() ackSnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := ackSnapshot{cumulative: t.cumulative}
+	if len(t.ranges) > 0 {
+		out.ranges = append(make([][2]uint64, 0, len(t.ranges)), t.ranges...)
+	}
+	return out
+}
+
+// covers reports whether every byte in [start, end) is acknowledged.
+func (s ackSnapshot) covers(start, end uint64) bool {
+	if end <= start || end <= s.cumulative {
+		return true
+	}
+	if start < s.cumulative {
+		start = s.cumulative
+	}
+	for _, r := range s.ranges {
+		if r[0] > start {
+			return false
+		}
+		if r[1] > start {
+			start = r[1]
+			if start >= end {
+				return true
+			}
+		}
+	}
+	return false
+}
