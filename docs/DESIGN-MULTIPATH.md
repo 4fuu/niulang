@@ -423,6 +423,23 @@ controller does stay in startup too long and holds a bandwidth-delay product of
 standing queue. Fixing that needs something that does not also discard the live
 path's noise, and that is not attempted here.
 
+**The emulator has been improved, and it still does not reproduce this.** It
+gained the impairment it most obviously lacked -- `DelayWander`, a correlated
+random walk on the one-way delay, as against `DelayJitter`'s independent
+per-packet draw. The distinction is the one that matters here: jitter reorders
+and leaves the smoothed round trip near the minimum, while wander shifts a whole
+flight together so the round trip varies and the minimum does not, which is what
+the live path does. It is a real impairment -- on an otherwise identical path it
+costs the transport 26% of its goodput, 13.84 Mbit/s to 10.27 -- and configured
+to the live path's range it still scores the two controller variants within 2%
+of each other, where live they differ by more than a factor of two.
+
+So the emulator is now closer to the path and is still not a substitute for it.
+That is worth stating plainly rather than presenting the improvement as a
+validation: what remains unmodelled is at least the separate-process, separate-
+machine timing of a real deployment, and whatever else the live path does that
+this has not yet identified.
+
 ### 7.7 Scenarios outside the standard matrix
 
 The matrix covers one shape of path. These are the others, four to six trials
@@ -487,10 +504,13 @@ passes twenty times consecutively and under `-race`, which it never had.
   the secondary QUIC pool authenticates in 404 ms and the lane join completes in
   606 ms. The delay before a joined lane appears is the lane probe's own
   baseline window, which is a scheduling choice, not a server-side defect.
-- `--per-flow-rate` does not model a shallow token bucket. The per-source
-  policer inherits the aggregate path's queue, so at `--rate 400
-  --per-flow-rate 25` each lane gets a 10 MB bucket -- three seconds of
-  buffering. Conclusions drawn from it about "shallow policers" do not follow.
+- `--per-flow-rate` used not to model a shallow token bucket: the per-source
+  policer inherited the aggregate path's queue, so at `--rate 400
+  --per-flow-rate 25` each lane got a 10 MB bucket -- three seconds of
+  buffering. It now scales the bucket from its own rate. Re-measured on the
+  corrected path the striping results are unchanged: 23.53 Mbit/s on one lane
+  against the reference's 20.69, and 61.95 on four against 22.23. The bug was
+  real and the conclusions drawn on it happened to survive it.
 
 ## 8. Phases
 

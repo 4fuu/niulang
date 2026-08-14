@@ -531,3 +531,103 @@ func TestDelayedPacketsDoNotCostAGoroutineEach(t *testing.T) {
 			growth, up.PacketsIn)
 	}
 }
+
+// Wander is the impairment the emulator lacked, and it is not jitter. Jitter
+// draws per packet, so it reorders and leaves the smoothed round trip near the
+// minimum; a real long-haul path varies its delay over hundreds of
+// milliseconds, so a whole flight shifts together. Measured on the China-US
+// path this targets, the round trip ranged 226 to 440 ms while the minimum
+// stayed put.
+func TestDelayWanderVariesTheRoundTripWithoutReordering(t *testing.T) {
+	d := &direction{rng: rand.New(rand.NewSource(7))}
+	cfg := Config{
+		OneWayDelay:       100 * time.Millisecond,
+		DelayWander:       100 * time.Millisecond,
+		DelayWanderPeriod: 40 * time.Millisecond,
+	}
+	now := time.Now()
+	var previous time.Time
+	var min, max time.Duration
+	reordered := 0
+	for i := range 500 {
+		sent := now.Add(time.Duration(i) * time.Millisecond)
+		arrival, ok := d.schedule(sent, 1200, cfg)
+		if !ok {
+			t.Fatal("wander must not drop packets")
+		}
+		delay := arrival.Sub(sent)
+		if min == 0 || delay < min {
+			min = delay
+		}
+		if delay > max {
+			max = delay
+		}
+		if i > 0 && arrival.Before(previous) {
+			reordered++
+		}
+		previous = arrival
+	}
+	if min < cfg.OneWayDelay {
+		t.Fatalf("wander moved the delay below the configured minimum: %v < %v", min, cfg.OneWayDelay)
+	}
+	if max > cfg.OneWayDelay+cfg.DelayWander {
+		t.Fatalf("wander exceeded its amplitude: %v > %v", max, cfg.OneWayDelay+cfg.DelayWander)
+	}
+	if spread := max - min; spread < cfg.DelayWander/4 {
+		t.Fatalf("wander produced only %v of spread against a %v amplitude", spread, cfg.DelayWander)
+	}
+	// The point of the distinction: this is delay variation, not reordering.
+	if reordered > 25 {
+		t.Fatalf("wander reordered %d of 500 packets; that is jitter's job, not this one", reordered)
+	}
+}
+
+// The per-source policer must be sized from its own rate. Inheriting the
+// aggregate path's queue gave each source a bucket sized for the whole link --
+// at 400 Mbit/s aggregate and 25 Mbit/s per source, three seconds of buffering,
+// which is a deep buffer rather than a policer.
+func TestPerFlowPolicerBucketFollowsItsOwnRate(t *testing.T) {
+	relay, err := New("127.0.0.1:0", "127.0.0.1:1", Config{
+		OneWayDelay:            100 * time.Millisecond,
+		RateBytesPerSec:        50_000_000,
+		PerFlowRateBytesPerSec: 3_125_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	aggregate := relay.cfg.QueueBytes
+	want := int(float64(aggregate) * float64(relay.cfg.PerFlowRateBytesPerSec) / float64(relay.cfg.RateBytesPerSec))
+	if aggregate <= want {
+		t.Fatalf("test is not meaningful: aggregate queue %d is not above the per-flow share %d", aggregate, want)
+	}
+	// Drive one source past the per-flow bucket but well inside the aggregate
+	// one, and require that it is policed.
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	target, err := net.ResolveUDPAddr("udp", relay.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 1200)
+	for range 2000 {
+		if _, err := client.WriteTo(payload, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if up, _ := relay.Stats(); up.PacketsIn >= 2000 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	up, _ := relay.Stats()
+	if up.PacketsDropped == 0 {
+		t.Fatalf("a source exceeding its own bucket was not policed: in=%d dropped=%d", up.PacketsIn, up.PacketsDropped)
+	}
+}

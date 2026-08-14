@@ -48,6 +48,7 @@ type options struct {
 	lossBurst    float64
 	lossUp       float64
 	jitterMillis float64
+	wanderMillis float64
 	rateMbits    float64
 	perFlowMbits float64
 	queueBytes   int
@@ -88,6 +89,7 @@ func run(args []string) error {
 	fs.Float64Var(&opts.lossBurst, "loss-burst", 0, "mean loss burst length in packets (0 or 1 gives independent loss)")
 	fs.Float64Var(&opts.lossUp, "loss-up", 0, "client-to-server loss percentage, overriding --loss for that direction")
 	fs.Float64Var(&opts.jitterMillis, "jitter", 0, "maximum extra per-packet delay in milliseconds, which also reorders")
+	fs.Float64Var(&opts.wanderMillis, "delay-wander", 0, "amplitude in milliseconds of a correlated random walk on the one-way delay; unlike --jitter this varies the round trip without reordering, which is what a long-haul path does")
 	fs.Float64Var(&opts.rateMbits, "rate", 100, "bottleneck rate in Mbit/s in each direction (0 disables)")
 	fs.Float64Var(&opts.perFlowMbits, "per-flow-rate", 0, "per-source-address rate in Mbit/s, modelling per-flow policing (0 disables)")
 	fs.IntVar(&opts.queueBytes, "queue", 0, "bottleneck queue in bytes (0 selects one BDP)")
@@ -139,6 +141,7 @@ func run(args []string) error {
 		LossBurstPackets:       opts.lossBurst,
 		UpstreamLossRate:       opts.lossUp / 100,
 		DelayJitter:            time.Duration(opts.jitterMillis * float64(time.Millisecond)),
+		DelayWander:            time.Duration(opts.wanderMillis * float64(time.Millisecond)),
 		RateBytesPerSec:        uint64(opts.rateMbits * 1e6 / 8),
 		PerFlowRateBytesPerSec: uint64(opts.perFlowMbits * 1e6 / 8),
 		QueueBytes:             opts.queueBytes,

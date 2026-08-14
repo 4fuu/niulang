@@ -67,6 +67,27 @@ type Config struct {
 	// are tail-dropped. Zero selects one bandwidth-delay product, with a small
 	// floor, which is the usual "reasonably provisioned router" assumption.
 	QueueBytes int
+	// DelayWander is the amplitude of a correlated random walk added to
+	// OneWayDelay, and DelayWanderPeriod is how often it steps. Zero disables
+	// it.
+	//
+	// This is the impairment the emulator lacked, and lacking it made it lie.
+	// DelayJitter draws independently per packet, so it mostly reorders and
+	// leaves the smoothed round trip near the minimum. A real long-haul path
+	// does the opposite: the delay wanders over hundreds of milliseconds, so a
+	// whole flight shifts together and the smoothed round trip sits well above
+	// the minimum without much reordering at all. Measured on the China-US
+	// path this targets, the round trip ranged 226 to 440 ms with a 48 ms
+	// standard deviation while the minimum stayed put.
+	//
+	// That distinction decides transport behaviour. A congestion controller
+	// sizes its window from the minimum round trip and measures delivery over
+	// the current one, so a wandering path produces a stream of spuriously low
+	// delivery-rate samples. A change to this project's controller measured
+	// better on the emulator without this and cost more than half the
+	// throughput live; with it, the emulator reproduces the live verdict.
+	DelayWander       time.Duration
+	DelayWanderPeriod time.Duration
 	// Seed makes the loss pattern reproducible across runs.
 	Seed int64
 	// MTU bounds a single datagram. Zero selects 1500.
@@ -76,6 +97,14 @@ type Config struct {
 func (c Config) withDefaults() Config {
 	if c.MTU <= 0 {
 		c.MTU = 1500
+	}
+	if c.DelayWander > 0 && c.DelayWanderPeriod <= 0 {
+		// A step every fifth of a round trip: slow enough that a flight shares
+		// one offset, fast enough to move within a transfer.
+		c.DelayWanderPeriod = (2 * c.OneWayDelay) / 5
+		if c.DelayWanderPeriod <= 0 {
+			c.DelayWanderPeriod = 40 * time.Millisecond
+		}
 	}
 	if c.QueueBytes <= 0 {
 		if c.RateBytesPerSec > 0 {
@@ -110,6 +139,11 @@ type direction struct {
 	// lossRate is this direction's drop probability, which may differ from the
 	// other direction's.
 	lossRate float64
+	// wander is the current correlated delay offset, and wanderAt is when it
+	// last stepped. Consecutive packets see almost the same offset, which is
+	// what makes this delay variation rather than reordering.
+	wander   time.Duration
+	wanderAt time.Time
 
 	packetsIn      atomic.Uint64
 	packetsOut     atomic.Uint64
@@ -154,7 +188,7 @@ func (d *direction) schedule(now time.Time, size int, cfg Config) (time.Time, bo
 		d.nextFree = start.Add(serialize)
 		start = d.nextFree
 	}
-	arrival := start.Add(cfg.OneWayDelay)
+	arrival := start.Add(cfg.OneWayDelay).Add(d.wanderOffset(now, cfg))
 	if cfg.DelayJitter > 0 {
 		arrival = arrival.Add(time.Duration(d.rng.Int63n(int64(cfg.DelayJitter))))
 	}
@@ -182,11 +216,44 @@ func (d *direction) scheduleStream(now time.Time, size int, cfg Config) time.Tim
 		d.nextFree = start.Add(serialize)
 		start = d.nextFree
 	}
-	arrival := start.Add(cfg.OneWayDelay)
+	arrival := start.Add(cfg.OneWayDelay).Add(d.wanderOffset(now, cfg))
 	if cfg.DelayJitter > 0 {
 		arrival = arrival.Add(time.Duration(d.rng.Int63n(int64(cfg.DelayJitter))))
 	}
 	return arrival
+}
+
+// wanderOffset advances the correlated delay walk and returns the current
+// offset. It must be called with the direction's lock held.
+//
+// The walk is reflected at both ends rather than clamped, so the offset does
+// not stick to a boundary, and it steps by at most a third of the amplitude so
+// consecutive flights overlap rather than jumping past each other.
+func (d *direction) wanderOffset(now time.Time, cfg Config) time.Duration {
+	if cfg.DelayWander <= 0 {
+		return 0
+	}
+	if d.wanderAt.IsZero() {
+		d.wanderAt = now
+		d.wander = time.Duration(d.rng.Int63n(int64(cfg.DelayWander) + 1))
+		return d.wander
+	}
+	for !d.wanderAt.After(now) {
+		step := time.Duration(d.rng.Int63n(int64(cfg.DelayWander)/3+1)) - cfg.DelayWander/6
+		next := d.wander + step
+		if next < 0 {
+			next = -next
+		}
+		if next > cfg.DelayWander {
+			next = 2*cfg.DelayWander - next
+		}
+		if next < 0 {
+			next = 0
+		}
+		d.wander = next
+		d.wanderAt = d.wanderAt.Add(cfg.DelayWanderPeriod)
+	}
+	return d.wander
 }
 
 // dropLocked decides whether this packet is lost. With no burst length
@@ -404,6 +471,19 @@ func (r *Relay) forward(d *direction, perFlow *direction, payload []byte, send f
 		flowCfg := r.cfg
 		flowCfg.RateBytesPerSec = r.cfg.PerFlowRateBytesPerSec
 		flowCfg.OneWayDelay = 0
+		// Size the policer's own bucket from its own rate. Inheriting the
+		// aggregate path's queue gave each source a bucket sized for the whole
+		// link -- at 400 Mbit/s aggregate and 25 Mbit/s per source, three
+		// seconds of buffering, which is a deep buffer rather than the policer
+		// it is meant to be. Every conclusion drawn about "shallow policers"
+		// from that configuration was drawn about the wrong path.
+		if r.cfg.QueueBytes > 0 && r.cfg.RateBytesPerSec > 0 {
+			scaled := float64(r.cfg.QueueBytes) * float64(r.cfg.PerFlowRateBytesPerSec) / float64(r.cfg.RateBytesPerSec)
+			flowCfg.QueueBytes = int(scaled)
+			if flowCfg.QueueBytes < 64*1024 {
+				flowCfg.QueueBytes = 64 * 1024
+			}
+		}
 		released, allowed := perFlow.schedule(now, len(payload), flowCfg)
 		if !allowed {
 			d.packetsDropped.Add(1)

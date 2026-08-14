@@ -19,10 +19,27 @@ relay in place of the server. It applies, per direction:
 | `UpstreamLossRate` | a different drop probability client-to-server |
 | `LossBurstPackets` | correlated loss: a Gilbert chain with this mean burst |
 | `RateBytesPerSec` | a bottleneck with tail-drop queueing |
-| `PerFlowRateBytesPerSec` | a policer applied per source address |
-| | It inherits `QueueBytes` from the aggregate path, so at `--rate 400 --per-flow-rate 25` each lane gets a 10 MB bucket -- three seconds of buffering, not a shallow token bucket. Set `--queue` explicitly to model a shallow one. |
+| `PerFlowRateBytesPerSec` | a policer applied per source address, with a bucket scaled from its own rate |
+| `DelayWander` | amplitude of a correlated random walk on the one-way delay |
 | `QueueBytes` | the bottleneck buffer; zero selects one BDP |
 | `Seed` | makes the loss pattern reproducible |
+
+### Jitter and wander are different impairments
+
+`DelayJitter` draws per packet, so it reorders and leaves the smoothed round
+trip near the minimum. `DelayWander` walks the one-way delay on a slower clock,
+so a whole flight shifts together: the round trip varies while the minimum stays
+put, and almost nothing reorders. A long-haul path does the second. The live
+China-US link this project targets measures 226 to 440 ms with a 48 ms standard
+deviation and a stable minimum, which `--delay-wander 107 --rtt 226`
+approximates.
+
+This mattered: a change to the congestion controller measured better on the
+emulator without wander and cost more than half the throughput live. Adding
+wander makes the emulator produce that regime -- it costs the transport 26% of
+its goodput on an otherwise identical path -- but it does **not** by itself
+reproduce that particular verdict. The emulator is a filter, not an oracle, and
+this is the measured limit of the filter.
 
 One seed reproduces one loss pattern exactly. That property has its own test,
 because everything else depends on it.
