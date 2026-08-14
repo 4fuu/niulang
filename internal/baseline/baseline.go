@@ -97,10 +97,14 @@ func (t Transport) quicConfig() *quic.Config {
 	// connection window is the send-window analogue: quinn's send_window
 	// bounds how much unacknowledged connection data the sender will hold.
 	return &quic.Config{
-		HandshakeIdleTimeout:           10 * time.Second,
-		MaxIdleTimeout:                 t.MaxIdleTimeout,
-		KeepAlivePeriod:                t.KeepAlivePeriod,
-		InitialStreamReceiveWindow:     t.StreamReceiveWindow,
+		HandshakeIdleTimeout:       10 * time.Second,
+		MaxIdleTimeout:             t.MaxIdleTimeout,
+		KeepAlivePeriod:            t.KeepAlivePeriod,
+		InitialStreamReceiveWindow: t.StreamReceiveWindow,
+		// Deliberately equal to the initial value: TUIC does not ramp its
+		// receive window, and this reference's whole worth is that it is shaped
+		// like TUIC. wanopt does ramp, which is a real advantage over TUIC and
+		// must not be read as a scheduler advantage; see DESIGN-MULTIPATH 7.6.
 		MaxStreamReceiveWindow:         t.StreamReceiveWindow,
 		InitialConnectionReceiveWindow: t.SendWindow,
 		MaxConnectionReceiveWindow:     t.SendWindow,

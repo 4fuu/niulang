@@ -436,7 +436,46 @@ product, and the two stacks are within noise of each other everywhere. So this
 is not the multipath scheduler: it is the QUIC stack and the controller
 underneath both.
 
-Part of it is startup, and that part is expected. BBR's startup needs
+**A flow-control fault, found by elimination, accounts for much of it.** The
+receive window was configured with `InitialStreamReceiveWindow` equal to
+`MaxStreamReceiveWindow`, which switches quic-go's window auto-tuning off and
+makes the window a constant 8 MiB. A receive window bounds throughput at
+rwnd/RTT whatever congestion control decides, so a constant one caps a single
+stream at a rate that falls as the round trip grows -- which is precisely the
+shape observed.
+
+Isolating it needed a floor measurement that had never been taken:
+`TestRawQUICSaturatesThePath` streams over one QUIC connection with no proxy on
+either side, through the same emulated path. At 400 ms on a 400 Mbit/s link it
+delivers 104 Mbit/s with a fixed 8 MiB window and 190 with a 64 MiB one, 1.8
+times as much; at 50 ms the two are 341 and 365, because there the product never
+made 8 MiB the binding constraint.
+
+Auto-tuning is now enabled, and it works: pre-sizing the window to 64 MiB adds
+nothing over letting it grow from 8 (0.34 against 0.33 at the worst cell), so
+the window is no longer the constraint. Utilisation against the TUIC-faithful
+reference, 200 MiB per cell:
+
+| | reference | wanopt |
+| --- | ---: | ---: |
+| 50 ms, 400 Mbit/s | 0.83 | 0.84 |
+| 100 ms, 400 Mbit/s | 0.60 | 0.60 |
+| 200 ms, 200 Mbit/s | 0.56 | **0.69** |
+| 400 ms, 400 Mbit/s | 0.23 | **0.33** |
+
+The reference keeps TUIC's fixed window, because a control that does not
+resemble TUIC is worth nothing. So the gap at high product is real and is an
+advantage over TUIC -- and it is a flow-control setting, not a scheduler
+property, and must not be quoted as one.
+
+**What remains is bounded and not ours.** At 400 ms and 400 Mbit/s: the emulator
+delivers 440 Mbit/s to a blaster, raw QUIC with a large window reaches 190, and
+the PEP reaches 134. So roughly half the remaining shortfall is quic-go at this
+product and roughly a quarter is the proxy layer -- the SOCKS and TCP legs and
+the copy through them -- which both stacks share. Neither is the multipath
+scheduler, and the first is not in this repository.
+
+Part of the rest is startup, and that part is expected. BBR's startup needs
 log2(BDP/IW) round trips to fill, so at 400 ms and 400 Mbit/s a 50 MiB transfer
 finishes before the ramp does. Repeating the two worst cells with 400 MiB:
 utilisation at BDP 5 MB rises from 0.45 to 0.71, and at BDP 20 MB from 0.15 to

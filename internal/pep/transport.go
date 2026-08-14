@@ -234,6 +234,23 @@ func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPoo
 const (
 	initialStreamReceiveWindow     = 8 * 1024 * 1024
 	initialConnectionReceiveWindow = 16 * 1024 * 1024
+	// The ceilings are what let quic-go auto-tune the receive window up to the
+	// path's bandwidth-delay product. Setting the initial value equal to the
+	// maximum, which this did, switches auto-tuning off and makes the window a
+	// constant -- and a receive window is a hard bound on throughput at
+	// rwnd/RTT, so a constant one caps a single stream at a rate that falls as
+	// the round trip grows.
+	//
+	// Measured with raw QUIC through the emulator, no proxy on either side, at
+	// 400 ms and a 400 Mbit/s link: a fixed 8 MiB window delivers 104 Mbit/s
+	// and a 64 MiB ceiling delivers 190, which is 1.8 times as much. At 50 ms
+	// on the same link the two are 341 and 365, because there the product is
+	// small enough that 8 MiB was never the binding constraint. That is the
+	// shape of a flow-control limit rather than a congestion-control one, and
+	// it is why link utilisation collapsed with the product across every cell
+	// of the benchmark grid for both this transport and the reference.
+	maxStreamReceiveWindow     = 64 * 1024 * 1024
+	maxConnectionReceiveWindow = 128 * 1024 * 1024
 	// A bounded stream fan-out lets one QUIC connection carry multiple
 	// independent PEP flows, like TUIC, without an unbounded stream commitment.
 	maxIncomingStreams = 128
@@ -271,9 +288,9 @@ func quicConfig(windows flowWindows) *quic.Config {
 		MaxIdleTimeout:                 15 * time.Second,
 		KeepAlivePeriod:                5 * time.Second,
 		InitialStreamReceiveWindow:     streamWindow,
-		MaxStreamReceiveWindow:         streamWindow,
+		MaxStreamReceiveWindow:         maxStreamReceiveWindow,
 		InitialConnectionReceiveWindow: connectionWindow,
-		MaxConnectionReceiveWindow:     connectionWindow,
+		MaxConnectionReceiveWindow:     maxConnectionReceiveWindow,
 		MaxIncomingStreams:             maxIncomingStreams,
 		MaxIncomingUniStreams:          0,
 		// The China path has a smaller effective UDP MTU than this host's
