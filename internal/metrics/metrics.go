@@ -31,9 +31,7 @@ type Registry struct {
 	// of its window will fail rather than recover if its lane dies, so a
 	// rising count is the operator's warning that lane rescue is no longer
 	// available for the affected traffic.
-	replayEvictions   atomic.Uint64
-	unreplayableFlows atomic.Uint64
-	replayBytesInUse  atomic.Int64
+	replayBytesInUse atomic.Int64
 	// bulkIsolations counts bulk flows moved off the shared control
 	// connection, which is the mechanism that protects interactive latency.
 	bulkIsolations atomic.Uint64
@@ -52,7 +50,7 @@ type Snapshot struct {
 	CompletionTimeouts                                               uint64
 	FlowTimeouts                                                     uint64
 	ClassTransitions                                                 [3]uint64
-	ReplayEvictions, UnreplayableFlows, BulkIsolations, Reinjections uint64
+	BulkIsolations, Reinjections                                     uint64
 	ReplayBytesInUse                                                 int64
 	QUICLanes                                                        int64
 	QUICLatestRTT, QUICSmoothedRTT                                   time.Duration
@@ -138,18 +136,6 @@ func (r *Registry) UDPAssociationRescueFailure() {
 	r.udpRescueFailures.Add(1)
 }
 
-// ReplayEvicted records frames dropped from a flow's rescue window, and marks
-// the flow unreplayable the first time it happens.
-func (r *Registry) ReplayEvicted(frames uint64, firstForFlow bool) {
-	if r == nil || frames == 0 {
-		return
-	}
-	r.replayEvictions.Add(frames)
-	if firstForFlow {
-		r.unreplayableFlows.Add(1)
-	}
-}
-
 // ReplayBytes tracks the endpoint's accounted rescue-window memory.
 func (r *Registry) ReplayBytes(delta int64) {
 	if r == nil || delta == 0 {
@@ -224,8 +210,6 @@ func (r *Registry) Snapshot() Snapshot {
 		UDPAssociationRescueFailures: r.udpRescueFailures.Load(),
 		CompletionTimeouts:           r.completionTimeouts.Load(),
 		FlowTimeouts:                 r.flowTimeouts.Load(),
-		ReplayEvictions:              r.replayEvictions.Load(),
-		UnreplayableFlows:            r.unreplayableFlows.Load(),
 		BulkIsolations:               r.bulkIsolations.Load(),
 		Reinjections:                 r.reinjections.Load(),
 		ReplayBytesInUse:             r.replayBytesInUse.Load(),
@@ -360,8 +344,6 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// A rising unreplayable count means lane rescue is no longer available for
 	// the affected flows: their rescue window was dropped to keep the
 	// application moving, so a lane failure now fails the flow.
-	fmt.Fprintf(w, "wanopt_replay_evictions_total %d\n", s.ReplayEvictions)
-	fmt.Fprintf(w, "wanopt_unreplayable_flows_total %d\n", s.UnreplayableFlows)
 	fmt.Fprintf(w, "wanopt_replay_bytes_in_use %d\n", s.ReplayBytesInUse)
 	fmt.Fprintf(w, "wanopt_bulk_isolations_total %d\n", s.BulkIsolations)
 	fmt.Fprintf(w, "wanopt_lane_reinjections_total %d\n", s.Reinjections)

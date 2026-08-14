@@ -482,20 +482,26 @@ func TestDoneWaitsForOutstandingChunks(t *testing.T) {
 	s := New(bytes.NewReader(payload), Config{ChunkSize: 4 * 1024, LaneWindow: 8})
 	defer s.Close()
 
+	// Take everything the scheduler has, including the marker that ends the
+	// stream. Stopping after a fixed count assumed the producer would still
+	// have a chunk pending when it reached EOF -- true only when the lane is
+	// slower than the producer, which the race detector's slowdown inverts.
 	ctx := context.Background()
 	var held []*Chunk
 	for {
-		chunk, err := s.Next(ctx, 0, 0)
-		if err != nil {
-			t.Fatalf("next: %v", err)
-		}
+		probeCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		chunk, err := s.Next(probeCtx, 0, 0)
+		cancel()
 		if chunk == nil {
+			if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("next: %v", err)
+			}
 			break
 		}
 		held = append(held, chunk)
-		if len(held) == 2 {
-			break
-		}
+	}
+	if len(held) < 2 {
+		t.Fatalf("took %d chunks, want at least the two the payload makes", len(held))
 	}
 	select {
 	case <-s.Done():

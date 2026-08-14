@@ -425,7 +425,7 @@ func (f *multipathFlow) sendFinal(ctx context.Context, sequence uint64) error {
 		Version: protocol.Version, Type: protocol.TypeClose, Flags: protocol.FlagFin,
 		SessionID: f.sessionID, FlowID: f.flowID, Sequence: sequence, Class: protocol.Class(f.class.Load()),
 	}}
-	if err := f.recordReplayContext(ctx, fin); err != nil {
+	if err := f.retainClose(fin); err != nil {
 		return err
 	}
 	// Publish the logical FIN before enqueueing it: a lane writer can fail

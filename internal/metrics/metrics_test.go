@@ -90,20 +90,12 @@ func TestZeroValueRegistryIsSafe(t *testing.T) {
 // operator needs to see it happening.
 func TestReplayAndIsolationCountersAreExported(t *testing.T) {
 	registry := New()
-	registry.ReplayEvicted(3, true)
-	registry.ReplayEvicted(2, false)
 	registry.ReplayBytes(1024)
 	registry.ReplayBytes(512)
 	registry.ReplayBytes(-1024)
 	registry.BulkIsolated()
 
 	got := registry.Snapshot()
-	if got.ReplayEvictions != 5 {
-		t.Fatalf("replay evictions = %d, want 5", got.ReplayEvictions)
-	}
-	if got.UnreplayableFlows != 1 {
-		t.Fatalf("unreplayable flows = %d, want one flow marked once", got.UnreplayableFlows)
-	}
 	if got.ReplayBytesInUse != 512 {
 		t.Fatalf("replay bytes in use = %d, want 512", got.ReplayBytesInUse)
 	}
@@ -115,8 +107,6 @@ func TestReplayAndIsolationCountersAreExported(t *testing.T) {
 	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	for _, want := range []string{
-		"wanopt_replay_evictions_total 5",
-		"wanopt_unreplayable_flows_total 1",
 		"wanopt_replay_bytes_in_use 512",
 		"wanopt_bulk_isolations_total 1",
 	} {
@@ -140,7 +130,6 @@ func TestReplayBytesGaugeCannotGoNegative(t *testing.T) {
 // A nil registry is the "metrics disabled" case and must stay safe.
 func TestNilRegistryIsSafe(t *testing.T) {
 	var registry *Registry
-	registry.ReplayEvicted(1, true)
 	registry.ReplayBytes(10)
 	registry.BulkIsolated()
 }

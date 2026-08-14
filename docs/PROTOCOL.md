@@ -1,4 +1,4 @@
-# wanopt wire protocol (draft 0)
+# wanopt wire protocol (draft 1)
 
 This is a design document, not a compatibility guarantee. Wire versions must
 be negotiated explicitly before a release.
@@ -26,7 +26,14 @@ maximum before allocating memory. Sequence numbers count bytes within a flow,
 not frames. A receiver acknowledges contiguous bytes plus selective ranges.
 
 Frame types are `HELLO`, `HELLO_OK`, `OPEN`, `OPEN_OK`, `DATA`, `ACK`,
-`WINDOW`, `CLOSE`, `RESET`, `PING`, `PONG`, `PACKET`, and `OPEN_FAST`.
+`CLOSE`, `RESET`, `PACKET`, `OPEN_FAST`, and `OPEN_JOIN_FAST`.
+
+Draft 1 removed three: `WINDOW`, `PING` and `PONG`. All three were specified
+and none was ever sent. A frame type that exists only in this document is worse
+than no frame type, because it reads as a property the implementation has. What
+each was for, and what actually provides it, is in "Backpressure" and
+"Liveness" below. The version byte is 2, so a draft-0 peer fails closed rather
+than misreading a renumbered type.
 
 ### Pooled QUIC authentication
 
@@ -65,10 +72,11 @@ fragmentation is rejected, malformed datagrams are dropped locally, and an
 association is bounded by the configured idle timeout and maximum lifetime.
 The current implementation carries packets over reliable QUIC streams or
 TLS/TCP, preserving packet boundaries while allowing automatic TCP rescue for
-new and failed in-session associations. An in-session rescue currently opens
-a fresh authenticated association while retaining the local SOCKS UDP socket;
-it does not resume the old remote UDP relay or retransmit datagrams lost during
-the transport transition.
+new and failed in-session associations. An in-session rescue for UDP still opens a
+fresh authenticated association while retaining the local SOCKS UDP socket; it
+does not resume the old remote UDP relay or retransmit datagrams lost during the
+transport transition. TCP flows do resume: a replacement lane attaches to the
+existing session and the flow continues on it.
 Native QUIC DATAGRAM mode is a planned optimization for loss-sensitive UDP.
 
 If the server also advertises `CapabilityReserveControl`, a pooled client may
@@ -91,10 +99,25 @@ continue to receive response bytes.
 
 ## Backpressure
 
-`WINDOW` advertises the highest byte sequence the receiver is prepared to
-buffer. The sender must not exceed it. Global session and per-flow buffered
-byte limits are mandatory; a slow application must not make the remote agent
-unboundedly buffer a large download.
+There is no application-level window frame, and there is no place for one.
+Three bounds already apply, each at the layer that owns the memory:
+
+- QUIC's own stream and connection flow control, which is what stops a lane's
+  peer being made to buffer.
+- The sender's write-ahead bound per lane: a lane may hold only what its
+  transport has not yet taken, so a stream write that blocks stops the producer.
+- The sender's retention bound per flow, which is what it may hold unacknowledged
+  in case a lane dies and its chunks must be re-issued elsewhere.
+
+The receiver's reassembly bound is sized from the last of these, so a peer
+running this code cannot overflow it and a hostile peer is bounded by the same
+per-flow figure.
+
+## Liveness
+
+There is no application-level ping. QUIC's keepalive refreshes an idle
+connection and its idle timeout declares a dead one; a second mechanism above
+that would only be a slower copy with no independent evidence.
 
 ## Lane identity
 
@@ -104,10 +127,24 @@ session. Lane joins are idempotent and expire unless refreshed.
 
 ## Reliability
 
-QUIC streams can carry frames reliably, but cross-lane ordering is still the
-responsibility of the session layer. Frames may be delivered out of order;
-the receiver buffers only within a bounded reassembly window. TCP fallback
-uses the same frame protocol so higher layers do not depend on the transport.
+QUIC streams carry frames reliably, but cross-lane ordering is the session
+layer's responsibility. Frames may be delivered out of order; the receiver
+buffers within a bounded reassembly window and delivers contiguously.
+
+What a sender retains for a lane that dies is exactly two things: the chunks the
+scheduler is holding, which are unacknowledged application bytes and may be
+re-offered to any lane, and this flow's own half-close. There is no second,
+frame-level retention window: it held the same bytes under a second limit, and
+the budget, eviction path and "unreplayable" state that bounded it were all
+mechanism for a copy that did not need to exist.
+
+A lane join that names a session the peer does not hold is answered with a
+`RESET` carrying `unknown session`. That answer is permanent -- a session
+identifier is random and is never reissued -- so a client must treat it as
+final rather than retrying.
+
+TCP fallback uses the same frame protocol so higher layers do not depend on the
+transport.
 
 ## Compatibility and security requirements
 

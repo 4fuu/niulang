@@ -187,6 +187,10 @@ The measure of this design is how much it removes.
 | Timer-based head reinjection with pressure heuristic | Reinjection is a scheduler property |
 | Lane-count A/B probe, its exhaustion and RTT-collapse guards | A useless lane is never pulled from, so lane count stops being a dangerous decision |
 | Per-lane burst-tolerance search (`commit.go`) | It was scaling a quantity that had already run away; see 7.1 |
+| The pushing sender itself, and the `WANOPT_SELF_PACED` switch | The comparison it existed for is recorded |
+| Virtual transmit clock, lane ranking by predicted arrival | A pulling sender never chooses a lane, so an order has nothing to express |
+| Frame-level replay window, its budget, eviction and "unreplayable" state | It held the same bytes the scheduler holds, under a second limit |
+| `WINDOW`, `PING` and `PONG` frame types | Specified, never sent; QUIC already provides both properties |
 
 That last one deserves a note. A whole measurement apparatus was built to decide
 whether to add a lane, because under a pushing scheduler a bad lane actively
@@ -401,25 +405,35 @@ over QUIC puts application data on the return path, where 25% loss falls on it.
 It is at parity, which it would not have been while admission depended on those
 acknowledgements arriving.
 
-**Correlated loss remains the open weakness.** At 35% loss in 10-packet bursts,
-neither stack is reliable -- both lose connections during setup -- and wanopt
-completes more transfers than the reference but has a much worse tail: healthy
-trials run at 5-6 Mbit/s while others take 27 to 51 seconds for 4 MiB. The cause
-is now identified rather than mysterious. Lanes die of QUIC's idle timeout
-during a burst (`timeout: no recent network activity`), and the rejoin that
-follows is refused with `unknown session`, because the server's own connection
-idled out and took the session with it. The flow then re-sends what the dead
-lane was holding, on a path that is already dropping a third of everything. Two
-things would have to change: an idle timeout that tolerates a multi-second
-burst, and a session that outlives its last lane long enough to be rejoined.
+**Correlated loss: what it was, and what is left.** At 35% loss in 10-packet
+bursts, a flow that lost its lane spent 45 seconds trying to rejoin a session
+the server did not have. The handshake itself often fails at this loss rate, so
+the server had never registered the session at all -- and a client answered
+`unknown session` twelve times over 34 seconds kept waiting anyway, because the
+recovery path treated a permanent answer as a transient one. A session
+identifier is random and is never reissued, so the first refusal is as
+informative as the twelfth; it now ends the flow's replacement grace.
 
-**A pre-existing flake in the TCP rescue path.** Roughly one run in eight of
-`go test ./internal/pep/ -run TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail`
-fails, and every run fails under `-race`. The rescue lane authenticates and is
-admitted by both endpoints, and then no application bytes cross it. It
-reproduces on the commit before this work as well, so it is not a regression,
-but it is the same subsystem as the correlated-loss weakness above and it means
-the rescue path is not race-checked.
+Twenty trials, 4 MiB each: wanopt completes 15 of the 16 transfers it starts,
+the reference 8 of 13 -- the other five fail or truncate. Both stacks lose a
+similar number of connections during setup, which is the path and not the
+transport. Medians are indistinguishable at this loss rate, so completion is the
+only comparison that means anything here.
+
+What is left is that a lane still dies of QUIC's idle timeout mid-burst, and
+each death costs a rejoin. Raising the idle timeout is not the answer: measured
+at 30 seconds it made wanopt worse, because the same constant bounds how fast a
+genuinely black-holed path falls back to TCP.
+
+**The TCP rescue path is fixed.** The flake was not a data-path failure at all,
+which is why it was hard to see: every application byte crossed in both
+directions, and then neither endpoint could finish. The acknowledgement loop
+returned on its first failed write, which happens exactly when the lane it was
+using dies -- so a flow that lost a lane stopped acknowledging permanently and
+never resumed on the replacement that arrived half a second later. The peer's
+sender is clocked by those acknowledgements. The loop now waits for a
+replacement lane and re-acknowledges from where the peer was last told; the test
+passes twenty times consecutively and under `-race`, which it never had.
 
 ### 7.7 Corrections to the earlier record
 

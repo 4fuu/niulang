@@ -90,18 +90,15 @@ type ClientConfig struct {
 	// receive windows. Zero selects the defaults, which match TUIC.
 	StreamReceiveWindow     uint64
 	ConnectionReceiveWindow uint64
-	// ReplayMemoryBytes bounds the total memory all local flows may hold in
-	// their replay windows. Zero selects the package default.
-	ReplayMemoryBytes   uint64
-	Metrics             *metrics.Registry
-	FallbackDelay       time.Duration
-	UDPFailureThreshold int
-	UDPCooldown         time.Duration
-	InitialLanes        int
-	MaxLanes            int
-	BulkStartLanes      int
-	MinimumMarginalGain float64
-	Logger              *slog.Logger
+	Metrics                 *metrics.Registry
+	FallbackDelay           time.Duration
+	UDPFailureThreshold     int
+	UDPCooldown             time.Duration
+	InitialLanes            int
+	MaxLanes                int
+	BulkStartLanes          int
+	MinimumMarginalGain     float64
+	Logger                  *slog.Logger
 }
 
 type Client struct {
@@ -109,9 +106,6 @@ type Client struct {
 	udpHealth *udpHealth
 	budget    *limiter.Budget
 	metrics   *metrics.Registry
-	// replayBudget bounds the memory all local flows may hold in their
-	// replay windows.
-	replayBudget *replayBudget
 
 	// One QUIC connection can carry many independent PEP streams. This is
 	// intentionally a single bounded pool: it gives concurrent flows a shared
@@ -291,8 +285,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		budget: limiter.New(limiter.Config{
 			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
 		}),
-		metrics:      cfg.Metrics,
-		replayBudget: newReplayBudget(int64(cfg.ReplayMemoryBytes)),
+		metrics: cfg.Metrics,
 	}, nil
 }
 
@@ -399,7 +392,6 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	}
 	c.cfg.Logger.Debug("local flow opened", "transport", flow.kind, "duration", time.Since(flowOpenStarted))
 	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics, c.cfg.Logger)
-	flowSession.replayBudget = c.replayBudget
 	flowSession.ackRanges.Store(c.peerAcceptsAckRanges())
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime

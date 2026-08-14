@@ -35,7 +35,10 @@ const (
 	// The receiver cannot instead apply backpressure here: every lane feeds one
 	// ordered reassembler, so pausing consumption would also pause the lane
 	// carrying the segment that would close the gap.
-	maxReassemblyBytes = maxFlowReplayBytes
+	// It is sized against the sender's own retention bound, so a peer running
+	// this code can never overflow it: the sender stops reading before it can
+	// hold more unacknowledged bytes than this.
+	maxReassemblyBytes = 2 * maxFlowOutstandingBytes
 	// The byte bound above is what limits memory. This frame bound only stops
 	// a peer using very small frames from turning the window into millions of
 	// map entries.
@@ -47,11 +50,6 @@ const (
 	// the combined queues at maxLaneWriteQueue.
 	maxLaneInteractiveReserve = 8
 	maxLaneBulkQueue          = maxLaneWriteQueue - maxLaneInteractiveReserve
-	// maxReplayBytes is the window a flow may hold without drawing on the
-	// endpoint's shared replay budget. Growth above it is granted only while
-	// the endpoint has spare accounted memory; see replaybudget.go.
-	maxReplayBytes  = 8 * 1024 * 1024
-	maxReplayFrames = 16384
 	// Must exceed QUIC dead-path detection plus TCP handshake time. The
 	// client normally detects a blackhole at ~15 s, then needs one scheduler
 	// tick and a bounded TCP handshake before the replacement can arrive.
@@ -295,36 +293,16 @@ type multipathFlow struct {
 	idleTimeout   time.Duration
 	maxLifetime   time.Duration
 
-	replayStalls    atomic.Uint64
-	replayStalled   atomic.Int64
-	replayEvictions atomic.Uint64
-	reinjections    atomic.Uint64
+	reinjections atomic.Uint64
 
 	replayMu sync.Mutex
-	replay   map[uint64]protocol.Frame
-	// replayOrder is the retention FIFO. Data frames are recorded in
-	// increasing sequence order, so its front is always the oldest retained
-	// frame; entries whose frame has already been acknowledged are skipped
-	// when popped rather than removed eagerly.
-	replayOrder  []uint64
-	replayNotify chan struct{}
-	replayBytes  uint64
-	// replayEvictedThrough is the highest byte offset released from the
-	// retention window to keep the application moving. Replay onto a
-	// replacement lane is complete as long as the peer has since acknowledged
-	// everything up to it; a sticky "unreplayable" flag would instead condemn
-	// a flow forever for an eviction the peer went on to acknowledge, which
-	// turned completed transfers into failures at teardown.
-	replayEvictedThrough uint64
-	// replayLimit is this flow's current send window. It starts at the
-	// unaccounted floor and grows from replayBudget while the endpoint has
-	// spare accounted memory. replayGranted is what has been drawn from that
-	// shared budget and must be returned when the flow ends.
-	replayLimit   uint64
-	replayGranted uint64
-	replayBudget  *replayBudget
-	acked         uint64
-	highestSent   uint64
+	// closeFrame is this flow's half-close, retained until the peer
+	// acknowledges it so a replacement lane can be handed it. It is the whole
+	// of the retention window: everything else a replacement needs is held by
+	// the scheduler, which re-offers it to any lane.
+	closeFrame  *protocol.Frame
+	acked       uint64
+	highestSent uint64
 }
 
 func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget, registry *metrics.Registry, loggers ...*slog.Logger) *multipathFlow {
@@ -338,8 +316,6 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 		finalAck: make(chan struct{}, 1), sendDone: make(chan struct{}),
 		done: make(chan struct{}), ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1),
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
-		replay: make(map[uint64]protocol.Frame), replayNotify: make(chan struct{}, 1),
-		replayLimit: maxReplayBytes,
 	}
 	if len(loggers) > 0 && loggers[0] != nil {
 		f.logger = loggers[0]
@@ -815,7 +791,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	limitErr := make(chan error, 1)
 	go f.watchLimits(limitsStop, limitErr)
 	defer f.signalDone()
-	defer f.releaseReplayBudget()
 	defer func() {
 		cancelACKs()
 		close(limitsStop)
@@ -860,7 +835,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 						stats.BytesSent = f.bytesUp.Load()
 						stats.BytesRead = f.bytesDown.Load()
 						stats.LaneBytes = f.laneStats()
-						f.recordSendStalls(&stats)
 						return stats, nil
 					}
 				}
@@ -874,7 +848,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 					stats.BytesSent = f.bytesUp.Load()
 					stats.BytesRead = f.bytesDown.Load()
 					stats.LaneBytes = f.laneStats()
-					f.recordSendStalls(&stats)
 					return stats, err
 				}
 			}
@@ -891,7 +864,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
-			f.recordSendStalls(&stats)
 			return stats, err
 		case err := <-f.ackErr:
 			if err == nil {
@@ -903,7 +875,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
-			f.recordSendStalls(&stats)
 			return stats, fmt.Errorf("cumulative acknowledgement: %w", err)
 		case failure := <-f.laneErr:
 			err := failure.err
@@ -917,7 +888,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				stats.BytesSent = f.bytesUp.Load()
 				stats.BytesRead = f.bytesDown.Load()
 				stats.LaneBytes = f.laneStats()
-				f.recordSendStalls(&stats)
 				return stats, nil
 			}
 			// A secondary lane can fail without invalidating the bytes already
@@ -935,17 +905,13 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 				stats.BytesSent = f.bytesUp.Load()
 				stats.BytesRead = f.bytesDown.Load()
 				stats.LaneBytes = f.laneStats()
-				f.recordSendStalls(&stats)
 				return stats, nil
 			}
 			if len(f.healthyLanes()) > 0 {
-				if !f.replayComplete() {
-					// Bytes released from the retention window have still not
-					// been acknowledged, so a replacement lane cannot be given
-					// a complete stream. Failing closed is required: replaying
-					// a gap would silently corrupt the flow.
-					err = fmt.Errorf("lane failed (%v): flow is no longer replayable", err)
-				} else if replayErr := f.replayPending(ctx); replayErr == nil {
+				// The scheduler retains every unacknowledged chunk and will
+				// re-offer what the dead lane was carrying, so the only state a
+				// replacement needs handed to it is the half-close.
+				if replayErr := f.replayPending(ctx); replayErr == nil {
 					continue
 				} else {
 					err = fmt.Errorf("lane failed (%v), replay failed: %w", err, replayErr)
@@ -956,7 +922,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
-			f.recordSendStalls(&stats)
 			return stats, err
 		case <-ctx.Done():
 			cancelRun()
@@ -965,7 +930,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 			stats.BytesSent = f.bytesUp.Load()
 			stats.BytesRead = f.bytesDown.Load()
 			stats.LaneBytes = f.laneStats()
-			f.recordSendStalls(&stats)
 			return stats, ctx.Err()
 		}
 	}
@@ -974,7 +938,6 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	stats.BytesSent = f.bytesUp.Load()
 	stats.BytesRead = f.bytesDown.Load()
 	stats.LaneBytes = f.laneStats()
-	f.recordSendStalls(&stats)
 	return stats, nil
 }
 
@@ -1103,22 +1066,6 @@ func (f *multipathFlow) telemetryLoop(stop <-chan struct{}) {
 			return
 		}
 	}
-}
-
-// oldestRetainedLocked returns the lowest-sequence frame still held for
-// replay. It must be called with replayMu held.
-func (f *multipathFlow) oldestRetainedLocked() (protocol.Frame, bool) {
-	for _, sequence := range f.replayOrder {
-		if frame, ok := f.replay[sequence]; ok {
-			if frame.Header.Type != protocol.TypeData {
-				continue
-			}
-			copied := frame
-			copied.Payload = append([]byte(nil), frame.Payload...)
-			return copied, true
-		}
-	}
-	return protocol.Frame{}, false
 }
 
 func (f *multipathFlow) signalDone() {
@@ -1324,117 +1271,6 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 	}
 }
 
-func (f *multipathFlow) recordReplay(frame protocol.Frame) error {
-	return f.recordReplayContext(context.Background(), frame)
-}
-
-// recordReplayContext applies backpressure when the bounded replay window is
-// full. Returning an error immediately would reset a healthy application flow
-// merely because ACKs were delayed by the path; waiting is safe because the
-// caller's context and the flow shutdown path both have explicit bounds.
-func (f *multipathFlow) recordReplayContext(ctx context.Context, frame protocol.Frame) error {
-	if frame.Header.Type != protocol.TypeData && frame.Header.Type != protocol.TypeClose {
-		return errors.New("only data and close frames are replayable")
-	}
-	if frame.Header.Sequence > ^uint64(0)-uint64(len(frame.Payload)) {
-		return errors.New("replay sequence overflow")
-	}
-	for {
-		f.replayMu.Lock()
-		if f.replay == nil {
-			f.replay = make(map[uint64]protocol.Frame)
-		}
-		if existing, exists := f.replay[frame.Header.Sequence]; exists {
-			f.replayMu.Unlock()
-			if len(existing.Payload) == len(frame.Payload) && existing.Header.Type == frame.Header.Type {
-				// Re-sending a chunk on a second lane is ordinary recovery
-				// under self-pacing, and the bytes are already retained. This
-				// used to be an error, which meant every re-issue failed its
-				// send, failed its chunk, and took the lane's worker down with
-				// it -- so a flow lost lanes one at a time exactly when it was
-				// trying to recover.
-				return nil
-			}
-			return errors.New("conflicting replay sequence")
-		}
-		if len(frame.Payload) > maxFlowReplayBytes {
-			f.replayMu.Unlock()
-			return errors.New("replay frame exceeds buffer limit")
-		}
-		if len(f.replay)+1 <= maxReplayFrames && f.replayBytes+uint64(len(frame.Payload)) > f.replayLimit {
-			// The window is the flow's send window. Grow it from the shared
-			// endpoint budget rather than blocking, so a high bandwidth-delay
-			// product path is not throttled by a fixed constant, and so the
-			// total commitment across flows stays accounted.
-			f.growReplayLimitLocked(uint64(len(frame.Payload)))
-		}
-		if len(f.replay)+1 <= maxReplayFrames && f.replayBytes+uint64(len(frame.Payload)) <= f.replayLimit {
-			frame.Payload = append([]byte(nil), frame.Payload...)
-			f.replay[frame.Header.Sequence] = frame
-			f.replayOrder = append(f.replayOrder, frame.Header.Sequence)
-			f.replayBytes += uint64(len(frame.Payload))
-			end := frame.Header.Sequence + uint64(len(frame.Payload))
-			if end > f.highestSent {
-				f.highestSent = end
-			}
-			f.replayMu.Unlock()
-			return nil
-		}
-		// The window is full and cannot grow. Waiting here throttles the
-		// application, and on a lossy path that is exactly the wrong
-		// behaviour: these frames are released by the peer's protocol
-		// acknowledgements, which travel as ordinary stream data on the
-		// reverse direction and are therefore subject to the reverse path's
-		// congestion window. When that window collapses under heavy loss the
-		// acknowledgements stall, the window fills, and a transfer that QUIC
-		// is still delivering perfectly well grinds to a halt. Measured on the
-		// live 30-50% loss path, this is what stopped transfers at roughly the
-		// 8 MiB window mark.
-		//
-		// The retained window is a rescue optimization, not a correctness
-		// requirement: QUIC already delivers reliably on the lane that carried
-		// the frame. Drop the oldest entries instead and record that the flow
-		// can no longer be replayed onto a replacement lane. A lane failure
-		// then fails the flow, which is the same outcome an unreplayable flow
-		// already had, without the throughput coupling.
-		f.evictOldestReplayLocked(uint64(len(frame.Payload)))
-		f.replayMu.Unlock()
-	}
-}
-
-// evictOldestReplayLocked frees at least needed bytes by discarding the
-// lowest-sequence retained frames. It must be called with replayMu held.
-//
-// Eviction runs once per frame while the window is full, which is exactly when
-// the path is already struggling, so it must not be expensive. replayOrder is
-// a FIFO of retained sequences: data frames are recorded in increasing
-// sequence order, so the oldest is always at its front and eviction is
-// amortized constant time. Sorting the whole window on every frame instead
-// would put an O(n log n) cost on the hot path under loss.
-func (f *multipathFlow) evictOldestReplayLocked(needed uint64) {
-	freed := uint64(0)
-	for len(f.replayOrder) > 0 {
-		if freed >= needed && len(f.replay)+1 <= maxReplayFrames {
-			return
-		}
-		sequence := f.replayOrder[0]
-		f.replayOrder = f.replayOrder[1:]
-		entry, retained := f.replay[sequence]
-		if !retained {
-			// Already released by an acknowledgement.
-			continue
-		}
-		delete(f.replay, sequence)
-		f.replayBytes -= uint64(len(entry.Payload))
-		freed += uint64(len(entry.Payload))
-		if end := sequence + uint64(len(entry.Payload)); end > f.replayEvictedThrough {
-			f.replayEvictedThrough = end
-		}
-		first := f.replayEvictions.Add(1) == 1
-		f.metrics.ReplayEvicted(1, first)
-	}
-}
-
 func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) error {
 	f.replayMu.Lock()
 	if sequence > f.highestSent {
@@ -1449,50 +1285,11 @@ func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) error {
 	if f.ackTrack != nil {
 		f.ackTrack.Advance(sequence)
 	}
-	for start, frame := range f.replay {
-		end := start + uint64(len(frame.Payload))
-		if frame.Header.Type == protocol.TypeData && end <= sequence {
-			delete(f.replay, start)
-			f.replayBytes -= uint64(len(frame.Payload))
-		}
-		if final && frame.Header.Type == protocol.TypeClose && start <= sequence {
-			delete(f.replay, start)
-		}
+	if final && f.closeFrame != nil && f.closeFrame.Header.Sequence <= sequence {
+		f.closeFrame = nil
 	}
-	f.pruneReplayOrderLocked()
 	f.replayMu.Unlock()
-	select {
-	case f.replayNotify <- struct{}{}:
-	default:
-	}
 	return nil
-}
-
-// pruneReplayOrderLocked drops leading entries whose frame has already been
-// released. Without it the retention FIFO would grow by one entry per frame
-// for the life of a flow even when nothing is ever evicted, which on a
-// long-lived bulk transfer is millions of entries. It must be called with
-// replayMu held.
-func (f *multipathFlow) pruneReplayOrderLocked() {
-	pruned := 0
-	for pruned < len(f.replayOrder) {
-		if _, retained := f.replay[f.replayOrder[pruned]]; retained {
-			break
-		}
-		pruned++
-	}
-	if pruned == 0 {
-		return
-	}
-	f.replayOrder = f.replayOrder[pruned:]
-	// Re-slicing alone leaves the released prefix reachable through the
-	// backing array. Compact once the dead prefix dominates, so a long flow
-	// cannot pin an ever-growing allocation.
-	if cap(f.replayOrder) > 64 && len(f.replayOrder)*2 < cap(f.replayOrder) {
-		compacted := make([]uint64, len(f.replayOrder))
-		copy(compacted, f.replayOrder)
-		f.replayOrder = compacted
-	}
 }
 
 // noteSent records that bytes have been written without retaining them.
@@ -1510,29 +1307,6 @@ func (f *multipathFlow) noteSent(sequence uint64, n int) {
 	if end := sequence + uint64(n); end > f.highestSent {
 		f.highestSent = end
 	}
-}
-
-func (f *multipathFlow) replayPending(ctx context.Context) error {
-	f.replayMu.Lock()
-	sequences := make([]uint64, 0, len(f.replay))
-	for sequence := range f.replay {
-		sequences = append(sequences, sequence)
-	}
-	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
-	frames := make([]protocol.Frame, 0, len(sequences))
-	for _, sequence := range sequences {
-		frame := f.replay[sequence]
-		frame.Payload = append([]byte(nil), frame.Payload...)
-		frames = append(frames, frame)
-	}
-	f.replayMu.Unlock()
-
-	for _, frame := range frames {
-		if err := f.enqueueOnHealthyLane(ctx, frame, frame.Header.Type == protocol.TypeData && frame.Header.Class == protocol.ClassBulk); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (f *multipathFlow) sendSequence(sequence uint64) {
@@ -1940,7 +1714,6 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 						if err != nil {
 							return fmt.Errorf("acknowledgement ranges: %w", err)
 						}
-						f.releaseAcknowledgedRanges(ranges)
 						f.ackTrack.Add(ranges)
 					}
 					continue
@@ -2066,73 +1839,6 @@ func (f *multipathFlow) closeAll() {
 	f.signalDone()
 }
 
-// recordSendStalls attaches the sender's replay-window stall accounting to a
-// completion record.
-func (f *multipathFlow) recordSendStalls(stats *FlowStats) {
-	stats.SendStalls = f.replayStalls.Load()
-	stats.SendStalled = time.Duration(f.replayStalled.Load())
-	stats.ReplayEvictions = f.replayEvictions.Load()
-}
-
-// growReplayLimitLocked raises this flow's send window so it can cover the
-// path's bandwidth-delay product, drawing the increase from the endpoint's
-// shared replay budget. It must be called with replayMu held. Failing to grow
-// is not an error: the caller then waits for acknowledgements, which is the
-// previous fixed-window behavior and keeps memory bounded under load.
-func (f *multipathFlow) growReplayLimitLocked(needed uint64) {
-	if f.replayLimit >= maxFlowReplayBytes {
-		return
-	}
-	step := uint64(minFlowReplayBytes)
-	for step < needed {
-		step *= 2
-	}
-	if f.replayLimit+step > maxFlowReplayBytes {
-		step = maxFlowReplayBytes - f.replayLimit
-	}
-	if step == 0 || !f.replayBudget.acquire(int64(step)) {
-		return
-	}
-	f.replayLimit += step
-	f.replayGranted += step
-	f.metrics.ReplayBytes(int64(step))
-}
-
-// releaseReplayBudget returns this flow's share of the endpoint replay budget.
-// It is idempotent so both the normal completion path and an error path can
-// call it.
-func (f *multipathFlow) releaseReplayBudget() {
-	f.replayMu.Lock()
-	granted := f.replayGranted
-	f.replayGranted = 0
-	f.replayLimit = maxReplayBytes
-	f.replayMu.Unlock()
-	f.replayBudget.release(int64(granted))
-	f.metrics.ReplayBytes(-int64(granted))
-}
-
-// replayComplete reports whether every byte the peer has not acknowledged is
-// still retained, and so whether this flow can be moved onto a replacement
-// lane without delivering a gap.
-//
-// Eviction alone does not condemn a flow. Frames are released oldest first,
-// and the peer's cumulative acknowledgement keeps advancing over them; once it
-// passes everything that was released, the retained window is complete again.
-// Treating the first eviction as permanent turned transfers that had delivered
-// every byte into failures when a lane closed at teardown.
-func (f *multipathFlow) replayComplete() bool {
-	if f.scheduler.Load() != nil {
-		// A self-paced flow keeps every unacknowledged chunk in the scheduler
-		// and hands the ones a dead lane was carrying to lanes that still
-		// work, so a replacement lane never needs a gap filled from this
-		// window.
-		return true
-	}
-	f.replayMu.Lock()
-	defer f.replayMu.Unlock()
-	return f.acked >= f.replayEvictedThrough
-}
-
 // publishReceivedRanges snapshots what the reassembler holds out of order.
 // The acknowledgement loop runs on its own goroutine and must not touch the
 // reassembler, which belongs to the receive loop.
@@ -2166,39 +1872,42 @@ func (f *multipathFlow) takeReceivedRanges(cumulative uint64) [][2]uint64 {
 	return fresh
 }
 
-// releaseAcknowledgedRanges drops retained frames the peer has reported
-// holding, even though they sit above the cumulative point.
-//
-// This is what keeps a striped flow's retention window proportional to the
-// bytes actually outstanding rather than to the whole reorder span. A frame is
-// released only when a reported range covers it completely; a partially
-// covered frame still has to be replayable in full.
-func (f *multipathFlow) releaseAcknowledgedRanges(ranges [][2]uint64) {
-	if len(ranges) == 0 {
-		return
-	}
-	f.replayMu.Lock()
-	for start, frame := range f.replay {
-		if frame.Header.Type != protocol.TypeData {
-			continue
-		}
-		end := start + uint64(len(frame.Payload))
-		for _, r := range ranges {
-			if r[0] <= start && end <= r[1] {
-				delete(f.replay, start)
-				f.replayBytes -= uint64(len(frame.Payload))
-				break
-			}
-		}
-	}
-	f.pruneReplayOrderLocked()
-	f.replayMu.Unlock()
-	select {
-	case f.replayNotify <- struct{}{}:
-	default:
-	}
-}
-
 // errResumeRefused reports that the peer cannot resume this association: it
 // has no such session, so no replacement lane can be attached to it.
 var errResumeRefused = errors.New("peer does not hold this session")
+
+// retainClose keeps this flow's half-close so a replacement lane can be given
+// it when the lane that carried it dies first.
+//
+// This is all that remains of a retention window that used to hold every
+// unacknowledged DATA frame, with a per-flow byte limit, growth drawn from an
+// endpoint-wide memory budget, an eviction path, stall accounting, and an
+// "unreplayable" state that failed the flow outright. None of it had anything
+// left to retain once the scheduler took over: a chunk is held there until the
+// peer acknowledges it and may be re-offered to any lane, so the frame-level
+// copy was the same bytes under a second limit. Its own completeness check had
+// already been reduced to "return true" for every flow this transport creates.
+//
+// One frame needs no budget.
+func (f *multipathFlow) retainClose(frame protocol.Frame) error {
+	if frame.Header.Type != protocol.TypeClose {
+		return errors.New("only a close frame is retained for replay")
+	}
+	retained := frame
+	retained.Payload = nil
+	f.replayMu.Lock()
+	f.closeFrame = &retained
+	f.replayMu.Unlock()
+	return nil
+}
+
+// replayPending re-sends the retained half-close on a lane that still works.
+func (f *multipathFlow) replayPending(ctx context.Context) error {
+	f.replayMu.Lock()
+	frame := f.closeFrame
+	f.replayMu.Unlock()
+	if frame == nil {
+		return nil
+	}
+	return f.enqueueOnHealthyLane(ctx, *frame, false)
+}

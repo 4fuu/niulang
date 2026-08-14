@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -360,77 +359,6 @@ func TestLaneQueueHasGlobalBound(t *testing.T) {
 	}
 	if got := len(lane.writeSlots); got != maxLaneWriteQueue {
 		t.Fatalf("global queue slots used = %d, want %d", got, maxLaneWriteQueue)
-	}
-}
-
-func TestReplayBufferAcknowledgesCumulativeSequence(t *testing.T) {
-	flow := &multipathFlow{replay: make(map[uint64]protocol.Frame)}
-	frames := []protocol.Frame{
-		{Header: protocol.Header{Type: protocol.TypeData, Sequence: 0}, Payload: []byte("abc")},
-		{Header: protocol.Header{Type: protocol.TypeData, Sequence: 3}, Payload: []byte("def")},
-		{Header: protocol.Header{Type: protocol.TypeClose, Sequence: 6}},
-	}
-	for _, frame := range frames {
-		if err := flow.recordReplay(frame); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := flow.acknowledgeReplay(3, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := flow.replay[0]; ok {
-		t.Fatal("cumulatively acknowledged frame was retained")
-	}
-	if len(flow.replay) != 2 || flow.replayBytes != 3 {
-		t.Fatalf("unexpected replay state: frames=%d bytes=%d", len(flow.replay), flow.replayBytes)
-	}
-	if err := flow.acknowledgeReplay(6, true); err != nil {
-		t.Fatal(err)
-	}
-	if len(flow.replay) != 0 || flow.replayBytes != 0 {
-		t.Fatalf("final ACK did not clear replay state: frames=%d bytes=%d", len(flow.replay), flow.replayBytes)
-	}
-}
-
-func TestReplayBufferRejectsInvalidBounds(t *testing.T) {
-	flow := &multipathFlow{replay: make(map[uint64]protocol.Frame)}
-	// A frame larger than any window the flow could ever be granted must be
-	// rejected rather than waiting forever for space that cannot arrive.
-	tooLarge := protocol.Frame{
-		Header:  protocol.Header{Type: protocol.TypeData},
-		Payload: []byte(strings.Repeat("x", maxFlowReplayBytes+1)),
-	}
-	if err := flow.recordReplay(tooLarge); err == nil {
-		t.Fatal("oversized replay frame was accepted")
-	}
-	if err := flow.recordReplay(protocol.Frame{Header: protocol.Header{Type: protocol.TypeData}, Payload: []byte("x")}); err != nil {
-		t.Fatal(err)
-	}
-	if err := flow.acknowledgeReplay(2, false); err == nil {
-		t.Fatal("ACK beyond sent data was accepted")
-	}
-}
-
-func TestReplayPendingUsesSurvivingLane(t *testing.T) {
-	flow := &multipathFlow{
-		ctx: context.Background(), done: make(chan struct{}),
-		lanes: make(map[uint64]*mpLane), replay: make(map[uint64]protocol.Frame),
-	}
-	lane := &mpLane{writeQ: make(chan laneFrame, 2), writeDone: make(chan struct{})}
-	flow.lanes[1] = lane
-	if err := flow.recordReplay(protocol.Frame{Header: protocol.Header{Type: protocol.TypeData, Sequence: 0}, Payload: []byte("abc")}); err != nil {
-		t.Fatal(err)
-	}
-	if err := flow.replayPending(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-lane.writeQ:
-		if string(got.frame.Payload) != "abc" || got.frame.Header.Sequence != 0 {
-			t.Fatalf("unexpected replayed frame: %+v", got)
-		}
-	default:
-		t.Fatal("pending frame was not replayed")
 	}
 }
 
