@@ -11,7 +11,7 @@ import (
 const (
 	Magic0            = byte('W')
 	Magic1            = byte('O')
-	Version           = byte(1)
+	Version           = byte(2)
 	HeaderSize        = 46
 	DefaultMaxPayload = 1 << 20
 	// FlagFin marks that the sender has reached EOF for the direction carried
@@ -49,6 +49,13 @@ const (
 
 type Type byte
 
+// Removed in version 2: WINDOW, PING and PONG. All three were specified and
+// none was ever sent. WINDOW described a receiver-advertised byte limit, which
+// QUIC's own stream and connection flow control already provides and which the
+// scheduler bounds again above it; PING and PONG described a liveness probe
+// that QUIC's keepalive and idle timeout already perform. A frame type that
+// exists only in the document is worse than no frame type: it reads as a safety
+// property the implementation does not have.
 const (
 	TypeHello Type = iota + 1
 	TypeHelloOK
@@ -56,11 +63,8 @@ const (
 	TypeOpenOK
 	TypeData
 	TypeAck
-	TypeWindow
 	TypeClose
 	TypeReset
-	TypePing
-	TypePong
 	// TypePacket carries one bounded SOCKS UDP datagram. It is intentionally
 	// distinct from TypeData: packet payloads preserve datagram boundaries and
 	// are not inserted into the byte-stream reassembler.

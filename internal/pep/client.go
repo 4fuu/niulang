@@ -1481,6 +1481,17 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				recoveryAttempts++
 				lastRecoveryAttempt = now
 				if err := c.openRecoveryLane(manageCtx, flow, sessionID, flowID); err != nil {
+					if errors.Is(err, errLaneJoinRejected) {
+						// The peer answered, and its answer was that it does
+						// not hold this session. That does not change: a
+						// session identifier is random and is never reissued.
+						// Retrying it spends the flow's whole replacement
+						// grace learning the same thing, so record the refusal
+						// and let the flow fail now.
+						flow.resumeRefused.Store(true)
+						c.cfg.Logger.Debug("peer cannot resume this association", "error", err)
+						return
+					}
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 						c.cfg.Logger.Warn("lane recovery unavailable", "error", err)
 					}

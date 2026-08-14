@@ -237,6 +237,10 @@ type multipathFlow struct {
 	// cannot monopolize the interactive connection. If no joined lane is
 	// healthy, selection deliberately falls back to lane 0 for availability.
 	reserveControlLane bool
+	// resumeRefused records that the peer answered a lane join by saying it
+	// does not know this session. That answer is permanent, so it ends the
+	// replacement grace rather than being retried.
+	resumeRefused atomic.Bool
 	// controlLaneShared reports whether another flow is currently using the
 	// pooled control connection. Nil means "no", which is what a flow on a
 	// dedicated connection should answer.
@@ -1545,6 +1549,9 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 	if len(f.healthyLanes()) > 0 {
 		return nil
 	}
+	if f.resumeRefused.Load() {
+		return errResumeRefused
+	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	ticker := time.NewTicker(25 * time.Millisecond)
@@ -1554,6 +1561,15 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 		case <-ticker.C:
 			if len(f.healthyLanes()) > 0 {
 				return nil
+			}
+			if f.resumeRefused.Load() {
+				// The peer does not have this session, and never will: a
+				// session identifier is random and is not reissued. Waiting out
+				// the replacement grace here is time the application spends
+				// learning nothing. Measured under 35% correlated loss, where
+				// the handshake itself often fails, this was 45 seconds of
+				// silence per lost flow.
+				return errResumeRefused
 			}
 		case <-timer.C:
 			return errors.New("lane replacement timeout")
@@ -1960,17 +1976,29 @@ func (f *multipathFlow) ackLoop(ctx context.Context) {
 			f.ackWriteNS.Add(uint64(time.Since(ackStart)))
 			f.acksOut.Add(1)
 			if err != nil {
-				// A failed ACK write already transitions the affected lane and
-				// publishes laneErr. Let run perform its normal bounded rescue when
-				// no lane remains; only surface an independent write error while a
-				// healthy lane is still available.
-				if ctx.Err() == nil && !f.doneChanClosed() && len(f.healthyLanes()) > 0 {
-					select {
-					case f.ackErr <- err:
-					default:
+				// A failed ACK write is a lane's failure, not the flow's. The
+				// lane is already transitioned by writeACK; this loop must
+				// outlive it, because the peer's sender is clocked by these
+				// acknowledgements and cannot finish without them.
+				//
+				// Returning here was a silent deadlock. Measured on the rescue
+				// path: every application byte crossed in both directions, and
+				// then neither endpoint could finish, because the receiver had
+				// stopped acknowledging the moment its last lane died and never
+				// resumed on the replacement that arrived half a second later.
+				// The flow sat until the application gave up.
+				if waitErr := f.waitForHealthyLane(ctx, laneReplacementWait); waitErr != nil {
+					if ctx.Err() == nil && !f.doneChanClosed() {
+						select {
+						case f.ackErr <- err:
+						default:
+						}
 					}
+					return
 				}
-				return
+				// Re-acknowledge from where the peer was last told, so the
+				// replacement lane carries the state the dead one was holding.
+				continue
 			}
 			sent = sequence
 			// If more bytes arrived during the write, immediately emit the
@@ -2201,14 +2229,6 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					return fmt.Errorf("peer reset flow: %s", string(frame.Payload[1:]))
 				}
 				return errors.New("peer reset flow")
-			case protocol.TypePing:
-				if err := f.writeControl(ctx, protocol.Frame{Header: protocol.Header{
-					Version: protocol.Version, Type: protocol.TypePong, SessionID: f.sessionID, FlowID: f.flowID,
-					Sequence: reassembler.NextSequence(), Class: protocol.Class(f.class.Load()),
-				}, Payload: frame.Payload}, event.lane); err != nil {
-					return err
-				}
-			case protocol.TypePong, protocol.TypeWindow:
 			default:
 				return fmt.Errorf("unexpected flow frame type %d", frame.Header.Type)
 			}
@@ -2435,3 +2455,7 @@ func (f *multipathFlow) releaseAcknowledgedRanges(ranges [][2]uint64) {
 	default:
 	}
 }
+
+// errResumeRefused reports that the peer cannot resume this association: it
+// has no such session, so no replacement lane can be attached to it.
+var errResumeRefused = errors.New("peer does not hold this session")

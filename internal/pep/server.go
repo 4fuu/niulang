@@ -583,6 +583,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	go s.watchFlowCompletion(ctx, sessionID, serverSession)
 	defer func() {
 		if registered {
+			s.cfg.Logger.Debug("session released with its flow", "lanes", serverSession.flow.laneCount())
 			s.unregisterSession(sessionID, serverSession)
 		}
 	}()
@@ -653,7 +654,10 @@ func (s *Server) watchFlowCompletion(ctx context.Context, sessionID [16]byte, se
 func (s *Server) retainCompletedSession(sessionID [16]byte, serverSession *serverFlow) {
 	serverSession.tombstone.Do(func() {
 		serverSession.completed.Store(true)
-		time.AfterFunc(completedSessionLinger, func() { s.unregisterSession(sessionID, serverSession) })
+		time.AfterFunc(completedSessionLinger, func() {
+			s.cfg.Logger.Debug("session tombstone expired")
+			s.unregisterSession(sessionID, serverSession)
+		})
 	})
 }
 
@@ -683,11 +687,15 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 	}
 	serverSession := s.lookupSession(sessionID)
 	if serverSession == nil || serverSession.flow.flowID != open.Header.FlowID {
+		// A rescue arriving after the session is gone is the failure mode that
+		// matters most on a lossy path, and it used to be silent on this side.
+		s.cfg.Logger.Debug("lane join refused: unknown session", "lane", laneID, "known", serverSession != nil)
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "unknown session")})
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
 	if serverSession.completed.Load() {
+		s.cfg.Logger.Debug("lane join reached a completed session", "lane", laneID)
 		if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
 			return
 		}
@@ -719,9 +727,11 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 		return
 	}
 	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
+		s.cfg.Logger.Debug("lane join refused: lane unavailable", "lane", laneID, "error", err)
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetFlowLimit, "lane unavailable")})
 		return
 	}
+	s.cfg.Logger.Debug("lane joined", "lane", laneID, "transport", transportKindForConn(conn), "lanes", serverSession.flow.laneCount())
 	s.observeLanes(serverSession.flow.laneCount())
 	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
 		return

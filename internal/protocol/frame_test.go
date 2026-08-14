@@ -63,7 +63,7 @@ func TestWriteFrameHandlesShortWrites(t *testing.T) {
 
 func TestWriteFrameRejectsZeroProgressWriter(t *testing.T) {
 	var sid [16]byte
-	f := Frame{Header: Header{Version: Version, Type: TypePing, SessionID: sid, Class: ClassNew}}
+	f := Frame{Header: Header{Version: Version, Type: TypeClose, SessionID: sid, Class: ClassNew}}
 	if err := WriteFrame(zeroWriter{}, f); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("expected io.ErrShortWrite, got %v", err)
 	}
@@ -80,7 +80,7 @@ func TestDecodeRejectsOversizedPayloadBeforeAllocation(t *testing.T) {
 
 func TestDecodeRejectsReservedBits(t *testing.T) {
 	var raw [HeaderSize]byte
-	raw[0], raw[1], raw[2], raw[3] = Magic0, Magic1, Version, byte(TypePing)
+	raw[0], raw[1], raw[2], raw[3] = Magic0, Magic1, Version, byte(TypeClose)
 	raw[43] = 1
 	if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err == nil {
 		t.Fatal("expected reserved-bit error")

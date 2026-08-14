@@ -232,15 +232,6 @@ func (r *flowRunner) receiveInner(ctx context.Context) error {
 				return fmt.Errorf("peer reset flow: %s", string(f.Payload[1:]))
 			}
 			return errors.New("peer reset flow")
-		case protocol.TypePing:
-			if err := r.fc.Write(protocol.Frame{Header: protocol.Header{
-				Version: protocol.Version, Type: protocol.TypePong, SessionID: r.sessionID,
-				FlowID: r.flowID, Sequence: expected, Class: protocol.Class(r.class.Load()),
-			}, Payload: f.Payload}); err != nil {
-				return err
-			}
-		case protocol.TypePong, protocol.TypeWindow:
-			// These control frames are valid but optional in one-lane mode.
 		default:
 			return fmt.Errorf("unexpected flow frame type %d", f.Header.Type)
 		}
