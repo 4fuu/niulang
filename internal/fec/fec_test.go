@@ -147,6 +147,9 @@ func TestEncodeLeavesDataShardsAlone(t *testing.T) {
 // sized for it has to survive that loss applied at random, not just at the
 // worst case, and it has to do so repeatedly.
 func TestSurvivesTheMeasuredChannel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("thousands of coded blocks; the shape is covered by TestAnyKOfNReconstructs")
+	}
 	const (
 		k, n  = 24, 64 // rate 0.375, sized for 42% loss in the rate controller
 		loss  = 0.42
@@ -249,6 +252,9 @@ func TestRejectsMismatchedShards(t *testing.T) {
 
 // GF(256) has to be a field, or none of the above means anything.
 func TestFieldArithmetic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("65536 field operations")
+	}
 	for a := 1; a < 256; a++ {
 		if got := mul(byte(a), inv(byte(a))); got != 1 {
 			t.Fatalf("%d * inv(%d) = %d, want 1", a, a, got)

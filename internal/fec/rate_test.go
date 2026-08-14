@@ -34,6 +34,9 @@ func liveSnapshot() lossmodel.Snapshot {
 // channel it was sized for. This runs the chosen code against the channel the
 // snapshot describes and checks the residual it promised.
 func TestTheChosenCodeSurvivesTheChannelItWasSizedFor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("thousands of coded blocks at (124,256)")
+	}
 	plan := Choose(liveSnapshot(), livePath())
 	if !plan.Code {
 		t.Fatalf("no code chosen for a 42%% erasure channel: %+v", plan)

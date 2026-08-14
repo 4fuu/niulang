@@ -126,12 +126,10 @@ func Choose(s lossmodel.Snapshot, p Params) Plan {
 		if float64(k)/float64(n) < minRate {
 			break
 		}
-		// In units of erasure events rather than shards.
-		need := int(math.Ceil(float64(k) / burst))
-		if need > trials {
+		residual, ok := residualFor(k, trials, burst, arrival)
+		if !ok {
 			continue
 		}
-		residual := binomialTailBelow(trials, arrival, need)
 		if residual <= p.TargetResidual {
 			best.Code = true
 			best.K, best.N = k, n
@@ -143,6 +141,59 @@ func Choose(s lossmodel.Snapshot, p Params) Plan {
 	}
 	best.Why = "no code rate above the floor meets the target residual"
 	return best
+}
+
+// ShardsFor answers Choose's question in the other direction: given how many
+// data shards a block actually holds, the smallest total that meets the target
+// residual.
+//
+// A block is not always the length the plan assumed. A flow that flushes a
+// short write seals a block of one or two shards, and sizing that block by the
+// plan's rate would be wrong in both directions -- it would send the plan's
+// whole block length for a few bytes, and it would still be too weak, because
+// a short block has no room for the binomial to average out. Repairing one
+// shard at 42% loss needs eight copies to reach a residual of a thousandth,
+// and that is the honest answer rather than the rate the long blocks use.
+func ShardsFor(k int, s lossmodel.Snapshot, p Params) (int, bool) {
+	if k < 1 {
+		return 0, false
+	}
+	loss := s.Floor
+	if loss <= 0 {
+		loss = s.Loss
+	}
+	if loss < minCodedLoss || p.TargetResidual <= 0 || p.TargetResidual >= 1 {
+		return k, false
+	}
+	burst := p.effectiveBurst(s)
+	arrival := 1 - loss
+	for n := k; n <= MaxShards; n++ {
+		trials := int(math.Round(float64(n) / burst))
+		if trials < 1 {
+			trials = 1
+		}
+		residual, ok := residualFor(k, trials, burst, arrival)
+		if !ok {
+			continue
+		}
+		if residual <= p.TargetResidual {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// residualFor is the probability that a block of k data shards cannot be
+// repaired, given how many independent erasure events its total length carries.
+// It reports ok=false when the block is too short to hold k shards' worth of
+// events at all.
+func residualFor(k, trials int, burst, arrival float64) (float64, bool) {
+	// In units of erasure events rather than shards.
+	need := int(math.Ceil(float64(k) / burst))
+	if need > trials {
+		return 1, false
+	}
+	return binomialTailBelow(trials, arrival, need), true
 }
 
 // blockShards picks n from the latency the flow can afford. Coding's whole
