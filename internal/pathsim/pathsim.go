@@ -88,6 +88,34 @@ type Config struct {
 	// throughput live; with it, the emulator reproduces the live verdict.
 	DelayWander       time.Duration
 	DelayWanderPeriod time.Duration
+	// PolicerRefillPeriod makes the bottleneck a token bucket refilled in
+	// quanta of one period's worth of bytes, rather than a queue drained
+	// continuously. It does not queue, so it adds no delay: a packet arriving
+	// with no tokens left is dropped where a queue would have held it. Zero
+	// keeps the queue.
+	//
+	// The live path is a policer, and the evidence is in the conditionals
+	// rather than in the rate. At twice the bottleneck rate it shows arrival
+	// runs averaging 2.3 packets and loss runs averaging 5.7. An arrival run
+	// of 2.3 is 1/0.42, which is the erasure channel by itself -- so within a
+	// run of arrivals nothing but the channel is dropping. The loss runs are
+	// far longer than the channel alone gives. That is a limiter which passes
+	// everything for a while and then drops everything for a while, which is
+	// what a bucket refilled on a timer tick does.
+	//
+	// It is not what a queue does. A queue at steady overload admits a packet
+	// exactly as fast as it drains one, so it drops nearly every other packet:
+	// emulated that way, at every buffer size from 32 KiB to a full
+	// bandwidth-delay product, the burst factor came out between 1.15 and 1.19
+	// against the live path's 1.62. Nor is the clustering the sender's own --
+	// reducing the probe's send burst from 64 packets to 4 left the live
+	// figures unchanged. At an 8 ms refill the emulator reproduces all five
+	// live statistics at once; see TestTheEmulatorReproducesTheMeasuredPath.
+	//
+	// Burst length is what decides whether an erasure code can repair a block,
+	// so a model that under-reports it would certify a code rate that fails on
+	// the real path.
+	PolicerRefillPeriod time.Duration
 	// Seed makes the loss pattern reproducible across runs.
 	Seed int64
 	// MTU bounds a single datagram. Zero selects 1500.
@@ -144,6 +172,14 @@ type direction struct {
 	// what makes this delay variation rather than reordering.
 	wander   time.Duration
 	wanderAt time.Time
+	// backlog is the bottleneck queue's occupancy in bytes and drainAt is when
+	// it was last drained; tokens is the policer's remaining allowance in
+	// bytes and tokenAt is when it is next refilled. A direction uses one or
+	// the other, never both.
+	backlog float64
+	drainAt time.Time
+	tokens  float64
+	tokenAt time.Time
 
 	packetsIn      atomic.Uint64
 	packetsOut     atomic.Uint64
@@ -168,25 +204,47 @@ func (d *direction) stats() Stats {
 func (d *direction) schedule(now time.Time, size int, cfg Config) (time.Time, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	start := now
+	if cfg.RateBytesPerSec > 0 && cfg.PolicerRefillPeriod > 0 {
+		if !d.policeLocked(now, size, cfg) {
+			d.packetsDropped.Add(1)
+			return time.Time{}, false
+		}
+	} else if cfg.RateBytesPerSec > 0 {
+		// The queue holds bytes, and drains at the bottleneck rate.
+		//
+		// Holding it as a departure time instead, and recovering the occupancy
+		// as elapsed-time times rate, is exact only while the rate never
+		// moves. It is the same quantity only under that assumption, and the
+		// assumption is not one the emulator should need.
+		rate := float64(cfg.RateBytesPerSec)
+		if !d.drainAt.IsZero() {
+			d.backlog -= now.Sub(d.drainAt).Seconds() * rate
+			if d.backlog < 0 {
+				d.backlog = 0
+			}
+		}
+		d.drainAt = now
+		if int(d.backlog)+size > cfg.QueueBytes {
+			d.packetsDropped.Add(1)
+			return time.Time{}, false
+		}
+		d.backlog += float64(size)
+		start = now.Add(time.Duration(d.backlog / rate * float64(time.Second)))
+	}
+	// The erasure segment is downstream of the limiter: a packet it drops has
+	// already spent the bottleneck's capacity.
+	//
+	// The order is not a detail, and the measured path picks it. Offering 50
+	// Mbit/s to a path with a 25 Mbit/s limiter and 42% loss delivered 14.4
+	// Mbit/s live, which is 25 x 0.58. Erasing first would have fed the
+	// limiter 29 Mbit/s and delivered 25. Putting the loss upstream also makes
+	// the two regimes mutually exclusive -- the channel would shield the
+	// limiter from ever being overrun -- so a model built that way can never
+	// show the correlated loss the live path shows above its knee.
 	if d.lossRate > 0 && d.dropLocked(cfg) {
 		d.packetsLost.Add(1)
 		return time.Time{}, false
-	}
-	start := now
-	if cfg.RateBytesPerSec > 0 {
-		if d.nextFree.After(start) {
-			// Queue occupancy is the backlog expressed in bytes at the
-			// bottleneck rate. Tail-drop once it exceeds the buffer.
-			backlog := float64(d.nextFree.Sub(now)) / float64(time.Second) * float64(cfg.RateBytesPerSec)
-			if int(backlog)+size > cfg.QueueBytes {
-				d.packetsDropped.Add(1)
-				return time.Time{}, false
-			}
-			start = d.nextFree
-		}
-		serialize := time.Duration(float64(size) / float64(cfg.RateBytesPerSec) * float64(time.Second))
-		d.nextFree = start.Add(serialize)
-		start = d.nextFree
 	}
 	arrival := start.Add(cfg.OneWayDelay).Add(d.wanderOffset(now, cfg))
 	if cfg.DelayJitter > 0 {
@@ -254,6 +312,43 @@ func (d *direction) wanderOffset(now time.Time, cfg Config) time.Duration {
 		d.wanderAt = d.wanderAt.Add(cfg.DelayWanderPeriod)
 	}
 	return d.wander
+}
+
+// policeLocked charges this packet against the token bucket, refilling it in
+// whole quanta first, and reports whether it may pass. It must be called with
+// the direction's lock held.
+func (d *direction) policeLocked(now time.Time, size int, cfg Config) bool {
+	quantum := float64(cfg.RateBytesPerSec) * cfg.PolicerRefillPeriod.Seconds()
+	if quantum <= 0 {
+		return true
+	}
+	// The bucket holds a quantum plus one packet rather than exactly a
+	// quantum. With exactly a quantum the remainder below a packet's size is
+	// discarded at every refill and the limiter delivers less than its
+	// configured rate: with a 3125-byte quantum and 1200-byte packets it
+	// passed two packets per period instead of two and a half, which measured
+	// as 19 Mbit/s out of a 25 Mbit/s limiter.
+	bucket := quantum + float64(cfg.MTU)
+	if d.tokenAt.IsZero() {
+		d.tokenAt = now
+		d.tokens = quantum
+	}
+	// Bounded because an idle path can leave an arbitrary gap since the last
+	// packet, and the bucket saturates after two refills anyway.
+	for steps := 0; !d.tokenAt.After(now) && steps < 64; steps++ {
+		if d.tokens += quantum; d.tokens > bucket {
+			d.tokens = bucket
+		}
+		d.tokenAt = d.tokenAt.Add(cfg.PolicerRefillPeriod)
+	}
+	if d.tokenAt.Before(now) {
+		d.tokenAt = now
+	}
+	if d.tokens < float64(size) {
+		return false
+	}
+	d.tokens -= float64(size)
+	return true
 }
 
 // dropLocked decides whether this packet is lost. With no burst length

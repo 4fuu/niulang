@@ -30,13 +30,16 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/icourses-dev/wanopt/internal/lossmodel"
 )
 
 const (
 	magic        = 0x574f5052 // "WOPR"
 	magicSummary = 0x574f5053 // the sender's own count, sent after the run
-	// requestSize is the fixed control packet: magic, rate, duration, payload.
-	requestSize = 4 + 8 + 8 + 4
+	// requestSize is the fixed control packet: magic, rate, duration, payload,
+	// burst.
+	requestSize = 4 + 8 + 8 + 4 + 4
 	// headerSize prefixes every data packet with magic, stream and sequence,
 	// so the receiver can attribute losses to a connection.
 	headerSize = 4 + 4 + 8
@@ -46,6 +49,13 @@ type request struct {
 	rateBytesPerSec uint64
 	duration        time.Duration
 	payload         int
+	// burst bounds how many packets the sender may release back to back. It is
+	// a property of the sender, not of the path, and it has to be controllable
+	// because it contaminates exactly the statistic the loss pattern is read
+	// for: a sender that releases 64 packets at once into a policer with a
+	// small bucket produces a loss run of nearly 64, and that run is the
+	// sender's rather than the path's.
+	burst int
 }
 
 func (r request) encode() []byte {
@@ -54,6 +64,7 @@ func (r request) encode() []byte {
 	binary.BigEndian.PutUint64(b[4:], r.rateBytesPerSec)
 	binary.BigEndian.PutUint64(b[12:], uint64(r.duration))
 	binary.BigEndian.PutUint32(b[20:], uint32(r.payload))
+	binary.BigEndian.PutUint32(b[24:], uint32(r.burst))
 	return b
 }
 
@@ -65,6 +76,10 @@ func decodeRequest(b []byte) (request, bool) {
 		rateBytesPerSec: binary.BigEndian.Uint64(b[4:]),
 		duration:        time.Duration(binary.BigEndian.Uint64(b[12:])),
 		payload:         int(binary.BigEndian.Uint32(b[20:])),
+		burst:           int(binary.BigEndian.Uint32(b[24:])),
+	}
+	if r.burst <= 0 || r.burst > 1024 {
+		r.burst = defaultBurst
 	}
 	if r.payload < headerSize || r.payload > 1500 || r.duration <= 0 || r.duration > time.Minute {
 		return request{}, false
@@ -92,6 +107,7 @@ func run(args []string) error {
 	seconds := fs.Float64("duration", 5, "client: seconds to send for")
 	payload := fs.Int("payload", 1200, "client: UDP payload size in bytes")
 	sweep := fs.String("sweep", "", "client: comma-separated per-connection rates in Mbit/s to try in turn")
+	burst := fs.Int("burst", defaultBurst, "client: bound the sender's back-to-back packet burst, which shapes the loss pattern independently of the path")
 	pattern := fs.Bool("pattern", false, "client: also report the loss pattern, not only its rate")
 	localAddr := fs.String("local-address", "", "client: bind the probe socket to this local IP, so a host TUN route does not carry the probe through a tunnel to the very server being measured")
 	if err := fs.Parse(args); err != nil {
@@ -116,7 +132,7 @@ func run(args []string) error {
 			}
 		}
 		analysePattern = *pattern
-		return probe(*remote, rates, *streams, time.Duration(*seconds*float64(time.Second)), *payload, *localAddr)
+		return probe(*remote, rates, *streams, time.Duration(*seconds*float64(time.Second)), *payload, *burst, *localAddr)
 	default:
 		return errors.New("--mode must be server or client")
 	}
@@ -124,6 +140,11 @@ func run(args []string) error {
 
 // analysePattern turns on loss-structure reporting.
 var analysePattern bool
+
+// defaultBurst is the sender's back-to-back packet limit. It is large enough
+// that the pacer is not the bottleneck at high rates, and small enough to stay
+// under any plausible policer bucket.
+const defaultBurst = 64
 
 func splitCommas(s string) []string {
 	var out []string
@@ -201,8 +222,8 @@ func blast(conn net.PacketConn, to net.Addr, req request) {
 		// Bound one burst so a long sleep does not release a huge train at
 		// once, which would measure the receiver's buffer rather than the path.
 		burst := earned - seq
-		if burst > 64 {
-			burst = 64
+		if limit := uint64(req.burst); burst > limit {
+			burst = limit
 		}
 		// A write that blocks makes this probe closed-loop: the socket's
 		// backpressure becomes the rate, and the result reads as the path's
@@ -258,62 +279,7 @@ type result struct {
 	seen map[uint64]bool
 }
 
-// lossPattern is the Gilbert-Elliott view of a run: the chance a packet is lost
-// given the previous one arrived, and the chance one arrives given the previous
-// was lost. Independent loss has p == overall loss and r == 1 - p; bursty loss
-// has r much smaller, and 1/r is the mean burst length.
-type lossPattern struct {
-	total, lost         uint64
-	lossAfterOK         uint64
-	okAfterLoss         uint64
-	transitionsFromOK   uint64
-	transitionsFromLoss uint64
-	longestBurst        uint64
-	bursts              map[uint64]uint64
-}
-
-func analyse(seen map[uint64]bool, sent uint64) lossPattern {
-	pattern := lossPattern{bursts: map[uint64]uint64{}}
-	var run uint64
-	prevLost := false
-	for i := uint64(0); i < sent; i++ {
-		lost := !seen[i]
-		pattern.total++
-		if lost {
-			pattern.lost++
-			run++
-		} else if run > 0 {
-			pattern.bursts[run]++
-			if run > pattern.longestBurst {
-				pattern.longestBurst = run
-			}
-			run = 0
-		}
-		if i > 0 {
-			if prevLost {
-				pattern.transitionsFromLoss++
-				if !lost {
-					pattern.okAfterLoss++
-				}
-			} else {
-				pattern.transitionsFromOK++
-				if lost {
-					pattern.lossAfterOK++
-				}
-			}
-		}
-		prevLost = lost
-	}
-	if run > 0 {
-		pattern.bursts[run]++
-		if run > pattern.longestBurst {
-			pattern.longestBurst = run
-		}
-	}
-	return pattern
-}
-
-func probe(remote string, rates []float64, streams int, duration time.Duration, payload int, localAddr string) error {
+func probe(remote string, rates []float64, streams int, duration time.Duration, payload, burst int, localAddr string) error {
 	fmt.Printf("# offered rate is per connection; %d connection(s), %v, %d-byte payloads\n",
 		streams, duration, payload)
 	fmt.Printf("offered_each\toffered_total\tsent_total\tdelivered_total\tdelivered_each\tloss_pct\tdeliv/sent\n")
@@ -325,7 +291,7 @@ func probe(remote string, rates []float64, streams int, duration time.Duration, 
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				r, err := probeOne(remote, request{rateBytesPerSec: perConn, duration: duration, payload: payload}, localAddr)
+				r, err := probeOne(remote, request{rateBytesPerSec: perConn, duration: duration, payload: payload, burst: burst}, localAddr)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "stream %d: %v\n", i, err)
 					return
@@ -373,25 +339,20 @@ func probe(remote string, rates []float64, streams int, duration time.Duration, 
 				if r.sent == 0 || r.seen == nil {
 					continue
 				}
-				p := analyse(r.seen, r.sent)
-				pLossAfterOK, pOKAfterLoss := 0.0, 0.0
-				if p.transitionsFromOK > 0 {
-					pLossAfterOK = float64(p.lossAfterOK) / float64(p.transitionsFromOK)
+				arrived := make([]bool, r.sent)
+				for seq := range r.seen {
+					if seq < r.sent {
+						arrived[seq] = true
+					}
 				}
-				if p.transitionsFromLoss > 0 {
-					pOKAfterLoss = float64(p.okAfterLoss) / float64(p.transitionsFromLoss)
-				}
-				meanBurst := 0.0
-				if pOKAfterLoss > 0 {
-					meanBurst = 1 / pOKAfterLoss
-				}
-				overall := float64(p.lost) / float64(p.total)
+				p := lossmodel.Analyze(arrived)
 				fmt.Printf("#   stream %d: loss=%.1f%% P(loss|prev ok)=%.3f P(ok|prev lost)=%.3f "+
-					"mean_burst=%.2f longest_burst=%d\n",
-					r.stream, 100*overall, pLossAfterOK, pOKAfterLoss, meanBurst, p.longestBurst)
+					"mean_burst=%.2f burst_factor=%.2f longest_burst=%d\n",
+					r.stream, 100*p.Loss, p.LossAfterArrival, p.ArrivalAfterLoss,
+					p.MeanBurst, p.BurstFactor, p.LongestBurst)
 				fmt.Printf("#   stream %d: burst length histogram", r.stream)
-				for _, l := range []uint64{1, 2, 3, 4, 5, 10, 20} {
-					fmt.Printf("  %d:%d", l, p.bursts[l])
+				for _, l := range []int{1, 2, 3, 4, 5, 10, 20, 50} {
+					fmt.Printf("  %d:%d", l, p.Bursts[l])
 				}
 				fmt.Println()
 			}
