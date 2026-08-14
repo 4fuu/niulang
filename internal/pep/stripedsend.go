@@ -6,7 +6,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/mpcc"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/stripe"
 )
@@ -215,10 +214,6 @@ func (s *flowSource) Read(p []byte) (int, error) {
 func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 	defer close(f.sendDone)
 
-	var cc *mpcc.Window
-	if coupledCongestion.Load() {
-		cc = mpcc.New(mpcc.Config{})
-	}
 	sched := stripe.New(&flowSource{flow: f}, stripe.Config{
 		ChunkSize:      f.chunkSize,
 		LaneWindow:     maxLaneChunkWindow,
@@ -231,10 +226,9 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 		MaxOutstandingBytes: maxFlowOutstandingBytes,
 		Retention:           f.retentionBytes,
 		RetransmitAfter:     chunkReissueDelay,
-		Windows:             &laneAdmission{flow: f, cc: cc},
+		Windows:             &laneAdmission{flow: f},
 	})
 	defer sched.Close()
-	f.cc = cc
 
 	sendCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -247,7 +241,7 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 	}
 	go f.superviseChunks(sendCtx, sched)
 	go f.watchChunkCompletion(sendCtx, sched)
-	go f.sampleLaneCongestion(sendCtx, cc)
+	go f.sampleLaneCongestion(sendCtx)
 
 	select {
 	case <-sched.Done():
@@ -397,11 +391,6 @@ func (f *multipathFlow) watchChunkCompletion(ctx context.Context, sched *stripe.
 				f.observeResidency(time.Since(done.issued))
 			}
 			sched.Complete(done.lane, done.chunk)
-			if f.cc != nil {
-				// Acknowledged bytes are what the coupled window grows on, so
-				// it advances at the rate the path actually delivers.
-				f.cc.Acked(done.lane, len(done.chunk.Data))
-			}
 		}
 
 		var err error

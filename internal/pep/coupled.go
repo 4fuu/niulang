@@ -2,31 +2,21 @@ package pep
 
 import (
 	"context"
-	"os"
-	"sync/atomic"
 	"time"
-
-	"github.com/icourses-dev/wanopt/internal/mpcc"
 )
 
-// coupledCongestion enables RFC 6356 coupling across a flow's lanes.
+// Lanes are deliberately not coupled.
 //
-// It is off by default, and the reason is measured rather than ideological.
-// Coupling makes a striped flow claim no more than one connection's share of a
-// shared bottleneck, which is the right thing to do to other people's traffic.
-// It buys that with a flow-wide increase of one segment per round trip, so a
-// flow needs thousands of round trips to grow into capacity that its lanes'
-// own controllers find in a few -- and on the policed path this exists for,
-// that is the difference between 37.5 Mbit/s and a single lane's 18.
+// RFC 6356's linked increase exists to enforce "do no harm": a multipath flow
+// must take no more of a shared bottleneck than a single-path flow would. That
+// is the right property for a general-purpose transport on the public internet
+// and it is the wrong one here. This transport exists because the paths it
+// runs over are policed per connection rather than per endpoint pair, so its
+// purpose is to claim more of the link than one connection is allowed, and a
+// mechanism whose job is to prevent exactly that has nothing to contribute.
 //
-// Both behaviours are therefore available and both are measured. What is not
-// available is a claim that one of them is free.
-var coupledCongestion atomic.Bool
-
-func init() { coupledCongestion.Store(os.Getenv("WANOPT_COUPLED_CC") == "1") }
-
-// SetCoupledCongestion selects coupled congestion control across lanes.
-func SetCoupledCongestion(on bool) { coupledCongestion.Store(on) }
+// The implementation that used to sit here is deleted rather than disabled, so
+// nothing reads as though the property were merely switched off.
 
 const (
 	// laneSampleInterval is how often lane congestion state is read. It is
@@ -43,7 +33,6 @@ const (
 // collectively claiming more than one connection's share.
 type laneAdmission struct {
 	flow *multipathFlow
-	cc   *mpcc.Window
 }
 
 func (w *laneAdmission) Lane(laneID uint64, _ uint64) int {
@@ -51,23 +40,13 @@ func (w *laneAdmission) Lane(laneID uint64, _ uint64) int {
 	if lane := w.flow.laneByID(laneID); lane != nil {
 		allowance = lane.windowBytes()
 	}
-	if w.cc != nil {
-		if coupled := w.cc.Lane(laneID); coupled > 0 && coupled < allowance {
-			allowance = coupled
-		}
-	}
 	return allowance
 }
 
-func (w *laneAdmission) Total() int {
-	if w.cc == nil {
-		// Zero means the flow window does not bind, leaving each lane governed
-		// by its own transport. This is the uncoupled arrangement: fast, and
-		// willing to take more than one share where lanes really do contend.
-		return 0
-	}
-	return w.cc.Total()
-}
+// Total is zero: no flow-level window binds the lanes together. Each lane is
+// governed by its own transport, which is the arrangement this transport wants
+// -- see the note above on why the lanes are not coupled.
+func (w *laneAdmission) Total() int { return 0 }
 
 // laneByID returns a lane by identifier, or nil.
 func (f *multipathFlow) laneByID(laneID uint64) *mpLane {
@@ -84,7 +63,7 @@ func (f *multipathFlow) laneByID(laneID uint64) *mpLane {
 // controller's own per-lane rate limit collapses a burst of losses into one
 // decrease. Reading it on a timer rather than hooking the transport keeps this
 // dependency-free enough that a TCP rescue lane needs no special case.
-func (f *multipathFlow) sampleLaneCongestion(ctx context.Context, cc *mpcc.Window) {
+func (f *multipathFlow) sampleLaneCongestion(ctx context.Context) {
 	ticker := time.NewTicker(laneSampleInterval)
 	defer ticker.Stop()
 	lost := make(map[uint64]uint64)
@@ -108,23 +87,12 @@ func (f *multipathFlow) sampleLaneCongestion(ctx context.Context, cc *mpcc.Windo
 			if rtt <= 0 {
 				rtt = stats.latestRTT
 			}
-			previous, known := lost[lane.id]
 			lost[lane.id] = stats.packetsLost
-			losing := known && stats.packetsLost > previous
 			traceLane(f, lane.id, stats)
-			if cc != nil {
-				cc.Observe(lane.id, rtt)
-				if losing {
-					cc.Congestion(lane.id)
-				}
-			}
 		}
 		for id := range lost {
 			if !seen[id] {
 				delete(lost, id)
-				if cc != nil {
-					cc.Forget(id)
-				}
 			}
 		}
 	}
