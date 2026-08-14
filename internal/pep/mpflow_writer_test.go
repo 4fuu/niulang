@@ -277,85 +277,33 @@ func TestLaneWriterPrioritizesInteractiveFrames(t *testing.T) {
 	}
 }
 
-func TestBulkSelectionReservesNegotiatedControlLane(t *testing.T) {
-	flow := &multipathFlow{
-		done: make(chan struct{}),
-		lanes: map[uint64]*mpLane{
-			0: {id: 0},
-			1: {id: 1},
-			2: {id: 2},
-		},
-		reserveControlLane: true,
-	}
-
-	control, err := flow.chooseLane(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if control.id != 0 {
-		t.Fatalf("control selection chose lane %d, want lane 0", control.id)
-	}
-	first, err := flow.chooseLane(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.id != 1 {
-		t.Fatalf("bulk selection chose lane %d, want the first non-control lane", first.id)
-	}
-	// Selection is by estimated delivery time, not rotation: the next frame
-	// moves to lane 2 only once lane 1 actually has a backlog. Rotating
-	// unconditionally is what causes in-order reassembly to stall behind the
-	// slower lane.
-	flow.lanes[1].nextFree = time.Now().Add(500 * time.Millisecond)
-	second, err := flow.chooseLane(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.id != 2 {
-		t.Fatalf("busy bulk selection chose lane %d, want the idle lane 2", second.id)
-	}
-	// The control lane stays excluded even when both bulk lanes are busy.
-	flow.lanes[2].nextFree = time.Now().Add(time.Second)
-	third, err := flow.chooseLane(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if third.id != 1 {
-		t.Fatalf("busy bulk selection chose lane %d, want the least backlogged bulk lane 1", third.id)
-	}
-}
-
+// Reserving the control lane is a preference, never a correctness dependency:
+// with no other lane healthy, bulk must still go somewhere.
 func TestBulkSelectionFallsBackToControlLane(t *testing.T) {
 	flow := &multipathFlow{
 		done: make(chan struct{}), lanes: map[uint64]*mpLane{0: {id: 0}}, reserveControlLane: true,
 	}
-	lane, err := flow.chooseLane(true)
+	candidates, err := flow.laneCandidates(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lane.id != 0 {
-		t.Fatalf("bulk fallback chose lane %d, want control lane 0", lane.id)
+	if len(candidates) != 1 || candidates[0].id != 0 {
+		t.Fatalf("bulk fallback produced %d lanes, want only the control lane", len(candidates))
 	}
 }
 
+// Without a negotiated control lane there is nothing to reserve, so every
+// healthy lane is eligible for bulk.
 func TestBulkSelectionKeepsAllLanesWithoutReservation(t *testing.T) {
 	flow := &multipathFlow{
 		done: make(chan struct{}), lanes: map[uint64]*mpLane{0: {id: 0}, 1: {id: 1}},
 	}
-	first, err := flow.chooseLane(true)
+	candidates, err := flow.laneCandidates(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.id != 0 {
-		t.Fatalf("unreserved bulk selection chose lane %d, want lane 0", first.id)
-	}
-	flow.lanes[0].nextFree = time.Now().Add(500 * time.Millisecond)
-	second, err := flow.chooseLane(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.id != 1 {
-		t.Fatalf("backlogged unreserved selection chose lane %d, want the idle lane 1", second.id)
+	if len(candidates) != 2 {
+		t.Fatalf("unreserved bulk selection produced %d lanes, want both", len(candidates))
 	}
 }
 

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"sync/atomic"
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/mpcc"
@@ -452,20 +450,4 @@ func (f *multipathFlow) sendFinal(ctx context.Context, sequence uint64) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-// selfPacedSend selects the self-pacing sender. It exists so the redesign can
-// be measured against the scheduler it replaces on the same path and the same
-// seed, rather than asserted; the pushing sender goes once the comparison is
-// recorded.
-var selfPacedSend atomic.Bool
-
-// SetSelfPacedSend chooses the sender. It is process-wide and intended for
-// benchmarks.
-func SetSelfPacedSend(on bool) { selfPacedSend.Store(on) }
-
-func init() {
-	// The environment override exists so the two senders can be compared on
-	// one binary, one path, and one seed. Anything else compares two builds.
-	selfPacedSend.Store(os.Getenv("WANOPT_SELF_PACED") != "0")
 }
