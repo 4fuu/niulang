@@ -406,7 +406,76 @@ trace shows a 17 MB congestion window with 6.5 MB in flight and no queueing at
 all. It does not arise on the live path, which runs at about 10 Mbit/s, so it is
 latent rather than pressing.
 
-### 7.6 What is now the limit
+### 7.6 Congestion-control evaluation
+
+Throughput against a reference answers "which is faster". It does not answer
+whether the congestion control is sound, and three standard questions were
+never asked here. They are asked now, and two of them changed what this design
+should do.
+
+**The instrument, first.** The emulator forwards 1722 Mbit/s at 200 ms and
+1784 at 20 ms (`TestForwardingCapacity`). Every figure below has at least
+threefold headroom, so none of them is the instrument. This should have been
+established before any of the earlier numbers were quoted.
+
+**Link utilisation is a function of the bandwidth-delay product, and it
+collapses.** One flow, one lane, 50 MiB, against a known bottleneck:
+
+| BDP | utilisation, wanopt | utilisation, reference |
+| ---: | ---: | ---: |
+| 0.31 MB | 0.95 | 0.96 |
+| 0.62 MB | 0.93 | 0.92 |
+| 1.25 MB | 0.82 | 0.84 |
+| 2.50 MB | 0.65 | 0.67 |
+| 5.00 MB | 0.44 | 0.45 |
+| 10.0 MB | 0.28 | 0.27 |
+| 20.0 MB | 0.15 | 0.15 |
+
+Sixteen cells across 50-400 ms and 50-400 Mbit/s collapse onto one curve in the
+product, and the two stacks are within noise of each other everywhere. So this
+is not the multipath scheduler: it is the QUIC stack and the controller
+underneath both.
+
+Part of it is startup, and that part is expected. BBR's startup needs
+log2(BDP/IW) round trips to fill, so at 400 ms and 400 Mbit/s a 50 MiB transfer
+finishes before the ramp does. Repeating the two worst cells with 400 MiB:
+utilisation at BDP 5 MB rises from 0.45 to 0.71, and at BDP 20 MB from 0.15 to
+0.40. So roughly half the deficit at ordinary transfer sizes is ramp, and a real
+steady-state deficit remains that still grows with the product. It is
+unexplained: it is not the emulator, not stream flow control (64 MiB in place of
+8 changes nothing), not the flow's retention bound, and not the per-lane
+write-ahead queue -- each was tested by changing it alone.
+
+**Striping loses share on a contended bottleneck.** This is the measurement that
+sequential benchmarking cannot make, and it required the emulator to grow a
+shared `Bottleneck` that two stacks contend for. wanopt and the reference, both
+fetching at once through one 100 Mbit/s link at 200 ms, six trials:
+
+| wanopt lanes | wanopt share | ratio to the reference |
+| ---: | ---: | ---: |
+| 1 | **0.514** | 1.06 |
+| 4 | **0.403** | 0.65 |
+
+One lane splits the link evenly and slightly better. Four lanes take a *third*
+less than one lane does, and the single-path reference ends up with about one
+and a half times wanopt's goodput. Four congestion windows on one bottleneck do
+not buy four shares; they buy less than one, because the flow is still a single
+ordered byte stream and the reordering and head-of-line cost of striping across
+a contended link exceeds what the extra windows win.
+
+The sequential benchmark had shown four lanes at 60 Mbit/s against one lane's 58
+on the same shared path and read it as harmless. Under contention it is not
+harmless, and no amount of running the stacks one after another would have said
+so.
+
+**What follows for the design.** Striping is worth having only where the path
+polices per source address, which is the claim section 1 already makes and which
+this now supports from the other direction: on a shared bottleneck extra lanes
+are not neutral, they are a loss. The lane search measures its own goodput and
+cannot see share, so on a contended shared link it is measuring the wrong
+quantity; that it settles on one lane there is luck rather than judgement.
+
+### 7.7 What is now the limit
 
 On the policed path each lane still holds two bandwidth-delay products in flight
 once it reaches ProbeBW, which is BBRv1's congestion-window gain and not
@@ -424,7 +493,7 @@ drained state. This is BBRv1 behaviour, shared with the reference and with
 native TUIC, not something this design introduced. Reducing it means a
 different startup, not a different scheduler.
 
-### 7.7 The live link, and what the emulator got wrong
+### 7.8 The live link, and what the emulator got wrong
 
 Every figure above is emulated. Run against the real China-US path -- 263 ms
 average round trip, 226 to 440 ms range, 5% loss, 48 ms of jitter -- the first
@@ -487,7 +556,7 @@ validation: what remains unmodelled is at least the separate-process, separate-
 machine timing of a real deployment, and whatever else the live path does that
 this has not yet identified.
 
-### 7.8 Scenarios outside the standard matrix
+### 7.9 Scenarios outside the standard matrix
 
 The matrix covers one shape of path. These are the others, four to six trials
 each, medians in Mbit/s, reference then wanopt:
@@ -545,7 +614,7 @@ sender is clocked by those acknowledgements. The loop now waits for a
 replacement lane and re-acknowledges from where the peer was last told; the test
 passes twenty times consecutively and under `-race`, which it never had.
 
-### 7.9 Corrections to the earlier record
+### 7.10 Corrections to the earlier record
 
 - The "5.37 s lane authentication exchange" is not reproducible. Measured now:
   the secondary QUIC pool authenticates in 404 ms and the lane join completes in

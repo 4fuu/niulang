@@ -146,6 +146,33 @@ go run ./cmd/wanoptbench --rtt 200 --loss 0.5 --loss-up 25 --rate 100 \
     --bytes $((32*1024*1024)) --trials 4
 ```
 
+## Measuring contention
+
+Running one stack and then the other answers which is faster alone. It cannot
+answer which takes more of a link when both want it, and for a transport whose
+purpose is to win a contended bottleneck that is the question that matters.
+
+`--contend` attaches two stacks to one shared `pathsim.Bottleneck` -- one
+serialization clock, one queue, one loss process -- starts both transfers
+together, and reports each one's share:
+
+```sh
+go run ./cmd/wanoptbench --contend wanopt,baseline --rtt 200 --rate 100 \
+    --bytes $((20*1024*1024)) --lanes 4 --initial-lanes 4 --trials 6
+```
+
+A share of 0.5 is an even split. The measurement is worth making before
+trusting any conclusion about lane count: four lanes measure 60 Mbit/s against
+one lane's 58 on a shared path run sequentially, which reads as harmless, and
+take 0.40 of the link against one lane's 0.51 when actually contended.
+
+## Calibrating the instrument
+
+`TestForwardingCapacity` measures what the emulator itself can forward, which
+bounds every transport number taken through it: 1722 Mbit/s at 200 ms, 1784 at
+20 ms. Quote no result that is within a small factor of these without checking
+it first.
+
 ## Live campaigns
 
 The emulator is the inner loop, not a replacement for the real link.

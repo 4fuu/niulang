@@ -70,6 +70,7 @@ type options struct {
 	singBox      string
 	jsonOut      string
 	gate         bool
+	contend      string
 	tolerance    float64
 }
 
@@ -110,6 +111,7 @@ func run(args []string) error {
 	fs.BoolVar(&opts.interactive, "interactive", false, "issue small requests during the bulk transfer and report their latency")
 	fs.StringVar(&opts.singBox, "sing-box", "", "path to a sing-box binary, enabling the tuic and hysteria2 stacks")
 	fs.StringVar(&opts.jsonOut, "json", "", "also write the full result set to this path as JSON")
+	fs.StringVar(&opts.contend, "contend", "", "two stacks to run concurrently on one shared bottleneck, e.g. wanopt,baseline; reports each one's share of the link")
 	fs.BoolVar(&opts.gate, "gate", false, "exit non-zero when wanopt is worse than the reference beyond --tolerance")
 	fs.Float64Var(&opts.tolerance, "tolerance", 0.10, "fractional goodput shortfall allowed by --gate")
 	if err := fs.Parse(args); err != nil {
@@ -158,6 +160,10 @@ func run(args []string) error {
 		opts.rttMillis, opts.lossPercent, opts.lossBurst, opts.rateMbits, opts.perFlowMbits, humanQueue(pathCfg), opts.seed,
 		humanBytes(opts.bytes), opts.congestion, opts.lanes)
 	fmt.Printf("stack\tflows\ttrial\tseconds\tmbits_per_sec\tcomplete\tnote\n")
+
+	if opts.contend != "" {
+		return measureContention(opts, pathCfg, origin)
+	}
 
 	report := Report{Path: describePath(opts, pathCfg)}
 	for _, stack := range strings.Split(opts.stacks, ",") {
@@ -429,6 +435,13 @@ func (h *harness) Close() {
 }
 
 func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim.Config) (*harness, error) {
+	return startStackOn(ctx, stack, opts, pathCfg, nil)
+}
+
+// startStackOn attaches the stack to a shared bottleneck when one is supplied,
+// so two transports can be measured while contending for one link rather than
+// one after the other on private ones.
+func startStackOn(ctx context.Context, stack string, opts options, pathCfg pathsim.Config, shared *pathsim.Bottleneck) (*harness, error) {
 	certificate, roots, err := selfSignedCertificate()
 	if err != nil {
 		return nil, err
@@ -447,7 +460,12 @@ func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim
 	if err != nil {
 		return nil, err
 	}
-	relay, err := pathsim.New("127.0.0.1:0", serverPacket.LocalAddr().String(), pathCfg)
+	var relay *pathsim.Relay
+	if shared != nil {
+		relay, err = shared.Attach("127.0.0.1:0", serverPacket.LocalAddr().String(), pathCfg)
+	} else {
+		relay, err = pathsim.New("127.0.0.1:0", serverPacket.LocalAddr().String(), pathCfg)
+	}
 	if err != nil {
 		_ = serverPacket.Close()
 		return nil, err
@@ -956,4 +974,87 @@ func startTCPStack(ctx context.Context, kind extproxy.Kind, opts options, pathCf
 	}
 	h.closes = append(h.closes, pair.Close, func() { _ = os.RemoveAll(workDir) })
 	return h, nil
+}
+
+// measureContention runs two stacks at the same time through one shared
+// bottleneck and reports what fraction of the link each took.
+//
+// This is the measurement a transport meant to win a contended link needs, and
+// no sequential benchmark can supply it: running one stack and then the other
+// answers which is faster alone. Both flows start together and are given the
+// same object, so the share is read directly off the goodput and the slower one
+// is still carrying traffic while the faster one finishes.
+func measureContention(opts options, pathCfg pathsim.Config, origin *origin) error {
+	stacks := strings.Split(opts.contend, ",")
+	if len(stacks) != 2 {
+		return errors.New("--contend needs exactly two stacks")
+	}
+	for i := range stacks {
+		stacks[i] = strings.TrimSpace(stacks[i])
+	}
+	fmt.Printf("# contention on one shared bottleneck: %s vs %s\n", stacks[0], stacks[1])
+	fmt.Printf("trial\t%s\t%s\tshare_%s\tratio\n", stacks[0], stacks[1], stacks[0])
+	var shares []float64
+	for trial := 1; trial <= opts.trials; trial++ {
+		cfg := pathCfg
+		cfg.Seed = pathCfg.Seed + int64(trial)*1000
+		shared := pathsim.NewBottleneck(cfg)
+
+		ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+		harnesses := make([]*harness, len(stacks))
+		failed := false
+		for i, stack := range stacks {
+			h, err := startStackOn(ctx, stack, opts, cfg, shared)
+			if err != nil {
+				fmt.Printf("%d\tsetup %s: %v\n", trial, stack, err)
+				failed = true
+				break
+			}
+			harnesses[i] = h
+			if err := warmUp(ctx, h.socks, origin); err != nil {
+				fmt.Printf("%d\twarmup %s: %v\n", trial, stack, err)
+				failed = true
+				break
+			}
+		}
+		if !failed {
+			rates := make([]float64, len(stacks))
+			var wg sync.WaitGroup
+			for i := range stacks {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					started := time.Now()
+					n, err := fetch(ctx, harnesses[i].socks, origin.addr, opts.bytes)
+					elapsed := time.Since(started)
+					if err == nil && n == opts.bytes && elapsed > 0 {
+						rates[i] = float64(n) * 8 / elapsed.Seconds() / 1e6
+					}
+				}(i)
+			}
+			wg.Wait()
+			total := rates[0] + rates[1]
+			share, ratio := 0.0, 0.0
+			if total > 0 {
+				share = rates[0] / total
+			}
+			if rates[1] > 0 {
+				ratio = rates[0] / rates[1]
+			}
+			shares = append(shares, share)
+			fmt.Printf("%d\t%.2f\t%.2f\t%.3f\t%.2f\n", trial, rates[0], rates[1], share, ratio)
+		}
+		for _, h := range harnesses {
+			if h != nil {
+				h.Close()
+			}
+		}
+		cancel()
+	}
+	if len(shares) > 0 {
+		sort.Float64s(shares)
+		fmt.Printf("\nmedian share of the bottleneck taken by %s: %.3f (0.5 is an even split)\n",
+			stacks[0], shares[len(shares)/2])
+	}
+	return nil
 }

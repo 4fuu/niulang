@@ -299,8 +299,11 @@ type Relay struct {
 	target *net.UDPAddr
 	local  *net.UDPConn
 
-	upstream   direction // client -> server
-	downstream direction // server -> client
+	// upstream and downstream may be this relay's own, or shared with other
+	// relays through a Bottleneck.
+	upstream   *direction // client -> server
+	downstream *direction // server -> client
+	owned      [2]direction
 
 	mu     sync.Mutex
 	peers  map[string]*peer
@@ -315,9 +318,50 @@ type Relay struct {
 	done chan struct{}
 }
 
+// Bottleneck is one shared link: a serialization clock, a queue and a loss
+// process that several relays contend for.
+//
+// Without it every endpoint gets its own private path, and two transports can
+// only ever be measured one after the other. That answers "which is faster
+// alone" and cannot answer "which takes more of the link when both want it",
+// which is a different question and, for a transport whose goal is to win a
+// contended bottleneck, the only one that matters.
+type Bottleneck struct {
+	up   direction
+	down direction
+}
+
+// NewBottleneck returns a link that relays can be attached to with Attach.
+func NewBottleneck(cfg Config) *Bottleneck {
+	cfg = cfg.withDefaults()
+	b := &Bottleneck{}
+	b.up.rng = rand.New(rand.NewSource(cfg.Seed))
+	b.down.rng = rand.New(rand.NewSource(cfg.Seed + 1))
+	b.up.lossRate = cfg.LossRate
+	if cfg.UpstreamLossRate > 0 {
+		b.up.lossRate = cfg.UpstreamLossRate
+	}
+	b.down.lossRate = cfg.LossRate
+	return b
+}
+
+// Stats returns the shared link's counters, which aggregate every attached
+// relay.
+func (b *Bottleneck) Stats() (up, down Stats) { return b.up.stats(), b.down.stats() }
+
+// Attach starts a relay that contends for this bottleneck instead of having a
+// path of its own.
+func (b *Bottleneck) Attach(listen, target string, cfg Config) (*Relay, error) {
+	return newRelay(listen, target, cfg, b)
+}
+
 // New starts a relay on listen (use "127.0.0.1:0" for an ephemeral port) that
 // forwards to target.
 func New(listen, target string, cfg Config) (*Relay, error) {
+	return newRelay(listen, target, cfg, nil)
+}
+
+func newRelay(listen, target string, cfg Config, shared *Bottleneck) (*Relay, error) {
 	if cfg.LossRate < 0 || cfg.LossRate >= 1 {
 		return nil, fmt.Errorf("loss rate %v must be in [0,1)", cfg.LossRate)
 	}
@@ -341,16 +385,21 @@ func New(listen, target string, cfg Config) (*Relay, error) {
 		cfg: cfg, target: targetAddr, local: local,
 		peers: make(map[string]*peer), done: make(chan struct{}),
 	}
-	// Separate generators keep each direction's loss pattern independent of
-	// the other direction's packet count, which would otherwise make a result
-	// depend on unrelated timing.
-	r.upstream.rng = rand.New(rand.NewSource(cfg.Seed))
-	r.downstream.rng = rand.New(rand.NewSource(cfg.Seed + 1))
-	r.upstream.lossRate = cfg.LossRate
-	if cfg.UpstreamLossRate > 0 {
-		r.upstream.lossRate = cfg.UpstreamLossRate
+	if shared != nil {
+		r.upstream, r.downstream = &shared.up, &shared.down
+	} else {
+		r.upstream, r.downstream = &r.owned[0], &r.owned[1]
+		// Separate generators keep each direction's loss pattern independent of
+		// the other direction's packet count, which would otherwise make a result
+		// depend on unrelated timing.
+		r.upstream.rng = rand.New(rand.NewSource(cfg.Seed))
+		r.downstream.rng = rand.New(rand.NewSource(cfg.Seed + 1))
+		r.upstream.lossRate = cfg.LossRate
+		if cfg.UpstreamLossRate > 0 {
+			r.upstream.lossRate = cfg.UpstreamLossRate
+		}
+		r.downstream.lossRate = cfg.LossRate
 	}
-	r.downstream.lossRate = cfg.LossRate
 	r.wg.Add(1)
 	go r.readClient()
 	return r, nil
@@ -408,7 +457,7 @@ func (r *Relay) readClient() {
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
-		r.forward(&r.upstream, &p.up, payload, func(b []byte) {
+		r.forward(r.upstream, &p.up, payload, func(b []byte) {
 			_, _ = p.conn.Write(b)
 		})
 	}
@@ -450,7 +499,7 @@ func (r *Relay) readServer(p *peer) {
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
 		client := p.client
-		r.forward(&r.downstream, &p.down, payload, func(b []byte) {
+		r.forward(r.downstream, &p.down, payload, func(b []byte) {
 			_, _ = r.local.WriteTo(b, client)
 		})
 	}
