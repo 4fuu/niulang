@@ -369,14 +369,29 @@ is amortised rather than dominating:
 | | Mbit/s |
 | --- | ---: |
 | Reference, one connection | 209.90 |
-| wanopt, one lane | 288.62 |
-| wanopt, four lanes | **413.26** |
+| wanopt, one lane | 292.44 |
+| wanopt, four lanes, 16 MiB retention | 413.26 |
+| wanopt, four lanes, retention from the lanes | **536.18** |
 
-So parallelism does raise the ceiling for a single application flow -- 43% from
-one lane to four -- but nothing like the fourfold a purely per-connection limit
-would give. A striped flow is still one ordered byte stream: the lanes are
-independent on the wire and share a reassembly point and an acknowledgement
-loop, and that is what four lanes cannot divide.
+That first reading was wrong, and the correction is worth keeping because the
+error is a common one: a limit was attributed to something structural when it
+was a constant. The flow's retention bound -- what it may hold read but not yet
+acknowledged -- was fixed at 16 MiB. Divided across four lanes that is 4 MB
+each, and the trace showed exactly that: each lane's congestion window reached
+10.5 MB while it held 4.5 MB in flight, its write-ahead queue empty and the
+producer stopped with nothing ready. The lanes were idle, not saturated.
+
+Retention now follows the lanes instead: twice their combined congestion
+windows, which is what "in flight, plus waiting to be acknowledged" means, with
+64 MiB as the memory ceiling behind it. Four lanes then reach 536 Mbit/s, and on
+the policed path 63.1 against the reference's 22.2. The per-lane write-ahead
+ceiling was tested the same way and is genuinely not binding: raising it from
+512 KiB to 4 MiB moved nothing, so it stays where head-of-line exposure wants
+it.
+
+Lanes therefore do multiply the ceiling substantially, though still not
+linearly, and what remains between four lanes and four times one lane has not
+been isolated -- it may be the emulator itself at 45,000 packets a second.
 
 The independent-flow case separates more cleanly. Four concurrent flows at
 200 ms measure 196 Mbit/s through the reference, which multiplexes them onto one

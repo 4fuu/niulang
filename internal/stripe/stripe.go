@@ -75,8 +75,14 @@ type Config struct {
 	LaneWindow int
 	// MaxOutstanding bounds chunks held across all lanes.
 	MaxOutstanding int
-	// MaxOutstandingBytes bounds the same set by size, and is the bound that
-	// matters. Counting chunks cannot bound memory when a chunk is whatever one
+	// Retention, when set, reports the current bound instead. It is consulted
+	// rather than fixed because what a flow must retain is a property of the
+	// path: the lanes' combined congestion windows, plus what the peer has not
+	// yet acknowledged. A constant either starves a fast path or lets a slow
+	// one hold memory it will never use.
+	Retention func() int
+	// MaxOutstandingBytes bounds the same set by size, and is the ceiling on
+	// Retention. Counting chunks cannot bound memory when a chunk is whatever one
 	// read returned: 2048 chunks is 64 MiB if they are full and a fraction of
 	// that if they are not, so a count generous enough to keep a fast path busy
 	// is also generous enough to let a flow retain tens of megabytes. Measured
@@ -277,7 +283,16 @@ func (s *Scheduler) produce() {
 // acknowledged, because a lane that dies may not have delivered what its
 // transport accepted. It is a memory bound and nothing else -- what a lane may
 // commit is bounded separately, by Windows.
-func (s *Scheduler) readAheadLimit() int { return s.cfg.MaxOutstandingBytes }
+func (s *Scheduler) readAheadLimit() int {
+	if s.cfg.Retention == nil {
+		return s.cfg.MaxOutstandingBytes
+	}
+	want := s.cfg.Retention()
+	if want <= 0 || want > s.cfg.MaxOutstandingBytes {
+		return s.cfg.MaxOutstandingBytes
+	}
+	return want
+}
 
 // retainedBytes is what the flow is holding: chunks read but not yet
 // acknowledged. Must be called with the lock held.

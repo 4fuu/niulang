@@ -29,7 +29,7 @@ const (
 	// a bound on how many *separate* pieces of the receiver's contiguous point
 	// one lane can be holding, and that is what a striped flow pays for when a
 	// lane slows.
-	maxLaneChunkWindow = 2048
+	maxLaneChunkWindow = 16384
 	// maxFlowOutstandingChunks bounds chunks retained across every lane, which
 	// bounds a flow's memory: a chunk is held until acknowledged because it may
 	// have to be re-issued elsewhere.
@@ -41,11 +41,21 @@ const (
 	// purely because the producer stopped reading. The real limit on commitment
 	// is the per-lane window, which shrinks with the lane; this is the memory
 	// ceiling behind it.
-	maxFlowOutstandingChunks = 2048
-	// maxFlowOutstandingBytes is the real read-ahead bound. It has to clear the
-	// lanes' combined windows so it does not become the limit, and stay well
-	// under what a count-based bound would allow a flow to retain.
-	maxFlowOutstandingBytes = 16 * 1024 * 1024
+	maxFlowOutstandingChunks = 16384
+	// maxFlowOutstandingBytes is the ceiling on what one flow may retain. The
+	// working value is measured from the lanes (see retentionBytes); this is
+	// the memory bound behind it.
+	//
+	// It was 16 MiB and fixed, and that was the limit on a high bandwidth-delay
+	// path rather than anything structural. Measured at 200 ms with four lanes:
+	// each lane's congestion window reached 10.5 MB and each held only 4.5 MB
+	// in flight, its write-ahead queue empty and the producer stopped, because
+	// 16 MiB divided across four lanes is 4 MB each. The lanes were idle, not
+	// saturated.
+	maxFlowOutstandingBytes = 64 * 1024 * 1024
+	// minFlowRetentionBytes is what a flow may retain before it has measured
+	// anything.
+	minFlowRetentionBytes = 16 * 1024 * 1024
 	// chunkReissueDelay is how long a chunk may sit on one lane before it is
 	// also offered to another.
 	chunkReissueDelay = 1500 * time.Millisecond
@@ -94,6 +104,30 @@ func (l *mpLane) windowBytes() int {
 		}
 	}
 	return laneQueueBytes(cwnd)
+}
+
+// retentionBytes is how much this flow may hold unacknowledged: the lanes'
+// combined congestion windows, doubled to cover the acknowledgement coming back
+// while the next window's worth is already in flight.
+//
+// This has to follow the path rather than be chosen. A chunk is retained from
+// the moment it is read until the peer acknowledges it, so the quantity is
+// whatever the lanes can have outstanding at once -- which is what a congestion
+// window means. Fixed at 16 MiB it was the binding limit on a fast path and
+// four times more than a slow one will ever use.
+func (f *multipathFlow) retentionBytes() int {
+	total := 0
+	for _, lane := range f.healthyLanes() {
+		cwnd, _ := lane.congestionState()
+		total += cwnd
+	}
+	if total <= 0 {
+		return minFlowRetentionBytes
+	}
+	if want := 2 * total; want > minFlowRetentionBytes {
+		return want
+	}
+	return minFlowRetentionBytes
 }
 
 // laneQueueBytes is how far ahead of its transport a lane may be committed.
@@ -195,6 +229,7 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 		// accepted. Nothing narrower is needed now that a lane's admission is
 		// bounded by what its transport has not yet taken.
 		MaxOutstandingBytes: maxFlowOutstandingBytes,
+		Retention:           f.retentionBytes,
 		RetransmitAfter:     chunkReissueDelay,
 		Windows:             &laneAdmission{flow: f, cc: cc},
 	})
