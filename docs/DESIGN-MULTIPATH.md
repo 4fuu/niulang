@@ -359,7 +359,39 @@ reference's 20.6, policed four lanes 18.0 to 30.0 across runs, 20% loss 13.1
 against 14.8, four concurrent flows 59.2 against 62.1, and no reproducible
 interactive advantage.
 
-### 7.5 What is now the limit
+### 7.5 Lanes and the per-connection ceiling at high bandwidth-delay
+
+At 200 ms with no rate limit, one QUIC connection plateaus well below the path.
+Both stacks do it, and the reference's is a plain copy into a stream, so it is
+not this project's scheduler. Four hundred MiB, so the congestion window's ramp
+is amortised rather than dominating:
+
+| | Mbit/s |
+| --- | ---: |
+| Reference, one connection | 209.90 |
+| wanopt, one lane | 288.62 |
+| wanopt, four lanes | **413.26** |
+
+So parallelism does raise the ceiling for a single application flow -- 43% from
+one lane to four -- but nothing like the fourfold a purely per-connection limit
+would give. A striped flow is still one ordered byte stream: the lanes are
+independent on the wire and share a reassembly point and an acknowledgement
+loop, and that is what four lanes cannot divide.
+
+The independent-flow case separates more cleanly. Four concurrent flows at
+200 ms measure 196 Mbit/s through the reference, which multiplexes them onto one
+connection, against 343 for wanopt, which moves classified bulk flows onto their
+own. There the ceiling really is per connection and having more of them is worth
+proportionally more.
+
+What sets the single-connection ceiling is not established. It is not flow
+control -- raising the stream receive window from 8 to 64 MiB changes nothing --
+nor the emulator's rate limiter, nor its delivery queue, and the sender's own
+trace shows a 17 MB congestion window with 6.5 MB in flight and no queueing at
+all. It does not arise on the live path, which runs at about 10 Mbit/s, so it is
+latent rather than pressing.
+
+### 7.6 What is now the limit
 
 On the policed path each lane still holds two bandwidth-delay products in flight
 once it reaches ProbeBW, which is BBRv1's congestion-window gain and not
@@ -377,7 +409,7 @@ drained state. This is BBRv1 behaviour, shared with the reference and with
 native TUIC, not something this design introduced. Reducing it means a
 different startup, not a different scheduler.
 
-### 7.6 The live link, and what the emulator got wrong
+### 7.7 The live link, and what the emulator got wrong
 
 Every figure above is emulated. Run against the real China-US path -- 263 ms
 average round trip, 226 to 440 ms range, 5% loss, 48 ms of jitter -- the first
@@ -440,7 +472,7 @@ validation: what remains unmodelled is at least the separate-process, separate-
 machine timing of a real deployment, and whatever else the live path does that
 this has not yet identified.
 
-### 7.7 Scenarios outside the standard matrix
+### 7.8 Scenarios outside the standard matrix
 
 The matrix covers one shape of path. These are the others, four to six trials
 each, medians in Mbit/s, reference then wanopt:
@@ -498,7 +530,7 @@ sender is clocked by those acknowledgements. The loop now waits for a
 replacement lane and re-acknowledges from where the peer was last told; the test
 passes twenty times consecutively and under `-race`, which it never had.
 
-### 7.8 Corrections to the earlier record
+### 7.9 Corrections to the earlier record
 
 - The "5.37 s lane authentication exchange" is not reproducible. Measured now:
   the secondary QUIC pool authenticates in 404 ms and the lane join completes in
