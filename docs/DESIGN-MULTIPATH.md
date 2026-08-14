@@ -377,7 +377,53 @@ drained state. This is BBRv1 behaviour, shared with the reference and with
 native TUIC, not something this design introduced. Reducing it means a
 different startup, not a different scheduler.
 
-### 7.6 Scenarios outside the standard matrix
+### 7.6 The live link, and what the emulator got wrong
+
+Every figure above is emulated. Run against the real China-US path -- 263 ms
+average round trip, 226 to 440 ms range, 5% loss, 48 ms of jitter -- the first
+campaign said something the emulator never had: **wanopt lost 17 of 18
+alternating rounds**, 5.42 Mbit/s against the reference's 8.85.
+
+Disabling striping did not close it (4.34 against 8.84), so it was not the lane
+machinery. Raising the per-lane write-ahead bound did not close it either (4.51
+against 9.01). What closed it was reverting one change made in this work: the
+application-limited test in `bbr-tuic`.
+
+The sender's own trace showed why. Its bandwidth estimate crept from 80 KB/s to
+288 KB/s over ten seconds and never left startup, and the sample counters
+explain it: `nonapp` froze at 94 while `appsamp` climbed past 1600. Almost every
+delivery-rate sample was being taken as valid, and on a path whose round trip
+varies by a factor of two most of those samples are spuriously low. BBR's
+application-limited marking is what keeps them out of the bandwidth filter.
+Tightening that marking -- which on the emulator looked correct, and let the
+controller leave startup instead of holding 2.9 congestion windows in flight --
+removed the protection. With it restored, the same configuration measures 9.67
+against 9.92.
+
+The full campaign on the shipped configuration, fourteen alternating rounds:
+
+| | Reference | wanopt |
+| --- | ---: | ---: |
+| mean | 10.59 Mbit/s | 10.24 Mbit/s |
+| rounds ahead | 8 of 14 | 6 of 14 |
+
+**Parity, not an advantage.** That is the honest live result, and it is the
+number that should be believed over any emulated one in this document.
+
+Two things follow. The first is that reverting cost nothing on the emulator --
+23.32 policed against 20.70, 58.85 on four lanes, 44.46 shared, 206 ms
+interactive median -- so the change never had emulated evidence for its
+throughput either; it had a mechanism, and the mechanism was reasoned about on a
+path with constant delay and independent loss. The second is that the emulator's
+gap is now a known quantity rather than an assumption: it models neither RTT
+variance nor burst loss, and both are what this transport meets in practice.
+
+The emulator finding it was meant to fix is still real. On a constant path the
+controller does stay in startup too long and holds a bandwidth-delay product of
+standing queue. Fixing that needs something that does not also discard the live
+path's noise, and that is not attempted here.
+
+### 7.7 Scenarios outside the standard matrix
 
 The matrix covers one shape of path. These are the others, four to six trials
 each, medians in Mbit/s, reference then wanopt:
@@ -435,7 +481,7 @@ sender is clocked by those acknowledgements. The loop now waits for a
 replacement lane and re-acknowledges from where the peer was last told; the test
 passes twenty times consecutively and under `-race`, which it never had.
 
-### 7.7 Corrections to the earlier record
+### 7.8 Corrections to the earlier record
 
 - The "5.37 s lane authentication exchange" is not reproducible. Measured now:
   the secondary QUIC pool authenticates in 404 ms and the lane join completes in

@@ -424,27 +424,34 @@ func saturatingByteAdd(a quiccongestion.ByteCount, b uint64) quiccongestion.Byte
 // appLimited reports whether the sender had window it did not use, which marks
 // the packets sent after this event as application-limited.
 //
-// The threshold is what makes this usable rather than a formality. Any unused
-// window at all is the wrong test: a paced sender is below its congestion
-// window at almost every acknowledgement, because the pacer is deliberately
-// spacing packets out, so "in flight is below the window" marks nearly every
-// packet application-limited. Application-limited samples are the ones the
-// full-bandwidth test skips, so with that test the controller never counts a
-// round without gain and never leaves startup at all -- measured on a path
-// policing each source at 25 Mbit/s, it stayed in startup for an entire 20 MiB
-// transfer, held 2.9 congestion windows in flight, and doubled the round trip
-// with standing queue.
+// Any unused window at all counts, outside DRAIN. That is deliberately liberal,
+// and an attempt to tighten it -- requiring a full burst of unused window, on
+// the reasoning that a paced sender is below its window at almost every
+// acknowledgement -- was measured and reverted. On the emulator it looked
+// right: the controller left startup promptly instead of holding 2.9 congestion
+// windows in flight for a whole transfer.
 //
-// Requiring a full burst of unused window separates the two: a sender that ran
-// out of data leaves the whole window unused, while a paced one is short by at
-// most the packets the pacer has not yet released. This is the rule the drain
-// case already applied; it belongs in every mode.
+// On the real China-US path it cost more than half the throughput: 4.3 Mbit/s
+// against the reference's 8.8, restored to 9.7 against 9.9 by putting this rule
+// back, measured in alternating paired rounds so the comparison sits inside one
+// path window. The emulator has constant delay and independent loss; the live
+// path varies between 226 and 440 ms and loses in bursts, which produces a
+// stream of spuriously low delivery-rate samples. Marking them
+// application-limited is what keeps them out of the bandwidth filter, and
+// treating them as valid drags the estimate -- and with it the congestion
+// window -- to half of what the path offers.
+//
+// The emulator finding was real and is not addressed by this: on a constant
+// path the controller does stay in startup too long. Fixing that needs a
+// mechanism that does not also discard the live path's noise.
 func (b *TUICBBRSender) appLimited(priorInFlight quiccongestion.ByteCount) bool {
 	window := b.GetCongestionWindow()
 	if priorInFlight >= window {
 		return false
 	}
-	return window-priorInFlight > tuicMaxBurstPackets*b.maxDatagramSize
+	available := window - priorInFlight
+	drainLimited := b.mode == tuicBbrDrain && priorInFlight > window/2
+	return !drainLimited || available > tuicMaxBurstPackets*b.maxDatagramSize
 }
 
 func obsoletePacketNumber(acked []quiccongestion.AckedPacketInfo, lost []quiccongestion.LostPacketInfo) (quiccongestion.PacketNumber, bool) {

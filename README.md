@@ -67,11 +67,24 @@ and the five transport defects that measuring them exposed, and
 [`docs/PERFORMANCE-20260812.md`](docs/PERFORMANCE-20260812.md) for the earlier
 campaign.
 
-On the live China-US link at 33% measured loss, 20 alternating 4 MiB trials
-with both stacks on the same controller completed 10/10 each, with wanopt 23%
-ahead on the median and ahead in 9 of 10 paired rounds. Before the rescue-window
-fix described in that document, wanopt completed 1 of 6 trials in a comparable
-window while the reference completed 6 of 6.
+### The live link is the number to believe
+
+Measured against the real China-US path -- 263 ms average round trip, 226 to
+440 ms range, 5% loss, 48 ms of jitter -- fourteen alternating 8 MiB rounds:
+wanopt 10.24 Mbit/s mean against the reference's 10.59, ahead in 6 of 14 rounds.
+**Parity, not an advantage.**
+
+That campaign also found the emulator wrong in a way no emulated cell showed. A
+first live run lost 17 of 18 rounds, 5.42 against 8.85, and the cause was a
+change to the congestion controller's application-limited test that had measured
+*better* on the emulator. On a path whose round trip varies by a factor of two,
+that marking is what keeps spuriously low delivery-rate samples out of BBR's
+bandwidth filter; removing it halved the throughput. Reverting cost nothing
+emulated. See [`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md) §7.6.
+
+An earlier campaign at 33% measured loss, 20 alternating 4 MiB trials, completed
+10/10 for both stacks with wanopt 23% ahead on the median; that run predates the
+current transport and has not been repeated.
 
 ### Protecting interactive latency under bulk load
 
