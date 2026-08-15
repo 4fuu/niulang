@@ -15,9 +15,12 @@ import (
 // lossyPipe is a pair of carriers connected through an erasure channel, so a
 // test can put the measured path between two coded paths without a socket.
 type lossyPipe struct {
-	mu     sync.Mutex
-	rng    *rand.Rand
-	loss   float64
+	mu   sync.Mutex
+	rng  *rand.Rand
+	loss float64
+	// drop erases particular datagrams rather than random ones, so a test can
+	// ask what happens to a specific symbol.
+	drop   func([]byte) bool
 	closed bool
 	done   chan struct{}
 	out    chan []byte
@@ -45,6 +48,9 @@ func (p *lossyPipe) Send(d []byte) error {
 	}
 	p.sent++
 	drop := p.loss > 0 && p.rng.Float64() < p.loss
+	if p.drop != nil && p.drop(d) {
+		drop = true
+	}
 	if drop {
 		p.lost++
 	}
@@ -97,7 +103,7 @@ func measuredPath(floor float64) *pathmodel.PathModel {
 func paths(t *testing.T, seed int64, loss, floor float64) (*Path, *Path, *lossyPipe) {
 	t.Helper()
 	pa, pb := newPipes(seed, loss)
-	cfg := Config{ShardBytes: 1100, RoundTrip: 60 * time.Millisecond, Path: measuredPath(floor)}
+	cfg := Config{SymbolBytes: 1100, RoundTrip: 60 * time.Millisecond, Path: measuredPath(floor)}
 	a, b := New(pa, cfg), New(pb, cfg)
 	t.Cleanup(func() { a.Close(); b.Close() })
 	return a, b, pa
@@ -194,10 +200,10 @@ func TestAnErasingPathCodes(t *testing.T) {
 	}
 }
 
-// Frames are packed together when several are waiting, because a block of one
-// frame wastes most of what the code could have done. Nothing is timed: the
-// signal is that the queue drained.
-func TestWaitingFramesShareABlock(t *testing.T) {
+// Frames are packed together when several are waiting, because a symbol
+// carrying one small frame wastes most of the datagram it cost. Nothing is
+// timed: the signal is that the queue drained.
+func TestWaitingFramesShareASymbol(t *testing.T) {
 	a, b, wire := paths(t, 5, 0, 0.42)
 	const frames = 64
 	payload := bytes.Repeat([]byte("x"), 500)
@@ -214,14 +220,138 @@ func TestWaitingFramesShareABlock(t *testing.T) {
 	sent, _ := wire.stats()
 	t.Logf("%d frames of %d bytes cost %d datagrams", frames, len(payload), sent)
 	// One datagram per frame would mean nothing was ever packed. The code adds
-	// parity, so the bound is generous; what it rules out is a block per frame
+	// parity, so the bound is generous; what it rules out is a symbol per frame
 	// with no packing at all.
 	if sent >= frames*3 {
-		t.Fatalf("%d datagrams for %d frames: frames are not sharing blocks", sent, frames)
+		t.Fatalf("%d datagrams for %d frames: frames are not sharing symbols", sent, frames)
 	}
 }
 
-// A frame no block can hold has to be refused rather than truncated, so the
+// A frame larger than a symbol occupies symbols of its own, and arrives whole.
+func TestALargeFrameIsCarriedInFragments(t *testing.T) {
+	a, b, wire := paths(t, 20, 0, 0.42)
+	frame := make([]byte, 32*1024)
+	rand.New(rand.NewSource(21)).Read(frame)
+	if err := a.Send(frame); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Receive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, frame) {
+		t.Fatalf("a %d-byte frame came back as %d bytes", len(frame), len(got))
+	}
+	sent, _ := wire.stats()
+	t.Logf("a %d-byte frame cost %d datagrams", len(frame), sent)
+	if sent < 20 {
+		t.Fatalf("%d datagrams for a %d-byte frame: it was not fragmented", sent, len(frame))
+	}
+}
+
+// A symbol lost for good costs the frames it carried and nothing behind them.
+//
+// This is the whole reason for using datagrams. A stream would have held every
+// later frame until the lost one was retransmitted -- a round trip on a path
+// whose round trip is the thing being avoided -- and so would a receiver that
+// reassembled the symbols into one stream before reading frames out of it.
+// Here the frames that were not in the lost symbol do not depend on it.
+func TestALostSymbolDoesNotBlockWhatFollows(t *testing.T) {
+	pa, pb := newPipes(22, 0)
+	// Every repair is erased as well, so the lost symbol is lost for good and
+	// what arrives is only what did not depend on it.
+	sources := 0
+	pa.drop = func(d []byte) bool {
+		if d[4] == kindRepair {
+			return true
+		}
+		sources++
+		return sources == 2
+	}
+	cfg := Config{SymbolBytes: 1100, RoundTrip: 60 * time.Millisecond, Path: measuredPath(0.42)}
+	a, b := New(pa, cfg), New(pb, cfg)
+	t.Cleanup(func() { a.Close(); b.Close() })
+
+	// Each frame is most of a symbol, so each gets one of its own.
+	const frames = 5
+	sent := make([][]byte, frames)
+	for i := range sent {
+		sent[i] = bytes.Repeat([]byte{byte('a' + i)}, 1000)
+		if err := a.Send(sent[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	arrived := make(chan []byte, frames)
+	go func() {
+		for {
+			frame, err := b.Receive()
+			if err != nil {
+				return
+			}
+			arrived <- frame
+		}
+	}()
+
+	var got [][]byte
+	deadline := time.After(2 * time.Second)
+	for len(got) < frames-1 {
+		select {
+		case frame := <-arrived:
+			got = append(got, frame)
+		case <-deadline:
+			t.Fatalf("only %d of %d frames arrived; one erasure held back the "+
+				"frames that did not depend on it", len(got), frames-1)
+		}
+	}
+	for _, frame := range got {
+		if len(frame) != 1000 {
+			t.Fatalf("a frame arrived %d bytes long", len(frame))
+		}
+	}
+}
+
+// A short exchange is the case the code is worst at and the one that matters
+// most: a lone symbol has nothing to share parity with, and nothing follows it
+// to trigger a retransmission either. The tail protection is what covers it,
+// and this measures whether it does.
+func TestAShortExchangeSurvivesTheErasureChannel(t *testing.T) {
+	a, b, wire := paths(t, 23, 0.42, 0.42)
+	const exchanges = 100
+	payload := bytes.Repeat([]byte("q"), 40)
+
+	arrived := make(chan []byte, exchanges)
+	go func() {
+		for {
+			frame, err := b.Receive()
+			if err != nil {
+				return
+			}
+			arrived <- frame
+		}
+	}()
+
+	got := 0
+	for i := 0; i < exchanges; i++ {
+		if err := a.Send(payload); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-arrived:
+			got++
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	sent, lost := wire.stats()
+	t.Logf("%d of %d short exchanges arrived; wire sent %d dropped %d (%.0f%%)",
+		got, exchanges, sent, lost, 100*float64(lost)/float64(sent))
+	if got < exchanges*95/100 {
+		t.Fatalf("only %d of %d short exchanges survived: the tail of a burst is "+
+			"not being protected", got, exchanges)
+	}
+}
+
+// A frame no symbol can hold has to be refused rather than truncated, so the
 // layer above can put it on the stream instead.
 func TestAnOversizedFrameIsRefused(t *testing.T) {
 	a, _, _ := paths(t, 6, 0, 0.42)

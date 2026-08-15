@@ -19,7 +19,7 @@ import (
 // order, so at this path's 42% erasure rate every gap stalls everything behind
 // it: measured with 256-byte messages, a stream's median delivery was 1.372 s
 // against a coded path's 153 ms. But the session's own acknowledgements must
-// not be coded, because they are what releases the data whose blocks they
+// not be coded, because they are what releases the data whose symbols they
 // would then be queued behind -- with everything on one coded substrate the
 // same channel carried 0.87 Mbit/s one way and 0.008 with acknowledgements
 // coming back the other.
@@ -74,8 +74,8 @@ func (d *bulkDemux) run(maxPayload uint32) {
 		}
 		frame, err := protocol.ParseFrame(payload, maxPayload)
 		if err != nil {
-			// A block that only half arrived truncates its last frame, which
-			// is ordinary loss rather than a defect.
+			// The coded path hands up whole frames or none, so this is a peer
+			// sending something this one cannot parse rather than loss.
 			continue
 		}
 		// The send happens under the lock that release closes under, or the
@@ -187,12 +187,12 @@ func newCodedPath(conn *quic.Conn, roundTrip time.Duration) *coded.Path {
 		roundTrip = 300 * time.Millisecond
 	}
 	return coded.New(carrier, coded.Config{
-		// Bulk payload: the code rate matters more than the block latency,
+		// Bulk payload: the code rate matters more than the recovery latency,
 		// because a repair still costs less than the round trip it replaces.
 		Class:     fec.ClassBulk,
 		RoundTrip: roundTrip,
 		// What the endpoint pair has already been measured to do, so the first
-		// block is coded for the path rather than for a clean one.
+		// symbol is coded for the path rather than for a clean one.
 		Path: pathmodel.Shared(peerKey(conn)),
 	})
 }

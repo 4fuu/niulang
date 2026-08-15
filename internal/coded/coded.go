@@ -3,8 +3,8 @@
 //
 // It does not make delivery reliable, and that is the point. The path this
 // project targets erases about 42% of packets independently of the sending
-// rate, and a code sized for that delivers all but about a thousandth of its
-// blocks without a round trip. The remaining thousandth is a job the layer
+// rate, and a code sized for that delivers all but about a thousandth of what
+// it carries without a round trip. The remaining thousandth is a job the layer
 // above already does: the session sequences by byte offset, acknowledges with
 // ranges, retains what is unacknowledged and re-issues it.
 //
@@ -15,8 +15,23 @@
 // its feedback was a timer where QUIC's is an arrival and its delivery was
 // in-order where the session above already tolerates gaps.
 //
-// So here a block either repairs or it does not. If it does not, its frames
-// are lost, which is a thing the session above is built to survive.
+// So here a symbol either survives or it does not. If it does not, the frames
+// it carried are lost, which is a thing the session above is built to survive.
+//
+// The code is a sliding window rather than a block code. A block code has to
+// choose its parity when it seals the block, before it has finished sending
+// into the path it is sizing for; here the source symbols go as they are
+// produced and repairs follow at whatever rate the path is currently measured
+// to need. Redundancy therefore reflects what is known now rather than what
+// was known when a block was sealed, and a repair can cover an erasure that
+// happened several symbols ago -- so a burst that would exceed one block's
+// parity is spread across every repair that reaches back over it.
+//
+// Nothing here waits for anything else. A symbol carrying whole frames
+// delivers them the moment it arrives, and a frame too large for one symbol
+// waits only for its own symbols. An erasure costs the frames it carried and
+// nothing behind them, which is the property that made datagrams worth using
+// instead of a stream.
 package coded
 
 import (
@@ -58,37 +73,46 @@ var (
 	ErrDatagramTooLarge = errors.New("coded: datagram too large for the carrier")
 	// ErrClosed is returned once the path has stopped.
 	ErrClosed = errors.New("coded: path closed")
-	// ErrFrameTooLarge means a frame cannot fit even a maximal block.
-	ErrFrameTooLarge = errors.New("coded: frame exceeds one block")
+	// ErrFrameTooLarge means a frame is beyond anything this path will carry.
+	ErrFrameTooLarge = errors.New("coded: frame exceeds the largest carried")
 )
 
 const (
-	// shardHeader is the transmission sequence, the block, the shard's index
-	// within it, k, n, and the block's payload length.
+	// A source datagram names its transmission sequence, says what it is, and
+	// identifies the symbol it carries. A repair adds the window it covers.
 	//
 	// The transmission sequence is what makes the channel measurable: loss is
 	// only visible as a gap in the order things were sent, and neither the
-	// block nor the shard index is that order.
-	shardHeader = 4 + 4 + 1 + 1 + 1 + 4
-	// frameHeader prefixes each frame inside a block's payload.
+	// symbol identifier nor the repair identifier is that order.
+	sourceHeader = 4 + 1 + 4
+	repairHeader = 4 + 1 + 4 + 4 + 2
+
+	kindSource = 0
+	kindRepair = 1
+
+	// symbolHeader prefixes the coded vector: how much payload the symbol
+	// carries, and which part of a frame it is. All three are inside the vector
+	// rather than in the datagram header because all three have to survive
+	// being reconstructed from repairs.
+	symbolHeader = 2 + 2 + 2
+	// frameHeader prefixes each frame inside a symbol that carries whole ones.
 	frameHeader = 4
-	// maxInboundBlocks bounds what a receiver holds for blocks still arriving.
-	// It only has to cover the blocks genuinely in flight; past that, a block
-	// is older than any shard still coming for it.
-	maxInboundBlocks = 64
+	// maxFrameBytes bounds what one frame may be.
+	maxFrameBytes = 1 << 20
 )
 
 // Config describes the path. Every field has a usable default.
 type Config struct {
-	// ShardBytes is the payload one shard carries. It is reduced to whatever
-	// the carrier will actually accept.
-	ShardBytes int
+	// SymbolBytes is the datagram one symbol is sent in. It is reduced to
+	// whatever the carrier will actually accept.
+	SymbolBytes int
 	// Class selects the latency-against-efficiency trade the code makes.
 	Class fec.Class
-	// RoundTrip bounds the block length: a block that takes longer to send
-	// than a retransmission takes to arrive has given up what coding was for.
+	// RoundTrip bounds the window: a window longer than a round trip's sending
+	// holds symbols whose repair would arrive later than a retransmission, and
+	// coding was for avoiding exactly that.
 	RoundTrip time.Duration
-	// TargetResidual is the share of blocks allowed to arrive unrepairable.
+	// TargetResidual is the share of symbols allowed to arrive unrepairable.
 	// It should not be zero: driving it down costs parity geometrically, and
 	// the residual is what the session above is good at.
 	TargetResidual float64
@@ -96,15 +120,15 @@ type Config struct {
 	// everything else sending to it -- above all the congestion controller,
 	// whose own acknowledgements reveal the erasure rate of exactly this
 	// direction. Without it a path starts out believing it is clean and sends
-	// its first blocks unprotected.
+	// its first symbols unprotected.
 	Path *pathmodel.PathModel
 	// Pending bounds the frames queued for sending before Send blocks.
 	Pending int
 }
 
 func (c Config) withDefaults() Config {
-	if c.ShardBytes <= 0 {
-		c.ShardBytes = 1100
+	if c.SymbolBytes <= 0 {
+		c.SymbolBytes = 1100
 	}
 	if c.RoundTrip <= 0 {
 		c.RoundTrip = 300 * time.Millisecond
@@ -126,23 +150,36 @@ type Path struct {
 	pending  chan []byte
 	received chan []byte
 
-	mu     sync.Mutex
-	blocks map[uint32]*inbound
-	order  []uint32
+	// The sending side belongs to one goroutine, and nothing else touches it.
+	encoder *fec.WindowEncoder
+	packed  []byte
+	nextSeq uint32
+	nextRID uint32
+	credit  float64
+	// burst counts what has been sent since the producer last drained, which
+	// is what the tail protection is sized from. tail caches how much that
+	// costs, because the answer is a binomial search and the question is asked
+	// every time the producer pauses.
+	burstSymbols int
+	burstRepairs int
+	tail         map[int]int
+	tailAt       int64
 
-	nextSeq   atomic.Uint32
-	nextBlock atomic.Uint32
-
+	// The receiving side belongs to the receive loop, held under mu only
+	// because Stats reads what it writes.
+	mu        sync.Mutex
+	decoder   *fec.WindowDecoder
+	assembler assembler
 	estimator *lossmodel.Estimator
-	// plan is cached because choosing one walks a binomial search, and the
-	// question is asked per frame while the answer changes on the timescale
+
+	// code is cached because sizing one walks a binomial search, and the
+	// question is asked per symbol while the answer changes on the timescale
 	// the path does.
-	plan         atomic.Pointer[fec.Plan]
-	plannedAt    atomic.Int64
-	sent         atomic.Uint64
-	repaired     atomic.Uint64
-	unrepairable atomic.Uint64
-	oversize     atomic.Uint64
+	code     atomic.Pointer[coding]
+	codedAt  atomic.Int64
+	sent     atomic.Uint64
+	repairs  atomic.Uint64
+	oversize atomic.Uint64
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -150,13 +187,12 @@ type Path struct {
 	err       atomic.Pointer[error]
 }
 
-type inbound struct {
-	shards  [][]byte
-	present []bool
-	held    int
-	k, n    int
-	length  int
-	done    bool
+// coding is the code the path is currently using: the plan it came from, how
+// wide a window it keeps, and how many repairs each source symbol earns.
+type coding struct {
+	plan     fec.Plan
+	capacity int
+	rate     float64
 }
 
 // New starts a coded path over the carrier. Close stops it.
@@ -166,7 +202,8 @@ func New(carrier Carrier, cfg Config) *Path {
 		cfg: cfg, carrier: carrier,
 		pending:   make(chan []byte, cfg.Pending),
 		received:  make(chan []byte, cfg.Pending),
-		blocks:    make(map[uint32]*inbound),
+		encoder:   fec.NewWindowEncoder(initialWindow),
+		decoder:   fec.NewWindowDecoder(),
 		estimator: lossmodel.New(lossmodel.Config{ReorderTolerance: 32}),
 		done:      make(chan struct{}),
 	}
@@ -176,10 +213,15 @@ func New(carrier Carrier, cfg Config) *Path {
 	return p
 }
 
+// initialWindow is what the encoder holds before the path has been measured.
+// It is small because an unmeasured path is usually a new one, where the first
+// thing sent is a short exchange rather than a stream.
+const initialWindow = 16
+
 // Send queues a frame. Delivery is not guaranteed: the code repairs what the
 // path erases, and what it cannot repair is the caller's to notice.
 func (p *Path) Send(frame []byte) error {
-	if len(frame)+frameHeader > p.maxBlockPayload() {
+	if len(frame) > maxFrameBytes {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(frame))
 	}
 	// Closed is checked before the queue, not alongside it: a select chooses
@@ -216,116 +258,224 @@ func (p *Path) Receive() ([]byte, error) {
 	}
 }
 
-// sendLoop packs every frame that is already waiting into one block, then
-// sends it because nothing more is waiting.
+// sendLoop packs every frame that is already waiting into symbols, then sends
+// what it has because nothing more is waiting.
 //
 // Draining is the seal signal, and it is not a policy. Under load there is
-// always another frame, so blocks fill and the code is efficient; when the
-// producer stops the block goes at once, so latency is the path's. Neither
-// size nor time is chosen, so neither has to be re-chosen when the path or the
-// traffic changes -- and a fixed delay is worse than either, because on a
-// request-response protocol every delay lands on the critical path of the next
-// request and they compound.
+// always another frame, so symbols fill and the framing overhead is a
+// hundredth; when the producer stops the symbol goes at once, so latency is
+// the path's. Neither size nor time is chosen, so neither has to be re-chosen
+// when the path or the traffic changes -- and a fixed delay is worse than
+// either, because on a request-response protocol every delay lands on the
+// critical path of the next request and they compound.
+//
+// The drain is also where the tail is protected. Repairs earned at the running
+// rate cover the symbols that precede them, and the last symbols of a burst
+// have nothing following: without this they would be the only ones the code
+// left bare, and they are the ones an interactive exchange consists of.
 func (p *Path) sendLoop() {
 	defer p.wg.Done()
 	for {
-		var first []byte
+		var frame []byte
 		select {
 		case <-p.done:
 			return
-		case first = <-p.pending:
+		case frame = <-p.pending:
 		}
-		block := appendFrame(make([]byte, 0, p.maxBlockPayload()), first)
-
-		for packing := true; packing; {
-			select {
-			case next := <-p.pending:
-				if len(block)+frameHeader+len(next) > p.maxBlockPayload() {
-					if err := p.transmit(block); err != nil {
-						return
-					}
-					block = appendFrame(block[:0], next)
-					continue
-				}
-				block = appendFrame(block, next)
-			default:
-				packing = false
+		for {
+			if err := p.appendFrame(frame); err != nil {
+				return
 			}
+			select {
+			case frame = <-p.pending:
+				continue
+			case <-p.done:
+				return
+			default:
+			}
+			break
 		}
-		if err := p.transmit(block); err != nil {
+		if err := p.flushPacked(); err != nil {
+			return
+		}
+		if err := p.protectBurst(); err != nil {
 			return
 		}
 	}
 }
 
-func appendFrame(block, frame []byte) []byte {
-	at := len(block)
-	block = append(block, 0, 0, 0, 0)
-	binary.BigEndian.PutUint32(block[at:], uint32(len(frame)))
-	return append(block, frame...)
+// appendFrame puts one frame on the wire, whole where it fits and in fragments
+// where it does not.
+//
+// A frame never straddles the boundary between a symbol that carries whole
+// frames and one that carries a fragment, because that is what would make one
+// symbol's loss cost another symbol's frames. Small frames share a symbol with
+// their neighbours; a large one occupies symbols of its own.
+func (p *Path) appendFrame(frame []byte) error {
+	limit := p.symbolPayload()
+	if frameHeader+len(frame) > limit {
+		if err := p.flushPacked(); err != nil {
+			return err
+		}
+		return p.sendFragments(frame, limit)
+	}
+	if len(p.packed)+frameHeader+len(frame) > limit {
+		if err := p.flushPacked(); err != nil {
+			return err
+		}
+	}
+	var head [frameHeader]byte
+	binary.BigEndian.PutUint32(head[:], uint32(len(frame)))
+	p.packed = append(append(p.packed, head[:]...), frame...)
+	return nil
 }
 
-// transmit codes one block and puts its shards on the wire.
-func (p *Path) transmit(payload []byte) error {
-	shardBytes := p.shardBytes()
-	k := (len(payload) + shardBytes - 1) / shardBytes
-	if k < 1 {
-		k = 1
+// sendFragments spreads one large frame over symbols of its own. Their count
+// is what tells the receiver how many to wait for, and their identifiers are
+// consecutive, so any one of them names the group.
+func (p *Path) sendFragments(frame []byte, limit int) error {
+	count := (len(frame) + limit - 1) / limit
+	if count > maxFragments {
+		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(frame))
 	}
-	if perShard := (len(payload) + k - 1) / k; perShard < shardBytes {
-		shardBytes = perShard
-	}
-
-	n := k
-	if want, ok := fec.ShardsFor(k, p.channel(), p.params()); ok {
-		n = want
-	}
-	shards := make([][]byte, n)
-	for i := range shards {
-		shards[i] = make([]byte, shardBytes)
-	}
-	for i := 0; i < k; i++ {
-		lo := i * shardBytes
-		if lo >= len(payload) {
-			break
-		}
-		copy(shards[i], payload[lo:min(lo+shardBytes, len(payload))])
-	}
-	if n > k {
-		codec, err := fec.New(k, n)
-		if err != nil {
-			n, shards = k, shards[:k]
-		} else if err := codec.Encode(shards); err != nil {
-			n, shards = k, shards[:k]
-		}
-	}
-
-	block := p.nextBlock.Add(1) - 1
-	for i := 0; i < n; i++ {
-		d := make([]byte, shardHeader+len(shards[i]))
-		binary.BigEndian.PutUint32(d, p.nextSeq.Add(1)-1)
-		binary.BigEndian.PutUint32(d[4:], block)
-		d[8] = byte(i)
-		d[9] = byte(k - 1)
-		d[10] = byte(n - 1)
-		binary.BigEndian.PutUint32(d[11:], uint32(len(payload)))
-		copy(d[shardHeader:], shards[i])
-
-		err := p.carrier.Send(d)
-		switch {
-		case err == nil:
-			p.sent.Add(1)
-		case errors.Is(err, ErrDatagramTooLarge):
-			// The path's estimate moved under us. Losing this shard is cheaper
-			// than losing the connection, and the next block is sized from the
-			// carrier's revised limit.
-			p.oversize.Add(1)
-		default:
-			p.fail(err)
+	for i := 0; i < count; i++ {
+		end := min((i+1)*limit, len(frame))
+		if err := p.emit(frame[i*limit:end], i, count); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// maxFragments is what the fragment count field can say.
+const maxFragments = 0xFFFF
+
+// flushPacked sends the whole frames accumulated so far as one symbol.
+func (p *Path) flushPacked() error {
+	if len(p.packed) == 0 {
+		return nil
+	}
+	err := p.emit(p.packed, 0, 1)
+	p.packed = p.packed[:0]
+	return err
+}
+
+// emit codes one symbol, sends it, and sends whatever repairs the running rate
+// has earned by it.
+func (p *Path) emit(payload []byte, index, count int) error {
+	vector := make([]byte, symbolHeader+len(payload))
+	binary.BigEndian.PutUint16(vector, uint16(len(payload)))
+	binary.BigEndian.PutUint16(vector[2:], uint16(index))
+	binary.BigEndian.PutUint16(vector[4:], uint16(count))
+	copy(vector[symbolHeader:], payload)
+
+	code := p.coding()
+	p.encoder.SetCapacity(code.capacity)
+	esi := p.encoder.Add(vector)
+	if err := p.sendSource(esi, vector); err != nil {
+		return err
+	}
+	p.burstSymbols++
+	if p.burstSymbols >= p.encoder.Capacity() {
+		// A window's worth has been covered at the running rate. What still
+		// needs protecting when the producer stops is whatever follows this.
+		p.burstSymbols, p.burstRepairs = 0, 0
+	}
+	for p.credit += code.rate; p.credit >= 1; p.credit-- {
+		if err := p.sendRepair(0); err != nil {
+			return err
+		}
+		p.burstRepairs++
+	}
+	return nil
+}
+
+// protectBurst tops the burst up to what the code says a run of that length
+// needs.
+//
+// It covers exactly that run rather than the whole window, because a repair is
+// as long as the longest symbol it spans: a short exchange protected over a
+// window still holding a bulk transfer's symbols would cost a full packet each
+// to repair a few dozen bytes.
+func (p *Path) protectBurst() error {
+	if p.burstSymbols <= 0 {
+		return nil
+	}
+	for want := p.tailRepairs(p.burstSymbols); p.burstRepairs < want; p.burstRepairs++ {
+		if err := p.sendRepair(p.burstSymbols); err != nil {
+			return err
+		}
+	}
+	p.burstSymbols, p.burstRepairs, p.credit = 0, 0, 0
+	return nil
+}
+
+// tailRepairs is how many repairs a run of symbols needs to reach the target
+// residual on its own, remembered until the path is re-measured.
+func (p *Path) tailRepairs(symbols int) int {
+	if at := p.codedAt.Load(); at != p.tailAt {
+		p.tail, p.tailAt = map[int]int{}, at
+	}
+	if want, ok := p.tail[symbols]; ok {
+		return want
+	}
+	want := 0
+	if n, ok := fec.ShardsFor(symbols, p.channel(), p.params()); ok {
+		want = n - symbols
+	}
+	p.tail[symbols] = want
+	return want
+}
+
+func (p *Path) sendSource(esi uint32, vector []byte) error {
+	d := make([]byte, sourceHeader+len(vector))
+	binary.BigEndian.PutUint32(d, p.take())
+	d[4] = kindSource
+	binary.BigEndian.PutUint32(d[5:], esi)
+	copy(d[sourceHeader:], vector)
+	return p.put(d)
+}
+
+// sendRepair emits one repair over the newest count symbols, or over the whole
+// window when count is zero.
+func (p *Path) sendRepair(count int) error {
+	repair, ok := p.encoder.Repair(p.nextRID, count)
+	p.nextRID++
+	if !ok {
+		return nil
+	}
+	d := make([]byte, repairHeader+len(repair.Vector))
+	binary.BigEndian.PutUint32(d, p.take())
+	d[4] = kindRepair
+	binary.BigEndian.PutUint32(d[5:], repair.RID)
+	binary.BigEndian.PutUint32(d[9:], repair.First)
+	binary.BigEndian.PutUint16(d[13:], uint16(repair.Count))
+	copy(d[repairHeader:], repair.Vector)
+	p.repairs.Add(1)
+	return p.put(d)
+}
+
+func (p *Path) take() uint32 {
+	seq := p.nextSeq
+	p.nextSeq++
+	return seq
+}
+
+func (p *Path) put(d []byte) error {
+	switch err := p.carrier.Send(d); {
+	case err == nil:
+		p.sent.Add(1)
+		return nil
+	case errors.Is(err, ErrDatagramTooLarge):
+		// The path's estimate moved under us. Losing this datagram is cheaper
+		// than losing the connection, and the next symbol is sized from the
+		// carrier's revised limit.
+		p.oversize.Add(1)
+		return nil
+	default:
+		p.fail(err)
+		return err
+	}
 }
 
 func (p *Path) receiveLoop() {
@@ -336,141 +486,205 @@ func (p *Path) receiveLoop() {
 			p.fail(err)
 			return
 		}
-		p.onShard(d)
+		for _, frame := range p.onDatagram(d) {
+			select {
+			case p.received <- frame:
+			case <-p.done:
+				return
+			}
+		}
 	}
 }
 
-func (p *Path) onShard(d []byte) {
-	if len(d) <= shardHeader {
-		return
+// onDatagram takes one arrival and returns whatever frames it completed --
+// frames it carried itself, frames an older symbol carried that it repaired,
+// or none.
+func (p *Path) onDatagram(d []byte) [][]byte {
+	if len(d) < sourceHeader {
+		return nil
 	}
 	seq := binary.BigEndian.Uint32(d)
-	block := binary.BigEndian.Uint32(d[4:])
-	index := int(d[8])
-	k := int(d[9]) + 1
-	n := int(d[10]) + 1
-	length := int(binary.BigEndian.Uint32(d[11:]))
-	shard := d[shardHeader:]
-	if index >= n || k > n || length <= 0 {
-		return
-	}
 
 	p.mu.Lock()
-	// Every arrival measures the channel, including one for a block already
-	// delivered: the gaps between transmission sequences are what loss is.
+	defer p.mu.Unlock()
+	// Every arrival measures the channel, including one carrying nothing new:
+	// the gaps between transmission sequences are what loss is.
 	p.estimator.Observe(uint64(seq))
 
-	b := p.blocks[block]
-	if b == nil {
-		b = &inbound{
-			shards: make([][]byte, n), present: make([]bool, n),
-			k: k, n: n, length: length,
+	var delivered fec.Delivery
+	var frames [][]byte
+	switch d[4] {
+	case kindSource:
+		esi := binary.BigEndian.Uint32(d[5:])
+		vector := d[sourceHeader:]
+		delivered = p.decoder.Source(esi, vector)
+		frames = p.assembler.arrived(esi, vector, frames)
+	case kindRepair:
+		if len(d) < repairHeader {
+			return nil
 		}
-		p.blocks[block] = b
-		p.order = append(p.order, block)
-		p.evictLocked()
+		delivered = p.decoder.Repair(fec.RepairSymbol{
+			RID:    binary.BigEndian.Uint32(d[5:]),
+			First:  binary.BigEndian.Uint32(d[9:]),
+			Count:  int(binary.BigEndian.Uint16(d[13:])),
+			Vector: d[repairHeader:],
+		})
+	default:
+		return nil
 	}
-	if b.done || index >= len(b.present) || b.present[index] {
-		p.mu.Unlock()
-		return
+	for _, r := range delivered.Recovered {
+		frames = p.assembler.arrived(r.ESI, r.Vector, frames)
 	}
-	b.shards[index] = append([]byte(nil), shard...)
-	b.present[index] = true
-	b.held++
-	if b.held < b.k {
-		p.mu.Unlock()
-		return
+	for _, esi := range delivered.Lost {
+		p.assembler.lost(esi)
 	}
-	frames := p.repairLocked(b)
-	p.mu.Unlock()
+	return frames
+}
 
-	for _, frame := range frames {
-		select {
-		case p.received <- frame:
-		case <-p.done:
-			return
+// assembler turns symbols back into frames.
+//
+// A symbol carrying whole frames needs nothing else, so its frames are
+// delivered as it arrives -- out of order with respect to other symbols, which
+// is what the session above already handles and what a stream could not have
+// given it. A frame spread over several symbols waits for its own, and for
+// nothing else.
+type assembler struct {
+	groups map[uint32]*fragmentGroup
+	high   uint32
+	seen   bool
+	lostN  uint64
+}
+
+type fragmentGroup struct {
+	parts [][]byte
+	held  int
+	bytes int
+}
+
+func (a *assembler) note(esi uint32) {
+	if !a.seen {
+		a.seen, a.high = true, esi
+		return
+	}
+	if int32(esi-a.high) > 0 {
+		a.high = esi
+		a.prune()
+	}
+}
+
+func (a *assembler) arrived(esi uint32, vector []byte, out [][]byte) [][]byte {
+	a.note(esi)
+	payload, index, count, ok := parseSymbol(vector)
+	if !ok {
+		return out
+	}
+	if count == 1 {
+		return parseFrames(payload, out)
+	}
+	first := esi - uint32(index)
+	group := a.groups[first]
+	if group == nil {
+		if a.groups == nil {
+			a.groups = map[uint32]*fragmentGroup{}
+		}
+		group = &fragmentGroup{parts: make([][]byte, count)}
+		a.groups[first] = group
+	}
+	if index >= len(group.parts) || group.parts[index] != nil {
+		return out
+	}
+	group.parts[index] = append([]byte(nil), payload...)
+	group.held++
+	group.bytes += len(payload)
+	if group.held < len(group.parts) {
+		return out
+	}
+	delete(a.groups, first)
+	frame := make([]byte, 0, group.bytes)
+	for _, part := range group.parts {
+		frame = append(frame, part...)
+	}
+	return append(out, frame)
+}
+
+// lost drops the frames that depended on a symbol nothing can still repair.
+func (a *assembler) lost(esi uint32) {
+	a.note(esi)
+	a.lostN++
+	for first, group := range a.groups {
+		if int32(esi-first) >= 0 && int32(esi-first) < int32(len(group.parts)) {
+			delete(a.groups, first)
 		}
 	}
 }
 
-// repairLocked reconstructs a block and splits it into the frames it carried.
-func (p *Path) repairLocked(b *inbound) [][]byte {
-	if b.done {
-		return nil
-	}
-	if b.n > b.k {
-		codec, err := fec.New(b.k, b.n)
-		if err != nil {
-			return nil
-		}
-		if err := codec.Reconstruct(b.shards, b.present); err != nil {
-			return nil
-		}
-	}
-	payload := make([]byte, 0, b.length)
-	for i := 0; i < b.k && len(payload) < b.length; i++ {
-		take := min(len(b.shards[i]), b.length-len(payload))
-		payload = append(payload, b.shards[i][:take]...)
-	}
-	if len(payload) != b.length {
-		return nil
-	}
-	b.done, b.shards, b.present = true, nil, nil
-	p.repaired.Add(1)
+// assemblerSlack is how far behind the newest symbol a partly-arrived frame is
+// kept.
+//
+// The decoder normally says when a symbol is lost, and says it at the only
+// moment that is certain: when no repair can still reach it. This covers the
+// case it cannot -- a symbol erased before anything had arrived to establish
+// that the stream had started, which the decoder has no evidence ever existed.
+const assemblerSlack = 512
 
-	var frames [][]byte
+func (a *assembler) prune() {
+	for first, group := range a.groups {
+		if int32(a.high-(first+uint32(len(group.parts)))) > assemblerSlack {
+			delete(a.groups, first)
+		}
+	}
+}
+
+func parseFrames(payload []byte, out [][]byte) [][]byte {
 	for len(payload) >= frameHeader {
 		size := int(binary.BigEndian.Uint32(payload))
 		payload = payload[frameHeader:]
 		if size > len(payload) {
 			break
 		}
-		frames = append(frames, append([]byte(nil), payload[:size]...))
+		out = append(out, append([]byte(nil), payload[:size]...))
 		payload = payload[size:]
 	}
-	return frames
+	return out
 }
 
-// evictLocked drops the oldest blocks once too many are held. Nothing
-// retransmits, so a block that has not completed by now will not.
-func (p *Path) evictLocked() {
-	for len(p.order) > maxInboundBlocks {
-		oldest := p.order[0]
-		p.order = p.order[1:]
-		if b, ok := p.blocks[oldest]; ok {
-			if !b.done {
-				p.unrepairable.Add(1)
-			}
-			delete(p.blocks, oldest)
-		}
+func parseSymbol(vector []byte) ([]byte, int, int, bool) {
+	if len(vector) < symbolHeader {
+		return nil, 0, 0, false
 	}
+	length := int(binary.BigEndian.Uint16(vector))
+	index := int(binary.BigEndian.Uint16(vector[2:]))
+	count := int(binary.BigEndian.Uint16(vector[4:]))
+	// A recovered symbol is padded to the length of the repair that recovered
+	// it, so it is long enough rather than exactly long enough.
+	if count < 1 || index >= count || symbolHeader+length > len(vector) {
+		return nil, 0, 0, false
+	}
+	return vector[symbolHeader : symbolHeader+length], index, count, true
 }
 
-// shardBytes is the configured shard size, reduced to what the carrier
+// symbolBytes is the configured datagram size, reduced to what the carrier
 // accepts. The limit is not a constant: QUIC's estimate of what fits in a
 // packet moves with the path, and a datagram over it is refused rather than
 // fragmented.
-func (p *Path) shardBytes() int {
-	size := p.cfg.ShardBytes
+func (p *Path) symbolBytes() int {
+	size := p.cfg.SymbolBytes
 	if sized, ok := p.carrier.(SizedCarrier); ok {
-		if limit := sized.MaxDatagramBytes() - shardHeader; limit > 0 && limit < size {
+		if limit := sized.MaxDatagramBytes(); limit > 0 && limit < size {
 			size = limit
 		}
 	}
-	if size < 1 {
-		size = 1
+	if floor := repairHeader + symbolHeader + frameHeader + 1; size < floor {
+		size = floor
 	}
 	return size
 }
 
-// maxBlockPayload is the most one block may carry.
-func (p *Path) maxBlockPayload() int {
-	plan := p.currentPlan()
-	shards := plan.K
-	if !plan.Code || shards <= 0 {
-		shards = 8
-	}
-	return shards * p.shardBytes()
+// symbolPayload is how much of a frame one symbol carries. It leaves room for
+// the larger of the two datagram headers, so that a repair covering a symbol
+// fits on the wire as surely as the symbol itself did.
+func (p *Path) symbolPayload() int {
+	return p.symbolBytes() - repairHeader - symbolHeader
 }
 
 // channel is what is known about the direction this path sends into.
@@ -478,9 +692,9 @@ func (p *Path) maxBlockPayload() int {
 // The peer is not asked. The congestion controller on this connection already
 // measures it -- the erasure rate of the direction it sends into is exactly
 // what its own acknowledgements reveal -- so the shared model has the answer
-// before the first block is sealed, which is when it is needed. Asking the
-// peer instead means the first blocks are sealed knowing nothing, and a block
-// sealed knowing nothing carries no parity.
+// before the first symbol is sent, which is when it is needed. Asking the peer
+// instead means the first symbols are sent knowing nothing, and a symbol sent
+// knowing nothing carries no parity.
 func (p *Path) channel() lossmodel.Snapshot {
 	floor := 0.0
 	if p.cfg.Path != nil {
@@ -495,40 +709,55 @@ func (p *Path) channel() lossmodel.Snapshot {
 func (p *Path) params() fec.Params {
 	return fec.Params{
 		Class:           p.cfg.Class,
-		ShardBytes:      p.shardBytes(),
+		ShardBytes:      p.symbolBytes(),
 		RateBytesPerSec: p.rate(),
 		RoundTrip:       p.cfg.RoundTrip,
 		TargetResidual:  p.cfg.TargetResidual,
 	}
 }
 
-// rate is the sending rate the block length is sized against.
+// rate is the sending rate the window is sized against.
 func (p *Path) rate() float64 {
 	if p.cfg.Path != nil {
 		if _, share := p.cfg.Path.Current(); share > 0 {
 			return share
 		}
 	}
-	return float64(p.shardBytes()) * 64 / p.cfg.RoundTrip.Seconds()
+	return float64(p.symbolBytes()) * 64 / p.cfg.RoundTrip.Seconds()
 }
 
-// planTTL is how long a chosen code stands before it is chosen again. The
+// codingTTL is how long a chosen code stands before it is chosen again. The
 // path's erasure rate moves on the scale of seconds, and the estimate behind
 // it is filtered over thousands of packets, so a fifth of a second is far
 // finer than the input can justify.
-const planTTL = 200 * time.Millisecond
+const codingTTL = 200 * time.Millisecond
 
-func (p *Path) currentPlan() fec.Plan {
+// coding is the window and repair rate the path is currently using.
+//
+// The window is the plan's block length, which is what a round trip's sending
+// comes to: a repair reaching further back than that would arrive later than
+// the retransmission it was meant to replace. The rate is not the plan's,
+// though, because a window is not a block -- its repairs chain across
+// neighbouring windows, so it reaches the same residual for less parity, and
+// taking the block's rate would spend a fifth of the wire on a residual nobody
+// asked for.
+func (p *Path) coding() coding {
 	now := time.Now().UnixNano()
-	if at := p.plannedAt.Load(); now-at < int64(planTTL) {
-		if stored := p.plan.Load(); stored != nil {
+	if at := p.codedAt.Load(); now-at < int64(codingTTL) {
+		if stored := p.code.Load(); stored != nil {
 			return *stored
 		}
 	}
-	plan := fec.Choose(p.channel(), p.params())
-	p.plan.Store(&plan)
-	p.plannedAt.Store(now)
-	return plan
+	channel, params := p.channel(), p.params()
+	plan := fec.Choose(channel, params)
+	current := coding{plan: plan, capacity: initialWindow}
+	if plan.Code && plan.K > 0 {
+		current.capacity = plan.K
+		current.rate = fec.WindowRate(current.capacity, channel, params)
+	}
+	p.code.Store(&current)
+	p.codedAt.Store(now)
+	return current
 }
 
 // Coding reports whether this path is currently worth sending bulk payload
@@ -540,31 +769,37 @@ func (p *Path) currentPlan() fec.Plan {
 // stream would have retransmitted it in a round trip. Asking this rather than
 // configuring it is what lets one build serve both a clean path and a 42%
 // erasure channel without being told which it is on.
-func (p *Path) Coding() bool { return p.currentPlan().Code }
+func (p *Path) Coding() bool { return p.coding().plan.Code }
 
 // Stats reports what the path has done and what it believes.
 type Stats struct {
-	Snapshot     lossmodel.Snapshot
-	Plan         fec.Plan
-	Sent         uint64
-	Repaired     uint64
-	Unrepairable uint64
-	Oversize     uint64
+	Snapshot lossmodel.Snapshot
+	Plan     fec.Plan
+	Window   int
+	// Sent is datagrams put on the wire, of which Repairs carried no new data.
+	Sent    uint64
+	Repairs uint64
+	// Recovered is symbols the code reconstructed; Lost is symbols that left
+	// the window still missing, and whose frames the session must re-issue.
+	Recovered uint64
+	Lost      uint64
+	Oversize  uint64
 }
 
 // Stats reports what this path has done and what it believes.
 func (p *Path) Stats() Stats {
 	p.mu.Lock()
 	snapshot := p.estimator.Snapshot()
+	recovered, lost := p.decoder.Recovered(), p.assembler.lostN
 	p.mu.Unlock()
-	plan := fec.Plan{}
-	if stored := p.plan.Load(); stored != nil {
-		plan = *stored
+	current := coding{}
+	if stored := p.code.Load(); stored != nil {
+		current = *stored
 	}
 	return Stats{
-		Snapshot: snapshot, Plan: plan,
-		Sent: p.sent.Load(), Repaired: p.repaired.Load(),
-		Unrepairable: p.unrepairable.Load(), Oversize: p.oversize.Load(),
+		Snapshot: snapshot, Plan: current.plan, Window: current.capacity,
+		Sent: p.sent.Load(), Repairs: p.repairs.Load(),
+		Recovered: recovered, Lost: lost, Oversize: p.oversize.Load(),
 	}
 }
 

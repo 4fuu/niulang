@@ -155,10 +155,12 @@ func TestNoShardExceedsTheCarriersDatagramLimit(t *testing.T) {
 	if err := carrier.Send(make([]byte, limit)); err != nil {
 		t.Fatalf("carrier refused a datagram of its own stated limit %d: %v", limit, err)
 	}
-	// And a channel over it must never build a shard larger than that.
-	p := New(carrier, Config{ShardBytes: DefaultDatagramBytes, RoundTrip: 300 * time.Millisecond})
+	// And a path over it must never build a datagram larger than that, for
+	// either kind: a repair carries the longer header, so sizing the payload by
+	// the source header alone would put every repair over the limit.
+	p := New(carrier, Config{SymbolBytes: DefaultDatagramBytes, RoundTrip: 300 * time.Millisecond})
 	defer p.Close()
-	if got := p.shardBytes() + shardHeader; got > limit {
+	if got := p.symbolPayload() + symbolHeader + repairHeader; got > limit {
 		t.Fatalf("path builds %d-byte datagrams against a carrier limit of %d", got, limit)
 	}
 }

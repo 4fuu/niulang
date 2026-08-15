@@ -25,7 +25,7 @@ import (
 // stream imposes at this path's loss rate.
 //
 // Carrying both on one substrate is what made the first coded lane slow. With
-// everything coded, a session's own acknowledgements queued behind the blocks
+// everything coded, a session's own acknowledgements queued behind the data
 // whose progress they release: the same channel measured 0.87 Mbit/s in one
 // direction and 0.008 when the reverse direction had to carry them.
 //
@@ -112,7 +112,7 @@ func newSplitFrameConn(control io.ReadWriteCloser, bulk *coded.Path, maxPayload 
 // And the flow must be one that wants latency more than bandwidth. Coding and
 // retransmission cost the same thing in different currencies: on a memoryless
 // erasure channel retransmission resends only what was lost, 1/(1-p), where a
-// block code must provision for the binomial. Measured live at 37% loss, a
+// code must provision for the binomial. Measured live at 37% loss, a
 // bulk download ran at 10.1 Mbit/s on the stream and 5.0 coded -- the code
 // spending exactly the difference the arithmetic predicts. A small exchange
 // went the other way, 1.9 s uncoded against 618 ms coded, because there the
@@ -206,9 +206,9 @@ func (c *frameConn) Write(f protocol.Frame) error {
 	return c.writeLocked(f)
 }
 
-// writeCoded hands a bulk frame to the coded substrate. A frame too large for
-// one block falls back to the control stream rather than failing: correctness
-// is not worth trading for the coding.
+// writeCoded hands a bulk frame to the coded substrate, falling back to the
+// control stream if it will not take it: correctness is not worth trading for
+// the coding.
 func (c *frameConn) writeCoded(f protocol.Frame) error {
 	buf, err := protocol.AppendFrame(nil, f)
 	if err != nil {
