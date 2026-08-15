@@ -180,7 +180,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
 	fs.BoolVar(&opts.quicPool, "quic-pool", false, "share one persistent QUIC connection for initial/control streams, and move classified bulk flows off it (opt-in)")
 	fs.BoolVar(&opts.optimisticOpen, "optimistic-open", false, "return SOCKS success before OPEN_OK; flow validates the eventual response (opt-in)")
-	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionReno), "QUIC congestion controller: reno, bbr, bbr-tuic, erasure, adaptive, or brutal")
+	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionErasure), "QUIC congestion controller: erasure (default), reno, bbr, bbr-tuic, adaptive, or brutal")
 	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "fixed per-lane Brutal target in bytes/s (required with --congestion brutal)")
 	fs.Uint64Var(&opts.adaptiveMinBytesSec, "adaptive-min-bytes-per-sec", 64*1024, "Adaptive controller minimum rate in bytes/s")
 	fs.Uint64Var(&opts.adaptiveMaxBytesSec, "adaptive-max-bytes-per-sec", 200*1024*1024, "Adaptive controller maximum rate in bytes/s")

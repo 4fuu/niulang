@@ -223,7 +223,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("unsupported client transport %q", cfg.Transport)
 	}
 	if cfg.Congestion == "" {
-		cfg.Congestion = CongestionReno
+		cfg.Congestion = defaultCongestion()
 	}
 	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
 		return nil, fmt.Errorf("unsupported QUIC congestion controller %q", cfg.Congestion)
@@ -714,6 +714,31 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 	if err != nil {
 		return fail(fmt.Errorf("read flow open acknowledgement: %w", err))
 	}
+	// A pipelined hello is acknowledged before the flow is, so the first frame
+	// back is the session's and not this flow's. The optimistic path leaves it
+	// to the flow reader; a caller that waits here has to consume it itself.
+	//
+	// Without this, pipelining could only be had together with not waiting for
+	// the flow acknowledgement, because the waiting path would read the
+	// session's acknowledgement and reject it as the wrong identity. Those are
+	// different decisions -- one saves a round trip and is always right, the
+	// other trades certainty for latency -- and they were the same flag.
+	if lane.helloPending && response.Header.Type == protocol.TypeHelloOK && response.Header.FlowID == 0 {
+		if response.Header.SessionID != lane.sessionID {
+			return fail(errors.New("session acknowledgement identity mismatch"))
+		}
+		var acknowledged session.HelloOK
+		if err := acknowledged.UnmarshalBinary(response.Payload); err != nil {
+			return fail(fmt.Errorf("decode session acknowledgement: %w", err))
+		}
+		if lane.onHelloOK != nil {
+			lane.onHelloOK(acknowledged)
+		}
+		lane.helloPending = false
+		if response, err = lane.fc.Read(); err != nil {
+			return fail(fmt.Errorf("read flow open acknowledgement: %w", err))
+		}
+	}
 	if response.Header.SessionID != lane.sessionID || response.Header.FlowID != flowID {
 		return fail(errors.New("flow open acknowledgement identity mismatch"))
 	}
@@ -729,7 +754,11 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 		return fail(errors.New("invalid flow open acknowledgement"))
 	}
 	_ = lane.outer.SetDeadline(time.Time{})
-	return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind, reserveControl: lane.reserveControl}, nil
+	return &openedFlow{
+		fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID,
+		laneID: lane.laneID, kind: lane.kind, reserveControl: lane.reserveControl,
+		helloPending: lane.helloPending, onHelloOK: lane.onHelloOK,
+	}, nil
 }
 
 func resetCode(payload []byte) session.ResetCode {
@@ -760,6 +789,12 @@ func (c *Client) dialJoinLane(ctx context.Context, kind TransportKind, sessionID
 func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind) (*authenticatedLane, error) {
 	// Under optimistic open the initial control stream pipelines HELLO with
 	// OPEN, so the pooled bootstrap must not block on HELLO_OK either.
+	// Pipelining is a separate decision from opening optimistically, and the
+	// open path now consumes a pipelined acknowledgement itself, so either can
+	// be had without the other. It stays tied to OptimisticOpen here because
+	// pipelining sends the open before the server's capabilities are known,
+	// and the first flow on a cold connection would forfeit its control-lane
+	// reservation.
 	return c.dialLaneMode(ctx, kind, sessionID, laneID, helloKind, c.cfg.EnableQUICPool, c.cfg.OptimisticOpen)
 }
 

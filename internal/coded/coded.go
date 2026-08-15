@@ -498,7 +498,6 @@ func (p *Path) params() fec.Params {
 		ShardBytes:      p.shardBytes(),
 		RateBytesPerSec: p.rate(),
 		RoundTrip:       p.cfg.RoundTrip,
-		InterleaveDepth: 1,
 		TargetResidual:  p.cfg.TargetResidual,
 	}
 }

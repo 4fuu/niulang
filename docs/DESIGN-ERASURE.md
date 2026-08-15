@@ -171,6 +171,72 @@ probe shows a per-4-tuple limiter, which is what the open-loop split test is
 for. And the erasure compensation, if lanes are ever used together, has to be
 shared across them rather than applied per lane.
 
+## The coded path
+
+`internal/coded` carries frames over the connection's datagrams, coded against
+erasure. It does **not** make delivery reliable, and that is the point: the
+session above already sequences by byte offset, acknowledges with ranges,
+retains what is unacknowledged and re-issues it. A block either repairs or it
+does not, and what it does not the session re-issues.
+
+The first version was a reliable transport of its own -- block
+acknowledgements, a retransmission timer, flow control, in-order delivery --
+and it carried 1.2 Mbit/s where the path carried 14.5, because its feedback
+was a timer where QUIC's is an arrival and its delivery was in-order where the
+session above already tolerates gaps. Removing all of it took the package from
+1028 lines to 593 and made it faster.
+
+Blocks are sealed when the send queue drains. That is not a policy: under load
+there is always another frame, so blocks fill and the code is efficient, and
+when the producer stops the block goes at once. Neither a size nor a delay is
+chosen, so neither has to be re-chosen when the path or the traffic changes --
+and a fixed delay is worse than either, because on a request-response protocol
+every delay lands on the critical path of the next request and they compound.
+
+Measured: 400 of 400 frames across a 43% erasure channel, at a (20,54) code.
+
+## The control and data split
+
+A lane is a QUIC **stream for control** and that connection's **datagrams for
+bulk**, and the framing routes by frame type. Both, on one connection, always.
+
+The split is what makes coding usable. A stream delivers in order, so at 42%
+erasure every gap stalls everything behind it -- 1.372 s median against a
+coded path's 153 ms on 256-byte messages. But the session's acknowledgements
+must not be coded, because they are what releases the data whose blocks they
+would then be queued behind: with everything on one coded substrate the same
+channel carried 0.87 Mbit/s one way and 0.008 with acknowledgements coming
+back the other.
+
+Nothing is configured. The coded path reports whether it is *coding*, from the
+measured floor, and bulk stays on the stream when it is not -- which on a clean
+path is exactly the old behaviour. That is what lets one build serve a clean
+path and an erasure channel without being told which it is on.
+
+The bulk path belongs to the connection, not the stream: per-stream paths put
+several receive loops on one connection competing for its datagrams, and left
+some pooled streams coded and some not, which loses every frame a coding sender
+sends to a receiver with no bulk reader.
+
+## Timeouts belong to the exchange they bound
+
+Three bugs, one shape: a constant sized for whichever path it was chosen on.
+
+`handleLocal` set one deadline on the local SOCKS connection covering both the
+application's request -- a loopback read that owes nothing to the network --
+and the remote flow open, which takes as long as the path does. Across the
+measured channel the open took eleven seconds, the deadline expired, and the
+client closed the application's connection *after both ends had opened the flow
+successfully*. The application saw EOF from a flow that was working. The local
+exchange is now bounded locally and the flow open by its own machinery.
+
+Every handshake deadline was a wall-clock constant. At 42% erasure one exchange
+in a hundred needs seven transmissions, so five seconds expires mid-handshake
+and the peer's stream is closed under a working flow. A handshake now gets a
+number of round trips, scaled from the measured round trip and never shorter
+than what was configured. The server also logs when it gives up: its silence is
+why this took so long to find.
+
 ## The coded lane, and why it was slow
 
 `--coded-lanes` carries a flow's frames over QUIC datagrams instead of a QUIC

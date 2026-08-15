@@ -34,12 +34,6 @@ type Params struct {
 	// length: a block that takes longer to send than a retransmission takes to
 	// arrive has given up the only thing coding was for.
 	RoundTrip time.Duration
-	// InterleaveDepth is the number of blocks the sender spreads its shards
-	// across. A burst of consecutive packet losses is divided among that many
-	// blocks, so depth is what converts correlated loss back into the
-	// independent loss a block code is efficient against. One means no
-	// interleaving.
-	InterleaveDepth int
 	// TargetResidual is the acceptable probability that a block arrives
 	// unrepairable and has to be retransmitted. It should not be zero: driving
 	// it down costs parity geometrically, and the residual is exactly what
@@ -224,17 +218,18 @@ func (p Params) blockShards() int {
 	return n
 }
 
-// effectiveBurst is the mean loss burst as the block sees it, after
-// interleaving has divided each burst among the blocks in flight.
+// effectiveBurst is the mean loss burst as the block sees it.
+//
+// Correlation is answered by lowering the code rate, not by spreading a
+// block's shards across others. Interleaving is the alternative answer, and it
+// trades latency for rate: a block is not complete until every block it was
+// interleaved with has been sent, which gives back exactly what coding was
+// bought for. Nothing measured on this path asks for that trade -- below the
+// knee the channel is memoryless, so there is no correlation to undo, and
+// above it the right response is to send less rather than to code harder.
 func (p Params) effectiveBurst(s lossmodel.Snapshot) float64 {
 	burst := s.BurstFactor
 	if burst < 1 || math.IsNaN(burst) {
-		burst = 1
-	}
-	if p.InterleaveDepth > 1 {
-		burst /= float64(p.InterleaveDepth)
-	}
-	if burst < 1 {
 		burst = 1
 	}
 	return burst

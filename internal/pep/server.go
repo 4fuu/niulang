@@ -171,7 +171,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, errors.New("maximum lane count must not exceed 8")
 	}
 	if cfg.Congestion == "" {
-		cfg.Congestion = CongestionReno
+		cfg.Congestion = defaultCongestion()
 	}
 	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
 		return nil, fmt.Errorf("unsupported QUIC congestion controller %q", cfg.Congestion)

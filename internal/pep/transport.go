@@ -36,13 +36,14 @@ const (
 	maxConfiguredSessions         = 1 << 16
 )
 
-// CongestionControlKind selects the QUIC sender. Reno leaves the apNet
-// quic-go default untouched and is the safe control. BBR is the original
-// wanopt controller. BBRTUIC is a faithful Go port of TUIC's
-// quinn-congestions BBR model and remains opt-in until matched path campaigns
-// establish that it is an improvement. Adaptive is a conservative
-// rate-estimating controller for unknown paths. Brutal is a fixed-rate mode
-// for controlled experiments where the operator knows the per-lane budget.
+// CongestionControlKind selects the QUIC sender.
+//
+// Erasure is the default and the only one that should normally be chosen. Reno
+// leaves the apNet quic-go default untouched and is the safe control. BBR is
+// the original wanopt controller. BBRTUIC is a faithful Go port of TUIC's
+// quinn-congestions BBR model. Adaptive is a conservative rate-estimating
+// controller for unknown paths. Brutal is a fixed-rate mode for controlled
+// experiments where the operator knows the per-lane budget.
 type CongestionControlKind string
 
 const (
@@ -57,6 +58,11 @@ const (
 	// floor it measures is zero and the correction it applies is one.
 	CongestionErasure CongestionControlKind = "erasure"
 )
+
+// defaultCongestion is the controller used when none is configured. It is a
+// function rather than a constant so the choice has one home and a test can
+// name it.
+func defaultCongestion() CongestionControlKind { return CongestionErasure }
 
 type congestionConfig struct {
 	kind                   CongestionControlKind
@@ -196,6 +202,7 @@ func (c *quicStreamConn) transportStats() laneTransportStats {
 
 func (c *quicStreamConn) Read(p []byte) (int, error)  { return c.stream.Read(p) }
 func (c *quicStreamConn) Write(p []byte) (int, error) { return c.stream.Write(p) }
+
 func (c *quicStreamConn) SetDeadline(t time.Time) error {
 	return c.stream.SetDeadline(t)
 }

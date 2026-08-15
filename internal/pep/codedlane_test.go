@@ -47,10 +47,6 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
 		Metrics: metrics.New(), HandshakeTimeout: 5 * time.Second,
-		// The server sends the download, so its controller is the one that
-		// decides whether the path is reachable at all: on a 42% erasure
-		// channel a loss-responsive sender collapses to a tenth of a megabit.
-		Congestion: CongestionErasure,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +71,6 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 		Secret: secret, RootCAs: roots, Transport: TransportQUIC,
 		EnableQUICPool: pooled,
 		InitialLanes:   1, MaxLanes: 1, Logger: logger, Metrics: metrics.New(),
-		Congestion: CongestionErasure,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -158,18 +153,26 @@ func TestACodedLaneCarriesAFlowAcrossAnErasureChannel(t *testing.T) {
 		LossRate:            0.42,
 		Seed:                17,
 	}
-	// The pooled path establishes a flow across this channel about a quarter
-	// of the time, and does so with or without the coded substrate -- measured
-	// 0 of 4 with no coded path at all, 1 of 4 with one. The client completes
-	// HELLO and HELLO_OK, writes its OPEN, and the server's read of it times
-	// out; on the runs that pass, the same OPEN arrives in about a second.
-	// Something in the pooled path drops or delays that one frame under loss.
+	// The pooled path needs a second round trip for its flow open, because a
+	// cold connection must learn the server's capabilities before it can ask
+	// for a control lane. Across this channel that second exchange fails about
+	// three times in four.
 	//
-	// It is not the split, and it is not the code: the unpooled path below
-	// carries the same flow across the same channel, and the coded path itself
-	// carries 400 of 400 frames across a 43% erasure channel in
-	// coded.TestFramesCrossTheMeasuredChannel.
-	t.Skip("pooled flow establishment is unreliable across a 42% erasure channel; see comment")
+	// What it is not: not the split and not the code (0 of 4 with no coded
+	// substrate, 1 of 4 with one), not the congestion controller (fails on the
+	// stock one too), not QUIC losing a lone small write (an isolated 61-byte
+	// write on an idle stream across this same channel arrived in 555 ms, five
+	// times out of five), and not a sick connection -- at the moment of
+	// failure the client had sent 14 KB, received 8 KB, lost one packet, and
+	// had a 307 ms smoothed round trip.
+	//
+	// Pipelining the hello with the open removes the second exchange and the
+	// failure with it, 4 of 4. It is not enabled here because it sends the
+	// open before the server's capabilities are known, so the first flow on a
+	// cold connection forfeits its control-lane reservation. Remembering a
+	// peer's capabilities across connections would give both, and is the
+	// direction rather than the flag.
+	t.Skip("pooled flow open needs a second round trip that this channel loses; see comment")
 	socks, destination := codedPair(t, true, &path)
 	conn := socksDial(t, socks, destination, 120*time.Second)
 	defer conn.Close()
@@ -227,5 +230,20 @@ func TestOneBuildServesACleanPathAndAnErasureChannel(t *testing.T) {
 			t.Logf("%s: %d bytes echoed in %v", test.name, len(payload),
 				time.Since(start).Round(time.Millisecond))
 		})
+	}
+}
+
+// The default controller decides whether the target path is reachable at all,
+// so it is not a matter of taste.
+//
+// Measured live on the China-US link, one lane, three interleaved rounds:
+// reno 0.11, 0.10, 0.08 Mbit/s against erasure's 10.31, 11.63, 10.90 -- a
+// factor of a hundred, and erasure was the only one that never collapsed. On a
+// clean path the erasure controller reduces to BBR, because the floor it
+// measures is zero and the correction it applies is one, so defaulting to it
+// costs nothing where it is not needed.
+func TestTheDefaultControllerIsTheOneThatReachesThePath(t *testing.T) {
+	if got := defaultCongestion(); got != CongestionErasure {
+		t.Fatalf("default congestion controller is %q, want %q", got, CongestionErasure)
 	}
 }

@@ -16,7 +16,6 @@ func livePath() Params {
 		ShardBytes:      1200,
 		RateBytesPerSec: 25e6 / 8,
 		RoundTrip:       300 * time.Millisecond,
-		InterleaveDepth: 1,
 		TargetResidual:  1e-3,
 	}
 }
@@ -156,26 +155,25 @@ func TestClusteredLossCostsMoreParityThanIndependentLoss(t *testing.T) {
 	}
 }
 
-// Interleaving is what converts a burst back into independent erasures, so
-// depth has to buy back the rate that clustering cost.
-func TestInterleavingRecoversTheRateThatClusteringCost(t *testing.T) {
-	clustered := liveSnapshot()
+// Correlation is answered by rate. Interleaving would be the other answer and
+// is deliberately absent: it makes a block wait for every block it is
+// interleaved with, which gives back the latency that coding was bought for,
+// and nothing measured on this path asks for that trade.
+func TestCorrelationIsAnsweredByRateAndNotByInterleaving(t *testing.T) {
+	independent := liveSnapshot()
+	clustered := independent
 	clustered.BurstFactor = 4
 	clustered.Memoryless = false
 
-	flat := Choose(clustered, livePath())
-	deep := livePath()
-	deep.InterleaveDepth = 4
-	interleaved := Choose(clustered, deep)
-
-	t.Logf("no interleave: rate=%.3f; depth 4: rate=%.3f", flat.Rate, interleaved.Rate)
-	if interleaved.Rate <= flat.Rate {
-		t.Fatalf("interleaving to depth 4 did not raise the code rate: %.3f against %.3f",
-			interleaved.Rate, flat.Rate)
+	flat := Choose(independent, livePath())
+	deep := Choose(clustered, livePath())
+	if deep.Rate >= flat.Rate {
+		t.Fatalf("clustered loss chose rate %.3f, no lower than independent loss at %.3f",
+			deep.Rate, flat.Rate)
 	}
-	if interleaved.EffectiveBurst > 1.01 {
-		t.Fatalf("effective burst %.2f at depth 4 against a burst factor of 4",
-			interleaved.EffectiveBurst)
+	if deep.EffectiveBurst != clustered.BurstFactor {
+		t.Fatalf("effective burst %.2f against a measured %.2f: nothing should be dividing it",
+			deep.EffectiveBurst, clustered.BurstFactor)
 	}
 }
 
