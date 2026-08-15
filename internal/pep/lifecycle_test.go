@@ -90,9 +90,14 @@ func TestFlowLifecycleDoesNotLeakGoroutines(t *testing.T) {
 		runEchoFlow(t, clientListener.Addr().String(), destinationListener.Addr().String())
 	}
 
-	// Allow a generous constant for scheduler and transport bookkeeping that
-	// legitimately varies; a per-flow leak would exceed it many times over.
-	const slack = 12
+	// Allow a generous constant for bookkeeping that legitimately varies, and
+	// for what a connection costs once rather than per flow: its coded path
+	// runs a send loop, a receive loop, a demultiplexer and a watcher that
+	// closes them with the connection. These flows share one pooled
+	// connection, so that is a constant here -- and a per-flow leak, which is
+	// what this guards, would exceed the whole allowance many times over
+	// rather than sitting just inside it.
+	const slack = 24
 	if got := countGoroutines(t, baseline+slack); got > baseline+slack {
 		t.Fatalf("goroutines grew from %d to %d over %d flows, which is more than "+
 			"bookkeeping variance:\n%s", baseline, got, flows, goroutineDump())
