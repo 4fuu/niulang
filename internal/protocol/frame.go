@@ -9,9 +9,23 @@ import (
 )
 
 const (
-	Magic0            = byte('W')
-	Magic1            = byte('O')
-	Version           = byte(2)
+	Magic0 = byte('W')
+	Magic1 = byte('O')
+	// Version is the framing this build speaks, and the only thing that stops
+	// two builds that disagree from appearing to work.
+	//
+	// It covers more than this header. Version 3 is version 2's frames carried
+	// over a sliding-window code rather than a block code, and the change is
+	// invisible here -- the frames are identical, and only the datagrams
+	// underneath them differ. A version 3 sender against a version 2 receiver
+	// would therefore complete its handshake, send bulk over datagrams the peer
+	// parses as shards, and have every frame silently dropped as unparseable
+	// while the session re-issued them forever.
+	//
+	// So anything that changes what is on the wire, at any layer this protocol
+	// carries, changes this. A mismatch then fails on the first frame, which is
+	// a diagnosable failure rather than a stalled flow.
+	Version           = byte(3)
 	HeaderSize        = 46
 	DefaultMaxPayload = 1 << 20
 	// FlagFin marks that the sender has reached EOF for the direction carried

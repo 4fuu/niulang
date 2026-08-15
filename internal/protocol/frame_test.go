@@ -189,3 +189,27 @@ func TestAckRangesFlagIsRejectedOnOtherFrameTypes(t *testing.T) {
 		t.Fatalf("the range flag was rejected on an acknowledgement: %v", err)
 	}
 }
+
+// A peer speaking a different version must be refused at the first frame.
+//
+// This is the whole value of the version byte: two builds whose framing agrees
+// but whose lower layers do not would otherwise handshake, exchange control
+// frames successfully, and lose all their bulk data to a substrate that parses
+// it as something else. That failure is invisible from either end -- the
+// session simply re-issues forever -- where this one names itself.
+func TestAPeerOfAnotherVersionIsRefused(t *testing.T) {
+	var raw [HeaderSize]byte
+	header := Header{Version: Version, Type: TypeData, Class: ClassBulk}
+	if err := header.Encode(raw[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err != nil {
+		t.Fatalf("this build refused its own framing: %v", err)
+	}
+	for _, other := range []byte{Version - 1, Version + 1} {
+		raw[2] = other
+		if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err == nil {
+			t.Fatalf("a frame of version %d was accepted by version %d", other, Version)
+		}
+	}
+}
