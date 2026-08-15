@@ -613,11 +613,93 @@ now keeps the peak it has measured and restores it when its pipe refills; if
 the path really has narrowed, the filter's own ten-round window disproves it.
 Re-measured on the case that produced it: 10.3 s, 13.9 s, 9.8 s against 25.0.
 
+## What a short flow costs, and what it was costing
+
+A browser opens a connection, asks for something small, and closes it. Every
+such flow is new, so nothing about it is warm except the connection
+underneath, and there is never any data behind its packets to prove one lost.
+This is the case the whole transport is for, and it was costing a timer.
+
+Measured across the emulated 300 ms path, every short flow cost 1.055 s. With
+the erasure switched off entirely it still cost 1.055 s -- and a fixed cost on
+a lossless path is not loss. It was a race. A flow opens without waiting for
+the peer to acknowledge it, which is what makes opening one cost nothing, and
+that means its first data frame can overtake the open that names it. The
+demultiplexer dropped such a frame as "a frame for a flow nobody has claimed",
+which reads like an unreliable substrate doing its job and was a race lost by
+a few hundred microseconds. Recovery then fell to the reissue timer.
+
+The connection now holds a frame for a flow it has not heard of yet and
+delivers it when the flow claims its share, bounded at 256 frames, a megabyte
+and two seconds so that a peer naming flows that never arrive cannot cost
+memory.
+
+| | before | after |
+|---|---|---|
+| emulated, 45% erasure | median 2.27 s, max 10.9 s | median 305 ms |
+| live | median 0.29 s, a quarter above 1 s | 22 of 24 between 0.21 and 0.26 s |
+
+Two further things were found on the way there. The reissue delay is now the
+path's rather than a constant: it governs only the case where nothing follows
+a chunk to prove it lost, and a second and a half was six round trips here. And
+a coded path with no measurement of the direction it sends into borrows what it
+measures of the direction it receives from -- a client that asks small
+questions never sends enough to measure itself, and assuming the path is clean
+is a worse assumption than assuming it resembles itself. The prewarm now also
+runs at startup rather than only when the uplink changes, for the same reason.
+
+## The sender is clocked by the receiver, so the receiver has to speak
+
+A chunk completes when its bytes are acknowledged, a lane's admission frees
+when its chunks complete, and nothing is issued until it does. The receiver,
+though, only spoke when its contiguous point advanced -- so the one arrival
+that proves a hole exists, a segment landing above it, was the one arrival it
+said nothing about.
+
+A single unrepaired chunk therefore stopped the sender dead. Traced live on a
+10 MB download: no acknowledgement scheduled at all for the first five
+seconds, the lane sitting with a full write-ahead window and an empty pipe,
+8.5 MB of a 10 MB file held before anything was released, and the application
+seeing delivery in lumps -- nothing for 1.6 s, then 3.3 MB at once.
+
+The receiver now publishes its ranges and asks for an acknowledgement on any
+arrival that leaves a hole. The sender acts on that evidence rather than a
+timer: data acknowledged beyond a chunk is proof the chunk did not arrive, the
+same inference a fast retransmit makes, at the layer where an unrepairable
+coded symbol actually goes missing. After: acknowledgements throughout, and 28
+Mbit/s held on the wire for the whole body of a transfer.
+
+## What one flow gets, and what eight get
+
+| | rate |
+|---|---|
+| one 10 MB transfer | 9.5-10 Mbit/s |
+| eight at once | 12.1 Mbit/s aggregate, within 1% of each other |
+| what the path delivers at 24 Mbit/s offered | 13.3 |
+
+Eight flows reach the path's ceiling and share it evenly; one does not. The
+difference is the tail: after the last chunk is issued, a transfer spends two
+to three seconds with the wire rate decaying while the transport waits out
+probe timeouts on the last losses, and with eight flows the others fill the
+pipe meanwhile. Widening the per-lane write-ahead window from 512 KB to 2 MB
+made no difference (8.19 s against 8.14 s over six paired transfers), so it is
+not a commitment bound.
+
+Probing the tail directly was tried and did not survive its own measurement: a
+tail probe re-offering the oldest outstanding chunks each round trip, and
+switching the tail to the coded path, together moved the tail from a mean of
+3.56 s to 3.16 s with the medians crossing the other way. On a path this noisy
+that is not a result, and a mechanism that spends bandwidth needs one, so it
+was removed rather than kept.
+
 ## What is not done
 
-**The drain at the end of a transfer.** The ramp is answered above; the other
-end is not. Traced live, the last second of a transfer has chunks ready and an
-empty pipe, and what it is waiting for has not been established.
+**The tail of a single bulk transfer.** It is understood -- the transport is
+waiting out probe timeouts on the last losses with nothing left to send -- and
+the obvious answer, probing it, did not measure better. What would is keeping
+the pipe full with something useful, which on a reliable stream means parity
+the stream cannot carry. It costs a single flow about a fifth of the path;
+concurrent flows do not pay it.
 
 Interleaving across blocks is now moot: the window interleaves continuously by
 construction, and `Params.InterleaveDepth` has no separate meaning for it.
