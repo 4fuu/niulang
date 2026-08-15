@@ -8,6 +8,7 @@ import (
 	"github.com/apernet/quic-go/monotime"
 
 	"github.com/icourses-dev/wanopt/internal/lossmodel"
+	"github.com/icourses-dev/wanopt/internal/pathmodel"
 )
 
 // ErasureSender is BBR on a path that erases packets for reasons that have
@@ -74,7 +75,7 @@ type ErasureSender struct {
 	// path is shared with every other lane to the same endpoint pair, or nil
 	// for a lane that is on its own. share is this lane's allowance of the
 	// endpoint's bottleneck in bytes per second, zero while it is unknown.
-	path  *PathModel
+	path  *pathmodel.PathModel
 	share atomic.Uint64
 }
 
@@ -105,7 +106,7 @@ func NewErasureSender(initialPacketSize quiccongestion.ByteCount) *ErasureSender
 // measures the erasure floor from only its own packets, and each discovers the
 // bottleneck from only its own delivered rate, so the aggregate overshoots by
 // however many lanes there are and the path's loss stops being memoryless.
-func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *PathModel) *ErasureSender {
+func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmodel.PathModel) *ErasureSender {
 	e := newErasureSender(initialPacketSize)
 	e.path = path
 	if path != nil {
@@ -215,7 +216,7 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	if e.path != nil {
 		// Pool with the other lanes: the floor converges on all their samples
 		// together, and the share is what stops their probes compounding.
-		pooled, share := e.path.Report(laneKey(uintptr(e.id())), floor, snapshot.Samples, float64(e.inner.bandwidth()))
+		pooled, share := e.path.Report(pathmodel.Member(e.id()), floor, snapshot.Samples, float64(e.inner.bandwidth()))
 		floor = pooled
 		e.share.Store(uint64(share))
 	}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/apernet/quic-go"
 	wancongestion "github.com/icourses-dev/wanopt/internal/congestion"
+	"github.com/icourses-dev/wanopt/internal/pathmodel"
 )
 
 type TransportKind string
@@ -483,7 +484,7 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestio
 		// overshot by however many lanes there were. Live, four lanes
 		// delivered about 8 Mbit/s where one delivered 11.
 		controller := wancongestion.NewErasureSenderOn(
-			conn.InitialPacketSize(), wancongestion.SharedPath(peerKey(conn)))
+			conn.InitialPacketSize(), pathmodel.Shared(peerKey(conn)))
 		conn.SetCongestionControl(controller)
 		return controller
 	case CongestionBrutal:

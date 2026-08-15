@@ -1,4 +1,4 @@
-package congestion
+package pathmodel
 
 import (
 	"math"
@@ -40,8 +40,8 @@ func TestTheShareDividesTheBottleneck(t *testing.T) {
 	m.Report(3, 0.42, 5000, perLane)
 	_, share := m.Report(4, 0.42, 5000, perLane)
 
-	if m.Lanes() != 4 {
-		t.Fatalf("model counts %d lanes, want 4", m.Lanes())
+	if m.Members() != 4 {
+		t.Fatalf("model counts %d lanes, want 4", m.Members())
 	}
 	// The aggregate is 4 MB/s, so each lane's share is 1 MB/s.
 	if math.Abs(share-perLane) > perLane*0.05 {
@@ -69,17 +69,17 @@ func TestAnIdleLaneStopsCounting(t *testing.T) {
 	m := NewPathModel()
 	m.Report(1, 0.42, 5000, 1e6)
 	m.Report(2, 0.42, 5000, 1e6)
-	if m.Lanes() != 2 {
-		t.Fatalf("lanes = %d, want 2", m.Lanes())
+	if m.Members() != 2 {
+		t.Fatalf("members = %d, want 2", m.Members())
 	}
 
 	m.mu.Lock()
-	m.lanes[1].at = time.Now().Add(-2 * laneIdle)
+	m.members[1].at = time.Now().Add(-2 * memberIdle)
 	m.mu.Unlock()
 
 	_, share := m.Report(2, 0.42, 5000, 1e6)
-	if m.Lanes() != 1 {
-		t.Fatalf("lanes = %d after one went idle, want 1", m.Lanes())
+	if m.Members() != 1 {
+		t.Fatalf("members = %d after one went idle, want 1", m.Members())
 	}
 	// The remaining lane now has the whole bottleneck rather than half.
 	if share < 1.5e6 {
@@ -90,11 +90,11 @@ func TestAnIdleLaneStopsCounting(t *testing.T) {
 // Lanes to the same peer share; lanes to different peers must not, or one
 // path's bottleneck would cap the other's.
 func TestSharedPathIsPerPeer(t *testing.T) {
-	a, b := SharedPath("peer-a"), SharedPath("peer-b")
+	a, b := Shared("peer-a"), Shared("peer-b")
 	if a == b {
 		t.Fatal("different peers were given the same model")
 	}
-	if again := SharedPath("peer-a"); again != a {
+	if again := Shared("peer-a"); again != a {
 		t.Fatal("the same peer was given two models")
 	}
 }
@@ -107,35 +107,5 @@ func TestASingleSharedLaneIsNotPenalised(t *testing.T) {
 	_, share := m.Report(1, 0.42, 5000, rate)
 	if share < rate*0.95 {
 		t.Fatalf("a lone lane was capped at %.0f of its own %.0f", share, rate)
-	}
-}
-
-// A lane joining a measured path must start where its siblings are, not at the
-// initial window. On this channel the ramp is the expensive part, and a lane
-// opened to replace one that died would otherwise repeat it every time.
-func TestAJoiningLaneStartsFromWhatIsAlreadyKnown(t *testing.T) {
-	m := NewPathModel()
-	const perLane = 2e6
-	m.Report(1, 0.42, 5000, perLane)
-	m.Report(2, 0.42, 5000, perLane)
-
-	floor, share := m.Current()
-	if math.Abs(floor-0.42) > 0.01 {
-		t.Fatalf("a joining lane is offered floor %.3f, want the measured 0.42", floor)
-	}
-	// Two lanes hold 4 MB/s between them; a third joining makes three shares.
-	if want := 4 * perLane / 2 / 3; math.Abs(share-want) > want*0.1 {
-		t.Fatalf("joining share %.0f, want about %.0f", share, want)
-	}
-
-	seeded := NewErasureSenderOn(1200, m)
-	if seeded.Share() <= 0 {
-		t.Fatal("a lane joining a measured path was given no share")
-	}
-	// And its pacer starts at that share rather than at the initial window.
-	fresh := NewErasureSender(1200)
-	if seeded.bandwidth() <= fresh.bandwidth() {
-		t.Fatalf("seeded lane starts at %d, no better than an unseeded %d",
-			seeded.bandwidth(), fresh.bandwidth())
 	}
 }

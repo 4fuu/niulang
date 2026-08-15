@@ -6,6 +6,7 @@ import (
 	quiccongestion "github.com/apernet/quic-go/congestion"
 
 	"github.com/icourses-dev/wanopt/internal/lossmodel"
+	"github.com/icourses-dev/wanopt/internal/pathmodel"
 )
 
 func losses(n int) []quiccongestion.LostPacketInfo {
@@ -126,5 +127,27 @@ func TestTheCongestionWindowIsCompensated(t *testing.T) {
 	}
 	if e.CanSend(outer) {
 		t.Fatal("a sender at the compensated window's limit should be blocked")
+	}
+}
+
+// A controller joining a path something else has already measured must start
+// from what is known rather than at the initial window. On a channel that
+// erases 40% of packets the ramp is the expensive part, and a lane opened to
+// replace one that died would otherwise repeat it on a path nothing has
+// forgotten.
+func TestAJoiningSenderStartsFromWhatIsAlreadyKnown(t *testing.T) {
+	model := pathmodel.NewPathModel()
+	const perMember = 2e6
+	model.Report(1, 0.42, 5000, perMember)
+	model.Report(2, 0.42, 5000, perMember)
+
+	seeded := NewErasureSenderOn(1200, model)
+	if seeded.Share() <= 0 {
+		t.Fatal("a sender joining a measured path was given no share")
+	}
+	fresh := NewErasureSender(1200)
+	if seeded.bandwidth() <= fresh.bandwidth() {
+		t.Fatalf("seeded sender starts at %d, no better than an unseeded %d",
+			seeded.bandwidth(), fresh.bandwidth())
 	}
 }

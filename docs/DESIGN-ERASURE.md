@@ -171,23 +171,44 @@ probe shows a per-4-tuple limiter, which is what the open-loop split test is
 for. And the erasure compensation, if lanes are ever used together, has to be
 shared across them rather than applied per lane.
 
-## The coded lane
+## The coded lane, and why it was slow
 
 `--coded-lanes` carries a flow's frames over QUIC datagrams instead of a QUIC
 stream. A connection carries one coded lane rather than a pool, because the
-lane owns the datagrams. What a connection is carrying is decided by racing its
+lane owns the datagrams. What a connection carries is decided by racing its
 first stream against its first datagram, so one server serves both kinds
 without being told and a mismatch fails instead of hanging.
 
-It is correct: a flow crosses a 42% erasure channel intact. It is also, inside
-the PEP, slow — 48 KiB echoed across the emulated channel takes about 84
-seconds, where the coded channel on its own carries 1 MiB in five. The
-difference is that the layer above writes a frame and waits for the answer, so
-every frame is sealed into its own block, and blocks that small are numerous
-enough that most fall past the receiver's report and wait on the
-retransmission timer. Coalescing writes for two milliseconds before sealing was
-tried and made it worse, so the cause is not only block size. It stays off by
-default until that is understood.
+It was correct from the start and slow for three reasons, none of them a
+tuning error. 48 KiB echoed across the emulated erasure channel took 84
+seconds; it now takes 35, and the remaining gap has a known cause rather than
+a suspicion.
+
+**Sealing on the wrong signal.** The layer above writes a frame and waits for
+the answer, so waiting for a block to fill deadlocks the handshake, and sealing
+per write puts one frame in each block. Sealing after a fixed delay is worse
+still: on a request-response protocol every delay lands on the critical path of
+the next request and they compound, which is why two milliseconds measured
+worse than none. The signal that fits is neither size nor time but whether
+anything else is waiting. A lane queues its frames and seals when the queue
+drains: under load there is always another frame, so blocks fill and the code
+is efficient; when the producer stops, the block seals at once. Nothing is
+chosen, so nothing has to be re-chosen when the path or the traffic changes.
+84 s to 51 s.
+
+**Deciding the code rate before knowing the path.** A block's (k,n) was fixed
+when its bytes were buffered, and a sender that runs ahead of its own feedback
+buffers its whole window before the first report arrives — so every block was
+sealed believing the path was clean, and carried no parity at all. The transfer
+then ran entirely on retransmission. Measured directly: starting from a known
+floor rather than from zero is 1.03 against 1.74 Mbit/s. 51 s to 35 s.
+
+**Acknowledgements queued behind the data they gate.** This is the largest and
+is not yet fixed. The session's own ACK frames travel over the same coded lane
+whose progress they release, so each one waits behind a block pipeline that is
+waiting for it. Measured: the same channel carries 0.87 Mbit/s one-way and
+0.008 Mbit/s when the reverse direction has to carry acknowledgements — a
+factor of a hundred.
 
 Two defects it exposed are worth recording because neither was visible from
 either side alone. The datagram limit is not a constant to guess: a connection
@@ -200,9 +221,50 @@ the accept path the way a stream pool can: that ordering is deliberate for a
 pool, whose loop only ends once the connection is already gone, but it tore
 down a coded session as it was authenticating.
 
+## One path, measured once
+
+`internal/pathmodel` holds what an endpoint pair has been measured to do:
+the erasure floor, the bottleneck, and each contributor's share of it.
+
+Everything that adapts to this path needs the same numbers, and each component
+used to estimate them alone. The congestion controller measured the floor from
+the packets it sent; the erasure code measured it again from the shards it
+received; a second lane measured it a third time from scratch. Three estimates
+of one quantity, each wrong until it converged, and each converging only on its
+own traffic.
+
+The cost is not duplication but the initial value. An estimate that starts at
+zero says the path is clean, and everything sized by it is sized for a clean
+path — which is exactly the fault above, and the reason four lanes used to
+overshoot a bottleneck none of them had finished measuring.
+
+So the path is measured once and read by everyone. The congestion controller
+contributes what its own acknowledgements reveal, which is the erasure rate of
+the direction it sends into; that is precisely the number the erasure code
+needs and would otherwise wait a round trip to be told.
+
 ## What is not done
 
-The coded lane's throughput inside the PEP, above.
+**Separating the control plane from the coded data plane.** This is the
+hundred-fold fault above and the next thing to build. A lane should be a QUIC
+connection carrying both a stream and datagrams: control, handshake and
+acknowledgement frames on the stream, where they are immediate, reliable and
+uncoded; bulk data on datagrams, where the code can see the erasures. Today a
+lane is one or the other, so acknowledgements queue behind the blocks they
+release. The pieces already exist — the protocol reserves a control lane, and
+the connection already carries both — so this is a re-wiring rather than a new
+mechanism.
+
+**Emitting parity continuously rather than per block.** Fixing (k,n) when a
+block is sealed means a sender must know the path before it commits data. The
+shared path model makes the first guess a good one, but the structural answer
+is a sliding-window code: keep the data symbols, and emit repair symbols on a
+continuous schedule sized by the floor as it is currently measured. Then
+redundancy always reflects what is known now, and running ahead of feedback
+costs nothing.
+
+**Live measurement of the coded lane.** Only the controller has been measured
+on the real link.
 
 Interleaving is modelled and sized for (`Params.InterleaveDepth` divides the
 burst factor) but the sender does not yet spread shards across blocks, so

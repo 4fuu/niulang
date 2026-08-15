@@ -20,13 +20,18 @@ import (
 // codedPair brings up a server and a client, optionally with a lossy emulated
 // path between them, and returns the client's SOCKS listener address.
 func codedPair(t *testing.T, coded bool, path *pathsim.Config) (socks string, destination net.Listener) {
+	return codedPairWith(t, coded, path, echoDestination)
+}
+
+// codedPairWith lets a test choose what the destination does with the bytes.
+func codedPairWith(t *testing.T, coded bool, path *pathsim.Config, serve func(net.Listener)) (socks string, destination net.Listener) {
 	t.Helper()
 	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = destinationListener.Close() })
-	go echoDestination(destinationListener)
+	go serve(destinationListener)
 
 	certificate, roots := testCertificate(t)
 	secret := []byte("coded-lane-test-secret-value-32b")
