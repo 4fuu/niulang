@@ -119,6 +119,58 @@ So the code earns its place on interactive and loss-sensitive traffic, and
 costs about 15% of throughput on bulk. That is a per-class decision, not a
 global one, which is why `fec.Class` exists.
 
+## Live validation (2026-08-15)
+
+The emulator is fitted to the path, not the path. Three controllers were run
+against the live link, downloading the same 50 MiB file through the proxy from
+the measurement server, bound to the LAN address so the host TUN route is
+bypassed, interleaved and repeated because the path moves between trials. The
+channel measured at the same time: ~35% memoryless loss below the knee (burst
+factor 1.10), rising to 52% and clustered (1.42) at 30 Mbit/s offered, with
+delivered capacity about 14.5 Mbit/s.
+
+One lane, 20 s per run, Mbit/s:
+
+| round | reno | bbr-tuic | erasure |
+|---|---|---|---|
+| 1 | 0.11 | 1.87 | 10.31 |
+| 2 | 0.10 | 10.27 | 11.63 |
+| 3 | 0.08 | 10.31 | 10.90 |
+
+The erasure controller is the fastest in every round and, more usefully, the
+only consistent one: BBR-TUIC collapsed to 1.87 in the first round and reached
+10 in the others, which is the loss-responsive failure appearing and clearing
+with the path. At about 11 Mbit/s against a 14.5 Mbit/s capacity it takes 75%
+of what the channel can deliver, where Reno takes under 1%.
+
+The emulator therefore had the ordering right and the margin wrong: it
+predicted the erasure controller would beat BBR-TUIC nine-fold, and live the
+gap is nearer 1.5x against BBR-TUIC's good rounds. What the emulator does not
+reproduce is BBR-TUIC's variance.
+
+### Striping costs more than it gains here
+
+The same comparison at four lanes:
+
+| round | bbr-tuic | erasure |
+|---|---|---|
+| 1 | 8.70 | 8.63 |
+| 2 | 7.73 | 7.64 |
+
+Four lanes are worse than one — about 8 Mbit/s against the single lane's 11 —
+and the controller no longer matters, because both land in the same place.
+This is consistent with what the open-loop probe found in
+`docs/PATH-CHARACTER-20260813.md`: the bottleneck is per endpoint pair, not per
+4-tuple, so lanes do not multiply the share. They do multiply the offered rate
+into one policer, which pushes the aggregate past the knee where loss turns
+correlated and wasteful, and each lane's controller applies the erasure
+compensation independently so the overshoot compounds.
+
+Two things follow. On this path the lane count should be one unless a measured
+probe shows a per-4-tuple limiter, which is what the open-loop split test is
+for. And the erasure compensation, if lanes are ever used together, has to be
+shared across them rather than applied per lane.
+
 ## What is not done
 
 The coded channel is a complete transport but is not yet wired into the PEP's
@@ -130,7 +182,9 @@ burst factor) but the sender does not yet spread shards across blocks, so
 depth is 1 in practice. On a path whose above-knee loss clusters, implementing
 it would buy back most of the rate that clustering costs.
 
-Nothing here has been re-measured on the live link since the emulator was
-fitted to it. The emulator reproduces the path on five statistics at four
-rates, which is a much stronger basis than this project had before, but it is
-not the path.
+The erasure compensation is per lane and should be per endpoint pair, which is
+what the four-lane result above shows. Until that is fixed, striping and this
+controller should not be combined.
+
+The coded channel has not been measured on the live link at all -- only the
+controller has. Its latency advantage is emulator evidence so far.
