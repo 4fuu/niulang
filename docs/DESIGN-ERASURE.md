@@ -172,6 +172,29 @@ gathers enough samples for the shared model to conclude the path erases, so it
 is carried uncoded. Seeding a new connection's model from the endpoint pair's
 history, which is what the model is for, is the way in.
 
+### Small transfers, live (2026-08-15)
+
+The 305 ms the emulator gives a small exchange does not reproduce on the live
+link, and that gap is the open question rather than a detail.
+
+Twelve 2.7 KB requests over one established flow, time to first byte, at 37%
+loss and a 300 ms round trip:
+
+| | median | p90 | max |
+|---|---|---|---|
+| erasure | 1.099 s | 1.483 s | 1.740 s |
+| reno | 1.580 s | 2.638 s | 5.660 s |
+
+The coding does what it was built to do at the tail -- p90 1.48 s against 2.64,
+and a worst case of 1.74 s against 5.66 -- which is the long recoveries being
+repaired without a round trip. But the median is about three and a half round
+trips where the emulator gives one, so something costs two round trips live
+that the emulator does not model. That is worth finding before the 305 ms is
+quoted as a property of the system.
+
+Each request over a *new* flow costs 1.341 s against reno's 1.577, so flow
+initiation is not where it goes.
+
 ### Striping costs more than it gains here
 
 The same comparison at four lanes:
