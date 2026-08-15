@@ -371,17 +371,6 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	// supplies one shared congestion controller and packet-loss state. This is
 	// the same multiplexing property that makes TUIC effective for short flows,
 	// without sharing application/session framing state.
-	// What a connection carries is decided once, by racing its first stream
-	// against its first datagram. A coded lane is one connection rather than a
-	// stream in the pool, because the code has to see the erasures and a
-	// stream has already repaired them.
-	first, isCoded, err := acceptCodedOrStream(ctx, conn, controller)
-	if err != nil {
-		if ctx.Err() == nil {
-			s.cfg.Logger.Debug("accept QUIC lane failed", "error", err)
-		}
-		return
-	}
 	dispatch := func(lane streamConn) bool {
 		select {
 		case s.semaphore <- struct{}{}:
@@ -398,26 +387,6 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 			return false
 		}
 	}
-	if isCoded {
-		// A coded lane owns its connection, so there is no pool to keep
-		// accepting from -- and the session is run here rather than handed to
-		// a goroutine, because this function closes the connection on the way
-		// out and closes it before waiting for anything. That ordering is
-		// deliberate for a stream pool, where the loop only ends once the
-		// connection is already gone; for a lane that owns its connection it
-		// would tear the session down as it was still authenticating.
-		select {
-		case s.semaphore <- struct{}{}:
-			defer func() { <-s.semaphore }()
-			s.handleSession(ctx, first, auth)
-		default:
-			_ = first.Close()
-			s.cfg.Logger.Warn("remote session limit reached")
-		}
-		return
-	}
-	dispatch(first)
-
 	for {
 		// Waiting for another stream is not a handshake operation. Applying the
 		// per-stream authentication timeout here used to close the entire QUIC
@@ -445,7 +414,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	sessionStarted := time.Now()
 	authFinished := time.Time{}
 	openFinished := time.Time{}
-	_ = conn.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
+	_ = conn.SetDeadline(time.Now().Add(handshakeBound(conn, s.cfg.HandshakeTimeout)))
 	fc := newFrameConn(conn, s.cfg.MaxPayload)
 	var (
 		hello      session.Hello
@@ -461,6 +430,10 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	if auth != nil && auth.authenticated.Load() {
 		first, readErr := fc.Read()
 		if readErr != nil {
+			// Silence here is how this hid: the stream is closed on the way
+			// out and the peer sees only EOF, with nothing on either side
+			// saying the handshake ran out of time.
+			s.cfg.Logger.Debug("pooled stream handshake failed", "error", readErr)
 			return
 		}
 		if first.Header.Type == protocol.TypeOpenJoinFast {

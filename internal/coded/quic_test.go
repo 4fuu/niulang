@@ -8,9 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"io"
 	"math/big"
-	mathrand "math/rand"
 	"testing"
 	"time"
 
@@ -133,100 +131,7 @@ func quicPairWithout(t *testing.T, cfg pathsim.Config) (client, server *quic.Con
 	return client, server
 }
 
-// The whole design, end to end, on a real QUIC connection across the path this
-// project targets: coded datagrams against the reliable stream the transport
-// uses today, carrying the same bytes over the same connection.
-//
-// The stream is not a straw man. It is exactly what every lane in this
-// repository runs on now, and it has QUIC's own loss recovery, pacing and
-// congestion control behind it.
-func TestCodedDatagramsAgainstAReliableStream(t *testing.T) {
-	if testing.Short() {
-		t.Skip("brings up QUIC across an emulated 300 ms path")
-	}
-	const payloadBytes = 1 << 20
-	payload := make([]byte, payloadBytes)
-	mathrand.New(mathrand.NewSource(31)).Read(payload)
-
-	t.Run("coded datagrams", func(t *testing.T) {
-		client, server := quicPair(t, liveChannel())
-		sendCarrier, err := NewQUICCarrier(client)
-		if err != nil {
-			t.Fatal(err)
-		}
-		recvCarrier, err := NewQUICCarrier(server)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg := Config{
-			ShardBytes:           ShardBytesFor(DefaultDatagramBytes),
-			RoundTrip:            300 * time.Millisecond,
-			MaxOutstandingBlocks: 16,
-		}
-		a := NewChannel(sendCarrier, cfg)
-		b := NewChannel(recvCarrier, cfg)
-		defer a.Close()
-		defer b.Close()
-
-		start := time.Now()
-		got := transfer(t, a, b, payload, 120*time.Second)
-		elapsed := time.Since(start)
-		if len(got) != len(payload) {
-			t.Fatalf("received %d bytes of %d", len(got), len(payload))
-		}
-		for i := range got {
-			if got[i] != payload[i] {
-				t.Fatalf("byte %d differs", i)
-			}
-		}
-		snap, _ := b.Snapshot()
-		_, plan := a.Snapshot()
-		t.Logf("coded: %.2f Mbit/s in %v; measured loss=%.3f floor=%.3f burst=%.2f memoryless=%v; plan (%d,%d) rate=%.3f",
-			float64(payloadBytes)*8/elapsed.Seconds()/1e6, elapsed.Round(time.Millisecond),
-			snap.Loss, snap.Floor, snap.BurstFactor, snap.Memoryless, plan.K, plan.N, plan.Rate)
-	})
-
-	t.Run("reliable stream", func(t *testing.T) {
-		client, server := quicPair(t, liveChannel())
-		done := make(chan int, 1)
-		go func() {
-			stream, err := server.AcceptStream(context.Background())
-			if err != nil {
-				done <- -1
-				return
-			}
-			got, err := io.ReadAll(io.LimitReader(stream, payloadBytes))
-			if err != nil && len(got) < payloadBytes {
-				t.Logf("stream read: %v", err)
-			}
-			done <- len(got)
-		}()
-		stream, err := client.OpenStreamSync(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		start := time.Now()
-		go func() {
-			if _, err := stream.Write(payload); err != nil {
-				t.Logf("stream write: %v", err)
-			}
-		}()
-		select {
-		case n := <-done:
-			elapsed := time.Since(start)
-			if n != payloadBytes {
-				t.Logf("stream delivered %d of %d bytes in %v", n, payloadBytes, elapsed.Round(time.Millisecond))
-				return
-			}
-			t.Logf("stream: %.2f Mbit/s in %v",
-				float64(payloadBytes)*8/elapsed.Seconds()/1e6, elapsed.Round(time.Millisecond))
-		case <-time.After(120 * time.Second):
-			t.Logf("stream did not finish 1 MiB in 120 s across a 42%% erasure channel")
-		}
-	})
-}
-
-// Every datagram this channel sends has to fit what the connection will
+// Every datagram this path sends has to fit what the connection will
 // accept. It is not a tuning question: a datagram over the limit is refused
 // rather than fragmented, so a shard sized against a guess disappears, and a
 // block that loses its full-size shards never completes. Short frames still go
@@ -251,9 +156,9 @@ func TestNoShardExceedsTheCarriersDatagramLimit(t *testing.T) {
 		t.Fatalf("carrier refused a datagram of its own stated limit %d: %v", limit, err)
 	}
 	// And a channel over it must never build a shard larger than that.
-	c := NewChannel(carrier, Config{ShardBytes: ShardBytesFor(DefaultDatagramBytes), RoundTrip: 300 * time.Millisecond})
-	defer c.Close()
-	if got := c.shardBytes() + shardHeader; got > limit {
-		t.Fatalf("channel builds %d-byte datagrams against a carrier limit of %d", got, limit)
+	p := New(carrier, Config{ShardBytes: DefaultDatagramBytes, RoundTrip: 300 * time.Millisecond})
+	defer p.Close()
+	if got := p.shardBytes() + shardHeader; got > limit {
+		t.Fatalf("path builds %d-byte datagrams against a carrier limit of %d", got, limit)
 	}
 }

@@ -152,7 +152,7 @@ func (l *mpLane) sendRate() (float64, time.Duration) {
 	if l.fc == nil {
 		return 0, 0
 	}
-	provider, ok := l.fc.conn.(laneStatsProvider)
+	provider, ok := l.fc.transport().(laneStatsProvider)
 	if !ok {
 		l.rateSampled = now
 		return l.rateBytes, l.rateRTT
@@ -490,7 +490,7 @@ func (f *multipathFlow) localAbortGrace() time.Duration {
 func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 	var observation metrics.QUICObservation
 	for _, lane := range lanes {
-		provider, ok := lane.fc.conn.(laneStatsProvider)
+		provider, ok := lane.fc.transport().(laneStatsProvider)
 		if !ok {
 			continue
 		}
@@ -636,21 +636,52 @@ func (f *multipathFlow) allocateJoinID() (uint64, error) {
 	return 0, errors.New("unable to allocate lane id")
 }
 
+// readLane reads a lane's two substrates into one handler.
+//
+// They are two loops rather than one because they have different semantics,
+// not merely different sources: the control stream is read synchronously so
+// that a caller's read deadline still means something, while the coded
+// substrate has no deadlines and no ordering. Merging them into a single call
+// gave the stream the datagram path's semantics, and a handshake timeout then
+// killed the reader for good.
 func (f *multipathFlow) readLane(lane *mpLane) {
+	go f.readLaneBulk(lane)
 	for {
 		frame, err := lane.fc.Read()
 		if err != nil {
 			f.failLane(lane, fmt.Errorf("lane %d: %w", lane.id, err))
 			return
 		}
-		if frame.Header.Type == protocol.TypeData {
-			lane.recv.Add(uint64(len(frame.Payload)))
-		}
-		select {
-		case f.events <- inboundEvent{lane: lane, frame: frame}:
-		case <-f.ctx.Done():
+		if !f.deliverInbound(lane, frame) {
 			return
 		}
+	}
+}
+
+// readLaneBulk drains the coded substrate. Its failure is not the lane's: the
+// control stream still works, and what the coded path dropped is re-issued by
+// the scheduler like any other unacknowledged chunk.
+func (f *multipathFlow) readLaneBulk(lane *mpLane) {
+	for {
+		frame, err := lane.fc.ReadBulk()
+		if err != nil {
+			return
+		}
+		if !f.deliverInbound(lane, frame) {
+			return
+		}
+	}
+}
+
+func (f *multipathFlow) deliverInbound(lane *mpLane, frame protocol.Frame) bool {
+	if frame.Header.Type == protocol.TypeData {
+		lane.recv.Add(uint64(len(frame.Payload)))
+	}
+	select {
+	case f.events <- inboundEvent{lane: lane, frame: frame}:
+		return true
+	case <-f.ctx.Done():
+		return false
 	}
 }
 

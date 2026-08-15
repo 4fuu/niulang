@@ -247,6 +247,32 @@ func ReadFrame(r io.Reader, maxPayload uint32) (Frame, error) {
 	return Frame{Header: h, Payload: payload}, nil
 }
 
+// ParseFrame decodes one frame that already sits whole in memory.
+//
+// A datagram substrate delivers a frame complete or not at all, so there is
+// nothing to read incrementally and no reader to hold. Requiring one would
+// mean wrapping every arrival in a bytes.Reader for the sake of an interface
+// it does not need.
+//
+// It is an error for the slice to hold anything after the frame: the caller
+// framed it, so a trailing byte means the framing disagrees with the parse.
+func ParseFrame(b []byte, maxPayload uint32) (Frame, error) {
+	if len(b) < HeaderSize {
+		return Frame{}, io.ErrUnexpectedEOF
+	}
+	h, err := DecodeHeader(b[:HeaderSize], maxPayload)
+	if err != nil {
+		return Frame{}, err
+	}
+	rest := b[HeaderSize:]
+	if uint32(len(rest)) != h.PayloadLen {
+		return Frame{}, fmt.Errorf("frame payload is %d bytes, header declares %d", len(rest), h.PayloadLen)
+	}
+	payload := make([]byte, len(rest))
+	copy(payload, rest)
+	return Frame{Header: h, Payload: payload}, nil
+}
+
 // AppendFrame serializes one frame into dst and returns the extended slice.
 //
 // The header and payload must reach the transport in a single write. When they

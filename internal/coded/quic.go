@@ -24,8 +24,8 @@ const DefaultDatagramBytes = 1200
 // first real frame vanished.
 const quicDatagramOverhead = 48
 
-// QUICCarrier runs a coded channel over a QUIC connection's unreliable
-// datagrams (RFC 9221).
+// QUICCarrier runs a coded path over a QUIC connection's unreliable datagrams
+// (RFC 9221).
 //
 // Datagrams rather than streams, because the erasure code has to see the
 // erasures. A QUIC stream is already reliable: it retransmits what this layer
@@ -71,27 +71,6 @@ func NewQUICCarrier(conn *quic.Conn) (*QUICCarrier, error) {
 
 // MaxDatagramBytes is the largest datagram this carrier will accept.
 func (c *QUICCarrier) MaxDatagramBytes() int { return int(c.limit.Load()) }
-
-// ShardBytesFor is the shard payload that fits a datagram of the given size,
-// which is what a Config's ShardBytes should be set to. A shard that does not
-// fit is not sent at all, so the size is computed rather than discovered.
-func ShardBytesFor(datagramBytes int) int {
-	if n := datagramBytes - shardHeader; n > 0 {
-		return n
-	}
-	return 0
-}
-
-// LaneMarker is the datagram a client sends to say that this connection
-// carries a coded lane rather than a stream pool.
-//
-// It is sent rather than configured because a mismatch would otherwise hang:
-// a server waiting on AcceptStream never learns that the client chose
-// datagrams. A server races the two, and whichever arrives first settles it.
-func LaneMarker() []byte { return []byte{typeLane} }
-
-// IsLaneMarker reports whether a datagram is the coded-lane announcement.
-func IsLaneMarker(d []byte) bool { return len(d) == 1 && d[0] == typeLane }
 
 func (c *QUICCarrier) Send(d []byte) error {
 	err := c.conn.SendDatagram(d)

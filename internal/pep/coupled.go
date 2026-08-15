@@ -78,7 +78,7 @@ func (f *multipathFlow) sampleLaneCongestion(ctx context.Context) {
 		seen := make(map[uint64]bool)
 		for _, lane := range f.healthyLanes() {
 			seen[lane.id] = true
-			provider, ok := lane.fc.conn.(laneStatsProvider)
+			provider, ok := lane.fc.transport().(laneStatsProvider)
 			if !ok {
 				continue
 			}

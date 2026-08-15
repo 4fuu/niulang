@@ -48,7 +48,6 @@ type options struct {
 	quicPool                      bool
 	optimisticOpen                bool
 	congestion                    string
-	codedLanes                    bool
 	brutalBytesPerSec             uint64
 	adaptiveMinBytesSec           uint64
 	adaptiveMaxBytesSec           uint64
@@ -110,7 +109,6 @@ func run(args []string) error {
 			EnableQUICPool: opts.quicPool,
 			OptimisticOpen: opts.optimisticOpen,
 			Congestion:     pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
-			CodedLanes:          opts.codedLanes,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
 			FallbackDelay: opts.fallbackDelay, UDPFailureThreshold: opts.udpFailureThreshold,
@@ -182,7 +180,6 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
 	fs.BoolVar(&opts.quicPool, "quic-pool", false, "share one persistent QUIC connection for initial/control streams, and move classified bulk flows off it (opt-in)")
 	fs.BoolVar(&opts.optimisticOpen, "optimistic-open", false, "return SOCKS success before OPEN_OK; flow validates the eventual response (opt-in)")
-	fs.BoolVar(&opts.codedLanes, "coded-lanes", false, "carry flows over QUIC datagrams repaired by an erasure code instead of reliable streams; for interactive traffic on a lossy path")
 	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionReno), "QUIC congestion controller: reno, bbr, bbr-tuic, erasure, adaptive, or brutal")
 	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "fixed per-lane Brutal target in bytes/s (required with --congestion brutal)")
 	fs.Uint64Var(&opts.adaptiveMinBytesSec, "adaptive-min-bytes-per-sec", 64*1024, "Adaptive controller minimum rate in bytes/s")

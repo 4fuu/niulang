@@ -73,20 +73,6 @@ type ClientConfig struct {
 	// path-specific Reno peer can be worse than independent QUIC lanes; the
 	// scheduler still opens independent lanes for measured bulk traffic.
 	EnableQUICPool bool
-	// CodedLanes carries a flow's frames over QUIC datagrams repaired by an
-	// erasure code, instead of over a QUIC stream repaired by retransmission.
-	//
-	// It is for interactive traffic on a lossy path. Measured across the
-	// emulated China-US channel with 256-byte messages, the stream's median
-	// delivery was 1.372 s and the coded lane's 153 ms, because a stream
-	// delivers in order and at a 42% erasure rate something is always missing.
-	// It is not for bulk: retransmission resends only what was lost where a
-	// block code provisions for the binomial, so a large transfer runs
-	// slightly faster on a stream.
-	//
-	// A connection carrying a coded lane is not pooled, because the lane owns
-	// it.
-	CodedLanes bool
 	// OptimisticOpen returns SOCKS success after the authenticated OPEN has
 	// been queued, without waiting for OPEN_OK. The flow reader validates the
 	// eventual OPEN_OK (or propagates a typed RESET), allowing application
@@ -782,12 +768,9 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 			kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
 			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
 		}
-		switch {
-		case c.cfg.CodedLanes:
-			outer, err = dialCodedQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg, c.windows())
-		case pooled:
+		if pooled {
 			outer, fastOpen, alreadyAuthenticated, reserveControl, publishCapabilities, err = c.dialPooledQUICLane(ctx, ccfg, sessionID, pipelineHello)
-		default:
+		} else {
 			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg, c.windows())
 		}
 	default:
@@ -876,7 +859,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 	// only worth its cost when there is something to protect.
 	c.quicPoolActive.Add(1)
 	outer := &controlPoolStreamConn{
-		quicStreamConn: &quicStreamConn{stream: stream, conn: c.quicConn, controller: c.quicController, closeConn: false},
+		quicStreamConn: &quicStreamConn{stream: stream, conn: c.quicConn, controller: c.quicController, closeConn: false, bulk: connBulkPath(c.quicConn)},
 		owner:          c,
 	}
 	if !c.quicPoolAuthenticated && c.quicConn.Context().Err() == nil {
@@ -1075,7 +1058,7 @@ func (c *Client) openBulkPoolStream(ctx context.Context) (streamConn, error) {
 	}
 	c.cfg.Logger.Debug("bulk pool stream opened", "duration", time.Since(started), "connections", c.bulkConnCount())
 	return &bulkPoolStreamConn{
-		quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, controller: entry.controller, closeConn: false},
+		quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, controller: entry.controller, closeConn: false, bulk: connBulkPath(entry.conn)},
 		owner:          c, entry: entry,
 	}, nil
 }
@@ -1168,7 +1151,7 @@ func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
 		entry.close("wanopt bulk pool bootstrap failed")
 		return nil, err
 	}
-	outer := &quicStreamConn{stream: stream, conn: conn, controller: entry.controller, closeConn: false}
+	outer := &quicStreamConn{stream: stream, conn: conn, controller: entry.controller, closeConn: false, bulk: connBulkPath(conn)}
 	_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
 	ok, err := clientAuthenticateKindResult(newFrameConn(outer, c.cfg.MaxPayload), c.cfg.Secret, bootstrap, 0, session.HelloPool, time.Now())
 	_ = outer.Close()

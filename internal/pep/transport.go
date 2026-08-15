@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
+	"github.com/icourses-dev/wanopt/internal/coded"
 	wancongestion "github.com/icourses-dev/wanopt/internal/congestion"
 	"github.com/icourses-dev/wanopt/internal/pathmodel"
 )
@@ -124,6 +125,39 @@ type laneStatsProvider interface {
 	transportStats() laneTransportStats
 }
 
+// handshakeRoundTrips is how many round trips a handshake gets, rather than
+// how many seconds.
+//
+// A wall-clock constant is a constant sized for whichever path it was chosen
+// on. On the channel this project targets each exchange needs 1/(1-p)
+// transmissions with a long tail -- at 42% erasure, one exchange in a hundred
+// still needs seven -- so a five-second bound expires while the peer's open is
+// being retransmitted, and the stream is closed under a flow that was working.
+// Thirty round trips is generous on any path and finite on all of them.
+const handshakeRoundTrips = 30
+
+// handshakeBound is the configured handshake timeout, extended to what the
+// measured path needs. It never shortens the configured value: an operator who
+// asked for longer gets longer.
+func handshakeBound(conn streamConn, configured time.Duration) time.Duration {
+	provider, ok := conn.(laneStatsProvider)
+	if !ok {
+		return configured
+	}
+	stats := provider.transportStats()
+	rtt := stats.smoothedRTT
+	if rtt <= 0 {
+		rtt = stats.latestRTT
+	}
+	if rtt <= 0 {
+		return configured
+	}
+	if scaled := handshakeRoundTrips * rtt; scaled > configured {
+		return scaled
+	}
+	return configured
+}
+
 type quicStreamConn struct {
 	stream     *quic.Stream
 	conn       *quic.Conn
@@ -134,7 +168,15 @@ type quicStreamConn struct {
 	// stream; closing the connection would tear down unrelated flows.
 	closeConn bool
 	once      sync.Once
+	// bulk carries this lane's data frames as coded datagrams when the path
+	// erases enough to make that worth doing. It belongs to the connection
+	// rather than the stream, so a pooled connection's streams share it.
+	bulk *coded.Path
 }
+
+// bulkPath lets the framing discover the coded substrate without every call
+// site that builds a lane having to thread it through.
+func (c *quicStreamConn) bulkPath() *coded.Path { return c.bulk }
 
 func (c *quicStreamConn) transportStats() laneTransportStats {
 	if c == nil || c.conn == nil {
@@ -326,7 +368,10 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 		}
 		return nil, err
 	}
-	return &quicStreamConn{stream: stream, conn: conn, packet: packetConn, controller: controller, closeConn: true}, nil
+	return &quicStreamConn{
+		stream: stream, conn: conn, packet: packetConn, controller: controller,
+		closeConn: true, bulk: connBulkPath(conn),
+	}, nil
 }
 
 // dialQUICConnection establishes only the QUIC connection. Keeping this
@@ -531,7 +576,10 @@ func acceptQUICStream(ctx context.Context, conn *quic.Conn, controller wanconges
 	if err != nil {
 		return nil, err
 	}
-	return &quicStreamConn{stream: stream, conn: conn, controller: controller, closeConn: false}, nil
+	return &quicStreamConn{
+		stream: stream, conn: conn, controller: controller,
+		closeConn: false, bulk: connBulkPath(conn),
+	}, nil
 }
 
 func transportError(kind TransportKind, err error) error {

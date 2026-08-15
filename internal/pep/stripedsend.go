@@ -166,7 +166,7 @@ func (l *mpLane) congestionState() (cwnd, inFlight int) {
 	if !l.cwndSampled.IsZero() && now.Sub(l.cwndSampled) < laneRateCacheTTL {
 		return l.cwndBytes, l.inFlightBytes
 	}
-	provider, ok := l.fc.conn.(laneStatsProvider)
+	provider, ok := l.fc.transport().(laneStatsProvider)
 	if !ok {
 		return 0, 0
 	}
