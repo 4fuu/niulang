@@ -548,18 +548,76 @@ bandwidth and never beat it, so every point of parity margin is a point of
 goodput -- and the margin is what buys the latency. Bulk stays on the stream;
 small exchanges stay coded.
 
+## What the window is worth, on the real link
+
+The sliding window carries small and interactive traffic; bulk stays on the
+stream for the reason above. So what it is worth is what a small exchange
+costs, and that was measured directly: one flow held open, a 16-byte request
+and a 2700-byte reply, one at a time, against the same server built twice --
+once as it ships and once with coding disabled outright.
+
+| | median | mean | p90 | max |
+|---|---|---|---|---|
+| coded | 290 ms | 364 ms | 340 ms | 2.68 s |
+| uncoded | 908 ms | 1.22 s | 2.06 s | 10.3 s |
+| coded (repeat) | 328 ms | 562 ms | 583 ms | 8.64 s |
+| uncoded (repeat) | 696 ms | 1.10 s | 2.37 s | 7.92 s |
+
+The median is one round trip on a path whose minimum is 245 ms, against two
+and a half to three for retransmission, and the tail is four to six times
+better. It also answers a question this document had been carrying: why a
+small exchange cost about 3.5 round trips live where the emulator gave one.
+The old figure of 1.099 s was measured with the block code, and it matches the
+uncoded column -- the block code was buying almost nothing here, because a
+block sealed for one small frame is one frame repeated, and repeating it is
+what retransmission already does.
+
+With the ramp fixes below, the same measurement tightened again: median
+295-296 ms, p90 309-318 ms, maximum 349 ms.
+
+## Opening a flow costs one round trip, or it costs everything
+
+The transport pools one QUIC connection for control and initial streams and
+moves classified bulk onto lanes of its own. That pooling was opt-in, and the
+cost of it being off is the whole of flow initiation:
+
+| | attempt 1 | attempt 2 | attempt 3 |
+|---|---|---|---|
+| unpooled | 0.645 s | 14.77 s | 1.111 s |
+| pooled | 0.302 s | 0.292 s | 0.300 s |
+
+Unpooled, every flow dials its own connection and pays a handshake across a
+38% erasure channel -- the 14.77 s is one that lost packets. Pooled, a flow
+costs one round trip and nothing else. Bulk measured the same either way, so
+the reason it had been opt-in (bulk to a Reno peer) no longer holds, and it is
+now the default.
+
+Two things then had to follow it.
+
+**A seeded rate is not a seeded window.** BBR derives both the rate it paces
+at and the window it will fill from one bandwidth estimate, and only the rate
+was being seeded from the shared model. Traced live on a path already measured
+at 15 Mbit/s, a flow began with a 37 KB window and a 60 Mbit/s pacing rate,
+and spent eight round trips doubling the window while the pacer waited on it.
+Seeding the estimate moves both, which needs the path's round trip -- so the
+shared model carries that now, and the coded path sizes its window from the
+measured round trip rather than from a configured 300 ms.
+
+**An estimate is forgotten by idling, not disproved by it.** The bandwidth
+filter holds ten rounds, so a pooled connection carrying small exchanges keeps
+only what those exchanges delivered. Making pooling the default exposed this
+immediately: a download arriving on such a connection started from 0.4 Mbit/s
+and took nineteen seconds to climb back to the 12 Mbit/s the path had all
+along, where the same download on a fresh connection took nine. A connection
+now keeps the peak it has measured and restores it when its pipe refills; if
+the path really has narrowed, the filter's own ten-round window disproves it.
+Re-measured on the case that produced it: 10.3 s, 13.9 s, 9.8 s against 25.0.
+
 ## What is not done
 
-**Live measurement of the coded lane.** The sliding window's advantage is
-emulator evidence so far. The block code it replaced was measured live and lost
-to the stream for bulk (10.1 Mbit/s against 5.0 at 37% loss); the window's
-lower parity narrows that arithmetic, so the split between coded and
-uncoded bulk is worth re-measuring on the real link rather than assumed.
-
-**Why a small exchange costs about 3.5 round trips live where the emulator
-gives one.** The tail is fixed — p90 1.48 s against Reno's 2.64, maximum 1.74
-against 5.66 — but the median gap is unexplained and is recorded here as such
-rather than papered over.
+**The drain at the end of a transfer.** The ramp is answered above; the other
+end is not. Traced live, the last second of a transfer has chunks ready and an
+empty pipe, and what it is waiting for has not been established.
 
 Interleaving across blocks is now moot: the window interleaves continuously by
 construction, and `Params.InterleaveDepth` has no separate meaning for it.
