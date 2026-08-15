@@ -89,11 +89,20 @@ type Config struct {
 	// with a count-only bound, throughput fell across successive transfers in
 	// one process as the heap grew.
 	MaxOutstandingBytes int
-	// RetransmitAfter is how long a chunk may be outstanding on a lane before
-	// it is also offered to another. Re-issuing duplicates bytes the receiver
+	// RetransmitAfter is asked how long a chunk may be outstanding before it is
+	// presumed lost and offered again. Re-issuing duplicates bytes the receiver
 	// discards, so this trades a little bandwidth for not waiting on a lane
-	// that has gone quiet. Zero disables it.
-	RetransmitAfter time.Duration
+	// that has gone quiet. Nil, or a zero answer, disables it.
+	//
+	// It is asked rather than fixed because the answer is a property of the
+	// path. A chunk with data behind it is proved lost by that data within a
+	// round trip, and this timer only governs the case where there is nothing
+	// behind it -- a small exchange, or the last chunks of a transfer. Fixed at
+	// a second and a half it was six round trips on the path this targets, and
+	// measured live, one small flow in five cost 1.79 s instead of 0.29
+	// because it spent that constant waiting for a chunk the code had failed
+	// to repair.
+	RetransmitAfter func() time.Duration
 	// Reliable reports whether a lane retransmits for itself. When nil every
 	// lane is taken to be reliable, which is what a lane on a QUIC stream is.
 	//
@@ -120,7 +129,7 @@ func DefaultConfig() Config {
 		LaneWindow:          4,
 		MaxOutstanding:      64,
 		MaxOutstandingBytes: 16 * 1024 * 1024,
-		RetransmitAfter:     2 * time.Second,
+		RetransmitAfter:     func() time.Duration { return 2 * time.Second },
 	}
 }
 
@@ -418,8 +427,8 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 			s.stats.BytesRetransmit += uint64(len(chunk.Data))
 		}
 		var deadline time.Time
-		if s.cfg.RetransmitAfter > 0 {
-			deadline = s.cfg.Now().Add(s.cfg.RetransmitAfter)
+		if after := s.retransmitAfter(); after > 0 {
+			deadline = s.cfg.Now().Add(after)
 		}
 		out.attempts = append(out.attempts, attempt{lane: laneID, deadline: deadline, reliable: s.laneRetransmits(laneID)})
 		chunk.urgent = false
@@ -632,6 +641,15 @@ func (s *Scheduler) hasRoomLocked(laneID uint64, windowBytes int, chunk uint64) 
 	return true
 }
 
+// retransmitAfter is how long the caller currently wants a chunk to wait
+// before it is presumed lost.
+func (s *Scheduler) retransmitAfter() time.Duration {
+	if s.cfg.RetransmitAfter == nil {
+		return 0
+	}
+	return s.cfg.RetransmitAfter()
+}
+
 // requeueLocked returns a chunk to the ready set in offset order, so the
 // receiver's contiguous point is always what the next free lane works on.
 func (s *Scheduler) requeueLocked(chunk *Chunk) {
@@ -683,8 +701,8 @@ func (s *Scheduler) ReissueUnacknowledgedBelow(offset uint64) int {
 		if reliable || s.pendingHas(out.chunk.Offset) {
 			continue
 		}
-		if s.cfg.RetransmitAfter > 0 {
-			out.attempts[0].deadline = s.cfg.Now().Add(s.cfg.RetransmitAfter)
+		if after := s.retransmitAfter(); after > 0 {
+			out.attempts[0].deadline = s.cfg.Now().Add(after)
 		}
 		s.requeueLocked(out.chunk)
 		reissued++
@@ -703,7 +721,8 @@ func (s *Scheduler) ReissueUnacknowledgedBelow(offset uint64) int {
 // keeps its chunk -- it may yet deliver it -- but the chunk stops being that
 // lane's exclusive responsibility.
 func (s *Scheduler) ReissueExpired() int {
-	if s.cfg.RetransmitAfter <= 0 {
+	after := s.retransmitAfter()
+	if after <= 0 {
 		return 0
 	}
 	s.mu.Lock()
@@ -733,7 +752,7 @@ func (s *Scheduler) ReissueExpired() int {
 		}
 		// Push the deadline out so a chunk cannot be re-offered every tick
 		// while both attempts are still in flight.
-		out.attempts[0].deadline = now.Add(s.cfg.RetransmitAfter)
+		out.attempts[0].deadline = now.Add(after)
 		s.requeueLocked(out.chunk)
 		reissued++
 	}

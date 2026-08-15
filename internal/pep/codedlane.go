@@ -41,9 +41,16 @@ import (
 type bulkDemux struct {
 	path *coded.Path
 	mu   sync.Mutex
-	// flows is keyed by flow identity. A frame for a flow nobody has claimed
-	// is dropped, which is what the session's re-issue is for.
+	// flows is keyed by flow identity.
 	flows map[uint64]*subscription
+	// held keeps frames that arrived before their flow did, which on a
+	// transport whose flows open without waiting is a race rather than a loss.
+	held map[uint64][]heldFrame
+}
+
+type heldFrame struct {
+	frame protocol.Frame
+	at    time.Time
 }
 
 // A subscription is shared by every lane of one flow, and lives until the last
@@ -90,10 +97,68 @@ func (d *bulkDemux) run(maxPayload uint32) {
 				// The flow is not keeping up. Dropping is what an unreliable
 				// substrate does, and the session re-issues what it needs.
 			}
+		} else {
+			d.holdLocked(frame)
 		}
 		d.mu.Unlock()
 	}
 }
+
+// holdLocked keeps a frame for a flow that does not exist here yet.
+//
+// A flow opens without waiting for the peer to acknowledge it, which is what
+// makes opening one cost nothing -- and it means the first data frame can
+// arrive before the open that names it has been processed and the flow has
+// claimed its share of these datagrams. Dropping it then is not the unreliable
+// substrate doing its job, it is a race: the frame arrived, and the only
+// reason it was thrown away is that this end was a few hundred microseconds
+// behind. Measured on the emulated path, that cost every short flow the
+// reissue timer -- 1.055 s where the exchange itself takes 300 ms.
+//
+// What is held is bounded in both directions: a few frames, briefly. Anything
+// beyond that is loss like any other.
+func (d *bulkDemux) holdLocked(frame protocol.Frame) {
+	if d.held == nil {
+		d.held = make(map[uint64][]heldFrame)
+	}
+	now := time.Now()
+	frames, bytes := 0, 0
+	for id, held := range d.held {
+		kept := held[:0]
+		for _, one := range held {
+			if now.Sub(one.at) <= heldFrameLifetime {
+				kept = append(kept, one)
+			}
+		}
+		if len(kept) == 0 {
+			delete(d.held, id)
+			continue
+		}
+		d.held[id] = kept
+		frames += len(kept)
+		for _, one := range kept {
+			bytes += len(one.frame.Payload)
+		}
+	}
+	if frames >= maxHeldFrames || bytes+len(frame.Payload) > maxHeldBytes {
+		return
+	}
+	d.held[frame.Header.FlowID] = append(d.held[frame.Header.FlowID], heldFrame{frame: frame, at: now})
+}
+
+const (
+	// heldFrameLifetime is how long a frame waits for its flow to appear. It
+	// covers the gap between an optimistic open and the peer acting on it,
+	// which is a scheduling delay rather than a round trip.
+	heldFrameLifetime = 2 * time.Second
+	// maxHeldFrames and maxHeldBytes bound what one connection holds for flows
+	// it has never heard of, which is what stops a peer naming flows that
+	// never arrive from costing memory. Both are needed: a data frame carries
+	// up to a chunk, so a count alone would allow several megabytes, and a
+	// byte bound alone would allow a great many empty ones.
+	maxHeldFrames = 256
+	maxHeldBytes  = 1 << 20
+)
 
 // subscribe claims a flow's frames until release is called.
 func (d *bulkDemux) subscribe(flowID uint64) <-chan protocol.Frame {
@@ -103,6 +168,15 @@ func (d *bulkDemux) subscribe(flowID uint64) <-chan protocol.Frame {
 	if !ok {
 		sub = &subscription{frames: make(chan protocol.Frame, 256)}
 		d.flows[flowID] = sub
+		// Whatever arrived before this flow existed is delivered now rather
+		// than waited for again.
+		for _, held := range d.held[flowID] {
+			select {
+			case sub.frames <- held.frame:
+			default:
+			}
+		}
+		delete(d.held, flowID)
 	}
 	sub.lanes++
 	return sub.frames

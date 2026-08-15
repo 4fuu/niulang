@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/classifier"
+	"github.com/icourses-dev/wanopt/internal/coded"
 	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/multipath"
@@ -2019,6 +2020,29 @@ func (f *multipathFlow) observe(n int, up bool) bool {
 		f.metrics.ClassTransition(int(newClass))
 	}
 	return newClass == classifier.ClassBulk
+}
+
+// codedSubstrate reports what the coded path under this flow's lanes has done,
+// which is what says whether a flow that went slowly was one the code failed
+// or one that never used it.
+func (f *multipathFlow) codedSubstrate() (coded.Stats, bool) {
+	for _, lane := range f.healthyLanes() {
+		if stats, ok := lane.fc.CodedPath(); ok {
+			return stats, true
+		}
+	}
+	return coded.Stats{}, false
+}
+
+// codedSubstrateFields renders a coded path's counters for a log line, or
+// "none" for a lane that has no coded substrate at all.
+func codedSubstrateFields(stats coded.Stats, ok bool) string {
+	if !ok {
+		return "none"
+	}
+	return fmt.Sprintf("sent=%d repairs=%d recovered=%d lost=%d window=%d coding=%t rate=%.2f",
+		stats.Sent, stats.Repairs, stats.Recovered, stats.Lost, stats.Window,
+		stats.Plan.Code, stats.Plan.Rate)
 }
 
 // dataSubstrates totals where this flow's payload went across its lanes.

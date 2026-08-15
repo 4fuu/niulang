@@ -17,6 +17,7 @@ import (
 	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/pathmodel"
 	"github.com/icourses-dev/wanopt/internal/pathsim"
+	"github.com/icourses-dev/wanopt/internal/protocol"
 )
 
 // codedPair brings up a server and a client, optionally with a lossy emulated
@@ -293,5 +294,55 @@ func TestOneBuildServesACleanPathAndAnErasureChannel(t *testing.T) {
 func TestTheDefaultControllerIsTheOneThatReachesThePath(t *testing.T) {
 	if got := defaultCongestion(); got != CongestionErasure {
 		t.Fatalf("default congestion controller is %q, want %q", got, CongestionErasure)
+	}
+}
+
+// A datagram that arrives before its flow does must wait for it, not be
+// thrown away.
+//
+// Flows open without waiting for the peer to acknowledge them, which is what
+// makes opening one cost nothing. It also means the first data frame can
+// overtake the open that names it: the frame arrives, nobody has claimed that
+// flow yet, and dropping it there is not an unreliable substrate doing its job
+// but a race lost by a few hundred microseconds. The session recovers, on a
+// timer -- measured, that was every short flow costing 1.055 s on a 300 ms
+// path, and on the live link a quarter of them costing 1.05 to 1.79 s.
+func TestADatagramWaitsForTheFlowThatOwnsIt(t *testing.T) {
+	demux := &bulkDemux{flows: make(map[uint64]*subscription)}
+	const flowID = 42
+	early := protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeData, FlowID: flowID, Sequence: 0,
+	}, Payload: []byte("arrived before the flow existed")}
+
+	demux.mu.Lock()
+	demux.holdLocked(early)
+	demux.mu.Unlock()
+
+	frames := demux.subscribe(flowID)
+	select {
+	case got := <-frames:
+		if string(got.Payload) != string(early.Payload) {
+			t.Fatalf("held frame came back as %q", got.Payload)
+		}
+	default:
+		t.Fatal("a frame that arrived before its flow was dropped, so the flow " +
+			"waits for the session to re-issue what had already arrived")
+	}
+
+	// What is held is bounded, or a peer naming flows that never arrive would
+	// cost memory without limit.
+	demux.mu.Lock()
+	for i := 0; i < maxHeldFrames*2; i++ {
+		demux.holdLocked(protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeData, FlowID: uint64(1000 + i),
+		}, Payload: []byte("x")})
+	}
+	held := 0
+	for _, frames := range demux.held {
+		held += len(frames)
+	}
+	demux.mu.Unlock()
+	if held > maxHeldFrames {
+		t.Fatalf("held %d frames for flows that do not exist, want at most %d", held, maxHeldFrames)
 	}
 }

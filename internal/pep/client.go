@@ -487,11 +487,13 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		return
 	}
 	codedFrames, streamFrames := flowSession.dataSubstrates()
+	substrate, hasCoded := flowSession.codedSubstrate()
 	c.cfg.Logger.Info("local flow complete", "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead,
 		"duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes,
 		// Where the payload went, which is what tells a flow that was coded
 		// for its first second from one that was coded throughout.
 		"data_coded", codedFrames, "data_stream", streamFrames,
+		"coded_substrate", codedSubstrateFields(substrate, hasCoded),
 		"class", classifier.Class(flowSession.class.Load()))
 }
 

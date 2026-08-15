@@ -287,6 +287,7 @@ func (e *ErasureSender) Telemetry() ControllerTelemetry {
 	t := e.inner.Telemetry()
 	t.Kind = "erasure"
 	arrival := e.arrivalRate()
+	t.ErasureFloor = 1 - arrival
 	t.PacingRate = uint64(float64(t.PacingRate) / arrival)
 	t.CongestionWindow = uint64(float64(t.CongestionWindow) / arrival)
 	return t

@@ -381,3 +381,60 @@ func TestAClosedCarrierEndsThePath(t *testing.T) {
 		t.Fatal("send on a closed path succeeded")
 	}
 }
+
+// A path must be able to size its code from the direction it can measure.
+//
+// The erasure rate of the direction a sender sends into is learned from its
+// own acknowledgements, and only a sender with something to send has any. A
+// client that asks small questions and receives large answers never measures
+// its own direction -- so with nothing else to go on it would carry its
+// requests uncoded across a channel it has every reason to know erases.
+//
+// What it receives, it can always measure. Borrowing that is an assumption,
+// and a weaker one than assuming the path is clean.
+func TestAPathSizesItsCodeFromWhatItCanMeasure(t *testing.T) {
+	// A model that knows nothing, which is what a lane carrying almost no
+	// traffic leaves behind.
+	pa, pb := newPipes(30, 0)
+	cfg := Config{SymbolBytes: 1100, RoundTrip: 60 * time.Millisecond, Path: pathmodel.NewPathModel()}
+	quiet, loud := New(pa, cfg), New(pb, cfg)
+	t.Cleanup(func() { quiet.Close(); loud.Close() })
+
+	if quiet.Coding() {
+		t.Fatal("a path that has measured nothing at all decided to code")
+	}
+
+	// The other end sends, and the erasing channel is visible in the gaps of
+	// the sequence it stamped, however little this end has sent.
+	payload := bytes.Repeat([]byte("x"), 500)
+	pb.mu.Lock()
+	pb.loss = 0.42
+	pb.mu.Unlock()
+	for i := 0; i < 400; i++ {
+		if err := loud.Send(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("the receiving end never measured the channel: %+v", quiet.Stats().Snapshot)
+		default:
+		}
+		if quiet.Stats().Snapshot.Decided >= reverseFloorSamples {
+			break
+		}
+		if _, err := quiet.Receive(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A path re-chooses its code on its own cadence, so the answer that
+	// matters is the one after it has had the chance to.
+	time.Sleep(codingTTL + 20*time.Millisecond)
+	if !quiet.Coding() {
+		t.Errorf("a path receiving across a 42%% erasure channel will not code what "+
+			"it sends: %+v", quiet.Stats())
+	}
+}

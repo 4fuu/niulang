@@ -54,6 +54,14 @@ func (c *Client) watchUplink(ctx context.Context) {
 	ticker := time.NewTicker(uplinkPollInterval)
 	defer ticker.Stop()
 	known := c.currentUplink()
+	// The uplink a client starts on is as unmeasured as one it moves to, and
+	// the first flow pays the same ignorance either way. Measuring it here is
+	// the whole reason the prewarm exists; running it only on a change left
+	// every client's first flows carried uncoded across a channel nothing had
+	// yet noticed erases -- and a client that asks small questions never
+	// notices at all, because measuring the direction you send into needs you
+	// to have sent something.
+	c.prewarmPath(ctx)
 	for {
 		select {
 		case <-ctx.Done():

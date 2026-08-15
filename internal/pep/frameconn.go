@@ -184,6 +184,20 @@ func (c *frameConn) DataSubstrates() (coded, stream uint64) {
 	return c.codedData.Load(), c.streamData.Load()
 }
 
+// CodedPath reports what the connection's coded substrate has done, or false
+// when this lane has none.
+//
+// It is the connection's rather than this lane's, because the datagrams are:
+// one coded path carries every flow multiplexed on the connection. A flow's
+// log therefore shows the substrate it shared, which is what explains a flow
+// that was carried well or badly by it.
+func (c *frameConn) CodedPath() (coded.Stats, bool) {
+	if c.bulk == nil {
+		return coded.Stats{}, false
+	}
+	return c.bulk.Stats(), true
+}
+
 func (c *frameConn) countData(f protocol.Frame, coded bool) {
 	if f.Header.Type != protocol.TypeData {
 		return

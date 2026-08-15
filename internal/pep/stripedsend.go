@@ -63,9 +63,12 @@ const (
 	// peer has received a chunk's worth of data that was sent after this one
 	// and cannot plausibly still be waiting for it.
 	lostChunkEvidence = 2 * defaultChunkSize
-	// chunkReissueDelay is how long a chunk may sit on one lane before it is
-	// also offered to another.
-	chunkReissueDelay = 1500 * time.Millisecond
+	// minChunkReissueDelay and maxChunkReissueDelay bound what the measured
+	// round trip may ask for. The floor keeps a fast path from re-sending
+	// something that is merely in flight; the ceiling keeps an unmeasured or
+	// absurd round trip from restoring the constant this replaced.
+	minChunkReissueDelay = 200 * time.Millisecond
+	maxChunkReissueDelay = 1500 * time.Millisecond
 	// chunkReissueInterval is how often the supervisor looks for chunks to
 	// re-offer.
 	chunkReissueInterval = 250 * time.Millisecond
@@ -135,6 +138,32 @@ func (f *multipathFlow) retentionBytes() int {
 		return want
 	}
 	return minFlowRetentionBytes
+}
+
+// reissueDelay is how long a chunk waits before it is presumed lost, which is
+// a property of the path rather than a constant.
+//
+// It only governs the case where nothing follows the chunk to prove it lost --
+// a small exchange, or the last chunks of a transfer. Everything else is
+// proved by the data behind it within a round trip. Two round trips is what a
+// transport's own probe timeout waits for the same reason, and a fixed second
+// and a half was six of them on the path this targets: measured live, one
+// small flow in five cost 1.79 s instead of 0.29 waiting out that constant.
+func (f *multipathFlow) reissueDelay() time.Duration {
+	longest := time.Duration(0)
+	for _, lane := range f.healthyLanes() {
+		if _, rtt := lane.sendRate(); rtt > longest {
+			longest = rtt
+		}
+	}
+	delay := 2 * longest
+	if delay < minChunkReissueDelay {
+		return minChunkReissueDelay
+	}
+	if delay > maxChunkReissueDelay {
+		return maxChunkReissueDelay
+	}
+	return delay
 }
 
 // laneQueueBytes is how far ahead of its transport a lane may be committed.
@@ -233,7 +262,7 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 		// bounded by what its transport has not yet taken.
 		MaxOutstandingBytes: maxFlowOutstandingBytes,
 		Retention:           f.retentionBytes,
-		RetransmitAfter:     chunkReissueDelay,
+		RetransmitAfter:     f.reissueDelay,
 		// A lane carrying its data over coded datagrams does not retransmit
 		// for itself: the code repairs most loss and not all, and what it
 		// cannot repair has no other way back on a single-lane flow.

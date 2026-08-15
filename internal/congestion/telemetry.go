@@ -29,6 +29,12 @@ type ControllerTelemetry struct {
 	PacketsLost      uint64
 	MinRTT           time.Duration
 	InRecovery       bool
+	// ErasureFloor is the share of packets this path drops for reasons that
+	// have nothing to do with sending rate, as the controller currently
+	// believes it. Everything sized for the path is sized from this number --
+	// the pacing compensation, the congestion window, and the erasure code's
+	// rate -- so a trace that does not carry it cannot explain any of them.
+	ErasureFloor float64
 }
 
 const (

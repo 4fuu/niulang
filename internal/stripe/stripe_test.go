@@ -62,6 +62,8 @@ func drainLanes(t *testing.T, s *Scheduler, rates []time.Duration) (map[uint64]u
 	return carried, out
 }
 
+func after(d time.Duration) func() time.Duration { return func() time.Duration { return d } }
+
 func TestSchedulerDeliversEveryByteInOrder(t *testing.T) {
 	payload := make([]byte, 512*1024)
 	rand.New(rand.NewSource(1)).Read(payload)
@@ -105,7 +107,7 @@ func TestStalledLaneDoesNotHoldUpTheTransfer(t *testing.T) {
 	payload := make([]byte, 128*1024)
 	rand.New(rand.NewSource(2)).Read(payload)
 	s := New(bytes.NewReader(payload), Config{
-		ChunkSize: 4 * 1024, LaneWindow: 2, RetransmitAfter: 50 * time.Millisecond,
+		ChunkSize: 4 * 1024, LaneWindow: 2, RetransmitAfter: after(50 * time.Millisecond),
 	})
 	defer s.Close()
 
@@ -225,7 +227,7 @@ func TestReissueAvoidsTheLaneAlreadyCarryingIt(t *testing.T) {
 	clock := func() time.Time { return now }
 	payload := make([]byte, 12*1024)
 	s := New(bytes.NewReader(payload), Config{
-		ChunkSize: 4 * 1024, LaneWindow: 4, RetransmitAfter: time.Second, Now: clock,
+		ChunkSize: 4 * 1024, LaneWindow: 4, RetransmitAfter: after(time.Second), Now: clock,
 	})
 	defer s.Close()
 
@@ -683,7 +685,7 @@ func TestCompletedChunkLeavesTheReadySet(t *testing.T) {
 	clock := func() time.Time { return now }
 	payload := make([]byte, 8*1024)
 	s := New(bytes.NewReader(payload), Config{
-		ChunkSize: 4 * 1024, LaneWindow: 4, RetransmitAfter: time.Second, Now: clock,
+		ChunkSize: 4 * 1024, LaneWindow: 4, RetransmitAfter: after(time.Second), Now: clock,
 	})
 	defer s.Close()
 
@@ -733,7 +735,7 @@ func TestAnUnreliableLaneMayCarryAChunkTwice(t *testing.T) {
 	now := time.Now()
 	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
 		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
-		RetransmitAfter: time.Second,
+		RetransmitAfter: after(time.Second),
 		Reliable:        func(uint64) bool { return false },
 		Now:             func() time.Time { return now },
 	})
@@ -766,7 +768,7 @@ func TestAReliableLaneRefusesTheSameChunkTwice(t *testing.T) {
 	now := time.Now()
 	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
 		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
-		RetransmitAfter: time.Second,
+		RetransmitAfter: after(time.Second),
 		Now:             func() time.Time { return now },
 	})
 	ready, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -796,7 +798,7 @@ func TestAChunkTakenUnreliablyStaysReissuableWhenTheLaneChanges(t *testing.T) {
 	coded := true
 	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
 		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
-		RetransmitAfter: time.Second,
+		RetransmitAfter: after(time.Second),
 		Reliable:        func(uint64) bool { return !coded },
 		Now:             func() time.Time { return now },
 	})
@@ -830,7 +832,7 @@ func TestAChunkProvedMissingIsReissuedWithoutWaiting(t *testing.T) {
 	s := New(source, Config{
 		ChunkSize: 1024, LaneWindow: 64, MaxOutstanding: 64,
 		MaxOutstandingBytes: 1 << 20, Retention: func() int { return 1 << 20 },
-		RetransmitAfter: time.Hour, // only the proof may re-offer anything
+		RetransmitAfter: after(time.Hour), // only the proof may re-offer anything
 		// An unreliable lane, which is what a coded lane is: what it loses has
 		// no other way back.
 		Reliable: func(uint64) bool { return false },
@@ -871,7 +873,7 @@ func TestAChunkProvedMissingIsReissuedWithoutWaiting(t *testing.T) {
 	reliable := New(bytes.NewReader(bytes.Repeat([]byte("y"), 4*1024)), Config{
 		ChunkSize: 1024, LaneWindow: 64, MaxOutstanding: 64,
 		MaxOutstandingBytes: 1 << 20, Retention: func() int { return 1 << 20 },
-		RetransmitAfter: time.Hour,
+		RetransmitAfter: after(time.Hour),
 	})
 	defer reliable.Close()
 	first, err := reliable.Next(ctx, 1, 1<<20)

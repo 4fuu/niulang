@@ -620,11 +620,13 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		return
 	}
 	codedFrames, streamFrames := flow.dataSubstrates()
+	substrate, hasCoded := flow.codedSubstrate()
 	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent,
 		"duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes,
 		// Where the payload went. The server is the sender for a download, so
 		// this is the split that decides what a download costs.
 		"data_coded", codedFrames, "data_stream", streamFrames,
+		"coded_substrate", codedSubstrateFields(substrate, hasCoded),
 		"class", classifier.Class(flow.class.Load()))
 }
 

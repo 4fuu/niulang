@@ -51,11 +51,11 @@ func traceLane(f *multipathFlow, laneID uint64, stats laneTransportStats) {
 	}
 	meanResidency, maxResidency := f.takeResidency()
 	fmt.Fprintf(os.Stderr,
-		"lane t=%.3f flow=%p lane=%d cwnd=%d inflight=%d minrtt=%.1fms srtt=%.1fms pacing=%d maxbw=%d round=%d appsamp=%d nonapp=%d window=%d held=%d queued=%d chunks=%d ready=%d flowheld=%d issued=%d reissued=%d source=%d breissued=%d lanefail=%d resid=%.0fms residmax=%.0fms acksin=%d acksout=%d acksched=%d ackwr=%.0fms sent=%d lost=%d mode=%d\n",
+		"lane t=%.3f flow=%p lane=%d cwnd=%d inflight=%d minrtt=%.1fms srtt=%.1fms pacing=%d maxbw=%d floor=%.3f round=%d appsamp=%d nonapp=%d window=%d held=%d queued=%d chunks=%d ready=%d flowheld=%d issued=%d reissued=%d source=%d breissued=%d lanefail=%d resid=%.0fms residmax=%.0fms acksin=%d acksout=%d acksched=%d ackwr=%.0fms sent=%d lost=%d mode=%d\n",
 		time.Since(traceStart).Seconds(), f, laneID,
 		c.CongestionWindow, c.BytesInFlight,
 		float64(c.MinRTT.Microseconds())/1000, float64(stats.smoothedRTT.Microseconds())/1000,
-		c.PacingRate, c.MaxBandwidth, c.Round, c.AppSamples, c.NonAppSamples,
+		c.PacingRate, c.MaxBandwidth, c.ErasureFloor, c.Round, c.AppSamples, c.NonAppSamples,
 		window, held, queued, chunks, ready, flowHeld, issued, reissued, sourceBytes, reissuedBytes, laneFailures,
 		float64(meanResidency.Microseconds())/1000, float64(maxResidency.Microseconds())/1000,
 		f.acksIn.Swap(0), f.acksOut.Swap(0), f.acksSched.Swap(0), float64(f.ackWriteNS.Swap(0))/1e6,

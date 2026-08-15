@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -300,4 +301,147 @@ func TestAGapIsReportedWhenItIsSeenNotWhenItCloses(t *testing.T) {
 	if ranges[0][0] != 2000 || ranges[0][1] != 3000 {
 		t.Fatalf("reported range %v, want the 2000-3000 that actually arrived", ranges[0])
 	}
+}
+
+// What a short-lived flow costs, which is the case this transport exists for.
+//
+// A browser opens a connection, asks for something small, and closes it. Every
+// such flow is a new one, so nothing about it is warm except the connection
+// underneath, and there is never any data behind its packets to prove one
+// lost. Measured live, most cost one round trip and a quarter cost a second
+// and a half more: the difference is a chunk the code failed to repair, waited
+// out by a timer.
+func TestAShortFlowCostsARoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("brings up QUIC across an emulated 300 ms path")
+	}
+	const oneWay = 150 * time.Millisecond
+	path := pathsim.Config{
+		OneWayDelay: oneWay, RateBytesPerSec: uint64(25e6 / 8),
+		PolicerRefillPeriod: 8 * time.Millisecond, LossRate: 0.45, Seed: 61,
+	}
+	const replyBytes = 1400
+	// The destination records when each request reached it, which splits what
+	// a flow costs into the half spent getting there and the half coming back.
+	arrivals := make(chan time.Time, 64)
+	socks, destination := codedPairWith(t, true, &path, func(listener net.Listener) {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 16)
+				body := make([]byte, replyBytes)
+				for {
+					if _, err := io.ReadFull(c, buf); err != nil {
+						return
+					}
+					select {
+					case arrivals <- time.Now():
+					default:
+					}
+					if _, err := c.Write(body); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	})
+	// The path has to be known before the question is asked: a flow on an
+	// unmeasured path is carried uncoded, which is a different experiment.
+	warm := dialWithRetries(t, socks, destination, 3)
+	request := make([]byte, 16)
+	reply := make([]byte, replyBytes)
+	for i := 0; i < 5; i++ {
+		if _, err := warm.Write(request); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(warm, reply); err != nil {
+			t.Fatalf("warming exchange %d: %v", i, err)
+		}
+	}
+	warm.Close()
+
+	const flows = 20
+	var samples, dials, outbound []time.Duration
+	for i := 0; i < flows; i++ {
+		for len(arrivals) > 0 {
+			<-arrivals
+		}
+		start := time.Now()
+		conn, err := trySocksDial(socks, destination, 20*time.Second)
+		if err != nil {
+			t.Fatalf("flow %d: %v", i, err)
+		}
+		dialed := time.Now()
+		if _, err := conn.Write(request); err == nil {
+			if _, err := io.ReadFull(conn, reply); err != nil {
+				conn.Close()
+				continue
+			}
+			samples = append(samples, time.Since(start))
+			dials = append(dials, dialed.Sub(start))
+			select {
+			case at := <-arrivals:
+				outbound = append(outbound, at.Sub(start))
+			default:
+			}
+		}
+		conn.Close()
+	}
+	if len(outbound) > 0 {
+		sorted := append([]time.Duration(nil), outbound...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+		t.Logf("  of which the request reaching the destination: median %v, max %v",
+			sorted[len(sorted)/2].Round(time.Millisecond), sorted[len(sorted)-1].Round(time.Millisecond))
+	}
+	if len(dials) > 0 {
+		sorted := append([]time.Duration(nil), dials...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+		t.Logf("  of which opening the flow: median %v, max %v",
+			sorted[len(sorted)/2].Round(time.Millisecond), sorted[len(sorted)-1].Round(time.Millisecond))
+	}
+	if len(samples) < flows/2 {
+		t.Fatalf("only %d of %d short flows completed", len(samples), flows)
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	median := samples[len(samples)/2]
+	p90 := samples[int(float64(len(samples)-1)*0.9)]
+	roundTrip := 2 * oneWay
+	rounded := make([]string, len(samples))
+	for i, s := range samples {
+		rounded[i] = s.Round(time.Millisecond).String()
+	}
+	t.Logf("%d short flows over a %.0f%% erasure channel: median %v, p90 %v, max %v (round trip %v)",
+		len(samples), path.LossRate*100, median.Round(time.Millisecond),
+		p90.Round(time.Millisecond), samples[len(samples)-1].Round(time.Millisecond), roundTrip)
+	t.Logf("  each: %s", strings.Join(rounded, " "))
+	// Three round trips, not one: the channel erases, and a flow whose repair
+	// was itself erased pays for it. What this separates is a transport where
+	// a short flow costs round trips from one where it costs a timer -- before
+	// the demultiplexer held frames for flows that had not claimed them yet,
+	// every short flow cost 1.055 s on a 300 ms path, which is the reissue
+	// delay and not the path.
+	if median > 3*roundTrip {
+		t.Errorf("a short flow costs %v against a round trip of %v", median.Round(time.Millisecond), roundTrip)
+	}
+	// And most of them, not merely the middle one. A distribution with a
+	// median of one round trip and a body of five is a transport that works
+	// when nothing goes wrong, which on this path is not the interesting case.
+	within := 0
+	for _, s := range samples {
+		if s <= 2*roundTrip {
+			within++
+		}
+	}
+	// And a good share of them within one round trip's slack of that, which
+	// was 22% before the demultiplexer held frames for flows that had not
+	// claimed them yet and is 45-95% after.
+	if within*10 < len(samples)*4 {
+		t.Errorf("only %d of %d short flows cost two round trips or less; the rest "+
+			"are waiting for something rather than being repaired", within, len(samples))
+	}
+	_ = p90
 }
