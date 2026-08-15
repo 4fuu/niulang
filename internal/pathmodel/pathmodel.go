@@ -59,6 +59,9 @@ type PathModel struct {
 	// aggregate is a windowed maximum of the summed delivered rate, which is
 	// the endpoint pair's bottleneck as measured from this side.
 	aggregate []bandwidthSample
+	// striping is what a lane probe concluded about this path, which is a
+	// property of the path and so outlives the flow that measured it.
+	striping Striping
 }
 
 // Member identifies one contributor within a model. A pointer is stable for
@@ -88,6 +91,41 @@ const (
 	// narrowed is believed within a few seconds.
 	bottleneckWindow = 10 * time.Second
 )
+
+// Striping is what a lane probe concluded about this path.
+type Striping uint8
+
+const (
+	// StripingUnknown means no probe has concluded yet.
+	StripingUnknown Striping = iota
+	// StripingRewarded means a probe measured that a second lane raised the
+	// aggregate.
+	StripingRewarded
+	// StripingRefused means a probe measured that it did not.
+	StripingRefused
+)
+
+// RecordStriping remembers what a lane probe concluded, so the next flow does
+// not repeat the experiment.
+//
+// Whether lanes help is a property of the path, not of a flow: it depends on
+// whether the bottleneck is policed per connection or per endpoint pair, and
+// that does not change between one download and the next. Without somewhere to
+// put the answer, every flow re-runs the probe -- growing a lane, measuring
+// that it did not help, retiring it, and growing again -- and pays for the
+// experiment each time on a path that has already answered.
+func (m *PathModel) RecordStriping(verdict Striping) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.striping = verdict
+}
+
+// Striping is what is known about whether this path rewards lanes.
+func (m *PathModel) Striping() Striping {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.striping
+}
 
 // NewPathModel returns an empty model. Callers normally want SharedPath.
 func NewPathModel() *PathModel {

@@ -47,6 +47,16 @@ type Metrics struct {
 	// and is zero on decisions that did not conclude one. It is evidence about
 	// a lane that was actually added, not a tick-over-tick rate change.
 	MarginalGain float64
+	// PathRefusesStriping reports that a probe has already measured, on this
+	// path, that lanes do not raise the aggregate.
+	//
+	// The first probe on a path is speculative by construction -- there is
+	// nothing to compare until a second lane exists -- and on a path whose
+	// bottleneck is shared that speculation never pays. Without a memory of
+	// the answer the flow grows, measures, retires and grows again, paying for
+	// the same experiment every few seconds. Whether lanes help belongs to the
+	// path, so it is remembered there and read back here.
+	PathRefusesStriping bool
 	// ProbeReady reports that the measurement layer has run a controlled
 	// experiment and concluded one more lane is warranted. Growth is gated on
 	// this rather than on MarginalGain crossing a threshold: a rate that rose
@@ -125,6 +135,10 @@ func (p *Planner) Decide(class classifier.Class, m Metrics) Decision {
 		if current < p.cfg.BulkStartLanes {
 			return Decision{TargetLanes: p.cfg.BulkStartLanes, Class: class, Reason: "bulk startup lanes"}
 		}
+		if m.PathRefusesStriping {
+			return Decision{TargetLanes: maxInt(1, minInt(current, p.cfg.BulkStartLanes)), Class: class,
+				Reason: "path measured not to reward striping"}
+		}
 		if current < p.cfg.MaxLanes && m.ProbeReady &&
 			(m.BaselineRTT <= 0 || m.CurrentRTT <= time.Duration(float64(m.BaselineRTT)*bulkRTTCollapseRatio)) {
 			return Decision{
@@ -137,6 +151,13 @@ func (p *Planner) Decide(class classifier.Class, m Metrics) Decision {
 	default:
 		return Decision{TargetLanes: 1, Class: classifier.ClassNew, Reason: "unknown class"}
 	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func maxInt(a, b int) int {

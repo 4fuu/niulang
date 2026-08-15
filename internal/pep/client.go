@@ -17,6 +17,7 @@ import (
 	wancongestion "github.com/icourses-dev/wanopt/internal/congestion"
 	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/metrics"
+	"github.com/icourses-dev/wanopt/internal/pathmodel"
 	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/scheduler"
 	"github.com/icourses-dev/wanopt/internal/session"
@@ -796,6 +797,18 @@ func resetCode(payload []byte) session.ResetCode {
 	return session.ResetCode(payload[0])
 }
 
+// currentPathModel is the model for the uplink and peer this client is
+// currently using, or nil before a connection has been made.
+func (c *Client) currentPathModel() *pathmodel.PathModel {
+	c.quicMu.Lock()
+	conn := c.quicConn
+	c.quicMu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return pathmodel.Shared(peerKey(conn))
+}
+
 // fastOpenProven reports whether a fast open has been acknowledged on the
 // current pooled connection, so later flows need not wait for theirs.
 func (c *Client) fastOpenProven() bool {
@@ -1449,6 +1462,8 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 		MaxLanes: bulkBudget, InteractiveLanes: 1, BulkStartLanes: bulkStartLanes,
 		MinimumMarginalGain: c.cfg.MinimumMarginalGain, InteractiveRTTBudget: 40 * time.Millisecond,
 	})
+	// What lane probes conclude belongs to the path they were run on.
+	pathModel := c.currentPathModel()
 	manageCtx, manageCancel := context.WithCancel(ctx)
 	defer manageCancel()
 	go func() {
@@ -1673,10 +1688,24 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				// between two ticks.
 				grow, gain := prober.Observe(goodput)
 				probeRequested = grow
+				// A concluded probe is evidence about the path, not about this
+				// flow, so it is recorded where the next flow will find it.
+				// Whether lanes help depends on the bottleneck being policed
+				// per connection or per endpoint pair, and that does not
+				// change between one download and the next.
+				if gain != 0 && pathModel != nil {
+					verdict := pathmodel.StripingRewarded
+					if gain <= 0 {
+						verdict = pathmodel.StripingRefused
+					}
+					pathModel.RecordStriping(verdict)
+				}
+				refuses := pathModel != nil && pathModel.Striping() == pathmodel.StripingRefused
 				decision = planner.Decide(snapshot.Class, scheduler.Metrics{
 					CurrentLanes: snapshot.CurrentLanes - controlReserve, HealthyLanes: snapshot.HealthyLanes - controlReserve,
 					AvailableLanes: bulkBudget, MarginalGain: gain, ProbeReady: grow,
-					BaselineRTT: snapshot.BaselineRTT, CurrentRTT: snapshot.CurrentRTT,
+					PathRefusesStriping: refuses,
+					BaselineRTT:         snapshot.BaselineRTT, CurrentRTT: snapshot.CurrentRTT,
 					UDPHealthy: c.udpHealth.allow(time.Now()),
 				})
 				if gain != 0 {

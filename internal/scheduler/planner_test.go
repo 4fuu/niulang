@@ -121,3 +121,70 @@ func TestConfirmedGainDoublesTheLaneTarget(t *testing.T) {
 		t.Fatalf("doubling past the ceiling asked for %d lanes, want 8", got)
 	}
 }
+
+// Lanes are a measurement, not a setting. The maximum is a ceiling on what
+// evidence may buy, and evidence is what has to buy it: on a path whose
+// bottleneck is shared -- which is what the open-loop probe found the
+// China-US link to be -- a second lane divides one capacity and adds its own
+// overhead, and four lanes measured 8 Mbit/s live where one measured 10.
+//
+// So a bulk flow that has measured nothing must stay where it started, however
+// high the ceiling is set.
+func TestLanesAreNotAddedWithoutMeasuredGain(t *testing.T) {
+	planner := New(Config{MaxLanes: 8, BulkStartLanes: 1, InteractiveLanes: 1})
+	steady := Metrics{
+		CurrentLanes: 1, HealthyLanes: 1, AvailableLanes: 8, UDPHealthy: true,
+		BaselineRTT: 300 * time.Millisecond, CurrentRTT: 320 * time.Millisecond,
+		// Nothing has been measured: no probe has completed, so there is no
+		// verdict either way.
+		ProbeReady: false,
+	}
+	for round := 0; round < 5; round++ {
+		decision := planner.Decide(classifier.ClassBulk, steady)
+		if decision.TargetLanes != 1 {
+			t.Fatalf("round %d: target %d lanes with a ceiling of 8 and no measured gain, want 1 (%s)",
+				round, decision.TargetLanes, decision.Reason)
+		}
+		steady.CurrentLanes = decision.TargetLanes
+	}
+}
+
+// And a path that does reward striping must get it, or the ceiling is the only
+// thing deciding and the measurement is decoration.
+func TestLanesAreAddedWhenGainIsMeasured(t *testing.T) {
+	planner := New(Config{MaxLanes: 8, BulkStartLanes: 1, InteractiveLanes: 1})
+	rewarding := Metrics{
+		CurrentLanes: 1, HealthyLanes: 1, AvailableLanes: 8, UDPHealthy: true,
+		BaselineRTT: 300 * time.Millisecond, CurrentRTT: 310 * time.Millisecond,
+		ProbeReady: true, MarginalGain: 0.9,
+	}
+	decision := planner.Decide(classifier.ClassBulk, rewarding)
+	if decision.TargetLanes <= 1 {
+		t.Fatalf("target %d lanes on a path where a probe measured a 90%% gain (%s)",
+			decision.TargetLanes, decision.Reason)
+	}
+}
+
+// A path that has already answered must not be asked again.
+//
+// The first probe on a path is speculative -- there is nothing to compare
+// until a second lane exists -- so on a path whose bottleneck is shared the
+// flow would grow, measure that it did not help, retire, and grow again, every
+// few seconds forever. The answer belongs to the path, and once it is known
+// the search stops.
+func TestAPathThatRefusesStripingIsNotProbedAgain(t *testing.T) {
+	planner := New(Config{MaxLanes: 8, BulkStartLanes: 1, InteractiveLanes: 1})
+	answered := Metrics{
+		CurrentLanes: 2, HealthyLanes: 2, AvailableLanes: 8, UDPHealthy: true,
+		BaselineRTT: 300 * time.Millisecond, CurrentRTT: 310 * time.Millisecond,
+		// A probe is ready and would otherwise buy a lane.
+		ProbeReady: true, MarginalGain: 0.5,
+		// But this path has already been measured not to reward them.
+		PathRefusesStriping: true,
+	}
+	decision := planner.Decide(classifier.ClassBulk, answered)
+	if decision.TargetLanes != 1 {
+		t.Fatalf("target %d lanes on a path measured not to reward striping, want 1 (%s)",
+			decision.TargetLanes, decision.Reason)
+	}
+}
