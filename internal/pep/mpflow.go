@@ -364,6 +364,10 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 		f.nextJoinID = lane.id + 1
 	}
 	f.lanesMu.Unlock()
+	// The policy is set before either goroutine exists. Setting it from the
+	// reader, as the first version did, meant the writer could already be
+	// asking for it.
+	lane.fc.setCodingPolicy(f.prefersCodingOverRetransmission)
 	go f.readLane(lane)
 	go f.writeLane(lane)
 	// A lane admitted while the flow is sending starts carrying data at once;
@@ -701,6 +705,18 @@ func (f *multipathFlow) deliverInbound(lane *mpLane, frame protocol.Frame) bool 
 	case <-f.ctx.Done():
 		return false
 	}
+}
+
+// prefersCodingOverRetransmission reports whether this flow would rather spend
+// bytes than round trips.
+//
+// A bulk transfer would not: it is measured by how many bytes arrive per
+// second, and a code that provisions for the binomial spends more of them than
+// retransmitting what was actually lost. Everything else would: an exchange
+// too short to trigger a fast retransmit recovers by timeout, and a timeout is
+// a round trip that coding does not spend.
+func (f *multipathFlow) prefersCodingOverRetransmission() bool {
+	return classifier.Class(f.class.Load()) != classifier.ClassBulk
 }
 
 // laneRetransmits reports whether a lane recovers its own losses, which is

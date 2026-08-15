@@ -37,41 +37,51 @@ func requestResponse(size int) func(net.Listener) {
 	}
 }
 
-// A small request and its small reply are the case the erasure channel treats
-// worst. Three packets at 38% loss means three quarters of exchanges lose one,
+func median(samples []time.Duration) time.Duration {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	return sorted[len(sorted)/2]
+}
+
+// A small request and its small reply are the case an erasure channel treats
+// worst. Three packets at 42% loss means three quarters of exchanges lose one,
 // and with nothing behind it to trigger a fast retransmit the recovery is a
 // probe timeout -- a round trip, then another if the probe is lost too.
 //
-// Coding repairs it without a round trip, but only if the path is known to
-// erase before the exchange starts. This measures both, so the difference is
-// the seeding rather than an opinion about it.
-func TestSmallExchangeLatencyDependsOnKnowingThePath(t *testing.T) {
+// Coding repairs that without a round trip, but only if the path is known to
+// erase before the exchange starts, because a block sealed knowing nothing
+// carries no parity. Both halves run on one connection, so the only thing that
+// differs between them is what is known.
+func TestSmallExchangesAreRepairedOnceThePathIsKnown(t *testing.T) {
 	if testing.Short() {
 		t.Skip("brings up QUIC across an emulated 300 ms path")
 	}
 	const oneWay = 150 * time.Millisecond
-	// A path is an uplink and a peer, and in this harness both are loopback.
 	loopback := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
+	key := pathKey(loopback, loopback)
+	// Every pair in this process reaches loopback by loopback, so they share
+	// one path key. Start from nothing so the first half really is blind.
+	pathmodel.Forget(key)
+	t.Cleanup(func() { pathmodel.Forget(key) })
+
 	path := pathsim.Config{
 		OneWayDelay: oneWay, RateBytesPerSec: uint64(25e6 / 8),
 		PolicerRefillPeriod: 8 * time.Millisecond, LossRate: 0.42, Seed: 41,
 	}
+	socks, destination := codedPairWith(t, true, &path, requestResponse(2700))
+	// A connection to a path that erases 42% of packets is sometimes simply
+	// lost, which is the path and not a defect. This measures what exchanges
+	// cost once a flow exists, so it is worth another attempt to get one.
+	conn := dialWithRetries(t, socks, destination, 3)
+	defer conn.Close()
 
-	exchange := func(t *testing.T, seeded bool) []time.Duration {
-		t.Helper()
-		socks, destination := codedPairWith(t, true, &path, requestResponse(2700))
-		if seeded {
-			// What the endpoint pair is already known to do. A long-lived
-			// proxy learns this from its own traffic; a fresh one does not,
-			// and that is the whole difference being measured.
-			pathmodel.Shared(pathKey(loopback, loopback)).Report(99, 0.42, 5000, 1.2e6)
-		}
-		conn := socksDial(t, socks, destination, 60*time.Second)
-		defer conn.Close()
-
+	exchange := func(n int) []time.Duration {
 		var samples []time.Duration
 		request, reply := make([]byte, 16), make([]byte, 2700)
-		for i := 0; i < 12; i++ {
+		for i := 0; i < n; i++ {
 			start := time.Now()
 			if _, err := conn.Write(request); err != nil {
 				t.Fatal(err)
@@ -84,23 +94,19 @@ func TestSmallExchangeLatencyDependsOnKnowingThePath(t *testing.T) {
 		return samples
 	}
 
-	report := func(name string, samples []time.Duration) time.Duration {
-		sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-		median := samples[len(samples)/2]
-		t.Logf("%s: median %v  p90 %v  max %v (round trip %v)",
-			name, median.Round(time.Millisecond),
-			samples[int(0.9*float64(len(samples)-1))].Round(time.Millisecond),
-			samples[len(samples)-1].Round(time.Millisecond), 2*oneWay)
-		return median
-	}
+	blind := median(exchange(10))
+	// What the endpoint pair is already known to erase. A long-lived proxy
+	// learns this from its own traffic or from the prewarm; only the floor is
+	// seeded, because a delivered rate would also claim a share of the
+	// bottleneck and that is a different experiment.
+	pathmodel.Shared(key).Report(99, 0.42, 5000, 0)
+	knowing := median(exchange(10))
 
-	blind := report("path unknown", exchange(t, false))
-	pathmodel.Shared(pathKey(loopback, loopback)).Report(99, 0.42, 5000, 1.2e6)
-	knowing := report("path known", exchange(t, true))
-
+	t.Logf("median exchange: %v when the path is unknown, %v once it is known (round trip %v)",
+		blind.Round(time.Millisecond), knowing.Round(time.Millisecond), 2*oneWay)
 	if knowing >= blind {
-		t.Errorf("knowing the path gave median %v against %v when blind; "+
-			"coding a small exchange should repair it without a round trip",
+		t.Errorf("knowing the path gave %v against %v when blind; a small exchange "+
+			"should be repaired by the code rather than by a probe timeout",
 			knowing.Round(time.Millisecond), blind.Round(time.Millisecond))
 	}
 }

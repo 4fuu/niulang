@@ -253,6 +253,18 @@ var (
 	shared   = make(map[string]*PathModel)
 )
 
+// Forget drops what is known about a path.
+//
+// A path that is gone should not be remembered indefinitely: the registry only
+// grows by the number of distinct uplinks a machine has used, which is small,
+// but a measurement kept past the network it describes is a confident wrong
+// answer waiting to be read.
+func Forget(key string) {
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	delete(shared, key)
+}
+
 // Shared returns the model for an endpoint pair, creating it on first use.
 // The key should identify the peer rather than the connection: lanes to the
 // same peer are exactly the ones that must share.

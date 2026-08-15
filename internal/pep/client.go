@@ -208,7 +208,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		cfg.DialTimeout = 10 * time.Second
 	}
 	if cfg.HandshakeTimeout <= 0 {
-		cfg.HandshakeTimeout = 10 * time.Second
+		// Long enough for the first connection to an erasing path. The QUIC
+		// handshake alone takes about five seconds at 42% loss -- its packets
+		// are large, they are lost as often as anything else, and the probe
+		// timeouts that recover them double -- and this bound has to cover
+		// that and the session's own exchange after it. At ten seconds the
+		// first connection was a coin flip, and it is the one connection every
+		// flow afterwards is built on.
+		cfg.HandshakeTimeout = 30 * time.Second
 	}
 	if cfg.FlowIdleTimeout <= 0 {
 		cfg.FlowIdleTimeout = defaultFlowIdleTimeout

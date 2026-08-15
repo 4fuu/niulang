@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -46,7 +47,10 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
-		Metrics: metrics.New(), HandshakeTimeout: 5 * time.Second,
+		Metrics: metrics.New(),
+		// The first connection to an erasing path spends about five seconds
+		// on the QUIC handshake alone, so a bound of five is a coin flip.
+		HandshakeTimeout: 30 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -96,20 +100,47 @@ func clientServerAcross(t *testing.T, path *pathsim.Config) (*Client, net.Listen
 	return lastClient, destination
 }
 
+// dialWithRetries opens a flow, allowing for a path that sometimes loses the
+// attempt outright.
+func dialWithRetries(t *testing.T, socks string, destination net.Listener, attempts int) net.Conn {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		conn, err := trySocksDial(socks, destination, 90*time.Second)
+		if err == nil {
+			return conn
+		}
+		if attempt >= attempts {
+			t.Fatalf("no flow after %d attempts: %v", attempts, err)
+		}
+		t.Logf("flow attempt %d failed on a 42%% erasure channel: %v", attempt, err)
+	}
+}
+
 // socksDial opens a SOCKS5 connection through the proxy to the destination.
 func socksDial(t *testing.T, socks string, destination net.Listener, deadline time.Duration) net.Conn {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", socks, 5*time.Second)
+	conn, err := trySocksDial(socks, destination, deadline)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return conn
+}
+
+// trySocksDial is socksDial for callers that want to handle a failure.
+func trySocksDial(socks string, destination net.Listener, deadline time.Duration) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", socks, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
 	_ = conn.SetDeadline(time.Now().Add(deadline))
 	if _, err := conn.Write([]byte{5, 1, 0}); err != nil {
-		t.Fatal(err)
+		conn.Close()
+		return nil, err
 	}
 	var method [2]byte
 	if _, err := io.ReadFull(conn, method[:]); err != nil {
-		t.Fatal(err)
+		conn.Close()
+		return nil, err
 	}
 	host, portText, _ := net.SplitHostPort(destination.Addr().String())
 	ip := net.ParseIP(host).To4()
@@ -119,16 +150,19 @@ func socksDial(t *testing.T, socks string, destination net.Listener, deadline ti
 	binary.BigEndian.PutUint16(portBytes[:], uint16(port))
 	request = append(request, portBytes[:]...)
 	if _, err := conn.Write(request); err != nil {
-		t.Fatal(err)
+		conn.Close()
+		return nil, err
 	}
 	var reply [10]byte
 	if _, err := io.ReadFull(conn, reply[:]); err != nil {
-		t.Fatal(err)
+		conn.Close()
+		return nil, err
 	}
 	if reply[1] != 0 {
-		t.Fatalf("SOCKS connect failed: %v", reply)
+		conn.Close()
+		return nil, fmt.Errorf("SOCKS connect failed: %v", reply)
 	}
-	return conn
+	return conn, nil
 }
 
 // A coded lane has to carry the session's frames as faithfully as a stream

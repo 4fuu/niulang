@@ -46,9 +46,18 @@ type frameConn struct {
 	// stream-lock acquisition per frame in addition to the payload reads.
 	reader *bufio.Reader
 
+	// wantsCoding reports whether this lane's flow would rather spend bytes
+	// than round trips. Nil means it would.
+	wantsCoding func() bool
+
 	closeOnce sync.Once
 	done      chan struct{}
 }
+
+// setCodingPolicy tells the framing which currency this flow prefers. It must
+// be called before the lane's goroutines start, because from then on the
+// answer is read on every write.
+func (c *frameConn) setCodingPolicy(wants func() bool) { c.wantsCoding = wants }
 
 // frameReadBuffer is sized above one default chunk so a data frame's header
 // and payload are normally satisfied from one underlying stream read.
@@ -85,14 +94,29 @@ func newSplitFrameConn(control io.ReadWriteCloser, bulk *coded.Path, maxPayload 
 
 // bulkFrame decides which substrate a frame belongs on.
 //
-// Only bulk payload goes to the coded path; everything else is control,
-// including the acknowledgements that release it. And even bulk stays on the
-// stream unless the coded path is actually coding: datagrams carry no
-// reliability of their own, so on a path clean enough not to warrant parity an
-// uncoded lost frame would wait for the session's re-issue where the stream
-// would have retransmitted it within a round trip.
+// Data frames may go to the coded path; everything else is control, including
+// the acknowledgements that release them. Two further conditions apply, and
+// both are measurements rather than settings.
+//
+// The path must be coding at all. Datagrams carry no reliability of their own,
+// so on a path clean enough not to warrant parity an uncoded lost frame waits
+// for the session's re-issue where the stream would have retransmitted it
+// within a round trip.
+//
+// And the flow must be one that wants latency more than bandwidth. Coding and
+// retransmission cost the same thing in different currencies: on a memoryless
+// erasure channel retransmission resends only what was lost, 1/(1-p), where a
+// block code must provision for the binomial. Measured live at 37% loss, a
+// bulk download ran at 10.1 Mbit/s on the stream and 5.0 coded -- the code
+// spending exactly the difference the arithmetic predicts. A small exchange
+// went the other way, 1.9 s uncoded against 618 ms coded, because there the
+// currency is a round trip and not a byte. So bulk stays on the stream and
+// everything else is coded.
 func (c *frameConn) bulkFrame(f protocol.Frame) bool {
-	return f.Header.Type == protocol.TypeData && c.codingBulk()
+	if f.Header.Type != protocol.TypeData || !c.codingBulk() {
+		return false
+	}
+	return c.wantsCoding == nil || c.wantsCoding()
 }
 
 // codingBulk reports whether this lane's data is going over the coded path,
