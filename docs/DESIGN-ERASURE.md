@@ -685,21 +685,34 @@ pipe meanwhile. Widening the per-lane write-ahead window from 512 KB to 2 MB
 made no difference (8.19 s against 8.14 s over six paired transfers), so it is
 not a commitment bound.
 
-Probing the tail directly was tried and did not survive its own measurement: a
-tail probe re-offering the oldest outstanding chunks each round trip, and
-switching the tail to the coded path, together moved the tail from a mean of
-3.56 s to 3.16 s with the medians crossing the other way. On a path this noisy
-that is not a result, and a mechanism that spends bandwidth needs one, so it
-was removed rather than kept.
+Probing the tail directly was tried twice and did not survive its own
+measurement either time. First as a re-issue of the oldest outstanding chunks
+each round trip: the tail moved from a mean of 3.56 s to 3.16 s with the
+medians crossing the other way, which on a path this noisy is not a result.
+Then, understanding that a copy written to the same reliable stream lands
+behind the very hole it is meant to fill -- stream bytes are delivered in
+order -- the copies were sent over the coded path instead, which delivers out
+of order. Twelve paired transfers each way: 7.96 s against 7.73 s. Slightly
+worse.
+
+The reason is worth keeping, because it bounds what any tail mechanism can do
+here. Filling the session's hole does not unblock the flow, because the bulk
+of the data is on a stream and the stream's own hole still gates everything
+QUIC carries behind it. Head-of-line blocking cannot be escaped by a side
+channel while the main channel is ordered. The only escape is to carry bulk on
+the coded path outright, and that is measured to cost more than it saves
+(7.0/6.1/5.0 Mbit/s against 9.8/9.0/7.7). So the tail is a property of the
+split, not a defect in it.
 
 ## What is not done
 
-**The tail of a single bulk transfer.** It is understood -- the transport is
-waiting out probe timeouts on the last losses with nothing left to send -- and
-the obvious answer, probing it, did not measure better. What would is keeping
-the pipe full with something useful, which on a reliable stream means parity
-the stream cannot carry. It costs a single flow about a fifth of the path;
-concurrent flows do not pay it.
+**The tail of a single bulk transfer.** It is understood and bounded above:
+the transport waits out probe timeouts on the last losses, and no side channel
+can fix it while the bulk rides an ordered stream. It costs a single flow
+about a fifth of the path; concurrent flows fill each other's tails and reach
+it. Escaping it means carrying bulk coded, which costs more than it saves at
+today's erasure rate -- but that arithmetic turns on the rate, and a path that
+erased less would change it.
 
 Interleaving across blocks is now moot: the window interleaves continuously by
 construction, and `Params.InterleaveDepth` has no separate meaning for it.
