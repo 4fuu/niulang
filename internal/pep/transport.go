@@ -184,6 +184,10 @@ type quicStreamConn struct {
 // site that builds a lane having to thread it through.
 func (c *quicStreamConn) bulkPath() *coded.Path { return c.bulk }
 
+// pathIdentity is the uplink and peer this lane runs between, which is what
+// its measurements are recorded against.
+func (c *quicStreamConn) pathIdentity() string { return peerKey(c.conn) }
+
 func (c *quicStreamConn) transportStats() laneTransportStats {
 	if c == nil || c.conn == nil {
 		return laneTransportStats{}
@@ -581,8 +585,43 @@ func peerKey(conn *quic.Conn) string {
 	return pathKey(conn.LocalAddr(), conn.RemoteAddr())
 }
 
+// pathKey names the uplink and peer a connection runs between.
+//
+// A socket's own local address is not reliably the uplink. Bound to the
+// wildcard, as these are, it reports :: or 0.0.0.0 whatever route the kernel
+// actually chose -- so keying on it would give Wi-Fi and cellular the same
+// name, which is the one thing this key exists to prevent. When it is
+// unspecified the routing table is asked instead, which is where the answer
+// was all along.
 func pathKey(local, remote net.Addr) string {
-	return addressHost(local) + "->" + addressHost(remote)
+	source := addressHost(local)
+	if isUnspecifiedHost(source) {
+		source = routeSource(remote)
+	}
+	return source + "->" + addressHost(remote)
+}
+
+func isUnspecifiedHost(host string) bool {
+	if host == "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// routeSource asks the routing table which source address this destination
+// gets. Dialling a UDP socket sends no packets; it only binds and resolves the
+// route, which is exactly the question.
+func routeSource(remote net.Addr) string {
+	if remote == nil {
+		return ""
+	}
+	conn, err := net.Dial("udp", remote.String())
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	return addressHost(conn.LocalAddr())
 }
 
 func addressHost(addr net.Addr) string {

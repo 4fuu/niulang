@@ -5,6 +5,8 @@ import (
 	"net"
 	"time"
 
+	"github.com/icourses-dev/wanopt/internal/pathmodel"
+	"github.com/icourses-dev/wanopt/internal/protocol"
 	"github.com/icourses-dev/wanopt/internal/session"
 )
 
@@ -96,17 +98,106 @@ func (c *Client) prewarmPath(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	lane, err := c.dialLaneMode(warm, TransportQUIC, sessionID, 0, session.HelloNew, c.cfg.EnableQUICPool, false)
+	// The hello is sent and not waited for. A prewarm has nobody waiting on
+	// it and nothing to authenticate for -- it opens no flow -- so waiting for
+	// the acknowledgement would only expose it to a timeout on exactly the
+	// paths it exists to measure. The connection it leaves behind is pooled,
+	// so the first real flow inherits the handshake as well as the
+	// measurement.
+	lane, err := c.dialLaneMode(warm, TransportQUIC, sessionID, 0, session.HelloNew, c.cfg.EnableQUICPool, true)
 	if err != nil {
 		c.cfg.Logger.Debug("path prewarm failed", "error", err)
 		return
 	}
+	// The handshake alone is about ten packets, which is enough to notice that
+	// a path erases and not enough to say how much, so the prewarm sends a
+	// little more before letting go.
+	c.probePath(lane)
 	// The connection stays in the pool; only this lane's framing is done with.
-	// What was wanted from it is already recorded: the handshake's own
-	// acknowledgements are what the congestion controller measures the path
-	// from, and it publishes that to the model every flow will read.
 	_ = lane.fc.Close()
 }
+
+const (
+	// pathProbePackets is how much padding the prewarm sends to measure the
+	// path with. The erasure floor is a proportion, and a proportion measured
+	// from ten packets is a guess: at 40% loss, ten packets put its standard
+	// error near fifteen points, and the code rate chosen from it would be
+	// wrong by more than the parity it was choosing. A hundred brings that
+	// under five.
+	//
+	// It is padding rather than something useful because there is nothing
+	// useful to send yet -- that is what makes it a prewarm -- and it is a
+	// hundred rather than a thousand because this runs when a phone changes
+	// network, where the bytes are the user's.
+	pathProbePackets = 100
+	// pathProbeBudget bounds the probe in time as well as in packets, so a
+	// path too slow to deliver them does not hold the prewarm open.
+	pathProbeBudget = 3 * time.Second
+)
+
+// probePath sends enough traffic for the congestion controller to measure the
+// path, and throws it away.
+//
+// The measurement is not of the padding but of what came back: the controller
+// reads the erasure floor from the acknowledgements of its own packets, and
+// publishes it to the model that every flow on this uplink then starts from.
+// Nothing needs to receive the padding, and nothing does -- it is addressed to
+// a flow that does not exist, which the peer's demultiplexer drops.
+func (c *Client) probePath(lane *authenticatedLane) {
+	if lane == nil || lane.fc == nil {
+		return
+	}
+	payload := make([]byte, probePayloadBytes)
+	deadline := time.Now().Add(pathProbeBudget)
+	for sent := 0; sent < pathProbePackets && time.Now().Before(deadline); sent++ {
+		frame := protocol.Frame{
+			Header: protocol.Header{
+				Version: protocol.Version, Type: protocol.TypeData,
+				SessionID: lane.sessionID, FlowID: probeFlowID, Class: protocol.ClassNew,
+			},
+			Payload: payload,
+		}
+		if err := lane.fc.Write(frame); err != nil {
+			return
+		}
+	}
+	c.awaitMeasurement(lane, deadline)
+}
+
+// awaitMeasurement waits for the answer the probe was asking for.
+//
+// Sending is not measuring. What the controller learns, it learns from the
+// acknowledgements, which are a round trip behind the padding that provoked
+// them -- so a prewarm that sent and returned would leave exactly the
+// ignorance it was opened to remove, and the first flow would still be the one
+// discovering the path.
+func (c *Client) awaitMeasurement(lane *authenticatedLane, deadline time.Time) {
+	keyed, ok := lane.outer.(interface{ pathIdentity() string })
+	if !ok {
+		return
+	}
+	model := pathmodel.Shared(keyed.pathIdentity())
+	for time.Now().Before(deadline) {
+		if floor, _ := model.Current(); floor > 0 {
+			return
+		}
+		time.Sleep(measurementPoll)
+	}
+}
+
+// measurementPoll is short against a long-haul round trip, so the prewarm ends
+// as soon as the answer arrives rather than on a schedule.
+const measurementPoll = 20 * time.Millisecond
+
+const (
+	// probeFlowID is a flow identity no flow has. Real ones are random and
+	// non-zero, and a peer that finds nobody subscribed to this simply drops
+	// the frame, which is the whole handling it needs.
+	probeFlowID = 0
+	// probePayloadBytes fills a packet without exceeding one, so each frame
+	// measures one packet's fate.
+	probePayloadBytes = 1000
+)
 
 // prewarmTimeout bounds the measurement, which is worth having and not worth
 // waiting for.

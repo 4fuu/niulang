@@ -1,11 +1,13 @@
 package pep
 
 import (
+	"context"
 	"io"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/icourses-dev/wanopt/internal/pathmodel"
 	"github.com/icourses-dev/wanopt/internal/pathsim"
 )
 
@@ -123,5 +125,44 @@ func TestTheUplinkIsWhicheverAddressReachesTheServer(t *testing.T) {
 	unreachable := &Client{cfg: ClientConfig{RemoteAddr: "127.0.0.1:not-a-port"}}
 	if got := unreachable.currentUplink(); got != "" {
 		t.Fatalf("unreachable server reported uplink %q", got)
+	}
+}
+
+// The prewarm exists to measure, so it has to leave a measurement behind.
+//
+// A path that erases is only coded around once something has noticed it does,
+// and the first flow on a fresh uplink notices nothing: a handshake is about
+// ten packets, and an erasure rate estimated from ten packets is a guess wider
+// than the parity it would choose. The prewarm sends enough to answer the
+// question before a flow has to ask it.
+func TestThePrewarmLeavesTheUplinkMeasured(t *testing.T) {
+	if testing.Short() {
+		t.Skip("brings up QUIC across an emulated 300 ms path")
+	}
+	path := pathsim.Config{
+		OneWayDelay: 150 * time.Millisecond, RateBytesPerSec: uint64(25e6 / 8),
+		PolicerRefillPeriod: 8 * time.Millisecond, LossRate: 0.42, Seed: 53,
+	}
+	loopback := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
+	key := pathKey(loopback, loopback)
+
+	// Start from nothing known about this uplink.
+	before, _ := pathmodel.Shared(key).Current()
+
+	client, _ := clientServerAcross(t, &path)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	client.prewarmPath(ctx)
+
+	after, _ := pathmodel.Shared(key).Current()
+	t.Logf("erasure floor known for this uplink: %.3f before the prewarm, %.3f after", before, after)
+	if after <= 0 {
+		t.Fatal("the prewarm left the uplink unmeasured, so the first flow on it " +
+			"will be carried uncoded across a channel that erases 42% of packets")
+	}
+	// And what it measured has to resemble the path, or it is worse than
+	// nothing: everything downstream is sized from this number.
+	if after < 0.2 || after > 0.7 {
+		t.Fatalf("measured floor %.3f on a 42%% erasure channel", after)
 	}
 }

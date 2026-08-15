@@ -79,7 +79,21 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 	t.Cleanup(cancel)
 	go func() { _ = server.ServePacketConn(ctx, packetConn) }()
 	go func() { _ = client.ServeListener(ctx, clientListener) }()
+	lastClient = client
 	return clientListener.Addr().String(), destinationListener
+}
+
+// lastClient is the client the most recent harness built, for tests that need
+// to call into it rather than through its SOCKS port.
+var lastClient *Client
+
+// clientServerAcross brings up a client and server across a path and returns
+// the client, for tests that drive it directly rather than through SOCKS.
+func clientServerAcross(t *testing.T, path *pathsim.Config) (*Client, net.Listener) {
+	t.Helper()
+	socks, destination := codedPairWith(t, true, path, echoDestination)
+	_ = socks
+	return lastClient, destination
 }
 
 // socksDial opens a SOCKS5 connection through the proxy to the destination.
