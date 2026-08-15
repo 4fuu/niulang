@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/metrics"
+	"github.com/icourses-dev/wanopt/internal/pathmodel"
 	"github.com/icourses-dev/wanopt/internal/pathsim"
 )
 
@@ -27,6 +28,11 @@ func codedPair(t *testing.T, pooled bool, path *pathsim.Config) (socks string, d
 // codedPairWith lets a test choose what the destination does with the bytes.
 func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(net.Listener)) (socks string, destination net.Listener) {
 	t.Helper()
+	// Every endpoint in this process is loopback, so every test shares one
+	// path model and would otherwise size its code from what the test before
+	// it measured on a different channel.
+	pathmodel.Reset()
+	t.Cleanup(pathmodel.Reset)
 	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
