@@ -13,6 +13,17 @@ import (
 // room for the IP, UDP and QUIC headers.
 const DefaultDatagramBytes = 1200
 
+// quicDatagramOverhead is what a QUIC packet spends before the datagram's own
+// payload: the header with its connection IDs and packet number, the datagram
+// frame's type and length, and the AEAD tag.
+//
+// It has to be subtracted rather than assumed away. A connection configured
+// with a 1200-byte packet size accepts a datagram payload near 1150, so a
+// carrier that offered 1200 had every full-size shard refused while every
+// short one went through -- a session whose handshake completed and whose
+// first real frame vanished.
+const quicDatagramOverhead = 48
+
 // QUICCarrier runs a coded channel over a QUIC connection's unreliable
 // datagrams (RFC 9221).
 //
@@ -50,7 +61,11 @@ func NewQUICCarrier(conn *quic.Conn) (*QUICCarrier, error) {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	c := &QUICCarrier{conn: conn, ctx: ctx, stop: stop}
-	c.limit.Store(DefaultDatagramBytes)
+	limit := int64(conn.InitialPacketSize()) - quicDatagramOverhead
+	if limit < 1 {
+		limit = 1
+	}
+	c.limit.Store(limit)
 	return c, nil
 }
 
@@ -66,6 +81,17 @@ func ShardBytesFor(datagramBytes int) int {
 	}
 	return 0
 }
+
+// LaneMarker is the datagram a client sends to say that this connection
+// carries a coded lane rather than a stream pool.
+//
+// It is sent rather than configured because a mismatch would otherwise hang:
+// a server waiting on AcceptStream never learns that the client chose
+// datagrams. A server races the two, and whichever arrives first settles it.
+func LaneMarker() []byte { return []byte{typeLane} }
+
+// IsLaneMarker reports whether a datagram is the coded-lane announcement.
+func IsLaneMarker(d []byte) bool { return len(d) == 1 && d[0] == typeLane }
 
 func (c *QUICCarrier) Send(d []byte) error {
 	err := c.conn.SendDatagram(d)

@@ -73,6 +73,20 @@ type ClientConfig struct {
 	// path-specific Reno peer can be worse than independent QUIC lanes; the
 	// scheduler still opens independent lanes for measured bulk traffic.
 	EnableQUICPool bool
+	// CodedLanes carries a flow's frames over QUIC datagrams repaired by an
+	// erasure code, instead of over a QUIC stream repaired by retransmission.
+	//
+	// It is for interactive traffic on a lossy path. Measured across the
+	// emulated China-US channel with 256-byte messages, the stream's median
+	// delivery was 1.372 s and the coded lane's 153 ms, because a stream
+	// delivers in order and at a 42% erasure rate something is always missing.
+	// It is not for bulk: retransmission resends only what was lost where a
+	// block code provisions for the binomial, so a large transfer runs
+	// slightly faster on a stream.
+	//
+	// A connection carrying a coded lane is not pooled, because the lane owns
+	// it.
+	CodedLanes bool
 	// OptimisticOpen returns SOCKS success after the authenticated OPEN has
 	// been queued, without waiting for OPEN_OK. The flow reader validates the
 	// eventual OPEN_OK (or propagates a typed RESET), allowing application
@@ -768,9 +782,12 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 			kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
 			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
 		}
-		if pooled {
+		switch {
+		case c.cfg.CodedLanes:
+			outer, err = dialCodedQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg, c.windows())
+		case pooled:
 			outer, fastOpen, alreadyAuthenticated, reserveControl, publishCapabilities, err = c.dialPooledQUICLane(ctx, ccfg, sessionID, pipelineHello)
-		} else {
+		default:
 			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, ccfg, c.windows())
 		}
 	default:

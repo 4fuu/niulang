@@ -371,6 +371,53 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	// supplies one shared congestion controller and packet-loss state. This is
 	// the same multiplexing property that makes TUIC effective for short flows,
 	// without sharing application/session framing state.
+	// What a connection carries is decided once, by racing its first stream
+	// against its first datagram. A coded lane is one connection rather than a
+	// stream in the pool, because the code has to see the erasures and a
+	// stream has already repaired them.
+	first, isCoded, err := acceptCodedOrStream(ctx, conn, controller)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.cfg.Logger.Debug("accept QUIC lane failed", "error", err)
+		}
+		return
+	}
+	dispatch := func(lane streamConn) bool {
+		select {
+		case s.semaphore <- struct{}{}:
+			wg.Add(1)
+			go func(lane streamConn) {
+				defer wg.Done()
+				defer func() { <-s.semaphore }()
+				s.handleSession(ctx, lane, auth)
+			}(lane)
+			return true
+		default:
+			_ = lane.Close()
+			s.cfg.Logger.Warn("remote session limit reached")
+			return false
+		}
+	}
+	if isCoded {
+		// A coded lane owns its connection, so there is no pool to keep
+		// accepting from -- and the session is run here rather than handed to
+		// a goroutine, because this function closes the connection on the way
+		// out and closes it before waiting for anything. That ordering is
+		// deliberate for a stream pool, where the loop only ends once the
+		// connection is already gone; for a lane that owns its connection it
+		// would tear the session down as it was still authenticating.
+		select {
+		case s.semaphore <- struct{}{}:
+			defer func() { <-s.semaphore }()
+			s.handleSession(ctx, first, auth)
+		default:
+			_ = first.Close()
+			s.cfg.Logger.Warn("remote session limit reached")
+		}
+		return
+	}
+	dispatch(first)
+
 	for {
 		// Waiting for another stream is not a handshake operation. Applying the
 		// per-stream authentication timeout here used to close the entire QUIC
@@ -385,18 +432,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 			}
 			return
 		}
-		select {
-		case s.semaphore <- struct{}{}:
-			wg.Add(1)
-			go func(stream streamConn) {
-				defer wg.Done()
-				defer func() { <-s.semaphore }()
-				s.handleSession(ctx, stream, auth)
-			}(stream)
-		default:
-			_ = stream.Close()
-			s.cfg.Logger.Warn("remote session limit reached")
-		}
+		dispatch(stream)
 	}
 }
 

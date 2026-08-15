@@ -304,6 +304,10 @@ func quicConfig(windows flowWindows) *quic.Config {
 		// path MTU and stall a long response.
 		DisablePathMTUDiscovery: true,
 		InitialPacketSize:       1200,
+		// Datagrams are negotiated on every connection so a coded lane is
+		// possible without a second handshake. Negotiating costs one transport
+		// parameter; a connection that never sends one pays nothing more.
+		EnableDatagrams: true,
 	}
 }
 

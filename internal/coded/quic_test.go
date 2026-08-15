@@ -225,3 +225,35 @@ func TestCodedDatagramsAgainstAReliableStream(t *testing.T) {
 		}
 	})
 }
+
+// Every datagram this channel sends has to fit what the connection will
+// accept. It is not a tuning question: a datagram over the limit is refused
+// rather than fragmented, so a shard sized against a guess disappears, and a
+// block that loses its full-size shards never completes. Short frames still go
+// through, so the symptom is a session that handshakes and then stalls on its
+// first real frame.
+func TestNoShardExceedsTheCarriersDatagramLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("brings up QUIC across an emulated 300 ms path")
+	}
+	client, _ := quicPair(t, liveChannel())
+	carrier, err := NewQUICCarrier(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := carrier.MaxDatagramBytes()
+	if limit <= 0 || limit >= int(client.InitialPacketSize()) {
+		t.Fatalf("carrier limit %d against a packet size of %d", limit, client.InitialPacketSize())
+	}
+	// A datagram of exactly the limit must be accepted, which is what makes
+	// the limit usable rather than merely conservative.
+	if err := carrier.Send(make([]byte, limit)); err != nil {
+		t.Fatalf("carrier refused a datagram of its own stated limit %d: %v", limit, err)
+	}
+	// And a channel over it must never build a shard larger than that.
+	c := NewChannel(carrier, Config{ShardBytes: ShardBytesFor(DefaultDatagramBytes), RoundTrip: 300 * time.Millisecond})
+	defer c.Close()
+	if got := c.shardBytes() + shardHeader; got > limit {
+		t.Fatalf("channel builds %d-byte datagrams against a carrier limit of %d", got, limit)
+	}
+}

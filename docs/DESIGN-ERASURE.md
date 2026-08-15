@@ -171,20 +171,51 @@ probe shows a per-4-tuple limiter, which is what the open-loop split test is
 for. And the erasure compensation, if lanes are ever used together, has to be
 shared across them rather than applied per lane.
 
+## The coded lane
+
+`--coded-lanes` carries a flow's frames over QUIC datagrams instead of a QUIC
+stream. A connection carries one coded lane rather than a pool, because the
+lane owns the datagrams. What a connection is carrying is decided by racing its
+first stream against its first datagram, so one server serves both kinds
+without being told and a mismatch fails instead of hanging.
+
+It is correct: a flow crosses a 42% erasure channel intact. It is also, inside
+the PEP, slow — 48 KiB echoed across the emulated channel takes about 84
+seconds, where the coded channel on its own carries 1 MiB in five. The
+difference is that the layer above writes a frame and waits for the answer, so
+every frame is sealed into its own block, and blocks that small are numerous
+enough that most fall past the receiver's report and wait on the
+retransmission timer. Coalescing writes for two milliseconds before sealing was
+tried and made it worse, so the cause is not only block size. It stays off by
+default until that is understood.
+
+Two defects it exposed are worth recording because neither was visible from
+either side alone. The datagram limit is not a constant to guess: a connection
+configured with a 1200-byte packet accepts a payload near 1150, so shards sized
+at 1200 were refused while short handshake frames went through — a session that
+completed its handshake and then lost its first real frame. The carrier now
+derives the limit from the connection's packet size and corrects it from any
+refusal. And a connection that owns a lane cannot be closed on the way out of
+the accept path the way a stream pool can: that ordering is deliberate for a
+pool, whose loop only ends once the connection is already gone, but it tore
+down a coded session as it was authenticating.
+
 ## What is not done
 
-The coded channel is a complete transport but is not yet wired into the PEP's
-lanes; `internal/pep` still runs on reliable QUIC streams. The erasure
-controller *is* wired in and is the change that matters most for throughput.
+The coded lane's throughput inside the PEP, above.
 
 Interleaving is modelled and sized for (`Params.InterleaveDepth` divides the
 burst factor) but the sender does not yet spread shards across blocks, so
 depth is 1 in practice. On a path whose above-knee loss clusters, implementing
 it would buy back most of the rate that clustering costs.
 
-The erasure compensation is per lane and should be per endpoint pair, which is
-what the four-lane result above shows. Until that is fixed, striping and this
-controller should not be combined.
+Lanes now share a `PathModel` per endpoint pair: the erasure floor is pooled
+across their samples, each lane is capped at its share of the bottleneck so
+their probes cannot compound, and a joining lane starts from what the model
+already knows rather than re-ramping. Live, four lanes improved from about 8.0
+to 8.45 Mbit/s — still below the single lane's 10.0, which is the finding
+rather than a defect, since the bottleneck is per endpoint pair. What changed
+is that using lanes is no longer actively harmful.
 
-The coded channel has not been measured on the live link at all -- only the
+The coded channel has not been measured on the live link -- only the
 controller has. Its latency advantage is emulator evidence so far.

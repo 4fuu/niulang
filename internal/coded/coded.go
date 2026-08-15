@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,6 +68,11 @@ const (
 	// datagram types.
 	typeShard  = 0
 	typeReport = 1
+	// typeLane announces that this connection carries a coded lane rather than
+	// a stream. A Channel ignores it, so the marker can be consumed by
+	// whatever is deciding the connection's kind without disturbing the
+	// channel that follows.
+	typeLane = 2
 
 	// shardHeader is type, transmission sequence, block, shard index, k, n and
 	// the block's data length. The sequence is what lets the receiver measure
@@ -219,6 +225,12 @@ type Channel struct {
 	dropped  atomic.Uint64
 	oversize atomic.Uint64
 
+	// deadline applies to both directions, as a net.Conn's does. It exists
+	// because the layer above addresses a lane through io.ReadWriteCloser plus
+	// SetDeadline, and a lane that cannot be timed out cannot be replaced.
+	deadline      time.Time
+	deadlineTimer *time.Timer
+
 	wg   sync.WaitGroup
 	stop chan struct{}
 }
@@ -334,6 +346,10 @@ func (c *Channel) Flush() error {
 	// Wait for room. The bound is on retained blocks, because that is what
 	// both ends have to hold for a repair to be possible at all.
 	for len(c.sent) >= c.cfg.MaxOutstandingBlocks {
+		if c.expiredLocked() {
+			c.mu.Unlock()
+			return os.ErrDeadlineExceeded
+		}
 		c.cond.Wait()
 		if err := c.fatal(); err != nil {
 			c.mu.Unlock()
@@ -513,6 +529,38 @@ func (c *Channel) retransmitAfter() time.Duration {
 	return c.cfg.RoundTrip*3/2 + c.cfg.ReportInterval
 }
 
+// SetDeadline bounds both directions, as a net.Conn's does. A zero time clears
+// it.
+func (c *Channel) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadline = t
+	if c.deadlineTimer != nil {
+		c.deadlineTimer.Stop()
+		c.deadlineTimer = nil
+	}
+	if t.IsZero() {
+		return nil
+	}
+	// Waiters sleep on a condition variable, which no deadline can interrupt
+	// by itself; the timer is what wakes them to notice it has passed.
+	if d := time.Until(t); d > 0 {
+		c.deadlineTimer = time.AfterFunc(d, func() {
+			c.mu.Lock()
+			c.cond.Broadcast()
+			c.mu.Unlock()
+		})
+	} else {
+		c.cond.Broadcast()
+	}
+	return nil
+}
+
+// expiredLocked reports whether the deadline has passed.
+func (c *Channel) expiredLocked() bool {
+	return !c.deadline.IsZero() && !time.Now().Before(c.deadline)
+}
+
 // Read returns stream bytes in order.
 func (c *Channel) Read(p []byte) (int, error) {
 	c.mu.Lock()
@@ -523,6 +571,9 @@ func (c *Channel) Read(p []byte) (int, error) {
 				return 0, c.err
 			}
 			return 0, io.EOF
+		}
+		if c.expiredLocked() {
+			return 0, os.ErrDeadlineExceeded
 		}
 		c.cond.Wait()
 	}
