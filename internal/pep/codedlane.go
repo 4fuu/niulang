@@ -43,11 +43,19 @@ type bulkDemux struct {
 	mu   sync.Mutex
 	// flows is keyed by flow identity. A frame for a flow nobody has claimed
 	// is dropped, which is what the session's re-issue is for.
-	flows map[uint64]chan protocol.Frame
+	flows map[uint64]*subscription
+}
+
+// A subscription is shared by every lane of one flow, and lives until the last
+// of them lets go. Closing it when the first lane does would take the coded
+// reads away from the others.
+type subscription struct {
+	frames chan protocol.Frame
+	lanes  int
 }
 
 func newBulkDemux(path *coded.Path, maxPayload uint32) *bulkDemux {
-	d := &bulkDemux{path: path, flows: make(map[uint64]chan protocol.Frame)}
+	d := &bulkDemux{path: path, flows: make(map[uint64]*subscription)}
 	go d.run(maxPayload)
 	return d
 }
@@ -57,8 +65,8 @@ func (d *bulkDemux) run(maxPayload uint32) {
 		payload, err := d.path.Receive()
 		if err != nil {
 			d.mu.Lock()
-			for id, ch := range d.flows {
-				close(ch)
+			for id, sub := range d.flows {
+				close(sub.frames)
 				delete(d.flows, id)
 			}
 			d.mu.Unlock()
@@ -70,18 +78,20 @@ func (d *bulkDemux) run(maxPayload uint32) {
 			// is ordinary loss rather than a defect.
 			continue
 		}
+		// The send happens under the lock that release closes under, or the
+		// two race: taking the channel and then sending outside the lock lets
+		// a flow that let go in between be sent to after its channel closed.
+		// The send cannot block, so holding the lock across it costs nothing.
 		d.mu.Lock()
-		ch := d.flows[frame.Header.FlowID]
+		if sub := d.flows[frame.Header.FlowID]; sub != nil {
+			select {
+			case sub.frames <- frame:
+			default:
+				// The flow is not keeping up. Dropping is what an unreliable
+				// substrate does, and the session re-issues what it needs.
+			}
+		}
 		d.mu.Unlock()
-		if ch == nil {
-			continue
-		}
-		select {
-		case ch <- frame:
-		default:
-			// The flow is not keeping up. Dropping is what an unreliable
-			// substrate does, and the session re-issues what it needs.
-		}
 	}
 }
 
@@ -89,21 +99,27 @@ func (d *bulkDemux) run(maxPayload uint32) {
 func (d *bulkDemux) subscribe(flowID uint64) <-chan protocol.Frame {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if existing, ok := d.flows[flowID]; ok {
-		return existing
+	sub, ok := d.flows[flowID]
+	if !ok {
+		sub = &subscription{frames: make(chan protocol.Frame, 256)}
+		d.flows[flowID] = sub
 	}
-	ch := make(chan protocol.Frame, 256)
-	d.flows[flowID] = ch
-	return ch
+	sub.lanes++
+	return sub.frames
 }
 
 func (d *bulkDemux) release(flowID uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if ch, ok := d.flows[flowID]; ok {
-		delete(d.flows, flowID)
-		close(ch)
+	sub, ok := d.flows[flowID]
+	if !ok {
+		return
 	}
+	if sub.lanes--; sub.lanes > 0 {
+		return
+	}
+	delete(d.flows, flowID)
+	close(sub.frames)
 }
 
 // bulkPaths holds one coded path per QUIC connection.

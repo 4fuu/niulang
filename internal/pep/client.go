@@ -326,6 +326,9 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 	defer listener.Close()
 	defer c.closeQUICPool()
 
+	// A change of uplink is a change of path, and nothing else will say so.
+	go c.watchUplink(ctx)
+
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, c.cfg.MaxSessions)
 	go func() {

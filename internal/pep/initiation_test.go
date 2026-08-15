@@ -94,3 +94,34 @@ func TestAPathIsAnUplinkAndAPeer(t *testing.T) {
 		t.Fatalf("a second lane on one uplink keyed %q against %q", again, overWiFi)
 	}
 }
+
+// The uplink is discovered by asking the routing table which source address
+// this destination gets, which sends nothing and so can be asked often.
+func TestTheUplinkIsWhicheverAddressReachesTheServer(t *testing.T) {
+	listener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	client := &Client{cfg: ClientConfig{RemoteAddr: listener.LocalAddr().String()}}
+
+	uplink := client.currentUplink()
+	if uplink != "127.0.0.1" {
+		t.Fatalf("uplink to a loopback server = %q, want 127.0.0.1", uplink)
+	}
+	// Asking twice must give the same answer, or every poll would look like a
+	// network change and tear down the pool.
+	if again := client.currentUplink(); again != uplink {
+		t.Fatalf("uplink changed between two questions: %q then %q", uplink, again)
+	}
+	// A destination that cannot be reached at all has no uplink, and must not
+	// be reported as one: an empty answer is ignored rather than acted on, so
+	// a transient resolver failure cannot look like a network change and tear
+	// the pool down. The address is malformed rather than merely unresolvable,
+	// because a resolver that answers everything -- this machine's does, with
+	// a fake address in 198.18.0.0/15 -- would otherwise give it an uplink.
+	unreachable := &Client{cfg: ClientConfig{RemoteAddr: "127.0.0.1:not-a-port"}}
+	if got := unreachable.currentUplink(); got != "" {
+		t.Fatalf("unreachable server reported uplink %q", got)
+	}
+}
