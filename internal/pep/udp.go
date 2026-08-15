@@ -328,7 +328,7 @@ func (c *Client) openUDPAssociationMode(ctx context.Context, fastRetry bool) (*a
 		_ = lane.fc.Close()
 		return nil, 0, err
 	}
-	_ = lane.outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	_ = lane.outer.SetDeadline(time.Now().Add(handshakeBound(lane.outer, c.cfg.HandshakeTimeout)))
 	openType := protocol.TypeOpen
 	if lane.fastOpen {
 		openType = protocol.TypeOpenFast

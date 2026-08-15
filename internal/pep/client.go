@@ -373,12 +373,25 @@ func (c *Client) closeQUICPool() {
 
 func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	defer inner.Close()
+	// This deadline bounds the local exchange only: reading a SOCKS request
+	// from an application on loopback, which owes nothing to the network.
+	//
+	// It used to stay set across the remote flow open as well, and the two
+	// have nothing in common but this line. Opening a flow takes as long as
+	// the path does -- across the measured 42% erasure channel it took 11
+	// seconds -- so a bound chosen for a loopback read expired while the flow
+	// was being established, and the client closed the application's
+	// connection after both ends had opened it successfully. The application
+	// saw EOF from a flow that was working.
 	_ = inner.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
 	req, err := socks5.ReadRequest(inner)
 	if err != nil {
 		c.cfg.Logger.Debug("SOCKS5 negotiation failed", "error", err)
 		return
 	}
+	// The request is in hand, so nothing local is outstanding. What follows is
+	// the network's business and is bounded by the flow open's own machinery.
+	_ = inner.SetDeadline(time.Time{})
 	if req.Command == socks5.CommandUDPAssociate {
 		c.handleUDPAssociate(ctx, inner)
 		return
@@ -412,6 +425,8 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		// pre-warmed lane and does not pay this cost.
 		c.openAdditionalLanes(ctx, flowSession, flow.sessionID, flow.flowID, flow.kind)
 	}
+	// Writing the reply is local again, so it is bounded again.
+	_ = inner.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
 	if err := socks5.WriteReply(inner, socks5.ReplySucceeded, nil); err != nil {
 		flowSession.closeAll()
 		return
@@ -526,7 +541,7 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 		_ = lane.fc.Close()
 		return nil, err
 	}
-	_ = lane.outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	_ = lane.outer.SetDeadline(time.Now().Add(handshakeBound(lane.outer, c.cfg.HandshakeTimeout)))
 	if err := lane.fc.Write(protocol.Frame{
 		Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeOpen, SessionID: sessionID, FlowID: flowID, Class: protocol.ClassNew},
 		Payload: payload,
@@ -668,7 +683,7 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 		_ = lane.fc.Close()
 		return nil, err
 	}
-	_ = lane.outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	_ = lane.outer.SetDeadline(time.Now().Add(handshakeBound(lane.outer, c.cfg.HandshakeTimeout)))
 	flowID, err := randomFlowID()
 	if err != nil {
 		return fail(err)
@@ -784,7 +799,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 		_ = outer.Close()
 		return nil, transportError(kind, err)
 	}
-	_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	_ = outer.SetDeadline(time.Now().Add(handshakeBound(outer, c.cfg.HandshakeTimeout)))
 	fc := newFrameConn(outer, c.cfg.MaxPayload)
 	if !alreadyAuthenticated {
 		if pipelineHello {
@@ -879,7 +894,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 		// makes connection-level authentication atomic: a second stream cannot
 		// race a not-yet-authenticated connection. Subsequent streams on a
 		// capable server skip Hello and begin with TypeOpenFast.
-		_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+		_ = outer.SetDeadline(time.Now().Add(handshakeBound(outer, c.cfg.HandshakeTimeout)))
 		ok, authErr := clientAuthenticateKindResult(newFrameConn(outer, c.cfg.MaxPayload), c.cfg.Secret, sessionID, 0, session.HelloNew, time.Now())
 		if authErr != nil {
 			_ = outer.Close()
@@ -1001,7 +1016,7 @@ func (c *Client) openFastJoinLane(ctx context.Context, sessionID [16]byte, flowI
 	fc := newFrameConn(outer, c.cfg.MaxPayload)
 	var payload [8]byte
 	binary.BigEndian.PutUint64(payload[:], laneID)
-	_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	_ = outer.SetDeadline(time.Now().Add(handshakeBound(outer, c.cfg.HandshakeTimeout)))
 	if err := fc.Write(protocol.Frame{Header: protocol.Header{
 		Version: protocol.Version, Type: protocol.TypeOpenJoinFast, Flags: protocol.FlagLaneJoin,
 		SessionID: sessionID, FlowID: flowID, Class: protocol.ClassBulk,
@@ -1152,7 +1167,7 @@ func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
 		return nil, err
 	}
 	outer := &quicStreamConn{stream: stream, conn: conn, controller: entry.controller, closeConn: false, bulk: connBulkPath(conn)}
-	_ = outer.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
+	_ = outer.SetDeadline(time.Now().Add(handshakeBound(outer, c.cfg.HandshakeTimeout)))
 	ok, err := clientAuthenticateKindResult(newFrameConn(outer, c.cfg.MaxPayload), c.cfg.Secret, bootstrap, 0, session.HelloPool, time.Now())
 	_ = outer.Close()
 	if err != nil {

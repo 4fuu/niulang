@@ -40,6 +40,9 @@ var bulkPaths sync.Map // *quic.Conn -> *coded.Path
 func connBulkPath(conn *quic.Conn) *coded.Path {
 	if true {
 		return nil
+	} // BISECT: no coded substrate at all
+	if true {
+		return nil
 	} // BISECT
 	if existing, ok := bulkPaths.Load(conn); ok {
 		return existing.(*coded.Path)

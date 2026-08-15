@@ -294,7 +294,7 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener) error
 
 func (s *Server) handleTCP(ctx context.Context, conn *tls.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
+	_ = conn.SetDeadline(time.Now().Add(handshakeBound(conn, s.cfg.HandshakeTimeout)))
 	if err := conn.HandshakeContext(ctx); err != nil {
 		s.cfg.Logger.Debug("remote TLS handshake failed", "error", err)
 		return
