@@ -1,9 +1,7 @@
 package fec
 
 import (
-	"bytes"
 	"math"
-	"math/rand"
 	"testing"
 	"time"
 
@@ -26,70 +24,6 @@ func liveSnapshot() lossmodel.Snapshot {
 		Samples: 20000, Loss: 0.42, Floor: 0.42, Recent: 0.42,
 		LossAfterArrival: 0.42, ArrivalAfterLoss: 0.58,
 		MeanBurst: 1.72, BurstFactor: 1.0, Memoryless: true,
-	}
-}
-
-// A plan is only worth anything if a code built to it actually survives the
-// channel it was sized for. This runs the chosen code against the channel the
-// snapshot describes and checks the residual it promised.
-func TestTheChosenCodeSurvivesTheChannelItWasSizedFor(t *testing.T) {
-	if testing.Short() {
-		t.Skip("thousands of coded blocks at (124,256)")
-	}
-	plan := Choose(liveSnapshot(), livePath())
-	if !plan.Code {
-		t.Fatalf("no code chosen for a 42%% erasure channel: %+v", plan)
-	}
-	t.Logf("plan: (%d,%d) rate=%.3f overhead=%.2fx residual=%.2e",
-		plan.K, plan.N, plan.Rate, plan.Overhead(), plan.Residual)
-
-	codec, err := New(plan.K, plan.N)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rng := rand.New(rand.NewSource(1))
-	const draws = 4000
-	var failures int
-	for draw := 0; draw < draws; draw++ {
-		shards := make([][]byte, plan.N)
-		for i := range shards {
-			shards[i] = make([]byte, 256)
-		}
-		for i := 0; i < plan.K; i++ {
-			rng.Read(shards[i])
-		}
-		if err := codec.Encode(shards); err != nil {
-			t.Fatal(err)
-		}
-		want := snapshot(shards[:plan.K])
-		got, present := snapshot(shards), make([]bool, plan.N)
-		for i := range present {
-			present[i] = rng.Float64() >= 0.42
-			if !present[i] {
-				got[i] = nil
-			}
-		}
-		switch err := codec.Reconstruct(got, present); err {
-		case nil:
-			for i := 0; i < plan.K; i++ {
-				if !bytes.Equal(got[i], want[i]) {
-					t.Fatalf("draw %d: shard %d wrong after repair", draw, i)
-				}
-			}
-		case ErrTooFewShards:
-			failures++
-		default:
-			t.Fatal(err)
-		}
-	}
-	observed := float64(failures) / draws
-	t.Logf("observed residual %.2e over %d blocks against a promised %.2e",
-		observed, draws, plan.Residual)
-	// The promise is an estimate, so it is held to an order of magnitude
-	// rather than exactly; what must not happen is the code failing far more
-	// often than it said it would.
-	if target := livePath().TargetResidual; observed > 10*target {
-		t.Fatalf("observed residual %.2e against a target of %.2e", observed, target)
 	}
 }
 

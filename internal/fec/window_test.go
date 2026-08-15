@@ -201,6 +201,42 @@ func TestTheWindowRateIsWhatTheWindowNeeds(t *testing.T) {
 	}
 }
 
+// The tail of a burst is the one place a block's arithmetic still applies, and
+// it has to hold against the window that actually sends it.
+//
+// When a producer stops, the symbols it has just sent have nothing following
+// them to share parity with, so the repairs that protect them are sized by
+// ShardsFor -- a block's question, asked of a run with nothing after it. This
+// runs that case as the coded path runs it: an isolated burst, the repairs
+// ShardsFor buys, and nothing else on the wire.
+func TestATailBurstSurvivesTheRepairsItIsGiven(t *testing.T) {
+	const loss, trials = 0.42, 5000
+	channel := lossmodel.Snapshot{
+		Loss: loss, Floor: loss, Recent: loss,
+		BurstFactor: 1, ArrivalAfterLoss: 1 - loss,
+	}
+	params := Params{
+		Class: ClassBulk, ShardBytes: 1100, RateBytesPerSec: 2e6,
+		RoundTrip: 300 * time.Millisecond, TargetResidual: 1e-3,
+	}
+	for _, burst := range []int{1, 4, 16, 32} {
+		total, ok := ShardsFor(burst, channel, params)
+		if !ok {
+			t.Fatalf("no block size for a burst of %d at %.0f%% erasure", burst, loss*100)
+		}
+		residual := smallTransfer(burst, total-burst, trials, loss)
+		t.Logf("a burst of %2d symbols gets %2d repairs and loses one %.4f of the time",
+			burst, total-burst, residual)
+		// The estimate is an estimate, so it is held to an order of magnitude
+		// rather than exactly; what must not happen is a tail failing far more
+		// often than the parity it was given says it should.
+		if residual > 10*params.TargetResidual {
+			t.Errorf("a burst of %d with %d repairs lost a symbol %.4f of the time, "+
+				"against a target of %.4f", burst, total-burst, residual, params.TargetResidual)
+		}
+	}
+}
+
 // A burst is what a block code is worst at, because a block's parity is spent
 // on its own erasures and a burst inside one block cannot borrow from the
 // next. A window has no boundary to be inside of: every repair emitted after

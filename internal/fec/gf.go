@@ -2,9 +2,9 @@ package fec
 
 // Arithmetic in GF(256), the field of bytes, with the primitive polynomial
 // x^8 + x^4 + x^3 + x^2 + 1. It is the field every practical erasure code uses:
-// its elements are exactly one byte, so a shard is a vector over it with no
-// packing, and 255 non-zero elements leave room for the 256 distinct matrix
-// parameters a code of up to 256 shards needs.
+// its elements are exactly one byte, so a symbol is a vector over it with no
+// packing, and 255 non-zero elements are enough coefficients that an equation
+// is degenerate about once in 256.
 const primitivePolynomial = 0x11d
 
 var (
@@ -39,8 +39,6 @@ func init() {
 	}
 }
 
-func mul(a, b byte) byte { return gfMul[a][b] }
-
 // inv returns the multiplicative inverse. Zero has none; callers construct
 // their arguments so it cannot arise, and this returns zero rather than
 // panicking in a data path.
@@ -49,13 +47,6 @@ func inv(a byte) byte {
 		return 0
 	}
 	return gfExp[255-int(gfLog[a])]
-}
-
-func div(a, b byte) byte {
-	if a == 0 || b == 0 {
-		return 0
-	}
-	return gfExp[int(gfLog[a])+255-int(gfLog[b])]
 }
 
 // mulSliceXor accumulates coefficient times in into out, byte by byte. This is

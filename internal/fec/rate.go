@@ -62,6 +62,17 @@ type Plan struct {
 	Why string
 }
 
+// MaxShards is the largest block a block code can have. Each shard needs a
+// distinct field element for the generator's construction, and GF(256) has 256
+// of them.
+//
+// It bounds ShardsFor, which sizes a genuine block: the burst a producer has
+// just finished, with nothing following it to share parity with. The sliding
+// window is not bounded by it -- its coefficients are drawn per repair over at
+// most a window's symbols, so it can send as many repairs as the channel needs
+// (see WindowRate).
+const MaxShards = 256
+
 const (
 	// minCodedLoss is the erasure rate below which parity costs more than it
 	// saves. Below it a retransmission is rare enough to be cheap, and every

@@ -1,6 +1,19 @@
-package fec
-
-// A sliding-window code, where a block code commits too early.
+// Package fec repairs a path that erases packets, and decides how much repair
+// to send.
+//
+// It exists because the path this project targets is an erasure channel rather
+// than a congested one. About 38% of packets are dropped in the download
+// direction independently of the sending rate (docs/DESIGN-ERASURE.md), and
+// independent loss at that rate is cheap to repair and expensive in round
+// trips to retransmit. On a memoryless channel with erasure probability p the
+// capacity is (1-p) times the line rate whatever the scheme, so a code buys no
+// bandwidth that retransmission does not -- what it buys is the round trip,
+// and that is why it is worth having for a small exchange and not for a bulk
+// transfer.
+//
+// Choose and WindowRate (rate.go) decide the window and the repair rate from
+// what the path has been measured to do. The code itself is here, and it is a
+// sliding window rather than a block.
 //
 // A block code has to choose (k, n) when it seals the block, which means it
 // has to know the path before it has finished sending into it. Everything
@@ -9,13 +22,14 @@ package fec
 // under-protected is lost whole. The shared path model makes that first guess
 // a good one, but it is still a guess made at the wrong moment.
 //
-// Here the source symbols are sent as they are produced, unaltered, and repair
-// symbols are emitted alongside them at whatever rate the path is currently
-// measured to need. A repair is a random linear combination of the last few
-// source symbols, so it is not tied to a block: one repair emitted now can
-// recover an erasure that happened several symbols ago, and the decision of
-// how many to emit is taken after the data rather than before it. Redundancy
-// therefore always reflects what is known now.
+// Here the source symbols are sent as they are produced, unaltered -- so a
+// receiver that loses nothing does no work at all -- and repair symbols are
+// emitted alongside them at whatever rate the path is currently measured to
+// need. A repair is a random linear combination of the last few source
+// symbols, so it is not tied to a block: one repair emitted now can recover an
+// erasure that happened several symbols ago, and the decision of how many to
+// emit is taken after the data rather than before it. Redundancy therefore
+// always reflects what is known now.
 //
 // Two properties follow that a block code cannot have. The window is a
 // continuous interleaver, so a burst that would exceed one block's parity is
@@ -28,6 +42,7 @@ package fec
 // Coefficients are drawn over GF(256), so an equation is degenerate with
 // probability about 1/256 -- small enough that the count of repairs, not their
 // independence, is what determines recovery.
+package fec
 
 // RepairSymbol is a linear combination of the source symbols in one window.
 // First and Count name the window so the receiver can regenerate the
