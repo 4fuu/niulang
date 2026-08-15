@@ -1,6 +1,7 @@
 package pep
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/classifier"
+	"github.com/icourses-dev/wanopt/internal/multipath"
 	"github.com/icourses-dev/wanopt/internal/pathmodel"
 	"github.com/icourses-dev/wanopt/internal/pathsim"
 	"github.com/icourses-dev/wanopt/internal/protocol"
@@ -241,5 +243,61 @@ func TestAFlowThatHasMovedBulkQuantitiesStopsCodingAtOnce(t *testing.T) {
 	if f.prefersCodingOverRetransmission() {
 		t.Fatalf("a flow that has moved %d bytes still prefers coding, and will "+
 			"go on doing so for the second its class takes to settle", f.bytesUp.Load())
+	}
+}
+
+// A gap has to be reported when it is seen, not when it closes.
+//
+// The sender is clocked entirely by these acknowledgements: a chunk completes
+// when its bytes are acknowledged, a lane's admission frees when its chunks
+// complete, and nothing is issued until it does. A receiver that stays silent
+// while it buffers above a hole therefore stops the sender dead -- and the one
+// arrival that proves a hole exists is exactly the arrival that does not
+// advance the cumulative point.
+func TestAGapIsReportedWhenItIsSeenNotWhenItCloses(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer inner.Close()
+	defer peer.Close()
+	f := newMultipathFlow(context.Background(), inner, [16]byte{1}, 1, 64*1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil, nil)
+	f.ackRanges.Store(true)
+
+	reassembler := multipath.NewReassembler(multipath.Config{
+		MaxBufferedBytes: maxReassemblyBytes, MaxBufferedFrames: maxReassemblyFrames,
+	})
+	payload := bytes.Repeat([]byte("x"), 1000)
+
+	// The first segment is contiguous, so it advances the cumulative point and
+	// is acknowledged in the ordinary way.
+	if _, _, err := reassembler.Insert(multipath.Segment{Sequence: 0, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	last := f.acknowledgeArrival(reassembler, 0)
+	if last != 1000 {
+		t.Fatalf("cumulative point %d after a contiguous segment, want 1000", last)
+	}
+	if f.gapPending.Load() {
+		t.Fatal("a contiguous arrival was reported as a gap")
+	}
+
+	// The next segment arrives above a hole. The cumulative point cannot move,
+	// which is precisely why the peer has to be told something.
+	if _, _, err := reassembler.Insert(multipath.Segment{Sequence: 2000, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.acknowledgeArrival(reassembler, last); got != last {
+		t.Fatalf("cumulative point moved to %d across a hole", got)
+	}
+	if !f.gapPending.Load() {
+		t.Fatal("a segment arriving above a hole asked for no acknowledgement, so " +
+			"the sender learns nothing until its reissue timer fires")
+	}
+	ranges := f.takeReceivedRanges(last)
+	if len(ranges) == 0 {
+		t.Fatal("the gap report carried no ranges, so it says only what was " +
+			"already known")
+	}
+	if ranges[0][0] != 2000 || ranges[0][1] != 3000 {
+		t.Fatalf("reported range %v, want the 2000-3000 that actually arrived", ranges[0])
 	}
 }

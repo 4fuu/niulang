@@ -259,6 +259,23 @@ func (t *ackTracker) Snapshot() ackSnapshot {
 	return out
 }
 
+// highest is the greatest byte offset the peer has reported receiving.
+//
+// Data acknowledged beyond a chunk is evidence about that chunk: the peer
+// could not have received bytes above it without the path having carried them,
+// so a chunk still outstanding well below this point did not arrive. It is the
+// same inference a fast retransmit makes, at the layer where an unrepairable
+// coded symbol actually goes missing.
+func (s ackSnapshot) highest() uint64 {
+	top := s.cumulative
+	for _, r := range s.ranges {
+		if r[1] > top {
+			top = r[1]
+		}
+	}
+	return top
+}
+
 // covers reports whether every byte in [start, end) is acknowledged.
 func (s ackSnapshot) covers(start, end uint64) bool {
 	if end <= start || end <= s.cumulative {

@@ -277,6 +277,9 @@ type multipathFlow struct {
 	// ranges alongside the cumulative acknowledgement. It is only useful to a
 	// striped flow, and must never be assumed of a peer that did not say so.
 	ackRanges atomic.Bool
+	// gapPending marks that the peer should be told what is held above a gap,
+	// which is an acknowledgement whose cumulative point has not moved.
+	gapPending atomic.Bool
 	// receivedRanges publishes what the reassembler currently holds out of
 	// order, so the acknowledgement loop can report it without touching the
 	// reassembler from another goroutine.
@@ -1563,6 +1566,44 @@ const (
 // window and support cross-lane resume, so they can be cumulative and
 // coalesced. A failed write transitions the lane and lets run's normal rescue
 // coordinator replace it; an independent error is reported through ackErr.
+// acknowledgeArrival tells the peer what has arrived, whether or not this
+// segment advanced the contiguous point, and returns the cumulative point now
+// acknowledged.
+//
+// A segment that did not advance it is the one arrival that proves a gap
+// exists, and it used to be the one arrival that said nothing. The sender's
+// whole clock is these reports: a chunk completes when its bytes are
+// acknowledged, a lane's admission frees when its chunks complete, and nothing
+// is issued until it does. So a single unrepaired chunk stopped the sender
+// dead -- measured live, a 10 MB download spent three to five seconds with an
+// empty pipe and a full lane window, waiting for a gap it had never been told
+// about, until the reissue timer eventually filled it.
+func (f *multipathFlow) acknowledgeArrival(reassembler *multipath.Reassembler, lastAck uint64) uint64 {
+	if next := reassembler.NextSequence(); next > lastAck {
+		f.publishReceivedRanges(reassembler)
+		f.scheduleACK(next)
+		return next
+	}
+	if reassembler.BufferedFrames() > 0 {
+		f.publishReceivedRanges(reassembler)
+		f.reportGap()
+	}
+	return lastAck
+}
+
+// reportGap asks for an acknowledgement whose cumulative point has not moved,
+// because what it carries is the ranges above it.
+func (f *multipathFlow) reportGap() {
+	if f.ackClosing.Load() || !f.ackRanges.Load() {
+		return
+	}
+	f.gapPending.Store(true)
+	select {
+	case f.ackWake <- struct{}{}:
+	default:
+	}
+}
+
 func (f *multipathFlow) scheduleACK(sequence uint64) {
 	if sequence == 0 || f.ackClosing.Load() {
 		return
@@ -1619,7 +1660,10 @@ func (f *multipathFlow) ackLoop(ctx context.Context) {
 				return
 			}
 			sequence := f.ackSequence.Load()
-			if sequence <= sent {
+			// A gap report carries the same cumulative point as the last
+			// acknowledgement and different ranges above it, so the cumulative
+			// point cannot be what decides whether to send.
+			if sequence <= sent && !f.gapPending.Swap(false) {
 				break
 			}
 			ackStart := time.Now()
@@ -1764,12 +1808,8 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					}
 					f.observe(len(out), false)
 					f.bytesDown.Add(uint64(len(out)))
-					if next := reassembler.NextSequence(); next > lastAckSequence {
-						f.publishReceivedRanges(reassembler)
-						f.scheduleACK(next)
-						lastAckSequence = next
-					}
 				}
+				lastAckSequence = f.acknowledgeArrival(reassembler, lastAckSequence)
 				if closed {
 					// A FIN may arrive on one lane before an earlier data
 					// segment on another lane. Once that gap is filled,

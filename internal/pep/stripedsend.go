@@ -55,6 +55,14 @@ const (
 	// minFlowRetentionBytes is what a flow may retain before it has measured
 	// anything.
 	minFlowRetentionBytes = 16 * 1024 * 1024
+	// lostChunkEvidence is how far beyond a chunk the peer's acknowledgements
+	// must reach before the chunk is presumed lost rather than late.
+	//
+	// One chunk's worth would call a reordering a loss on a striped flow,
+	// where lanes deliver out of order by construction. Two is enough that the
+	// peer has received a chunk's worth of data that was sent after this one
+	// and cannot plausibly still be waiting for it.
+	lostChunkEvidence = 2 * defaultChunkSize
 	// chunkReissueDelay is how long a chunk may sit on one lane before it is
 	// also offered to another.
 	chunkReissueDelay = 1500 * time.Millisecond
@@ -378,6 +386,19 @@ func (f *multipathFlow) watchChunkCompletion(ctx context.Context, sched *stripe.
 		// thousands of times a second for an answer that cannot change during
 		// the pass.
 		acked := f.ackTrack.Snapshot()
+		// What the peer has reported receiving above a chunk is proof the
+		// chunk did not arrive. Waiting for the reissue timer instead means
+		// waiting a second and a half with the receiver's contiguous point --
+		// and so every acknowledgement, and so this sender's clock -- stopped
+		// behind it.
+		if top := acked.highest(); top > lostChunkEvidence {
+			if n := sched.ReissueUnacknowledgedBelow(top - lostChunkEvidence); n > 0 {
+				f.reinjections.Add(uint64(n))
+				for i := 0; i < n && f.metrics != nil; i++ {
+					f.metrics.Reinjected()
+				}
+			}
+		}
 		f.chunkMu.Lock()
 		kept := f.outstandingChunks[:0]
 		var completed []outstandingChunk

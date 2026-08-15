@@ -403,6 +403,7 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 			// help. Had it taken it unreliably the opposite would hold: the
 			// chunk may simply be gone, and on a single-lane flow this is the
 			// only way it comes back.
+			//
 			continue
 		}
 		s.pending = append(s.pending[:i], s.pending[i+1:]...)
@@ -646,6 +647,54 @@ func (s *Scheduler) requeueLocked(chunk *Chunk) {
 	s.pending[i] = chunk
 }
 
+// ReissueUnacknowledgedBelow re-offers chunks the peer has proved it did not
+// receive, and reports how many.
+//
+// The proof is data acknowledged beyond them. A peer that reports holding
+// bytes above a chunk received those bytes over the same path, so a chunk
+// still outstanding well below that point is not late, it is gone -- the same
+// inference a fast retransmit makes, at the layer where an unrepairable coded
+// symbol actually goes missing.
+//
+// Only attempts that cannot recover themselves are re-offered. A chunk on a
+// reliable lane will be retransmitted by that lane, and a second copy is spent
+// on the one outcome it cannot help.
+//
+// Without this the only recovery was a timer, and the timer is a second and a
+// half: measured live, a single chunk erased from the coded prefix of a
+// download held the receiver's contiguous point -- and therefore every
+// acknowledgement, and therefore the sender's entire clock -- for five
+// seconds, on a transfer that took nine.
+func (s *Scheduler) ReissueUnacknowledgedBelow(offset uint64) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reissued := 0
+	for _, out := range s.live {
+		if out.chunk.End() > offset || len(out.attempts) == 0 {
+			continue
+		}
+		reliable := false
+		for _, a := range out.attempts {
+			if a.reliable {
+				reliable = true
+				break
+			}
+		}
+		if reliable || s.pendingHas(out.chunk.Offset) {
+			continue
+		}
+		if s.cfg.RetransmitAfter > 0 {
+			out.attempts[0].deadline = s.cfg.Now().Add(s.cfg.RetransmitAfter)
+		}
+		s.requeueLocked(out.chunk)
+		reissued++
+	}
+	if reissued > 0 {
+		s.ready.Broadcast()
+	}
+	return reissued
+}
+
 // ReissueExpired offers any chunk that has been outstanding too long to
 // another lane, without disturbing the attempt already in flight. A caller
 // runs this periodically; it reports how many chunks it re-offered.
@@ -671,6 +720,15 @@ func (s *Scheduler) ReissueExpired() int {
 			continue
 		}
 		if s.pendingHas(out.chunk.Offset) {
+			continue
+		}
+		// Offering a chunk to another lane needs another lane. Where the only
+		// lane holding it will deliver it or die, re-offering it puts a chunk
+		// in the ready set that nothing can ever take: it is skipped by every
+		// scan from then on, it makes the flow look like it has work when it
+		// is waiting, and it hid the tail from the probe that exists to shorten
+		// it.
+		if out.attempts[0].reliable && len(s.laneLoad) <= 1 {
 			continue
 		}
 		// Push the deadline out so a chunk cannot be re-offered every tick

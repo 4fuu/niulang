@@ -223,7 +223,7 @@ func TestRetiredLaneReleasesItsChunks(t *testing.T) {
 func TestReissueAvoidsTheLaneAlreadyCarryingIt(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }
-	payload := make([]byte, 8*1024)
+	payload := make([]byte, 12*1024)
 	s := New(bytes.NewReader(payload), Config{
 		ChunkSize: 4 * 1024, LaneWindow: 4, RetransmitAfter: time.Second, Now: clock,
 	})
@@ -234,9 +234,15 @@ func TestReissueAvoidsTheLaneAlreadyCarryingIt(t *testing.T) {
 	if err != nil || first == nil {
 		t.Fatalf("next: %v", err)
 	}
+	// A second lane, because re-offering a chunk is offering it to another
+	// lane: with only the one that already holds it reliably, there is nobody
+	// for the copy to go to and it is not made.
+	if _, err := s.Next(ctx, 1, 0); err != nil {
+		t.Fatalf("second lane: %v", err)
+	}
 	now = now.Add(2 * time.Second)
-	if n := s.ReissueExpired(); n != 1 {
-		t.Fatalf("re-offered %d chunks, want 1", n)
+	if n := s.ReissueExpired(); n != 2 {
+		t.Fatalf("re-offered %d chunks, want both lanes'", n)
 	}
 	// Lane 0 must not be handed the same chunk back.
 	next, err := s.Next(ctx, 0, 0)
@@ -686,9 +692,14 @@ func TestCompletedChunkLeavesTheReadySet(t *testing.T) {
 	if err != nil || first == nil {
 		t.Fatalf("next: %v", err)
 	}
+	// A second lane, so that the first lane's chunk has somewhere to be
+	// re-offered to.
+	if _, err := s.Next(ctx, 1, 0); err != nil {
+		t.Fatalf("second lane: %v", err)
+	}
 	now = now.Add(2 * time.Second)
-	if n := s.ReissueExpired(); n != 1 {
-		t.Fatalf("re-offered %d chunks, want 1", n)
+	if n := s.ReissueExpired(); n != 2 {
+		t.Fatalf("re-offered %d chunks, want both lanes'", n)
 	}
 	// It arrives on the lane that already had it, while the re-offered copy is
 	// still waiting for a lane to pick up.
@@ -803,5 +814,72 @@ func TestAChunkTakenUnreliablyStaysReissuableWhenTheLaneChanges(t *testing.T) {
 	}
 	if _, err := scheduler.Next(ctx, 1, 1<<20); err != nil {
 		t.Fatalf("the lane refused to resend a chunk it had taken unreliably: %v", err)
+	}
+}
+
+// A chunk the peer has proved it did not receive must be re-offered at once.
+//
+// The proof is data acknowledged beyond it: a peer holding bytes above a chunk
+// received them over the same path, so a chunk still outstanding well below
+// that point is gone rather than late. Waiting for the reissue timer instead
+// costs a second and a half with the receiver's contiguous point stopped
+// behind the hole -- and with it every acknowledgement, and with them the
+// sender's whole clock.
+func TestAChunkProvedMissingIsReissuedWithoutWaiting(t *testing.T) {
+	source := bytes.NewReader(bytes.Repeat([]byte("x"), 8*1024))
+	s := New(source, Config{
+		ChunkSize: 1024, LaneWindow: 64, MaxOutstanding: 64,
+		MaxOutstandingBytes: 1 << 20, Retention: func() int { return 1 << 20 },
+		RetransmitAfter: time.Hour, // only the proof may re-offer anything
+		// An unreliable lane, which is what a coded lane is: what it loses has
+		// no other way back.
+		Reliable: func(uint64) bool { return false },
+	})
+	defer s.Close()
+
+	ctx := context.Background()
+	var taken []*Chunk
+	for i := 0; i < 4; i++ {
+		chunk, err := s.Next(ctx, 1, 1<<20)
+		if err != nil || chunk == nil {
+			t.Fatalf("chunk %d: %v", i, err)
+		}
+		taken = append(taken, chunk)
+		s.Wrote(1, chunk)
+	}
+
+	// The peer acknowledges everything except the first chunk.
+	for _, chunk := range taken[1:] {
+		s.Complete(1, chunk)
+	}
+	if n := s.ReissueUnacknowledgedBelow(taken[0].End()); n != 1 {
+		t.Fatalf("re-offered %d chunks, want the one the peer proved missing", n)
+	}
+	// And it is offered again, to the same lane, because an unreliable lane
+	// losing a chunk is the only way that chunk comes back.
+	again, err := s.Next(ctx, 1, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again == nil || again.Offset != taken[0].Offset {
+		t.Fatalf("next chunk was %v, want the missing one at offset %d", again, taken[0].Offset)
+	}
+
+	// A chunk a reliable lane is carrying must not be re-offered: that lane
+	// will retransmit it, and a second copy is spent on the one outcome it
+	// cannot help.
+	reliable := New(bytes.NewReader(bytes.Repeat([]byte("y"), 4*1024)), Config{
+		ChunkSize: 1024, LaneWindow: 64, MaxOutstanding: 64,
+		MaxOutstandingBytes: 1 << 20, Retention: func() int { return 1 << 20 },
+		RetransmitAfter: time.Hour,
+	})
+	defer reliable.Close()
+	first, err := reliable.Next(ctx, 1, 1<<20)
+	if err != nil || first == nil {
+		t.Fatalf("reliable lane took nothing: %v", err)
+	}
+	reliable.Wrote(1, first)
+	if n := reliable.ReissueUnacknowledgedBelow(first.End() + 1<<20); n != 0 {
+		t.Fatalf("re-offered %d chunks from a reliable lane, want none", n)
 	}
 }
