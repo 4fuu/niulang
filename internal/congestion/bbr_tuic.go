@@ -207,6 +207,24 @@ func (b *TUICBBRSender) bandwidth() quiccongestion.ByteCount {
 	return quiccongestion.ByteCount(rate)
 }
 
+// seedPacingRate starts this sender at a rate something else already measured,
+// instead of at the initial window over the round trip.
+//
+// A lane joining a path its siblings have already mapped should not repeat
+// their discovery. On a channel that erases 40% of packets that discovery is
+// the expensive part -- it is the same ramp a loss-based controller never
+// finishes -- and a lane opened to replace one that died would pay it again on
+// a path nothing has forgotten. The rate is only ever raised, so a seed that
+// is too low costs nothing beyond a normal startup.
+func (b *TUICBBRSender) seedPacingRate(rate uint64) {
+	if rate > tuicMaxRate {
+		rate = tuicMaxRate
+	}
+	if rate > b.pacingRate {
+		b.pacingRate = rate
+	}
+}
+
 func (b *TUICBBRSender) initialPacingRate() uint64 {
 	rtt := b.rtt()
 	if rtt <= 0 {

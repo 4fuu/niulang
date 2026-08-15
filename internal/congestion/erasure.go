@@ -2,6 +2,7 @@ package congestion
 
 import (
 	"sync/atomic"
+	"unsafe"
 
 	quiccongestion "github.com/apernet/quic-go/congestion"
 	"github.com/apernet/quic-go/monotime"
@@ -69,6 +70,12 @@ type ErasureSender struct {
 
 	suppressed atomic.Uint64
 	passed     atomic.Uint64
+
+	// path is shared with every other lane to the same endpoint pair, or nil
+	// for a lane that is on its own. share is this lane's allowance of the
+	// endpoint's bottleneck in bytes per second, zero while it is unknown.
+	path  *PathModel
+	share atomic.Uint64
 }
 
 const (
@@ -85,8 +92,37 @@ const (
 )
 
 // NewErasureSender returns a controller for a path whose loss is mostly not
-// congestion.
+// congestion, deciding on its own. Use NewErasureSenderOn when more than one
+// lane shares an endpoint pair.
 func NewErasureSender(initialPacketSize quiccongestion.ByteCount) *ErasureSender {
+	return NewErasureSenderOn(initialPacketSize, nil)
+}
+
+// NewErasureSenderOn returns a controller that pools its measurements with
+// every other lane on the same path.
+//
+// Deciding alone is what made lanes cost more than they earn: each lane
+// measures the erasure floor from only its own packets, and each discovers the
+// bottleneck from only its own delivered rate, so the aggregate overshoots by
+// however many lanes there are and the path's loss stops being memoryless.
+func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *PathModel) *ErasureSender {
+	e := newErasureSender(initialPacketSize)
+	e.path = path
+	if path != nil {
+		// Start where its siblings already are rather than at the initial
+		// window. On a path that erases 40% of packets the ramp is the
+		// expensive part, and a lane opened to replace one that died would
+		// otherwise pay it again on a path nothing has forgotten.
+		if floor, share := path.Current(); share > 0 {
+			e.arrival.Store(uint64((1 - floor) * partsPerMillion))
+			e.share.Store(uint64(share))
+			e.inner.seedPacingRate(uint64(share / e.arrivalRate()))
+		}
+	}
+	return e
+}
+
+func newErasureSender(initialPacketSize quiccongestion.ByteCount) *ErasureSender {
 	e := &ErasureSender{
 		inner: NewTUICBBRSender(initialPacketSize),
 		// A reorder tolerance wide enough for QUIC's acknowledgement
@@ -100,9 +136,19 @@ func NewErasureSender(initialPacketSize quiccongestion.ByteCount) *ErasureSender
 }
 
 // bandwidth is the rate to put on the wire: BBR's estimate of what arrives,
-// divided by the fraction that arrives.
+// bounded by this lane's share of the endpoint pair's bottleneck, and divided
+// by the fraction that arrives.
+//
+// The cap is what keeps lanes from compounding. Each lane's own estimate is
+// what it alone is receiving, so four lanes each probing above their own
+// estimate put four times the overshoot into one bottleneck; capping at the
+// share means the aggregate on the wire is what a single sender would have put
+// there.
 func (e *ErasureSender) bandwidth() quiccongestion.ByteCount {
 	delivered := float64(e.inner.bandwidth())
+	if share := float64(e.share.Load()); share > 0 && share < delivered {
+		delivered = share
+	}
 	return quiccongestion.ByteCount(delivered / e.arrivalRate())
 }
 
@@ -165,7 +211,15 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		}
 	}
 	snapshot := e.estimator.Snapshot()
-	e.arrival.Store(uint64((1 - snapshot.Floor) * partsPerMillion))
+	floor := snapshot.Floor
+	if e.path != nil {
+		// Pool with the other lanes: the floor converges on all their samples
+		// together, and the share is what stops their probes compounding.
+		pooled, share := e.path.Report(laneKey(uintptr(e.id())), floor, snapshot.Samples, float64(e.inner.bandwidth()))
+		floor = pooled
+		e.share.Store(uint64(share))
+	}
+	e.arrival.Store(uint64((1 - floor) * partsPerMillion))
 
 	e.inner.OnCongestionEventEx(priorInFlight, eventTime, acked, e.congestive(snapshot, lost))
 }
@@ -229,6 +283,18 @@ func (e *ErasureSender) Telemetry() ControllerTelemetry {
 	t.CongestionWindow = uint64(float64(t.CongestionWindow) / arrival)
 	return t
 }
+
+// id identifies this lane within its shared model. The pointer is stable for
+// the controller's lifetime and unique among live controllers, which is
+// exactly what membership needs.
+func (e *ErasureSender) id() uintptr {
+	return uintptr(unsafe.Pointer(e))
+}
+
+// Share is this lane's allowance of the endpoint pair's bottleneck in bytes
+// per second, or zero when it is deciding alone or the bottleneck is not yet
+// known.
+func (e *ErasureSender) Share() float64 { return float64(e.share.Load()) }
 
 // Channel reports what the controller believes about the path and how much
 // loss it has declined to treat as congestion.

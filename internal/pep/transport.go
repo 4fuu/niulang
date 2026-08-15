@@ -472,7 +472,14 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestio
 		conn.SetCongestionControl(controller)
 		return controller
 	case CongestionErasure:
-		controller := wancongestion.NewErasureSender(conn.InitialPacketSize())
+		// Every lane to the same peer shares one model. Deciding alone is what
+		// made lanes cost more than they earn on this path: each measured the
+		// erasure floor from only its own packets and discovered the
+		// bottleneck from only its own delivered rate, so the aggregate
+		// overshot by however many lanes there were. Live, four lanes
+		// delivered about 8 Mbit/s where one delivered 11.
+		controller := wancongestion.NewErasureSenderOn(
+			conn.InitialPacketSize(), wancongestion.SharedPath(peerKey(conn)))
 		conn.SetCongestionControl(controller)
 		return controller
 	case CongestionBrutal:
@@ -488,6 +495,21 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestio
 		// controller if a future caller constructs an invalid config directly.
 	}
 	return nil
+}
+
+// peerKey identifies the endpoint pair a connection belongs to. It is the
+// peer's address without its port: a second lane to the same server opens a
+// new port and must still share, because the bottleneck it will contend for is
+// the same one.
+func peerKey(conn *quic.Conn) string {
+	addr := conn.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(addr.String()); err == nil {
+		return host
+	}
+	return addr.String()
 }
 
 func quicServerTLSConfig(certificate tls.Certificate) *tls.Config {
