@@ -107,12 +107,29 @@ func TestSmallExchangesAreRepairedOnceThePathIsKnown(t *testing.T) {
 	pathmodel.Shared(key).Report(99, 0.42, 5000, 0, 0)
 	knowing := median(exchange(10))
 
+	roundTrip := 2 * oneWay
 	t.Logf("median exchange: %v when the path is unknown, %v once it is known (round trip %v)",
-		blind.Round(time.Millisecond), knowing.Round(time.Millisecond), 2*oneWay)
-	if knowing >= blind {
-		t.Errorf("knowing the path gave %v against %v when blind; a small exchange "+
-			"should be repaired by the code rather than by a probe timeout",
-			knowing.Round(time.Millisecond), blind.Round(time.Millisecond))
+		blind.Round(time.Millisecond), knowing.Round(time.Millisecond), roundTrip)
+
+	// What matters is the absolute cost, not that seeding the model improved
+	// it. The two halves share a connection, and the controller measures the
+	// floor from its own acknowledgements as it goes -- so by the time the
+	// blind half has run a few exchanges the path is no longer unknown, and
+	// the first half can be as fast as the second. That is the code working
+	// sooner than the test can arrange for it not to, and asserting an
+	// improvement makes a better result look like a worse one.
+	//
+	// A repair costs no round trip; a probe timeout costs at least one more.
+	// Half a round trip of slack separates them by a wide margin.
+	if knowing > roundTrip*3/2 {
+		t.Errorf("a small exchange cost %v against a round trip of %v, so it is "+
+			"being repaired by a probe timeout rather than by the code",
+			knowing.Round(time.Millisecond), roundTrip)
+	}
+	if knowing > blind+roundTrip/2 {
+		t.Errorf("knowing the path gave %v against %v when blind; knowing it "+
+			"cannot make an exchange slower", knowing.Round(time.Millisecond),
+			blind.Round(time.Millisecond))
 	}
 }
 
