@@ -148,6 +148,30 @@ predicted the erasure controller would beat BBR-TUIC nine-fold, and live the
 gap is nearer 1.5x against BBR-TUIC's good rounds. What the emulator does not
 reproduce is BBR-TUIC's variance.
 
+### Re-measured on the current build (2026-08-15)
+
+The channel that day: 38% loss, burst factor 1.28, about 12.4 Mbit/s of
+delivered capacity. A 50 MiB download, one lane, interleaved, three rounds:
+
+| round | reno | erasure |
+|---|---|---|
+| 1 | 0.04 | 10.07 |
+| 2 | 0.05 | 10.22 |
+| 3 | 0.07 | 10.71 |
+
+About 85% of what the path can deliver, against 0.4% for what used to be the
+default. The erasure controller is now the default, so this is what a fresh
+install does.
+
+Small transfers are a different story and are not improved. Time to first byte
+for a 2.7 KB response over sequential flows was 1.3 to 1.9 seconds with either
+controller -- congestion control barely matters for a few packets, and what
+dominates is loss recovery on a reliable stream. That is exactly the
+head-of-line blocking the coded path removes, but a flow that short never
+gathers enough samples for the shared model to conclude the path erases, so it
+is carried uncoded. Seeding a new connection's model from the endpoint pair's
+history, which is what the model is for, is the way in.
+
 ### Striping costs more than it gains here
 
 The same comparison at four lanes:
