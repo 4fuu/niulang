@@ -92,8 +92,12 @@ func newSplitFrameConn(control io.ReadWriteCloser, bulk *coded.Path, maxPayload 
 // uncoded lost frame would wait for the session's re-issue where the stream
 // would have retransmitted it within a round trip.
 func (c *frameConn) bulkFrame(f protocol.Frame) bool {
-	return c.bulk != nil && f.Header.Type == protocol.TypeData && c.bulk.Coding()
+	return f.Header.Type == protocol.TypeData && c.codingBulk()
 }
+
+// codingBulk reports whether this lane's data is going over the coded path,
+// which is also what decides whether the lane can lose a chunk outright.
+func (c *frameConn) codingBulk() bool { return c.bulk != nil && c.bulk.Coding() }
 
 // Read returns the next control frame. It reads the stream synchronously,
 // because that is what every caller's read deadline is set on, and a shared
@@ -108,26 +112,23 @@ func (c *frameConn) Read() (protocol.Frame, error) {
 	return protocol.ReadFrame(c.reader, c.maxPayload)
 }
 
-// ReadBulk returns the next frame from the coded substrate, or an error once
-// there is none. A lane with no coded substrate blocks until it closes, so a
-// caller can run this loop unconditionally.
-func (c *frameConn) ReadBulk() (protocol.Frame, error) {
-	if c.bulk == nil {
-		<-c.done
-		return protocol.Frame{}, io.EOF
+// bulkFrames claims this lane's flow's share of the connection's coded
+// datagrams. Nil when the lane has no coded substrate.
+//
+// The claim is by flow rather than by lane because the datagrams belong to the
+// connection: one stream of them carries every flow multiplexed on it, so a
+// reader per lane would consume frames belonging to other flows.
+func (c *frameConn) bulkFrames(flowID uint64) <-chan protocol.Frame {
+	demux := connBulkDemux(c.bulk, c.maxPayload)
+	if demux == nil {
+		return nil
 	}
-	for {
-		payload, err := c.bulk.Receive()
-		if err != nil {
-			return protocol.Frame{}, err
-		}
-		frame, err := protocol.ParseFrame(payload, c.maxPayload)
-		if err != nil {
-			// A frame the code repaired wrongly would be a defect, but a frame
-			// truncated by a block that only half arrived is ordinary loss.
-			continue
-		}
-		return frame, nil
+	return demux.subscribe(flowID)
+}
+
+func (c *frameConn) releaseBulk(flowID uint64) {
+	if demux := connBulkDemux(c.bulk, c.maxPayload); demux != nil {
+		demux.release(flowID)
 	}
 }
 

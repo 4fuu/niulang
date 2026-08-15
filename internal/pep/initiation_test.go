@@ -71,3 +71,26 @@ func TestFlowInitiationCostsNoRoundTripsWhenTheConnectionIsWarm(t *testing.T) {
 	}
 	_ = net.Dialer{}
 }
+
+// A path is an uplink and a peer, not a peer. The same server reached over
+// Wi-Fi and over a cellular link erases differently, is bottlenecked
+// differently and has a different minimum round trip; carrying one's
+// measurements into the other is worse than having none, because everything
+// downstream is sized from a confident wrong answer.
+func TestAPathIsAnUplinkAndAPeer(t *testing.T) {
+	wifi := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 20), Port: 51000}
+	cellular := &net.UDPAddr{IP: net.IPv4(10, 55, 3, 7), Port: 51000}
+	server := &net.UDPAddr{IP: net.IPv4(23, 135, 236, 244), Port: 12443}
+
+	overWiFi := pathKey(wifi, server)
+	overCellular := pathKey(cellular, server)
+	if overWiFi == overCellular {
+		t.Fatalf("two uplinks to one server share a path key: %q", overWiFi)
+	}
+	// The same uplink and peer must key the same, whatever port it used, or a
+	// second lane would be treated as a different path and learn it again.
+	second := &net.UDPAddr{IP: wifi.IP, Port: 51001}
+	if again := pathKey(second, server); again != overWiFi {
+		t.Fatalf("a second lane on one uplink keyed %q against %q", again, overWiFi)
+	}
+}

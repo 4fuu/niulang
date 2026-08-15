@@ -710,3 +710,67 @@ func TestCompletedChunkLeavesTheReadySet(t *testing.T) {
 		}
 	}
 }
+
+// A flow with one unreliable lane must still recover a chunk that lane lost.
+//
+// The rule that a chunk is never re-offered to the lane already carrying it is
+// right for a reliable lane, which will deliver it or die. It is fatal for an
+// unreliable one: a coded datagram path repairs most loss and not all, and
+// with a single lane there is nowhere else to offer the chunk, so the flow
+// waits forever for bytes that are simply gone.
+func TestAnUnreliableLaneMayCarryAChunkTwice(t *testing.T) {
+	now := time.Now()
+	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
+		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
+		RetransmitAfter: time.Second,
+		Reliable:        func(uint64) bool { return false },
+		Now:             func() time.Time { return now },
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	first, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil || first == nil {
+		t.Fatalf("no chunk offered to the only lane: %v", err)
+	}
+	// The lane lost it. Nothing acknowledges, the deadline passes, and the
+	// scheduler re-queues it.
+	now = now.Add(2 * time.Second)
+	if reissued := scheduler.ReissueExpired(); reissued != 1 {
+		t.Fatalf("re-issued %d chunks, want the one that was lost", reissued)
+	}
+	again, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil || again == nil {
+		t.Fatalf("the only lane was not offered the chunk it lost (%v): a "+
+			"single-lane flow over an unreliable substrate can never recover", err)
+	}
+	if again.Offset != first.Offset {
+		t.Fatalf("re-offered offset %d, want the lost %d", again.Offset, first.Offset)
+	}
+}
+
+// And a reliable lane must still refuse it, or every stream lane pays for a
+// retransmission QUIC has already made.
+func TestAReliableLaneRefusesTheSameChunkTwice(t *testing.T) {
+	now := time.Now()
+	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
+		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
+		RetransmitAfter: time.Second,
+		Now:             func() time.Time { return now },
+	})
+	ready, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := scheduler.Next(ready, 1, 1<<20); err != nil {
+		t.Fatalf("no chunk offered: %v", err)
+	}
+	now = now.Add(2 * time.Second)
+	scheduler.ReissueExpired()
+
+	// It is back in the ready set but this lane must not be given it, so the
+	// only outcome available is the context expiring.
+	blocked, stop := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer stop()
+	if again, err := scheduler.Next(blocked, 1, 1<<20); err == nil {
+		t.Fatalf("a reliable lane was offered the same chunk twice at offset %d", again.Offset)
+	}
+}

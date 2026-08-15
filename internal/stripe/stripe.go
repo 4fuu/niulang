@@ -94,6 +94,17 @@ type Config struct {
 	// discards, so this trades a little bandwidth for not waiting on a lane
 	// that has gone quiet. Zero disables it.
 	RetransmitAfter time.Duration
+	// Reliable reports whether a lane retransmits for itself. When nil every
+	// lane is taken to be reliable, which is what a lane on a QUIC stream is.
+	//
+	// It decides whether a chunk may be re-offered to the lane already
+	// carrying it. On a reliable lane it may not: that lane will deliver the
+	// chunk or die, so a second copy is bandwidth spent on the one outcome it
+	// cannot help. On an unreliable lane it must, because there the chunk can
+	// simply be gone -- a coded datagram path repairs most loss and not all --
+	// and with a single lane there is no other lane to offer it to. Without
+	// this a flow whose only lane drops one chunk waits forever.
+	Reliable func(laneID uint64) bool
 	// Windows supplies admission limits. When nil, only LaneWindow and
 	// MaxOutstanding apply, which is the behaviour of a flow with no
 	// congestion coupling.
@@ -375,9 +386,11 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 			// scan cheap.
 			return nil
 		}
-		if out, ok := s.live[chunk.Offset]; ok && laneHasAttempt(out, laneID) {
-			// Never re-issue a chunk on the lane already carrying it: that is
-			// the one lane whose failure it would not survive.
+		if out, ok := s.live[chunk.Offset]; ok && laneHasAttempt(out, laneID) && s.laneRetransmits(laneID) {
+			// A reliable lane will deliver this chunk or die, so a second copy
+			// on it is spent on the one outcome it cannot help. An unreliable
+			// lane is the opposite case: the chunk may simply be gone, and on
+			// a single-lane flow this is the only way it comes back.
 			continue
 		}
 		s.pending = append(s.pending[:i], s.pending[i+1:]...)
@@ -408,6 +421,14 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 		return chunk
 	}
 	return nil
+}
+
+// laneRetransmits reports whether a lane recovers its own losses.
+func (s *Scheduler) laneRetransmits(laneID uint64) bool {
+	if s.cfg.Reliable == nil {
+		return true
+	}
+	return s.cfg.Reliable(laneID)
 }
 
 func laneHasAttempt(out *outstanding, laneID uint64) bool {

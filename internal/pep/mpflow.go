@@ -663,16 +663,29 @@ func (f *multipathFlow) readLane(lane *mpLane) {
 	}
 }
 
-// readLaneBulk drains the coded substrate. Its failure is not the lane's: the
-// control stream still works, and what the coded path dropped is re-issued by
-// the scheduler like any other unacknowledged chunk.
+// readLaneBulk drains this flow's share of the connection's coded datagrams.
+// Its end is not the lane's failure: the control stream still works, and what
+// the coded path dropped is re-issued by the scheduler like any other
+// unacknowledged chunk.
 func (f *multipathFlow) readLaneBulk(lane *mpLane) {
+	frames := lane.fc.bulkFrames(f.flowID)
+	if frames == nil {
+		return
+	}
+	defer lane.fc.releaseBulk(f.flowID)
 	for {
-		frame, err := lane.fc.ReadBulk()
-		if err != nil {
-			return
-		}
-		if !f.deliverInbound(lane, frame) {
+		select {
+		case frame, ok := <-frames:
+			if !ok {
+				return
+			}
+			if !f.deliverInbound(lane, frame) {
+				return
+			}
+		case <-f.done:
+			// The flow's own closure, not the context it was started with:
+			// that context belongs to the whole client and outlives every flow
+			// on it, so waiting on it is waiting forever.
 			return
 		}
 	}
@@ -688,6 +701,19 @@ func (f *multipathFlow) deliverInbound(lane *mpLane, frame protocol.Frame) bool 
 	case <-f.ctx.Done():
 		return false
 	}
+}
+
+// laneRetransmits reports whether a lane recovers its own losses, which is
+// true exactly when its data is going over the stream rather than the coded
+// datagram path. A lane whose bulk path is coding can lose a chunk outright.
+func (f *multipathFlow) laneRetransmits(laneID uint64) bool {
+	f.lanesMu.RLock()
+	lane := f.lanes[laneID]
+	f.lanesMu.RUnlock()
+	if lane == nil || lane.fc == nil {
+		return true
+	}
+	return !lane.fc.codingBulk()
 }
 
 // failLane transitions a lane to failed exactly once, stops both of its I/O

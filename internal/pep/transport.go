@@ -336,7 +336,16 @@ func (w flowWindows) resolved() (stream, connection uint64) {
 func quicConfig(windows flowWindows) *quic.Config {
 	streamWindow, connectionWindow := windows.resolved()
 	return &quic.Config{
-		HandshakeIdleTimeout: 10 * time.Second,
+		// The handshake gets as long as an erasing path needs.
+		//
+		// On the channel this targets the handshake itself takes about five
+		// seconds: its packets are large, they are lost 42% of the time, and
+		// the probe timeouts that recover them double. Ten seconds made the
+		// first connection a coin flip, and it is the one connection
+		// everything else is built on. This is the one place a long wall-clock
+		// constant is right, because there is no measurement of the path yet
+		// to scale anything by.
+		HandshakeIdleTimeout: 30 * time.Second,
 		// Existing-flow TCP rescue cannot begin until QUIC declares the
 		// black-holed lane dead. Keep this bound well below application-level
 		// request timeouts while allowing several PTOs on a 200 ms WAN.
@@ -558,8 +567,25 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestio
 // peer's address without its port: a second lane to the same server opens a
 // new port and must still share, because the bottleneck it will contend for is
 // the same one.
+// peerKey identifies the path a connection runs over, which is a pair: the
+// uplink it leaves by and the peer it reaches.
+//
+// The peer alone is not the path. The same server over Wi-Fi and over a
+// cellular link erases differently, is bottlenecked differently and has a
+// different minimum round trip, and a measurement of one is worse than no
+// measurement of the other -- it is a confident wrong answer, and everything
+// downstream is sized from it. The local address is what distinguishes them:
+// changing uplink changes it, so the model for the new path starts empty
+// rather than inheriting the old one's conclusions.
 func peerKey(conn *quic.Conn) string {
-	addr := conn.RemoteAddr()
+	return pathKey(conn.LocalAddr(), conn.RemoteAddr())
+}
+
+func pathKey(local, remote net.Addr) string {
+	return addressHost(local) + "->" + addressHost(remote)
+}
+
+func addressHost(addr net.Addr) string {
 	if addr == nil {
 		return ""
 	}
