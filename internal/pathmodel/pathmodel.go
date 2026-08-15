@@ -73,7 +73,23 @@ type report struct {
 	floor     float64
 	samples   float64
 	delivered float64
+	roundTrip time.Duration
 	at        time.Time
+}
+
+// State is what an endpoint pair has been measured to do, from the point of
+// view of one contributor.
+type State struct {
+	// Floor is the erasure rate that does not respond to sending more slowly,
+	// pooled across every lane's samples.
+	Floor float64
+	// Share is this contributor's allowance of the bottleneck in bytes per
+	// second. Zero means the bottleneck is not yet known and the contributor
+	// should not cap itself.
+	Share float64
+	// RoundTrip is the path's minimum round trip, which is the smallest any
+	// lane has seen: a larger one is that lane's queueing, not the path.
+	RoundTrip time.Duration
 }
 
 type bandwidthSample struct {
@@ -133,10 +149,8 @@ func NewPathModel() *PathModel {
 }
 
 // Report records what one lane currently believes, and returns what the
-// endpoint pair believes: the pooled erasure floor, and this lane's share of
-// the bottleneck in bytes per second. A share of zero means the bottleneck is
-// not yet known and the lane should not cap itself.
-func (m *PathModel) Report(member Member, floor, samples, delivered float64) (pooledFloor, share float64) {
+// endpoint pair believes.
+func (m *PathModel) Report(member Member, floor, samples, delivered float64, roundTrip time.Duration) State {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -147,7 +161,11 @@ func (m *PathModel) Report(member Member, floor, samples, delivered float64) (po
 		m.members[member] = entry
 	}
 	entry.floor, entry.samples, entry.delivered, entry.at = floor, samples, delivered, now
+	if roundTrip > 0 {
+		entry.roundTrip = roundTrip
+	}
 
+	var state State
 	var weighted, weight, sum float64
 	live := 0
 	for key, other := range m.members {
@@ -161,11 +179,14 @@ func (m *PathModel) Report(member Member, floor, samples, delivered float64) (po
 		// which is also what lets a new lane join without disturbing it.
 		weighted += other.floor * other.samples
 		weight += other.samples
+		if other.roundTrip > 0 && (state.RoundTrip == 0 || other.roundTrip < state.RoundTrip) {
+			state.RoundTrip = other.roundTrip
+		}
 	}
 	if weight > 0 {
-		pooledFloor = weighted / weight
+		state.Floor = weighted / weight
 	} else {
-		pooledFloor = floor
+		state.Floor = floor
 	}
 
 	if sum > 0 {
@@ -185,9 +206,9 @@ func (m *PathModel) Report(member Member, floor, samples, delivered float64) (po
 	m.aggregate = kept
 
 	if live > 0 && bottleneck > 0 {
-		share = bottleneck / float64(live)
+		state.Share = bottleneck / float64(live)
 	}
-	return pooledFloor, share
+	return state
 }
 
 // Current is what the model already knows, without contributing to it: the
@@ -198,10 +219,11 @@ func (m *PathModel) Report(member Member, floor, samples, delivered float64) (po
 // is expensive -- it is the same ramp that costs a loss-based controller the
 // path in the first place. A replacement lane, opened because its predecessor
 // died, would pay it every time.
-func (m *PathModel) Current() (floor, share float64) {
+func (m *PathModel) Current() State {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var state State
 	var weighted, weight, bottleneck float64
 	live := 0
 	for key, entry := range m.members {
@@ -212,9 +234,12 @@ func (m *PathModel) Current() (floor, share float64) {
 		live++
 		weighted += entry.floor * entry.samples
 		weight += entry.samples
+		if entry.roundTrip > 0 && (state.RoundTrip == 0 || entry.roundTrip < state.RoundTrip) {
+			state.RoundTrip = entry.roundTrip
+		}
 	}
 	if weight > 0 {
-		floor = weighted / weight
+		state.Floor = weighted / weight
 	}
 	for _, sample := range m.aggregate {
 		if now.Sub(sample.at) <= bottleneckWindow && sample.rate > bottleneck {
@@ -224,9 +249,9 @@ func (m *PathModel) Current() (floor, share float64) {
 	if bottleneck > 0 {
 		// The joining lane counts too, or the first thing it does is take a
 		// share sized for a path with one fewer lane on it.
-		share = bottleneck / float64(live+1)
+		state.Share = bottleneck / float64(live+1)
 	}
-	return floor, share
+	return state
 }
 
 // Members is how many contributors are currently reporting.
@@ -263,6 +288,24 @@ func Forget(key string) {
 	sharedMu.Lock()
 	defer sharedMu.Unlock()
 	delete(shared, key)
+}
+
+// Reset drops every model.
+//
+// It exists for tests, and it exists because of what a path key is. A model is
+// keyed by the endpoint pair, which is the right key for a real network and
+// the wrong one for a process where every pair is loopback to loopback: two
+// tests that could not affect each other on a real path share one model here,
+// and the second inherits whatever the first measured. That has produced
+// failures that look like flakes and are not -- a test whose channel erases
+// 42% of packets, sizing its code from a floor a previous test measured on a
+// clean one, and stalling until its deadline.
+//
+// A test that brings up its own endpoints starts from nothing by calling this.
+func Reset() {
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	clear(shared)
 }
 
 // Shared returns the model for an endpoint pair, creating it on first use.

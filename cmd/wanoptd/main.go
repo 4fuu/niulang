@@ -178,7 +178,7 @@ func parseOptions(args []string) (options, error) {
 	fs.DurationVar(&opts.flowIdleTimeout, "flow-idle-timeout", 30*time.Minute, "maximum application-idle period before a flow is reset")
 	fs.DurationVar(&opts.flowMaxLifetime, "flow-max-lifetime", 24*time.Hour, "maximum lifetime of one logical flow")
 	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
-	fs.BoolVar(&opts.quicPool, "quic-pool", false, "share one persistent QUIC connection for initial/control streams, and move classified bulk flows off it (opt-in)")
+	fs.BoolVar(&opts.quicPool, "quic-pool", true, "share one persistent QUIC connection for initial/control streams, and move classified bulk flows off it")
 	fs.BoolVar(&opts.waitForOpenAck, "wait-for-open-ack", false, "wait for OPEN_OK before answering SOCKS, costing one round trip per flow, in exchange for a precise failure when a destination is unreachable")
 	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionErasure), "QUIC congestion controller: erasure (default), reno, bbr, bbr-tuic, adaptive, or brutal")
 	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "fixed per-lane Brutal target in bytes/s (required with --congestion brutal)")
@@ -200,6 +200,14 @@ func parseOptions(args []string) (options, error) {
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
+	// Which flags the operator actually gave, rather than which ones hold a
+	// non-zero value. The two are not the same, and treating them as the same
+	// means a flag can never be defaulted to anything but its zero value: when
+	// --quic-pool became the default, every server refused to start, because a
+	// default it had never been given looked exactly like one it had.
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
 	if fs.NArg() != 0 {
 		return opts, fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
 	}
@@ -261,14 +269,15 @@ func parseOptions(args []string) (options, error) {
 		if opts.remote == "" || opts.serverName == "" {
 			return opts, errors.New("--remote and --server-name are required in local mode")
 		}
-		if opts.certFile != "" || opts.keyFile != "" || opts.allowPrivate {
+		if given["tls-cert"] || given["tls-key"] || given["allow-private-destinations"] {
 			return opts, errors.New("server-only flags used in local mode")
 		}
 	} else {
 		if opts.certFile == "" || opts.keyFile == "" {
 			return opts, errors.New("--tls-cert and --tls-key are required in server mode")
 		}
-		if opts.remote != "" || opts.serverName != "" || opts.rootCAFile != "" || opts.localAddress != "" || opts.quicPool || opts.waitForOpenAck {
+		if given["remote"] || given["server-name"] || given["root-ca"] ||
+			given["local-address"] || given["quic-pool"] || given["wait-for-open-ack"] {
 			return opts, errors.New("local-only flags used in server mode")
 		}
 	}

@@ -698,7 +698,7 @@ func (p *Path) symbolPayload() int {
 func (p *Path) channel() lossmodel.Snapshot {
 	floor := 0.0
 	if p.cfg.Path != nil {
-		floor, _ = p.cfg.Path.Current()
+		floor = p.cfg.Path.Current().Floor
 	}
 	return lossmodel.Snapshot{
 		Loss: floor, Floor: floor, Recent: floor,
@@ -711,7 +711,7 @@ func (p *Path) params() fec.Params {
 		Class:           p.cfg.Class,
 		ShardBytes:      p.symbolBytes(),
 		RateBytesPerSec: p.rate(),
-		RoundTrip:       p.cfg.RoundTrip,
+		RoundTrip:       p.roundTrip(),
 		TargetResidual:  p.cfg.TargetResidual,
 	}
 }
@@ -719,11 +719,28 @@ func (p *Path) params() fec.Params {
 // rate is the sending rate the window is sized against.
 func (p *Path) rate() float64 {
 	if p.cfg.Path != nil {
-		if _, share := p.cfg.Path.Current(); share > 0 {
+		if share := p.cfg.Path.Current().Share; share > 0 {
 			return share
 		}
 	}
-	return float64(p.symbolBytes()) * 64 / p.cfg.RoundTrip.Seconds()
+	return float64(p.symbolBytes()) * 64 / p.roundTrip().Seconds()
+}
+
+// roundTrip is the path's own, where it has been measured, and the
+// configured guess until then.
+//
+// The window is a round trip's worth of symbols, so this is what sizes it. A
+// configured 300 ms against a measured 245 ms is a window a fifth too wide,
+// which is a fifth further back than a repair can usefully reach -- and the
+// model that measures the erasure this window is sized for has been measuring
+// the round trip alongside it all along.
+func (p *Path) roundTrip() time.Duration {
+	if p.cfg.Path != nil {
+		if rtt := p.cfg.Path.Current().RoundTrip; rtt > 0 {
+			return rtt
+		}
+	}
+	return p.cfg.RoundTrip
 }
 
 // codingTTL is how long a chosen code stands before it is chosen again. The

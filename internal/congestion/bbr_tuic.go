@@ -50,8 +50,11 @@ type TUICBBRSender struct {
 	roundsNoGain         uint8
 	fullBandwidth        bool
 	lastSampleAppLimited bool
-	lossEventsInRound    uint64
-	bytesLostInRound     uint64
+	// peakBandwidth is the most this connection has ever been measured to
+	// deliver, which outlives the filter's ten-round memory of it.
+	peakBandwidth     uint64
+	lossEventsInRound uint64
+	bytesLostInRound  uint64
 
 	estimator      tuicBandwidthEstimator
 	ackedBytes     uint64
@@ -207,21 +210,82 @@ func (b *TUICBBRSender) bandwidth() quiccongestion.ByteCount {
 	return quiccongestion.ByteCount(rate)
 }
 
-// seedPacingRate starts this sender at a rate something else already measured,
-// instead of at the initial window over the round trip.
+// seedBandwidth starts this sender from a delivered rate something else has
+// already measured, instead of from the initial window over the round trip.
 //
 // A lane joining a path its siblings have already mapped should not repeat
 // their discovery. On a channel that erases 40% of packets that discovery is
 // the expensive part -- it is the same ramp a loss-based controller never
 // finishes -- and a lane opened to replace one that died would pay it again on
-// a path nothing has forgotten. The rate is only ever raised, so a seed that
-// is too low costs nothing beyond a normal startup.
-func (b *TUICBBRSender) seedPacingRate(rate uint64) {
+// a path nothing has forgotten.
+//
+// It seeds the estimate rather than the pacing rate, and that distinction is
+// the whole of it. BBR derives two things from one bandwidth estimate: the
+// rate it paces at, and the window it is willing to fill. Seeding only the
+// rate leaves the window at the initial one, and the window is what binds --
+// traced live on a path already measured at 15 Mbit/s, a flow began with a
+// 37 KB window and a 60 Mbit/s pacing rate, and spent eight round trips
+// doubling the window while the pacer waited on it. Seeding the estimate moves
+// both, because both were always the same number.
+//
+// The round trip is needed because a window is a rate times one. Without a
+// measured round trip the estimate still seeds the pacing rate, and the window
+// follows one round trip later when the first acknowledgement supplies it.
+//
+// Both are only ever raised, so a seed below what this sender has already
+// found costs nothing.
+func (b *TUICBBRSender) seedBandwidth(rate uint64, roundTrip time.Duration) {
+	if rate == 0 {
+		return
+	}
 	if rate > tuicMaxRate {
 		rate = tuicMaxRate
 	}
-	if rate > b.pacingRate {
-		b.pacingRate = rate
+	b.estimator.maxFilter.updateMax(b.round, rate)
+	if pacing := uint64(float64(rate) * b.highGain); pacing > b.pacingRate {
+		b.pacingRate = minUint64(pacing, tuicMaxRate)
+	}
+	if roundTrip <= 0 {
+		return
+	}
+	if b.minRTT <= 0 || roundTrip < b.minRTT {
+		b.minRTT = roundTrip
+	}
+	window := quiccongestion.ByteCount(float64(rate) * roundTrip.Seconds())
+	if window > b.maxCwnd {
+		window = b.maxCwnd
+	}
+	if window > b.cwnd {
+		b.cwnd = window
+	}
+}
+
+// minRoundTrip is the smallest round trip this sender has seen, which is the
+// path's rather than any one queue's.
+func (b *TUICBBRSender) minRoundTrip() time.Duration { return b.minRTT }
+
+// restartFromIdle restores what this sender had measured before the pipe
+// emptied.
+//
+// An estimate is forgotten by idling, not disproved by it. The filter holds ten
+// rounds, and a connection that spends a minute carrying small exchanges keeps
+// only what those exchanges delivered -- so when a download arrives on it, it
+// starts from the trickle. Probing bandwidth climbs a quarter per cycle, and
+// measured live on a pooled connection that had been carrying small exchanges,
+// an estimate that had fallen to 0.4 Mbit/s took nineteen seconds to find the
+// 12 Mbit/s the path had had all along. The same download on a fresh
+// connection ran at nine.
+//
+// So the peak this connection has actually seen is put back, and probing
+// continues from there. This is a bet that a path which delivered 12 Mbit/s a
+// minute ago still does, and it is the same bet the shared path model already
+// makes for a lane that joins. If it is wrong the filter's own window
+// disproves it within ten rounds, which is what the filter is for -- where
+// being wrong the other way costs nineteen seconds every time a connection is
+// reused, which is exactly what pooling connections is meant to make cheap.
+func (b *TUICBBRSender) restartFromIdle() {
+	if b.peakBandwidth > b.estimator.estimate() {
+		b.seedBandwidth(b.peakBandwidth, b.minRTT)
 	}
 }
 
@@ -263,6 +327,7 @@ func (b *TUICBBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quicc
 	preSendFlight := preSendBytesInFlight(bytesInFlight, bytes, retransmittable)
 	if preSendFlight == 0 {
 		b.exitingQuiescence = true
+		b.restartFromIdle()
 	}
 	// Keep the controller telemetry in the same post-send units as quic-go.
 	b.bytesInFlight = maxByteCount(0, bytesInFlight)
@@ -378,6 +443,12 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		excessAcked = b.ackAgg.update(bytesAckedWindow, eventTime, b.round, b.estimator.estimate())
 	}
 	b.estimator.endAcks()
+	// What this connection has been measured to deliver outlives the filter's
+	// memory of it, so that a pipe which empties can be refilled from what it
+	// already knows rather than from what a trickle left behind.
+	if bw := b.estimator.estimate(); bw > b.peakBandwidth {
+		b.peakBandwidth = bw
+	}
 	lastSendState := sample.lastSendState
 	if lastLostState.valid && (!lastSendState.valid || lastLostState.packetNumber > lastSendState.packetNumber) {
 		lastSendState = lastLostState

@@ -69,10 +69,21 @@ type ClientConfig struct {
 	FlowMaxLifetime  time.Duration
 	MaxSessions      int
 	Transport        TransportKind
-	// EnableQUICPool enables a persistent multiplexed QUIC connection for
-	// initial/control streams. It is opt-in because bulk performance on a
-	// path-specific Reno peer can be worse than independent QUIC lanes; the
-	// scheduler still opens independent lanes for measured bulk traffic.
+	// EnableQUICPool keeps one persistent QUIC connection for initial and
+	// control streams, and is what makes opening a flow cost nothing.
+	//
+	// Without it every flow dials its own connection, and so pays a handshake
+	// and a congestion ramp from the initial window before it carries a byte.
+	// Measured live on a 38% erasure path, a small flow cost 0.64 s, 1.11 s and
+	// 14.77 s on three attempts unpooled -- the last being a handshake that
+	// lost packets -- against 0.302, 0.292 and 0.300 pooled, which is one round
+	// trip and nothing else.
+	//
+	// It was opt-in because bulk on a pooled connection to a Reno peer measured
+	// worse than an independent lane. That reason has gone: the peer runs the
+	// erasure controller, the scheduler already moves classified bulk off the
+	// pooled connection onto lanes of its own, and bulk measured the same
+	// either way (0.85-1.15 MB/s pooled against 0.86-1.02 unpooled).
 	EnableQUICPool bool
 	// WaitForOpenAcknowledgement makes a flow wait for OPEN_OK before telling
 	// the application its connection is up. It is off by default, so a flow on

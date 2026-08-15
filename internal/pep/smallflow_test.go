@@ -104,7 +104,7 @@ func TestSmallExchangesAreRepairedOnceThePathIsKnown(t *testing.T) {
 	// learns this from its own traffic or from the prewarm; only the floor is
 	// seeded, because a delivered rate would also claim a share of the
 	// bottleneck and that is a different experiment.
-	pathmodel.Shared(key).Report(99, 0.42, 5000, 0)
+	pathmodel.Shared(key).Report(99, 0.42, 5000, 0, 0)
 	knowing := median(exchange(10))
 
 	t.Logf("median exchange: %v when the path is unknown, %v once it is known (round trip %v)",

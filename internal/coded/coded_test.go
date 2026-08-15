@@ -96,7 +96,7 @@ func (p *lossyPipe) stats() (sent, lost int) {
 // connection.
 func measuredPath(floor float64) *pathmodel.PathModel {
 	m := pathmodel.NewPathModel()
-	m.Report(1, floor, 5000, 2e6)
+	m.Report(1, floor, 5000, 2e6, 0)
 	return m
 }
 

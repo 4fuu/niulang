@@ -178,7 +178,7 @@ func (c *Client) awaitMeasurement(lane *authenticatedLane, deadline time.Time) {
 	}
 	model := pathmodel.Shared(keyed.pathIdentity())
 	for time.Now().Before(deadline) {
-		if floor, _ := model.Current(); floor > 0 {
+		if model.Current().Floor > 0 {
 			return
 		}
 		time.Sleep(measurementPoll)

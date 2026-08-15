@@ -114,10 +114,16 @@ func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmo
 		// window. On a path that erases 40% of packets the ramp is the
 		// expensive part, and a lane opened to replace one that died would
 		// otherwise pay it again on a path nothing has forgotten.
-		if floor, share := path.Current(); share > 0 {
-			e.arrival.Store(uint64((1 - floor) * partsPerMillion))
-			e.share.Store(uint64(share))
-			e.inner.seedPacingRate(uint64(share / e.arrivalRate()))
+		//
+		// What is seeded is the delivered rate, compensated for the erasure --
+		// which is what this sender puts on the wire to deliver it. BBR sizes
+		// both its pacing and its window from that one number, so seeding it
+		// moves both; seeding a pacing rate alone leaves the window at the
+		// initial one and the pacer waiting on it.
+		if state := path.Current(); state.Share > 0 {
+			e.arrival.Store(uint64((1 - state.Floor) * partsPerMillion))
+			e.share.Store(uint64(state.Share))
+			e.inner.seedBandwidth(uint64(state.Share/e.arrivalRate()), state.RoundTrip)
 		}
 	}
 	return e
@@ -216,9 +222,10 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	if e.path != nil {
 		// Pool with the other lanes: the floor converges on all their samples
 		// together, and the share is what stops their probes compounding.
-		pooled, share := e.path.Report(pathmodel.Member(e.id()), floor, snapshot.Samples, float64(e.inner.bandwidth()))
-		floor = pooled
-		e.share.Store(uint64(share))
+		state := e.path.Report(pathmodel.Member(e.id()), floor, snapshot.Samples,
+			float64(e.inner.bandwidth()), e.inner.minRoundTrip())
+		floor = state.Floor
+		e.share.Store(uint64(state.Share))
 	}
 	e.arrival.Store(uint64((1 - floor) * partsPerMillion))
 

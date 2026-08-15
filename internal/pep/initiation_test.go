@@ -147,14 +147,14 @@ func TestThePrewarmLeavesTheUplinkMeasured(t *testing.T) {
 	key := pathKey(loopback, loopback)
 
 	// Start from nothing known about this uplink.
-	before, _ := pathmodel.Shared(key).Current()
+	before := pathmodel.Shared(key).Current().Floor
 
 	client, _ := clientServerAcross(t, &path)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	client.prewarmPath(ctx)
 
-	after, _ := pathmodel.Shared(key).Current()
+	after := pathmodel.Shared(key).Current().Floor
 	t.Logf("erasure floor known for this uplink: %.3f before the prewarm, %.3f after", before, after)
 	if after <= 0 {
 		t.Fatal("the prewarm left the uplink unmeasured, so the first flow on it " +
