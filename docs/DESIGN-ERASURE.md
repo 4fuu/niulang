@@ -274,6 +274,30 @@ a precise failure, so an unreachable destination becomes a connection that
 opens and then closes. `--wait-for-open-ack` buys the distinction back for one
 round trip per flow.
 
+## Coding is per flow, and reliability is per attempt
+
+Coding and retransmission cost the same thing in different currencies. On a
+memoryless erasure channel retransmission resends only what was lost, 1/(1-p),
+where a block code provisions for the binomial. Measured live at 37% loss, a
+50 MiB download runs at about 9.1 Mbit/s with its data on the stream and 5.0
+with all of it coded — the code spending exactly the difference the arithmetic
+predicts. A 2.7 KB exchange goes the other way, 1.9 s uncoded against 305 ms
+coded, because there the currency is a round trip and not a byte.
+
+So bulk data stays on the stream and everything else is coded, from the class
+the flow is already measured to have. A download pays for the second before it
+is recognised as bulk, which costs about 20% of its throughput — 6.3 to 7.6
+Mbit/s against the 9.1 a stream-only build gets — and buys every short flow the
+difference above.
+
+Reliability then has to be a property of the **attempt**, not of the lane. A
+lane's answer changes: one that carried a chunk over the coded path may carry
+the next over its stream. Asking the lane as it is now strands exactly the
+chunks that were sent unreliably — nothing re-issues them, because the lane no
+longer thinks it needs to — and measured live that took a download from 6.2
+Mbit/s to 0.25. The scheduler records how each chunk was taken and decides from
+that.
+
 ## Timeouts belong to the exchange they bound
 
 Three bugs, one shape: a constant sized for whichever path it was chosen on.

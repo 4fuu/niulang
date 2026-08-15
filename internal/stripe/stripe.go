@@ -173,6 +173,17 @@ func (c *Chunk) End() uint64 { return c.Offset + uint64(len(c.Data)) }
 type attempt struct {
 	lane     uint64
 	deadline time.Time
+	// reliable records whether the lane retransmitted for itself at the moment
+	// this chunk was handed to it.
+	//
+	// It belongs to the attempt and not to the lane, because a lane's answer
+	// changes: one that carried a chunk over a coded datagram path may be
+	// carrying the next over its stream. Asking the lane as it is now, rather
+	// than as it was when it took these bytes, strands exactly the chunks that
+	// were sent unreliably -- nothing will re-issue them, because the lane now
+	// says it did not need to. Measured live, that took a download from 6.2
+	// Mbit/s to 0.25.
+	reliable bool
 	// written records that the lane's transport has taken these bytes. Until
 	// then they are the lane's queued commitment and bound its admission;
 	// afterwards they are the transport's problem, and the scheduler retains
@@ -386,11 +397,12 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 			// scan cheap.
 			return nil
 		}
-		if out, ok := s.live[chunk.Offset]; ok && laneHasAttempt(out, laneID) && s.laneRetransmits(laneID) {
-			// A reliable lane will deliver this chunk or die, so a second copy
-			// on it is spent on the one outcome it cannot help. An unreliable
-			// lane is the opposite case: the chunk may simply be gone, and on
-			// a single-lane flow this is the only way it comes back.
+		if out, ok := s.live[chunk.Offset]; ok && laneHasReliableAttempt(out, laneID) {
+			// This lane already took this chunk in a way that will deliver it
+			// or die, so a second copy is spent on the one outcome it cannot
+			// help. Had it taken it unreliably the opposite would hold: the
+			// chunk may simply be gone, and on a single-lane flow this is the
+			// only way it comes back.
 			continue
 		}
 		s.pending = append(s.pending[:i], s.pending[i+1:]...)
@@ -408,7 +420,7 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 		if s.cfg.RetransmitAfter > 0 {
 			deadline = s.cfg.Now().Add(s.cfg.RetransmitAfter)
 		}
-		out.attempts = append(out.attempts, attempt{lane: laneID, deadline: deadline})
+		out.attempts = append(out.attempts, attempt{lane: laneID, deadline: deadline, reliable: s.laneRetransmits(laneID)})
 		chunk.urgent = false
 		s.laneLoad[laneID]++
 		s.laneBytes[laneID] += uint64(len(chunk.Data))
@@ -431,9 +443,22 @@ func (s *Scheduler) laneRetransmits(laneID uint64) bool {
 	return s.cfg.Reliable(laneID)
 }
 
+// laneHasAttempt reports whether this lane is carrying this chunk at all,
+// however it took it.
 func laneHasAttempt(out *outstanding, laneID uint64) bool {
 	for _, a := range out.attempts {
 		if a.lane == laneID {
+			return true
+		}
+	}
+	return false
+}
+
+// laneHasReliableAttempt reports whether this lane already holds this chunk in
+// a form that will arrive or fail loudly.
+func laneHasReliableAttempt(out *outstanding, laneID uint64) bool {
+	for _, a := range out.attempts {
+		if a.lane == laneID && a.reliable {
 			return true
 		}
 	}

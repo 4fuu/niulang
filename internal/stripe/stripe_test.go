@@ -774,3 +774,34 @@ func TestAReliableLaneRefusesTheSameChunkTwice(t *testing.T) {
 		t.Fatalf("a reliable lane was offered the same chunk twice at offset %d", again.Offset)
 	}
 }
+
+// Reliability belongs to the attempt, not to the lane. A lane whose answer
+// changes -- one that carried a chunk over a coded datagram path and now
+// carries them over its stream -- must still be allowed to re-issue what it
+// took unreliably, or exactly those chunks are stranded and the flow waits for
+// bytes nothing will resend.
+func TestAChunkTakenUnreliablyStaysReissuableWhenTheLaneChanges(t *testing.T) {
+	now := time.Now()
+	coded := true
+	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
+		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
+		RetransmitAfter: time.Second,
+		Reliable:        func(uint64) bool { return !coded },
+		Now:             func() time.Time { return now },
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := scheduler.Next(ctx, 1, 1<<20); err != nil {
+		t.Fatalf("no chunk offered while the lane was coding: %v", err)
+	}
+	// The flow is now bulk, so the lane carries data on its stream and reports
+	// itself reliable. The chunk it already took is still coded and still gone.
+	coded = false
+	now = now.Add(2 * time.Second)
+	if reissued := scheduler.ReissueExpired(); reissued != 1 {
+		t.Fatalf("re-issued %d chunks, want the one taken unreliably", reissued)
+	}
+	if _, err := scheduler.Next(ctx, 1, 1<<20); err != nil {
+		t.Fatalf("the lane refused to resend a chunk it had taken unreliably: %v", err)
+	}
+}

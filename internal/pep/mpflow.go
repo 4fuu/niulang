@@ -729,7 +729,7 @@ func (f *multipathFlow) laneRetransmits(laneID uint64) bool {
 	if lane == nil || lane.fc == nil {
 		return true
 	}
-	return !lane.fc.codingBulk()
+	return !lane.fc.codesData()
 }
 
 // failLane transitions a lane to failed exactly once, stops both of its I/O
