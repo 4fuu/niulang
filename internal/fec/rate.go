@@ -177,6 +177,72 @@ func ShardsFor(k int, s lossmodel.Snapshot, p Params) (int, bool) {
 	return 0, false
 }
 
+// WindowRate is how many repair symbols each source symbol earns on a sliding
+// window of the given capacity, for the target residual.
+//
+// It is not ShardsFor's answer, and the difference is not small. ShardsFor
+// sizes a block, where the only transmissions that can repair an erasure are
+// the ones in its own block; on a window they chain, because a repair that
+// resolves a neighbouring symbol frees an equation that covers this one, and
+// that equation may come from a window this symbol was never in. The code
+// therefore behaves like a block several times the window's length, and asking
+// for a block's parity over a window's length buys a residual far below the
+// one that was asked for -- at 42% erasure and a window of 64, 1.20 repairs
+// per symbol where 0.98 was enough, which is a fifth of the wire.
+//
+// The multiple is measured rather than derived: the chaining depends on how
+// the decoder retains equations, which is a property of this implementation
+// and not of the arithmetic. TestTheWindowRateIsWhatTheWindowNeeds holds it to
+// what the code actually achieves.
+//
+// The block's shard limit does not apply here either. A block of 256 shards is
+// all GF(256) has distinct generator rows for, so ShardsFor gives up above it
+// and reports that no code will do -- but a window's coefficients are drawn per
+// repair over at most a window's symbols, so the repairs are unbounded and a
+// wide window is exactly where the code is cheapest.
+func WindowRate(capacity int, s lossmodel.Snapshot, p Params) float64 {
+	if capacity < 1 {
+		return 0
+	}
+	loss := s.Floor
+	if loss <= 0 {
+		loss = s.Loss
+	}
+	if loss < minCodedLoss || p.TargetResidual <= 0 || p.TargetResidual >= 1 {
+		return 0
+	}
+	arrival := 1 - loss
+	if arrival <= 0 {
+		return maxWindowRate
+	}
+	effective := int(float64(capacity) * windowChaining)
+	// The tail falls as transmissions are added, so the smallest total that
+	// meets the target is a bisection rather than a walk.
+	lo, hi := effective, int(float64(effective)/arrival*maxWindowRate)
+	if binomialTailBelow(hi, arrival, effective) > p.TargetResidual {
+		return maxWindowRate
+	}
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if binomialTailBelow(mid, arrival, effective) <= p.TargetResidual {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	return float64(lo-effective) / float64(effective)
+}
+
+const (
+	// windowChaining is how many windows' worth of symbols one window's repairs
+	// effectively code over, once equations that resolve neighbouring symbols
+	// are counted. Measured, not derived.
+	windowChaining = 2.5
+	// maxWindowRate stops the search where the channel is no longer one this
+	// transport can use, matching minRate's judgement for blocks.
+	maxWindowRate = 1 / minRate
+)
+
 // residualFor is the probability that a block of k data shards cannot be
 // repaired, given how many independent erasure events its total length carries.
 // It reports ok=false when the block is too short to hold k shards' worth of
