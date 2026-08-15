@@ -1,14 +1,19 @@
 package pep
 
 import (
+	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"sort"
 	"testing"
 	"time"
 
+	"github.com/icourses-dev/wanopt/internal/classifier"
 	"github.com/icourses-dev/wanopt/internal/pathmodel"
 	"github.com/icourses-dev/wanopt/internal/pathsim"
+	"github.com/icourses-dev/wanopt/internal/protocol"
 )
 
 // requestResponse serves a destination that answers each small request with a
@@ -108,5 +113,116 @@ func TestSmallExchangesAreRepairedOnceThePathIsKnown(t *testing.T) {
 		t.Errorf("knowing the path gave %v against %v when blind; a small exchange "+
 			"should be repaired by the code rather than by a probe timeout",
 			knowing.Round(time.Millisecond), blind.Round(time.Millisecond))
+	}
+}
+
+// A refused destination and a lost attempt are different answers, and only one
+// of them is worth asking again.
+//
+// The peer answering "I could not reach that" has told the application
+// something true; asking again only delays it. A path that lost the asking has
+// told it nothing, and reporting that as an unreachable destination is a lie
+// about the destination -- the application's own retry costs a fresh TCP
+// connection and a fresh SOCKS negotiation for something this layer could have
+// tried again itself.
+func TestOnlyALostAttemptIsRetried(t *testing.T) {
+	client := &Client{cfg: ClientConfig{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+
+	attempts := 0
+	client.openFlowForTest = func() (*openedFlow, error) {
+		attempts++
+		return nil, errDestinationUnavailable
+	}
+	if _, err := client.openFlowWithRetries(context.Background(), "example.test:80"); err == nil {
+		t.Fatal("a refused destination was reported as success")
+	}
+	if attempts != 1 {
+		t.Fatalf("a refused destination was asked %d times, want 1", attempts)
+	}
+
+	attempts = 0
+	client.openFlowForTest = func() (*openedFlow, error) {
+		attempts++
+		return nil, errors.New("quic lane: context deadline exceeded")
+	}
+	if _, err := client.openFlowWithRetries(context.Background(), "example.test:80"); err == nil {
+		t.Fatal("a lost attempt was reported as success")
+	}
+	if attempts != flowOpenAttempts {
+		t.Fatalf("a lost attempt was asked %d times, want %d", attempts, flowOpenAttempts)
+	}
+
+	// And a path that loses the first attempt but not the second must not cost
+	// the application anything at all.
+	attempts = 0
+	client.openFlowForTest = func() (*openedFlow, error) {
+		if attempts++; attempts == 1 {
+			return nil, errors.New("quic lane: context deadline exceeded")
+		}
+		return &openedFlow{}, nil
+	}
+	if _, err := client.openFlowWithRetries(context.Background(), "example.test:80"); err != nil {
+		t.Fatalf("a path that lost one attempt failed the flow: %v", err)
+	}
+}
+
+// A flow becomes what it is as it ages, not only when it reads.
+//
+// This is the considered answer rather than the immediate one: a flow that has
+// already moved more than a small exchange stops coding at once, without
+// waiting for the class. Both matter, because they arrive at different times.
+//
+// The classifier was driven only by reads from the inner connection, and a
+// server reading a ten megabyte file from a local destination does every one
+// of those inside a second -- before the bulk test's minimum age -- and then
+// never reads again. Nothing re-examined the flow, so it stayed ClassNew for
+// its whole life and was coded from first byte to last.
+func TestAFlowIsReclassifiedAsItAges(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer inner.Close()
+	defer peer.Close()
+	f := newMultipathFlow(context.Background(), inner, [16]byte{1}, 1, 64*1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil, nil)
+
+	// Ten megabytes read before the bulk test's minimum age has elapsed, which
+	// is what a fast local destination gives a server.
+	f.observe(84, false)
+	f.bytesDown.Add(84)
+	for sent := 0; sent < 10_000_000; sent += 64 * 1024 {
+		f.observe(64*1024, true)
+		f.bytesUp.Add(64 * 1024)
+	}
+	if got := classifier.Class(f.class.Load()); got != classifier.ClassNew {
+		t.Fatalf("class %v before the minimum age, want new", got)
+	}
+
+	// The reads are over. Only age separates this flow from being bulk, and
+	// re-examining it is the only thing that can notice.
+	f.started = f.started.Add(-5 * time.Second)
+	f.lastClassified.Store(0)
+	f.refreshClass()
+	if got := classifier.Class(f.class.Load()); got != classifier.ClassBulk {
+		t.Fatalf("class %v after ageing, want bulk; the flow was never "+
+			"re-examined once it stopped reading", got)
+	}
+}
+
+// And a flow that has already moved bulk quantities stops coding immediately,
+// without waiting a second for the class to settle. That second is where a
+// download produces most of its frames.
+func TestAFlowThatHasMovedBulkQuantitiesStopsCodingAtOnce(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer inner.Close()
+	defer peer.Close()
+	f := newMultipathFlow(context.Background(), inner, [16]byte{1}, 1, 64*1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil, nil)
+
+	if !f.prefersCodingOverRetransmission() {
+		t.Fatal("a flow that has carried nothing should still prefer coding")
+	}
+	f.bytesUp.Store(codedFlowBytes + 1)
+	if f.prefersCodingOverRetransmission() {
+		t.Fatalf("a flow that has moved %d bytes still prefers coding, and will "+
+			"go on doing so for the second its class takes to settle", f.bytesUp.Load())
 	}
 }

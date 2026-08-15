@@ -285,16 +285,19 @@ type multipathFlow struct {
 	ackSequence   atomic.Uint64
 	ackClosing    atomic.Bool
 	lastPayload   atomic.Int64
-	lastActivity  atomic.Int64
-	closeOnce     sync.Once
-	doneOnce      sync.Once
-	finished      atomic.Bool
-	nextJoinID    uint64
-	telemetryID   uint64
-	baselineRTTNS atomic.Int64
-	currentRTTNS  atomic.Int64
-	idleTimeout   time.Duration
-	maxLifetime   time.Duration
+	// lastClassified is when the flow last re-examined its own class, so that
+	// a flow which has stopped reading is still reclassified as it ages.
+	lastClassified atomic.Int64
+	lastActivity   atomic.Int64
+	closeOnce      sync.Once
+	doneOnce       sync.Once
+	finished       atomic.Bool
+	nextJoinID     uint64
+	telemetryID    uint64
+	baselineRTTNS  atomic.Int64
+	currentRTTNS   atomic.Int64
+	idleTimeout    time.Duration
+	maxLifetime    time.Duration
 
 	reinjections atomic.Uint64
 
@@ -716,7 +719,56 @@ func (f *multipathFlow) deliverInbound(lane *mpLane, frame protocol.Frame) bool 
 // too short to trigger a fast retransmit recovers by timeout, and a timeout is
 // a round trip that coding does not spend.
 func (f *multipathFlow) prefersCodingOverRetransmission() bool {
+	// How much this flow has moved is the immediate answer; the class is the
+	// considered one. Both are needed because they become available at
+	// different times.
+	//
+	// The class takes a second to settle, and a transfer from a fast local
+	// destination produces most of its frames inside that second -- measured
+	// live, 265 of a download's 557 data frames were coded before the class
+	// caught up. A flow that has already moved more than a small exchange's
+	// worth is not a small exchange, whatever it is later decided to be, and
+	// coding it spends bandwidth to save round trips it was not going to
+	// notice.
+	if f.bytesUp.Load()+f.bytesDown.Load() > codedFlowBytes {
+		return false
+	}
+	f.refreshClass()
 	return classifier.Class(f.class.Load()) != classifier.ClassBulk
+}
+
+// codedFlowBytes is how much a flow may carry and still be treated as an
+// exchange worth coding. Past it, the round trips coding saves are amortised
+// over so many bytes that the parity costs more than the waiting.
+const codedFlowBytes = 256 * 1024
+
+// classRefreshInterval bounds how often a flow re-examines what it is. The
+// classifier's own thresholds move on the scale of seconds, so this is far
+// finer than the answer can change.
+const classRefreshInterval = 250 * time.Millisecond
+
+// refreshClass re-examines the flow from what it has carried so far.
+//
+// The classifier is otherwise driven only by reads from the inner connection,
+// and that is not when a flow becomes what it is. A server reading a ten
+// megabyte file from a local destination does every one of those reads inside
+// a second -- before the bulk test's minimum age has elapsed -- and then never
+// reads again. Nothing re-examined it, so the flow stayed ClassNew for its
+// whole life and was coded from first byte to last: measured live, 605 data
+// frames coded and 4 on the stream, on a transfer that was bulk by any
+// description after its first second.
+func (f *multipathFlow) refreshClass() {
+	now := time.Now()
+	last := f.lastClassified.Load()
+	if now.Sub(time.Unix(0, last)) < classRefreshInterval {
+		return
+	}
+	if !f.lastClassified.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	// Zero bytes: this is a re-examination of what has already been carried,
+	// not a new observation of anything.
+	f.observe(0, false)
 }
 
 // laneRetransmits reports whether a lane recovers its own losses, which is
@@ -767,7 +819,13 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 	}
 	f.laneFailures.Add(1)
 	if f.logger != nil {
-		f.logger.Debug("multipath lane failed", "flow_id", f.flowID, "lane_id", lane.id, "transport", lane.kind, "error", err)
+		coded, stream := f.dataSubstrates()
+		f.logger.Debug("multipath lane failed", "flow_id", f.flowID, "lane_id", lane.id,
+			"transport", lane.kind, "error", err,
+			"data_coded", coded, "data_stream", stream,
+			"class", classifier.Class(f.class.Load()),
+			"bytes_up", f.bytesUp.Load(), "bytes_down", f.bytesDown.Load(),
+			"classifier_says", f.classifier.Class(), "age", time.Since(f.started))
 	}
 	select {
 	case f.laneErr <- laneFailure{lane: lane, err: err}:
@@ -1870,6 +1928,12 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 	}
 }
 
+// smallExchangeBytes is how much a direction may carry and still be one of
+// the small exchanges an interactive flow is made of. It matches the
+// classifier's own new-flow byte budget: past this, a direction is carrying
+// content rather than conversation.
+const smallExchangeBytes = 64 * 1024
+
 func (f *multipathFlow) observe(n int, up bool) bool {
 	now := time.Now()
 	f.lastActivity.Store(now.UnixNano())
@@ -1895,7 +1959,18 @@ func (f *multipathFlow) observe(n int, up bool) bool {
 			}
 			return now.Sub(time.Unix(0, previousPayload))
 		}(),
-		SmallBidirectionalBursts: n <= 16*1024,
+		// Whether this flow is made of small exchanges, not whether this
+		// particular read was small.
+		//
+		// Taking it from the read size made a download permanently
+		// unclassifiable: a 10 MB transfer is read in 16 KiB chunks, so every
+		// read looked like a small burst, and a download is bidirectional -- a
+		// short request, a long response -- so the bulk test's
+		// "not bidirectional or not small bursts" was never satisfied. The
+		// flow stayed ClassNew to the end and was coded from first byte to
+		// last, which cost about a fifth of its throughput on the measured
+		// path.
+		SmallBidirectionalBursts: upBytes <= smallExchangeBytes && downBytes <= smallExchangeBytes,
 	}
 	oldClass := classifier.Class(f.class.Load())
 	newClass := f.classifier.Observe(obs)
@@ -1904,6 +1979,21 @@ func (f *multipathFlow) observe(n int, up bool) bool {
 		f.metrics.ClassTransition(int(newClass))
 	}
 	return newClass == classifier.ClassBulk
+}
+
+// dataSubstrates totals where this flow's payload went across its lanes.
+func (f *multipathFlow) dataSubstrates() (coded, stream uint64) {
+	f.lanesMu.RLock()
+	defer f.lanesMu.RUnlock()
+	for _, lane := range f.lanes {
+		if lane.fc == nil {
+			continue
+		}
+		c, s := lane.fc.DataSubstrates()
+		coded += c
+		stream += s
+	}
+	return coded, stream
 }
 
 func (f *multipathFlow) closeAll() {

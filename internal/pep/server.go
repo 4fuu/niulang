@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
+	"github.com/icourses-dev/wanopt/internal/classifier"
 	"github.com/icourses-dev/wanopt/internal/limiter"
 	"github.com/icourses-dev/wanopt/internal/metrics"
 	"github.com/icourses-dev/wanopt/internal/protocol"
@@ -618,7 +619,13 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		s.cfg.Logger.Debug("remote flow ended with error", "error", err, "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "lane_bytes", stats.LaneBytes)
 		return
 	}
-	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes)
+	codedFrames, streamFrames := flow.dataSubstrates()
+	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent,
+		"duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes,
+		// Where the payload went. The server is the sender for a download, so
+		// this is the split that decides what a download costs.
+		"data_coded", codedFrames, "data_stream", streamFrames,
+		"class", classifier.Class(flow.class.Load()))
 }
 
 // watchFlowCompletion closes a correctness gap between the application FIN

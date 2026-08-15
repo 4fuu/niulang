@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/coded"
@@ -49,6 +50,11 @@ type frameConn struct {
 	// wantsCoding reports whether this lane's flow would rather spend bytes
 	// than round trips. Nil means it would.
 	wantsCoding func() bool
+	// codedData and streamData count where this lane's payload actually went,
+	// which is the only way to tell "the class never changed" from "the class
+	// changed and coding continued".
+	codedData  atomic.Uint64
+	streamData atomic.Uint64
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -173,10 +179,28 @@ func (c *frameConn) releaseBulk(flowID uint64) {
 	}
 }
 
+// DataSubstrates reports how many data frames this lane sent each way.
+func (c *frameConn) DataSubstrates() (coded, stream uint64) {
+	return c.codedData.Load(), c.streamData.Load()
+}
+
+func (c *frameConn) countData(f protocol.Frame, coded bool) {
+	if f.Header.Type != protocol.TypeData {
+		return
+	}
+	if coded {
+		c.codedData.Add(1)
+		return
+	}
+	c.streamData.Add(1)
+}
+
 func (c *frameConn) Write(f protocol.Frame) error {
 	if c.bulkFrame(f) {
+		c.countData(f, true)
 		return c.writeCoded(f)
 	}
+	c.countData(f, false)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return c.writeLocked(f)
@@ -222,8 +246,10 @@ func (c *frameConn) WriteContext(ctx context.Context, f protocol.Frame) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		c.countData(f, true)
 		return c.writeCoded(f)
 	}
+	c.countData(f, false)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if err := ctx.Err(); err != nil {

@@ -131,6 +131,10 @@ type Client struct {
 	// quicPoolFast is learned from the first stream's HelloOK. The session ID
 	// remains per logical flow; only the TLS/QUIC connection authentication is
 	// shared. A zero capability keeps compatibility with an older server.
+	// openFlowForTest stands in for one flow-open attempt, so the retry policy
+	// can be tested without a network that loses things on demand.
+	openFlowForTest func() (*openedFlow, error)
+
 	quicPoolFast bool
 	// quicPoolFastProven records that a fast open on this connection has been
 	// acknowledged, so later flows need not wait for theirs.
@@ -422,7 +426,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		return
 	}
 	flowOpenStarted := time.Now()
-	flow, err := c.openFlow(ctx, req.Destination)
+	flow, err := c.openFlowWithRetries(ctx, req.Destination)
 	if err != nil {
 		_ = socks5.WriteReply(inner, socks5.ReplyHostUnreachable, nil)
 		c.cfg.Logger.Warn("remote flow open failed", "error", err)
@@ -471,7 +475,13 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		c.cfg.Logger.Debug("local flow ended with error", "error", err, "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead, "lane_bytes", stats.LaneBytes)
 		return
 	}
-	c.cfg.Logger.Info("local flow complete", "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead, "duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes)
+	codedFrames, streamFrames := flowSession.dataSubstrates()
+	c.cfg.Logger.Info("local flow complete", "bytes_up", stats.BytesSent, "bytes_down", stats.BytesRead,
+		"duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes,
+		// Where the payload went, which is what tells a flow that was coded
+		// for its first second from one that was coded throughout.
+		"data_coded", codedFrames, "data_stream", streamFrames,
+		"class", classifier.Class(flowSession.class.Load()))
 }
 
 type openedFlow struct {
@@ -610,7 +620,7 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 		return fail(errors.New("pipelined flow acknowledgement identity mismatch"))
 	}
 	if openAck.Header.Type == protocol.TypeReset {
-		return fail(errors.New("remote destination unavailable"))
+		return fail(errDestinationUnavailable)
 	}
 	if openAck.Header.Type != protocol.TypeOpenOK || len(openAck.Payload) != 0 {
 		return fail(errors.New("invalid pipelined flow acknowledgement"))
@@ -694,6 +704,54 @@ func closeLateFlow(ch <-chan openedFlowResult) {
 			_ = result.flow.fc.Close()
 		}
 	}()
+}
+
+// errDestinationUnavailable is the peer saying it could not reach the
+// destination. It is the answer to the application's question, not a failure
+// to ask it, so it is never retried.
+var errDestinationUnavailable = errors.New("remote destination unavailable")
+
+// flowOpenAttempts is how many times a flow open is tried before the
+// application is told the destination is unreachable.
+//
+// On a path that erases 42% of packets an attempt is sometimes simply lost --
+// a handshake packet goes missing and the probe timeouts that would recover it
+// run past the bound. Reporting that as an unreachable destination is a lie
+// about the destination, and the application's own retry is a fresh TCP
+// connection and a fresh SOCKS negotiation for something this layer could have
+// tried again itself.
+const flowOpenAttempts = 3
+
+// openFlowWithRetries asks again when the path lost the asking.
+//
+// Only a transport failure is retried. A peer that answered -- with a reset,
+// because the destination refused or does not exist -- has told the
+// application something true, and asking again would only delay it.
+func (c *Client) openFlowWithRetries(ctx context.Context, destination string) (*openedFlow, error) {
+	var err error
+	for attempt := 1; attempt <= flowOpenAttempts; attempt++ {
+		var flow *openedFlow
+		flow, err = c.openOnce(ctx, destination)
+		if err == nil {
+			if attempt > 1 {
+				c.cfg.Logger.Debug("flow opened after a lost attempt", "attempts", attempt)
+			}
+			return flow, nil
+		}
+		if errors.Is(err, errDestinationUnavailable) || ctx.Err() != nil {
+			return nil, err
+		}
+		c.cfg.Logger.Debug("flow open attempt failed", "attempt", attempt, "error", err)
+	}
+	return nil, err
+}
+
+// openOnce is one attempt, indirected so a test can stand in for the network.
+func (c *Client) openOnce(ctx context.Context, destination string) (*openedFlow, error) {
+	if c.openFlowForTest != nil {
+		return c.openFlowForTest()
+	}
+	return c.openFlow(ctx, destination)
 }
 
 func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry bool) (*openedFlow, error) {
@@ -781,7 +839,7 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 			_ = lane.fc.Close()
 			return c.openFlowMode(ctx, destination, true)
 		}
-		return fail(errors.New("remote destination unavailable"))
+		return fail(errDestinationUnavailable)
 	}
 	if response.Header.Type != protocol.TypeOpenOK || len(response.Payload) != 0 {
 		return fail(errors.New("invalid flow open acknowledgement"))
