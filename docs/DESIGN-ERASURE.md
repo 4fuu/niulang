@@ -704,6 +704,30 @@ the coded path outright, and that is measured to cost more than it saves
 (7.0/6.1/5.0 Mbit/s against 9.8/9.0/7.7). So the tail is a property of the
 split, not a defect in it.
 
+## Where the transport stands against the path
+
+Measured on the live link on 2026-08-16, with the path itself measured the
+same night by UDP sweep for comparison.
+
+| | what the path gives | what the transport gets | |
+|---|---|---|---|
+| download, one flow | 13.3 Mbit/s | 9.5-10 | 73% |
+| download, eight flows | 13.3 | 12.1 aggregate, within 1% of each other | 91% |
+| upload, one flow | 14.5 | 11.3-11.7 | 81% |
+| short flow, round trip | 210 ms | 210-260 ms | one round trip |
+
+The two directions are not the same path. Downstream erases 45% of what it
+carries at any rate and then policies at about 24 Mbit/s offered, so 13.3
+Mbit/s is all that can be delivered. Upstream erases nothing measurable and
+policies at 14.5. A transport that assumed symmetry would be wrong in both
+directions at once.
+
+Larger transfers behave: 100 MB completes in 67-107 s, memory returns
+afterwards -- 198 MB resident during, 104 MB after three of them, with the
+thread count unchanged -- and a 100 MB download **survives the server being
+restarted underneath it**, completing intact because the session retains what
+is unacknowledged and replays it on a new connection.
+
 ## What is not done
 
 **The tail of a single bulk transfer.** It is understood and bounded above:
