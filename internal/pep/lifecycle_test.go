@@ -65,7 +65,7 @@ func TestFlowLifecycleDoesNotLeakGoroutines(t *testing.T) {
 	client, err := NewClient(ClientConfig{
 		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
 		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		OptimisticOpen: true, MaxLanes: 1, InitialLanes: 1, Logger: logger,
+		MaxLanes: 1, InitialLanes: 1, Logger: logger,
 		HandshakeTimeout: 2 * time.Second,
 	})
 	if err != nil {

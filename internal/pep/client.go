@@ -73,13 +73,24 @@ type ClientConfig struct {
 	// path-specific Reno peer can be worse than independent QUIC lanes; the
 	// scheduler still opens independent lanes for measured bulk traffic.
 	EnableQUICPool bool
-	// OptimisticOpen returns SOCKS success after the authenticated OPEN has
-	// been queued, without waiting for OPEN_OK. The flow reader validates the
-	// eventual OPEN_OK (or propagates a typed RESET), allowing application
-	// request bytes to overlap the destination dial and one WAN RTT. It is
-	// opt-in until deployment campaigns prove acceptable destination-error
-	// behavior for all callers.
-	OptimisticOpen                bool
+	// WaitForOpenAcknowledgement makes a flow wait for OPEN_OK before telling
+	// the application its connection is up. It is off by default, so a flow on
+	// a connection that is already established costs no round trips at all.
+	//
+	// Waiting costs exactly one round trip per flow, and an application opens
+	// a flow far more often than it opens a connection. Measured across an
+	// emulated 300 ms path, a first flow costs 922 ms -- a QUIC handshake, an
+	// authentication exchange and an open -- and every flow after it cost 306
+	// ms, which is one round trip of pure waiting on a pool that was already
+	// up. That is the cost this removes: request bytes now leave with the open
+	// rather than a round trip behind it.
+	//
+	// What is given up is the ability to answer SOCKS with a precise failure.
+	// The flow reader still validates the eventual OPEN_OK and propagates a
+	// typed RESET, so an unreachable destination becomes a connection that
+	// opens and then closes rather than one that never opens. Set this when a
+	// caller needs the distinction more than it needs the round trip.
+	WaitForOpenAcknowledgement    bool
 	Congestion                    CongestionControlKind
 	BrutalBytesPerSec             uint64
 	AdaptiveMinBytesSec           uint64
@@ -119,7 +130,10 @@ type Client struct {
 	// quicPoolFast is learned from the first stream's HelloOK. The session ID
 	// remains per logical flow; only the TLS/QUIC connection authentication is
 	// shared. A zero capability keeps compatibility with an older server.
-	quicPoolFast          bool
+	quicPoolFast bool
+	// quicPoolFastProven records that a fast open on this connection has been
+	// acknowledged, so later flows need not wait for theirs.
+	quicPoolFastProven    bool
 	quicPoolControl       bool
 	quicPoolAuthenticated bool
 	// quicPoolActive counts flows currently sharing the pooled control
@@ -354,7 +368,7 @@ func (c *Client) closeQUICPool() {
 	c.quicMu.Lock()
 	conn, packet := c.quicConn, c.quicPacket
 	c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
-	c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
+	c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated, c.quicPoolFastProven = false, false, false, false
 	c.quicMu.Unlock()
 	if conn != nil {
 		_ = conn.CloseWithError(0, "wanopt client stopped")
@@ -409,6 +423,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
 	flowSession.openAckPending = flow.openPending
+	flowSession.onProtocolReset = c.disableQUICPoolFast
 	flowSession.helloAckPending = flow.helloPending
 	flowSession.onHelloOK = flow.onHelloOK
 	flowSession.reserveControlLane = flow.reserveControl
@@ -548,7 +563,7 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 	}); err != nil {
 		return fail(fmt.Errorf("send pipelined flow open: %w", err))
 	}
-	if c.cfg.OptimisticOpen {
+	if !c.cfg.WaitForOpenAcknowledgement {
 		// The server emits HELLO_OK before OPEN_OK. Neither acknowledgement
 		// gates the application's first request bytes, so reading HELLO_OK
 		// here would spend one full WAN round trip confirming something the
@@ -702,7 +717,14 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 	}); err != nil {
 		return fail(fmt.Errorf("send flow open: %w", err))
 	}
-	if c.cfg.OptimisticOpen {
+	// A fast open can be refused on protocol grounds by a peer that advertised
+	// the capability but cannot yet honour it, and that refusal is the only
+	// signal to stop offering it. Waiting for it once per connection costs one
+	// round trip on the first flow -- the place a round trip is affordable,
+	// because every flow after it reuses what that one established -- and
+	// nothing thereafter.
+	proveFastOpen := lane.fastOpen && !c.fastOpenProven()
+	if !c.cfg.WaitForOpenAcknowledgement && !proveFastOpen {
 		_ = lane.outer.SetDeadline(time.Time{})
 		return &openedFlow{
 			fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID,
@@ -753,6 +775,9 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 	if response.Header.Type != protocol.TypeOpenOK || len(response.Payload) != 0 {
 		return fail(errors.New("invalid flow open acknowledgement"))
 	}
+	if lane.fastOpen {
+		c.markFastOpenProven()
+	}
 	_ = lane.outer.SetDeadline(time.Time{})
 	return &openedFlow{
 		fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID,
@@ -768,9 +793,24 @@ func resetCode(payload []byte) session.ResetCode {
 	return session.ResetCode(payload[0])
 }
 
+// fastOpenProven reports whether a fast open has been acknowledged on the
+// current pooled connection, so later flows need not wait for theirs.
+func (c *Client) fastOpenProven() bool {
+	c.quicMu.Lock()
+	defer c.quicMu.Unlock()
+	return c.quicPoolFastProven
+}
+
+func (c *Client) markFastOpenProven() {
+	c.quicMu.Lock()
+	c.quicPoolFastProven = true
+	c.quicMu.Unlock()
+}
+
 func (c *Client) disableQUICPoolFast() {
 	c.quicMu.Lock()
 	c.quicPoolFast = false
+	c.quicPoolFastProven = false
 	c.quicMu.Unlock()
 }
 
@@ -789,13 +829,16 @@ func (c *Client) dialJoinLane(ctx context.Context, kind TransportKind, sessionID
 func (c *Client) dialLane(ctx context.Context, kind TransportKind, sessionID [16]byte, laneID uint64, helloKind session.HelloKind) (*authenticatedLane, error) {
 	// Under optimistic open the initial control stream pipelines HELLO with
 	// OPEN, so the pooled bootstrap must not block on HELLO_OK either.
-	// Pipelining is a separate decision from opening optimistically, and the
-	// open path now consumes a pipelined acknowledgement itself, so either can
-	// be had without the other. It stays tied to OptimisticOpen here because
-	// pipelining sends the open before the server's capabilities are known,
-	// and the first flow on a cold connection would forfeit its control-lane
-	// reservation.
-	return c.dialLaneMode(ctx, kind, sessionID, laneID, helloKind, c.cfg.EnableQUICPool, c.cfg.OptimisticOpen)
+	// The hello is not pipelined with the open. Pipelining sends the open
+	// before the server's capabilities are known, so the first flow on a cold
+	// connection would forfeit its control-lane reservation -- and the first
+	// connection to a server is the one place a round trip is affordable,
+	// because every flow after it reuses what that round trip established.
+	//
+	// It is a free choice rather than a coupling: openFlow consumes a
+	// pipelined acknowledgement itself, so pipelining and opening without
+	// waiting are independent.
+	return c.dialLaneMode(ctx, kind, sessionID, laneID, helloKind, c.cfg.EnableQUICPool, false)
 }
 
 // dialLaneMode uses the shared QUIC stream pool only for a flow's initial
@@ -883,11 +926,11 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 		if c.quicPacket != nil {
 			_ = c.quicPacket.Close()
 		}
-		c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
+		c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated, c.quicPoolFastProven = false, false, false, false
 		conn, packet, err := dialQUICConnection(dialCtx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress, c.windows())
 		if err != nil {
 			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
-			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
+			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated, c.quicPoolFastProven = false, false, false, false
 			return nil, false, false, false, nil, err
 		}
 		controller := configureQUICController(conn, ccfg)
@@ -901,7 +944,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 				_ = c.quicPacket.Close()
 			}
 			c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
-			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
+			c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated, c.quicPoolFastProven = false, false, false, false
 		}
 		return nil, false, false, false, nil, err
 	}
@@ -935,7 +978,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 			_ = outer.Close()
 			if c.quicConn.Context().Err() != nil {
 				c.quicConn, c.quicPacket, c.quicController = nil, nil, nil
-				c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated = false, false, false
+				c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated, c.quicPoolFastProven = false, false, false, false
 			}
 			return nil, false, false, false, nil, authErr
 		}

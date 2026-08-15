@@ -257,7 +257,12 @@ type multipathFlow struct {
 	remoteAbort       atomic.Bool
 	localAbortSent    atomic.Bool
 	laneFailures      atomic.Uint64
-	// openAckPending is set only for the opt-in optimistic OPEN path. The
+	// onProtocolReset is called when the peer rejects this flow's open on
+	// protocol grounds. It exists because a flow that does not wait for its
+	// open acknowledgement never sees that rejection on the dial path, and the
+	// client would go on offering a fast open the server has refused.
+	onProtocolReset func()
+	// openAckPending is set only when the caller waited for nothing. The
 	// application may begin sending immediately, but the eventual OPEN_OK is
 	// still required on the authenticated stream and is consumed by the flow
 	// reader before ordinary data/control frames are accepted.
@@ -1770,6 +1775,13 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				}
 				f.openAckPending = false
 			case protocol.TypeReset:
+				// A protocol rejection of a pending open is the peer saying it
+				// will not accept the fast form. Nothing on the dial path is
+				// listening any more, so the downgrade has to happen here or
+				// every later flow repeats the same rejected open.
+				if f.openAckPending && f.onProtocolReset != nil && resetCode(frame.Payload) == session.ResetProtocol {
+					f.onProtocolReset()
+				}
 				if len(frame.Payload) > 1 {
 					return fmt.Errorf("peer reset flow: %s", string(frame.Payload[1:]))
 				}

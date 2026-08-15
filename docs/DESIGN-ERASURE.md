@@ -218,6 +218,38 @@ several receive loops on one connection competing for its datagrams, and left
 some pooled streams coded and some not, which loses every frame a coding sender
 sends to a receiver with no bulk reader.
 
+## Flow initiation costs no round trips
+
+An application opens a flow far more often than it opens a connection to the
+server, so what it feels is the per-flow cost, not the per-connection one. The
+first connection may cost what it must; every flow after it should cost
+nothing.
+
+Measured across an emulated 300 ms path, from dialing the local SOCKS port to
+having the reply in hand:
+
+| | before | after |
+|---|---|---|
+| first flow | 922 ms (3.1 round trips) | 618 ms (2.1) |
+| proving flow | — | 303 ms (1) |
+| every flow after | 306 ms (1) | **1 ms (0)** |
+
+Three things are paid once and reused. The QUIC connection is pooled. The
+session's authentication is one exchange, and it is not pipelined with the
+first open, because pipelining would send that open before the server's
+capabilities were known and the first flow would forfeit its control lane --
+the one round trip a connection is allowed. And a fast open is proved once:
+the capability can be advertised by a peer that cannot yet honour it, and the
+refusal is the only signal to stop offering it, so one flow waits for its
+acknowledgement and no later flow does.
+
+After that a flow is answered as soon as its open is queued. The
+acknowledgement still arrives and is still validated by the flow reader, which
+propagates a typed reset; what is given up is the ability to answer SOCKS with
+a precise failure, so an unreachable destination becomes a connection that
+opens and then closes. `--wait-for-open-ack` buys the distinction back for one
+round trip per flow.
+
 ## Timeouts belong to the exchange they bound
 
 Three bugs, one shape: a constant sized for whichever path it was chosen on.

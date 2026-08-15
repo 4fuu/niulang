@@ -524,7 +524,7 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		client, err := pep.NewClient(pep.ClientConfig{
 			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "wanopt.test",
 			Secret: secret, RootCAs: roots, Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
-			EnableQUICPool: opts.quicPool, OptimisticOpen: true,
+			EnableQUICPool:    opts.quicPool,
 			Congestion:        pep.CongestionControlKind(opts.congestion),
 			BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
 			InitialLanes:      opts.initialLanes, MaxLanes: opts.lanes, Logger: logger,

@@ -481,7 +481,11 @@ func TestQUICPoolFastRejectDowngradesToLegacy(t *testing.T) {
 	}
 }
 
-func TestOptimisticOpenReturnsBeforeOpenOKAndPreservesResponse(t *testing.T) {
+// A flow is answered without waiting for its open to be acknowledged, and the
+// acknowledgement still arrives and still has to be right. This is where the
+// round trip per flow went: an application asks for a connection far more
+// often than it asks for a new one to the server.
+func TestAFlowIsAnsweredBeforeItsOpenIsAcknowledged(t *testing.T) {
 	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -507,7 +511,7 @@ func TestOptimisticOpenReturnsBeforeOpenOKAndPreservesResponse(t *testing.T) {
 	client, err := NewClient(ClientConfig{
 		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
 		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		OptimisticOpen: true, MaxLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+		MaxLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -522,31 +526,25 @@ func TestOptimisticOpenReturnsBeforeOpenOKAndPreservesResponse(t *testing.T) {
 		t.Fatalf("optimistic open: %v", err)
 	}
 	if !flow.openPending {
-		t.Fatal("optimistic open did not retain pending OPEN_OK state")
+		t.Fatal("open did not retain pending OPEN_OK state")
 	}
-	// The cold pooled bootstrap pipelines HELLO with OPEN and returns without
-	// waiting for either acknowledgement, so both are still on the stream in
-	// wire order. Waiting for HELLO_OK here would cost one WAN round trip.
-	if !flow.helloPending {
-		t.Fatal("cold optimistic open waited for HELLO_OK")
+	// A cold connection does wait for HELLO_OK, and that is the one round trip
+	// this design spends. It buys the server's capabilities, without which the
+	// first flow cannot ask for a control lane and no later flow can use the
+	// fast open at all -- so it is paid once, on the connection, and every
+	// flow after it is answered without waiting for anything.
+	if flow.helloPending {
+		t.Fatal("a cold connection should learn the server's capabilities before opening")
 	}
-	if client.quicPoolAuthenticated {
-		t.Fatal("pool capabilities were published before HELLO_OK arrived")
+	if !client.quicPoolAuthenticated {
+		t.Fatal("pool capabilities were not published by a cold connection's authentication")
 	}
-	helloAck, err := flow.fc.Read()
-	if err != nil {
-		t.Fatalf("read deferred HELLO_OK: %v", err)
-	}
-	if helloAck.Header.Type != protocol.TypeHelloOK || helloAck.Header.SessionID != flow.sessionID || helloAck.Header.FlowID != 0 {
-		t.Fatalf("deferred session response = %+v, want matching HELLO_OK", helloAck.Header)
-	}
-	var helloOK session.HelloOK
-	if err := helloOK.UnmarshalBinary(helloAck.Payload); err != nil {
-		t.Fatalf("decode deferred HELLO_OK: %v", err)
-	}
-	flow.onHelloOK(helloOK)
-	if !client.quicPoolAuthenticated || !client.quicPoolFast {
-		t.Fatalf("deferred HELLO_OK did not publish capabilities: authenticated=%v fast=%v", client.quicPoolAuthenticated, client.quicPoolFast)
+	// The session was acknowledged during the connection's own authentication,
+	// so the only thing still on the stream is this flow's own acknowledgement
+	// -- which is exactly what the application did not wait for.
+	if !client.quicPoolFast {
+		t.Fatalf("cold authentication did not publish capabilities: authenticated=%v fast=%v",
+			client.quicPoolAuthenticated, client.quicPoolFast)
 	}
 	response, err := flow.fc.Read()
 	if err != nil {
