@@ -412,41 +412,163 @@ contributes what its own acknowledgements reveal, which is the erasure rate of
 the direction it sends into; that is precisely the number the erasure code
 needs and would otherwise wait a round trip to be told.
 
+## The code is a sliding window, not a block
+
+A block code has to choose (k, n) when it seals the block, which means it has
+to know the path before it has finished sending into it. Everything after that
+is fixed: if the erasure rate rises, the parity already on the wire is the
+parity the block gets, and a block that turns out to be under-protected is lost
+whole. The shared path model makes that first guess a good one, but it is still
+a guess made at the wrong moment.
+
+`internal/fec/window.go` is the answer. Source symbols go as they are produced,
+unaltered; repair symbols follow at whatever rate the path is currently
+measured to need, each a random linear combination over GF(256) of the last
+window of source symbols. The receiver holds one linear system in reduced row
+echelon form, and a row that comes down to a single unknown is a recovered
+symbol.
+
+Three things follow that a block code cannot have.
+
+**Redundancy reflects what is known now.** The decision of how much parity to
+send is taken after the data, not before it, so a rising erasure rate is
+answered by the next repair rather than by the next block.
+
+**The window is a continuous interleaver.** A repair reaches back over
+everything in the window, so a burst that would exceed one block's parity is
+spread across every repair covering it. Measured: an eight-symbol burst inside
+a thirty-two-symbol window, with one repair per four symbols, is recovered
+whole — no block of four could have held it.
+
+**The same residual costs less parity.** A window's repairs chain: a repair
+that resolves a neighbouring symbol frees an equation covering this one, and
+that equation may come from a window this symbol was never in. So the code
+behaves like a block several times the window's length. Measured at 42%
+erasure, for a residual of a thousandth:
+
+| window | repairs per symbol, window | repairs per symbol, block |
+|---|---|---|
+| 16 | 1.35 | 1.81 |
+| 32 | 1.15 | 1.44 |
+| 64 | 1.02 | 1.20 |
+| 128 | 0.93 | no rate reaches it |
+
+The last row is not a rounding difference. A block of 256 shards is all
+GF(256) has distinct generator rows for, so a block code simply gives up above
+it — while a window's coefficients are drawn per repair over at most a window's
+symbols, so a wide window is exactly where the code is cheapest. `WindowRate`
+therefore has its own sizing rather than borrowing `ShardsFor`'s, and
+`TestTheWindowRateIsWhatTheWindowNeeds` runs the real code at the rate it asks
+for and checks the residual it actually gets, in both directions: three
+quarters of that rate must miss the target, or the rate is buying a residual
+nobody asked for.
+
+Whole frames are packed into one symbol and delivered the moment it arrives; a
+frame too large for a symbol takes symbols of its own and waits only for them.
+Nothing waits for anything else, which is the property that made datagrams
+worth using instead of a stream. Measured on the emulated channel: 400 of 400
+frames arrived through 43% erasure, and the same delivery cost 1860 datagrams
+against the block code's 2196.
+
+## What the path actually is, measured end to end
+
+Everything above was built from the transport's own view of the path, which is
+made of the transport's own traffic. On 2026-08-15 the path was measured
+directly instead, with a UDP probe that sends at a chosen rate and counts what
+arrives at the far end (`--mode blast`/`sink` for up, `receive`/`reflector`
+for down, since this end is behind a NAT). The result refines the premise this
+project was built on in two ways that matter.
+
+**The erasure is directional.** Sending China → US, loss is negligible until
+the rate limit:
+
+| offered | loss | delivered |
+|---|---|---|
+| 5 Mbit/s | 1.3% | 4.93 |
+| 10 | 0.0% | 10.00 |
+| 15 | 3.8% | 14.33 |
+| 20 | 27.5% | 14.41 |
+| 30 | 51.7% | 14.38 |
+
+Sending US → China, loss is a flat fraction of whatever is offered, exactly as
+an erasure channel should be, until the same ceiling:
+
+| offered | loss | delivered |
+|---|---|---|
+| 4 Mbit/s | 39.1% | 2.44 |
+| 8 | 38.7% | 4.91 |
+| 12 | 38.8% | 7.35 |
+| 16 | 37.1% | 10.06 |
+| 20 | 38.1% | 12.36 |
+| 30 | 51.5% | 14.43 |
+
+So the download direction is the erasure channel and the upload direction is
+not. Nothing in the design has to change for this, which is worth saying
+explicitly: each side measures the erasure rate of the direction *it* sends
+into, from its own acknowledgements, and publishes that to the model its own
+code reads. An asymmetric path was never assumed and is handled by
+construction.
+
+**There is a policer as well as an erasure.** Both directions saturate at
+about 14.4 Mbit/s delivered, and the loss above that is the excess being
+dropped rather than the channel erasing. The two compose: a rate limit near 23
+Mbit/s, and behind it a 38% erasure, so the most that can be delivered is
+about 14.4 Mbit/s and the most useful goodput an ideal transport could extract
+is the same number.
+
+## Where the bulk throughput goes
+
+That measurement makes the question answerable. Traced on the live link during
+a 10 MB download (`WANOPT_LANE_TRACE=1`), in steady state:
+
+- offered 26–28 Mbit/s, which is just above the policer,
+- `maxbw` 15.4 Mbit/s, which is the delivered ceiling the probe measured,
+- goodput 12–15 Mbit/s,
+- `inflight` equal to pacing × smoothed RTT, so the sender is pacing-limited
+  rather than window-limited,
+- `issued=321` chunks against `source=10485966` bytes with `reissued=0`: the
+  striping layer sends each chunk exactly once,
+- `sent` 19.4 MB for 10.49 MB delivered, a ratio of 1.85 where the erasure
+  alone costs 1/(1-0.38) = 1.61.
+
+So in steady state the transport gets 85–90% of everything the path can
+deliver, and there is no missing fifth to find in the data path. What the
+whole-transfer average loses -- 8.5–9 Mbit/s against the steady state's 12–15
+-- is spent at the two ends of the transfer: about a second ramping, and about
+a second draining. That is where the remaining work is, and it is a different
+problem from the one this document was written about.
+
+It also settles the question of coding bulk. Measured live, with bulk forced
+onto the coded path, three 10 MB downloads ran at 7.0, 6.1 and 5.0 Mbit/s
+against 9.8, 9.0 and 7.7 on the stream. The arithmetic says why, and says it
+is not a defect of the code: given a fixed offered rate, retransmission
+delivers `offered x (1-p)` and a code delivers at best `offered / (1 +
+p/(1-p))`, which is the same number. A code can match retransmission's
+bandwidth and never beat it, so every point of parity margin is a point of
+goodput -- and the margin is what buys the latency. Bulk stays on the stream;
+small exchanges stay coded.
+
 ## What is not done
 
-**Separating the control plane from the coded data plane.** This is the
-hundred-fold fault above and the next thing to build. A lane should be a QUIC
-connection carrying both a stream and datagrams: control, handshake and
-acknowledgement frames on the stream, where they are immediate, reliable and
-uncoded; bulk data on datagrams, where the code can see the erasures. Today a
-lane is one or the other, so acknowledgements queue behind the blocks they
-release. The pieces already exist — the protocol reserves a control lane, and
-the connection already carries both — so this is a re-wiring rather than a new
-mechanism.
+**Live measurement of the coded lane.** The sliding window's advantage is
+emulator evidence so far. The block code it replaced was measured live and lost
+to the stream for bulk (10.1 Mbit/s against 5.0 at 37% loss); the window's
+lower parity narrows that arithmetic, so the split between coded and
+uncoded bulk is worth re-measuring on the real link rather than assumed.
 
-**Emitting parity continuously rather than per block.** Fixing (k,n) when a
-block is sealed means a sender must know the path before it commits data. The
-shared path model makes the first guess a good one, but the structural answer
-is a sliding-window code: keep the data symbols, and emit repair symbols on a
-continuous schedule sized by the floor as it is currently measured. Then
-redundancy always reflects what is known now, and running ahead of feedback
-costs nothing.
+**Why a small exchange costs about 3.5 round trips live where the emulator
+gives one.** The tail is fixed — p90 1.48 s against Reno's 2.64, maximum 1.74
+against 5.66 — but the median gap is unexplained and is recorded here as such
+rather than papered over.
 
-**Live measurement of the coded lane.** Only the controller has been measured
-on the real link.
+Interleaving across blocks is now moot: the window interleaves continuously by
+construction, and `Params.InterleaveDepth` has no separate meaning for it.
 
-Interleaving is modelled and sized for (`Params.InterleaveDepth` divides the
-burst factor) but the sender does not yet spread shards across blocks, so
-depth is 1 in practice. On a path whose above-knee loss clusters, implementing
-it would buy back most of the rate that clustering costs.
-
-Lanes now share a `PathModel` per endpoint pair: the erasure floor is pooled
-across their samples, each lane is capped at its share of the bottleneck so
-their probes cannot compound, and a joining lane starts from what the model
-already knows rather than re-ramping. Live, four lanes improved from about 8.0
-to 8.45 Mbit/s — still below the single lane's 10.0, which is the finding
-rather than a defect, since the bottleneck is per endpoint pair. What changed
-is that using lanes is no longer actively harmful.
-
-The coded channel has not been measured on the live link -- only the
-controller has. Its latency advantage is emulator evidence so far.
+Lanes share a `PathModel` per endpoint pair: the erasure floor is pooled across
+their samples, each lane is capped at its share of the bottleneck so their
+probes cannot compound, and a joining lane starts from what the model already
+knows rather than re-ramping. Live, four lanes improved from about 8.0 to 8.45
+Mbit/s — still below the single lane's 10.0, which is the finding rather than a
+defect, since the bottleneck is per endpoint pair. What changed is that using
+lanes is no longer actively harmful, and the server now starts bulk flows on
+one lane because of it.
