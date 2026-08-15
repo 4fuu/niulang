@@ -153,26 +153,20 @@ func TestACodedLaneCarriesAFlowAcrossAnErasureChannel(t *testing.T) {
 		LossRate:            0.42,
 		Seed:                17,
 	}
-	// The pooled path needs a second round trip for its flow open, because a
-	// cold connection must learn the server's capabilities before it can ask
-	// for a control lane. Across this channel that second exchange fails about
-	// three times in four.
+	// This used to fail three times in four, and what fixed it was removing a
+	// round trip rather than finding a lost frame. Every flow waited for its
+	// open to be acknowledged, and on a channel that erases 42% of packets an
+	// exchange that need not happen is an exchange that can fail. With flows
+	// answered as soon as their open is queued it passes nine times in ten.
 	//
-	// What it is not: not the split and not the code (0 of 4 with no coded
-	// substrate, 1 of 4 with one), not the congestion controller (fails on the
-	// stock one too), not QUIC losing a lone small write (an isolated 61-byte
+	// Things ruled out along the way, recorded so they are not re-checked: not
+	// the split and not the code (it failed 0 of 4 with no coded substrate and
+	// 1 of 4 with one), not the congestion controller (it failed on the stock
+	// one too), and not QUIC losing a lone small write -- an isolated 61-byte
 	// write on an idle stream across this same channel arrived in 555 ms, five
-	// times out of five), and not a sick connection -- at the moment of
-	// failure the client had sent 14 KB, received 8 KB, lost one packet, and
-	// had a 307 ms smoothed round trip.
-	//
-	// Pipelining the hello with the open removes the second exchange and the
-	// failure with it, 4 of 4. It is not enabled here because it sends the
-	// open before the server's capabilities are known, so the first flow on a
-	// cold connection forfeits its control-lane reservation. Remembering a
-	// peer's capabilities across connections would give both, and is the
-	// direction rather than the flag.
-	t.Skip("pooled flow open needs a second round trip that this channel loses; see comment")
+	// times of five, and at the moment of failure the connection had sent
+	// 14 KB, received 8 KB, lost one packet and had a 307 ms smoothed round
+	// trip.
 	socks, destination := codedPair(t, true, &path)
 	conn := socksDial(t, socks, destination, 120*time.Second)
 	defer conn.Close()
