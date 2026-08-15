@@ -28,11 +28,25 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/icourses-dev/wanopt/internal/fec"
 	"github.com/icourses-dev/wanopt/internal/lossmodel"
 )
+
+// SizedCarrier is a Carrier that knows how large a datagram it will accept. A
+// carrier that does not implement it is taken at the Config's word.
+type SizedCarrier interface {
+	Carrier
+	MaxDatagramBytes() int
+}
+
+// ErrDatagramTooLarge is a carrier refusing a datagram for its size. It is not
+// fatal: the limit moves with the path, and a datagram refused for being over
+// it is loss like any other, which this layer repairs. A carrier reports it so
+// the count is visible rather than silent.
+var ErrDatagramTooLarge = errors.New("coded: datagram too large for the carrier")
 
 // Carrier is the unreliable datagram service underneath. A QUIC connection
 // with datagrams enabled is one; so is a UDP socket.
@@ -193,6 +207,18 @@ type Channel struct {
 	peerFloor float64
 	peerBurst float64
 
+	// outbox is the one place datagrams leave from. A carrier's Send may
+	// block -- quic-go's datagram queue blocks once it holds its maximum --
+	// and the receive path must never be the thing that blocks on it: repairs
+	// are sent in response to a report, so a blocking Send inside the receive
+	// loop stops the loop that would have read the acknowledgements that
+	// unblock it. Over an in-memory carrier that never blocks this is
+	// invisible; over QUIC it is a deadlock, and it stalled a 1 MiB transfer
+	// indefinitely.
+	outbox   chan []byte
+	dropped  atomic.Uint64
+	oversize atomic.Uint64
+
 	wg   sync.WaitGroup
 	stop chan struct{}
 }
@@ -207,12 +233,61 @@ func NewChannel(carrier Carrier, cfg Config) *Channel {
 		blocks:    make(map[uint64]*recvBlock),
 		estimator: lossmodel.New(lossmodel.Config{}),
 		stop:      make(chan struct{}),
+		// Deep enough to hold a whole block plus the repairs a report can ask
+		// for, so neither has to be dropped merely for arriving together.
+		outbox: make(chan []byte, 2*MaxBlockShards),
 	}
 	c.cond = sync.NewCond(&c.mu)
-	c.wg.Add(2)
+	c.wg.Add(3)
 	go c.receiveLoop()
 	go c.reportLoop()
+	go c.sendLoop()
 	return c
+}
+
+// MaxBlockShards is the largest number of datagrams one block can become.
+const MaxBlockShards = 256
+
+// send hands a datagram to the writer. Application data waits for room,
+// because that is the backpressure the producer should feel. Control and
+// repair traffic never waits: a dropped repair is loss, which this protocol
+// already repairs, while a blocked control path is a stall it does not.
+func (c *Channel) send(d []byte, wait bool) {
+	if wait {
+		select {
+		case c.outbox <- d:
+		case <-c.stop:
+		}
+		return
+	}
+	select {
+	case c.outbox <- d:
+	default:
+		c.dropped.Add(1)
+	}
+}
+
+func (c *Channel) sendLoop() {
+	defer c.wg.Done()
+	for {
+		select {
+		case <-c.stop:
+			return
+		case d := <-c.outbox:
+			err := c.carrier.Send(d)
+			if errors.Is(err, ErrDatagramTooLarge) {
+				// The path's estimate moved under us. Losing this shard is
+				// cheaper than losing the connection, and the next block is
+				// sized from the carrier's revised limit.
+				c.oversize.Add(1)
+				continue
+			}
+			if err != nil {
+				c.failWith(err)
+				return
+			}
+		}
+	}
 }
 
 // Write appends to the stream. It blocks while the sender is holding as many
@@ -267,16 +342,12 @@ func (c *Channel) Flush() error {
 	}
 	data := c.partial
 	c.partial = nil
-	block, datagrams := c.sealLocked(data)
+	_, datagrams := c.sealLocked(data)
 	c.mu.Unlock()
 
 	for _, d := range datagrams {
-		if err := c.carrier.Send(d); err != nil {
-			c.failWith(err)
-			return err
-		}
+		c.send(d, true)
 	}
-	_ = block
 	return nil
 }
 
@@ -290,17 +361,24 @@ func (c *Channel) sealLocked(data []byte) (uint64, [][]byte) {
 	// flushed short write is far fewer than the plan's. Sizing a short block
 	// by the plan's rate would send a long block's worth of datagrams for a
 	// few bytes and still under-protect them.
-	k := (len(data) + c.cfg.ShardBytes - 1) / c.cfg.ShardBytes
+	//
+	// It is the shard size that fixes k, never the plan's. Clamping k to the
+	// plan instead makes the shards grow when the plan shrinks between the
+	// write that filled the buffer and the flush that seals it, and a shard
+	// one byte over the carrier's datagram limit is not a slow path but a
+	// dead one.
+	shardBytes := c.shardBytes()
+	k := (len(data) + shardBytes - 1) / shardBytes
 	if k < 1 {
 		k = 1
 	}
-	if plan.Code && plan.K > 0 && k > plan.K {
-		k = plan.K
+	if perShard := (len(data) + k - 1) / k; perShard < shardBytes {
+		shardBytes = perShard
 	}
-	shardBytes := (len(data) + k - 1) / k
 	if shardBytes < 1 {
 		shardBytes = 1
 	}
+	_ = plan
 
 	n := k
 	if want, ok := fec.ShardsFor(k, c.outboundLocked(), c.paramsLocked()); ok {
@@ -364,7 +442,26 @@ func (c *Channel) blockDataBytes() int {
 	if !plan.Code || k <= 0 {
 		k = 8
 	}
-	return k * c.cfg.ShardBytes
+	return k * c.shardBytes()
+}
+
+// shardBytes is the configured shard size, reduced to whatever the carrier
+// will actually accept.
+//
+// The limit is not a constant. QUIC's estimate of what fits in a packet moves
+// with the path, and a datagram over it is refused rather than fragmented, so
+// the size has to be asked for rather than assumed.
+func (c *Channel) shardBytes() int {
+	size := c.cfg.ShardBytes
+	if sized, ok := c.carrier.(SizedCarrier); ok {
+		if limit := sized.MaxDatagramBytes() - shardHeader; limit > 0 && limit < size {
+			size = limit
+		}
+	}
+	if size < 1 {
+		size = 1
+	}
+	return size
 }
 
 // planLocked re-sizes the code from what the estimator currently believes. It
@@ -707,10 +804,7 @@ func (c *Channel) onReport(d []byte) {
 	c.mu.Unlock()
 
 	for _, d := range datagrams {
-		if err := c.carrier.Send(d); err != nil {
-			c.failWith(err)
-			return
-		}
+		c.send(d, false)
 	}
 }
 
@@ -737,10 +831,7 @@ func (c *Channel) reportLoop() {
 		datagrams = append(datagrams, c.timedRepairsLocked()...)
 		c.mu.Unlock()
 		for _, d := range datagrams {
-			if err := c.carrier.Send(d); err != nil {
-				c.failWith(err)
-				return
-			}
+			c.send(d, false)
 		}
 	}
 }
@@ -774,6 +865,30 @@ func (c *Channel) timedRepairsLocked() [][]byte {
 	}
 	return datagrams
 }
+
+// Err reports why the channel stopped, or nil while it is running. A sender
+// that has already handed off its last block learns of a carrier failure no
+// other way: Write has returned, and the failure surfaces only to whoever
+// reads next.
+func (c *Channel) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		return nil
+	}
+	if c.err != nil {
+		return c.err
+	}
+	return ErrClosed
+}
+
+// Dropped counts datagrams the writer had no room for. They are control and
+// repair traffic, so they read as loss rather than as failure, but a large
+// count means the carrier is slower than this channel is trying to drive it.
+func (c *Channel) Dropped() uint64 { return c.dropped.Load() }
+
+// Oversize counts datagrams the carrier refused for their size.
+func (c *Channel) Oversize() uint64 { return c.oversize.Load() }
 
 // Snapshot reports what the channel currently believes about the path, which
 // is what a caller needs to decide anything above it.

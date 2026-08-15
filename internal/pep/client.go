@@ -225,7 +225,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Congestion == "" {
 		cfg.Congestion = CongestionReno
 	}
-	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
+	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
 		return nil, fmt.Errorf("unsupported QUIC congestion controller %q", cfg.Congestion)
 	}
 	if cfg.Congestion == CongestionBrutal && cfg.BrutalBytesPerSec == 0 {

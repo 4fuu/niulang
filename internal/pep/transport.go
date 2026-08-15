@@ -49,6 +49,11 @@ const (
 	CongestionBBRTUIC  CongestionControlKind = "bbr-tuic"
 	CongestionAdaptive CongestionControlKind = "adaptive"
 	CongestionBrutal   CongestionControlKind = "brutal"
+	// CongestionErasure is BBR corrected for a path that erases packets for
+	// reasons unrelated to congestion. It is the right choice on a long-haul
+	// path with a loss floor; on a clean path it reduces to BBR, because the
+	// floor it measures is zero and the correction it applies is one.
+	CongestionErasure CongestionControlKind = "erasure"
 )
 
 type congestionConfig struct {
@@ -464,6 +469,10 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestio
 		return controller
 	case CongestionAdaptive:
 		controller := wancongestion.NewAdaptiveSender(conn.InitialPacketSize(), cfg.adaptiveMinBytesPerSec, cfg.adaptiveMaxBytesPerSec)
+		conn.SetCongestionControl(controller)
+		return controller
+	case CongestionErasure:
+		controller := wancongestion.NewErasureSender(conn.InitialPacketSize())
 		conn.SetCongestionControl(controller)
 		return controller
 	case CongestionBrutal:
