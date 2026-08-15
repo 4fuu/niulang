@@ -3,7 +3,10 @@
 // decryption or a TLS MITM.
 package classifier
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // Class is the scheduling class assigned to a flow.
 type Class uint8
@@ -74,8 +77,14 @@ type Observation struct {
 // Classifier is stateful. Once a flow becomes bulk it remains bulk until it
 // closes; this hysteresis prevents queue policy from flapping during a short
 // idle gap in a large transfer.
+// A Classifier is read and written from different goroutines: a flow observes
+// its own traffic on whichever goroutine carried the bytes, and asks for the
+// class wherever a scheduling decision is made. The class is one word, and one
+// word is exactly the size of value a race detector finds and a reader gets
+// half of.
 type Classifier struct {
 	cfg   Config
+	mu    sync.Mutex
 	class Class
 }
 
@@ -87,11 +96,17 @@ func New(cfg Config) *Classifier {
 	return &Classifier{cfg: cfg, class: ClassNew}
 }
 
-func (c *Classifier) Class() Class { return c.class }
+func (c *Classifier) Class() Class {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.class
+}
 
 // Observe advances the flow class. The caller should call this at a bounded
 // cadence (for example, once per scheduler tick), not once per packet.
 func (c *Classifier) Observe(o Observation) Class {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.class == ClassBulk {
 		return c.class
 	}
