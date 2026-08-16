@@ -7,8 +7,8 @@ import (
 	quiccongestion "github.com/apernet/quic-go/congestion"
 	"github.com/apernet/quic-go/monotime"
 
-	"github.com/icourses-dev/queqiao/internal/lossmodel"
-	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/bojieli/queqiao/internal/lossmodel"
+	"github.com/bojieli/queqiao/internal/pathmodel"
 )
 
 // ErasureSender is BBR on a path that erases packets for reasons that have

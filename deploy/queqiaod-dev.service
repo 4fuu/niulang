@@ -1,6 +1,6 @@
 [Unit]
 Description=queqiao experimental adaptive PEP (development instance)
-Documentation=https://github.com/icourses-dev/queqiao
+Documentation=https://github.com/bojieli/queqiao
 After=network-online.target
 Wants=network-online.target
 

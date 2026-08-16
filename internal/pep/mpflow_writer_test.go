@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/metrics"
-	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/metrics"
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 // ackCaptureConn is a deterministic stream writer used to exercise the

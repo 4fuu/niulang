@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 const defaultChunkSize = 32 * 1024

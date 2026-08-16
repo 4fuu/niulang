@@ -34,7 +34,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/baseline"
+	"github.com/bojieli/queqiao/internal/baseline"
 )
 
 func main() {

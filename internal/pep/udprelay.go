@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/session"
+	"github.com/bojieli/queqiao/internal/session"
 )
 
 // A UDP association's relay is a socket on the server, and its source address

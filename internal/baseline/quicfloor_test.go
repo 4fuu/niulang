@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	"github.com/icourses-dev/queqiao/internal/pathsim"
+	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
 // TestRawQUICSaturatesThePath is the floor under every transport number this

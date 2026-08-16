@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	"github.com/icourses-dev/queqiao/internal/classifier"
-	"github.com/icourses-dev/queqiao/internal/limiter"
-	"github.com/icourses-dev/queqiao/internal/metrics"
-	"github.com/icourses-dev/queqiao/internal/protocol"
-	"github.com/icourses-dev/queqiao/internal/session"
+	"github.com/bojieli/queqiao/internal/classifier"
+	"github.com/bojieli/queqiao/internal/limiter"
+	"github.com/bojieli/queqiao/internal/metrics"
+	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/session"
 )
 
 // Must exceed the client's bounded lane-replacement wait so a final-ACK loss

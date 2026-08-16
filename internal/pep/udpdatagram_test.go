@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/coded"
-	"github.com/icourses-dev/queqiao/internal/metrics"
-	"github.com/icourses-dev/queqiao/internal/pathmodel"
-	"github.com/icourses-dev/queqiao/internal/pathsim"
-	"github.com/icourses-dev/queqiao/internal/protocol"
-	"github.com/icourses-dev/queqiao/internal/socks5"
+	"github.com/bojieli/queqiao/internal/coded"
+	"github.com/bojieli/queqiao/internal/metrics"
+	"github.com/bojieli/queqiao/internal/pathmodel"
+	"github.com/bojieli/queqiao/internal/pathsim"
+	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 // A UDP packet's sequence number can no longer be required to be the next

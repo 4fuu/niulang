@@ -31,8 +31,8 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	wancongestion "github.com/icourses-dev/queqiao/internal/congestion"
-	"github.com/icourses-dev/queqiao/internal/socks5"
+	wancongestion "github.com/bojieli/queqiao/internal/congestion"
+	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 const (

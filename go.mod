@@ -1,4 +1,4 @@
-module github.com/icourses-dev/queqiao
+module github.com/bojieli/queqiao
 
 go 1.25.0
 

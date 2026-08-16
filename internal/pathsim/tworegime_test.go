@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/lossmodel"
+	"github.com/bojieli/queqiao/internal/lossmodel"
 )
 
 // offer paces packets at a fixed rate through the relay, open loop, and reports

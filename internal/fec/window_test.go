@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/lossmodel"
+	"github.com/bojieli/queqiao/internal/lossmodel"
 )
 
 // symbol builds a distinguishable source symbol of the given length.

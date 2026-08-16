@@ -13,14 +13,14 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	"github.com/icourses-dev/queqiao/internal/classifier"
-	wancongestion "github.com/icourses-dev/queqiao/internal/congestion"
-	"github.com/icourses-dev/queqiao/internal/limiter"
-	"github.com/icourses-dev/queqiao/internal/metrics"
-	"github.com/icourses-dev/queqiao/internal/pathmodel"
-	"github.com/icourses-dev/queqiao/internal/protocol"
-	"github.com/icourses-dev/queqiao/internal/session"
-	"github.com/icourses-dev/queqiao/internal/socks5"
+	"github.com/bojieli/queqiao/internal/classifier"
+	wancongestion "github.com/bojieli/queqiao/internal/congestion"
+	"github.com/bojieli/queqiao/internal/limiter"
+	"github.com/bojieli/queqiao/internal/metrics"
+	"github.com/bojieli/queqiao/internal/pathmodel"
+	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/session"
+	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 // A peer that accepts a replacement stream and immediately closes it must not

@@ -43,9 +43,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/fec"
-	"github.com/icourses-dev/queqiao/internal/lossmodel"
-	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/bojieli/queqiao/internal/fec"
+	"github.com/bojieli/queqiao/internal/lossmodel"
+	"github.com/bojieli/queqiao/internal/pathmodel"
 )
 
 // Carrier is the unreliable datagram service underneath. A QUIC connection

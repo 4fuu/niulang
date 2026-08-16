@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/lossmodel"
+	"github.com/bojieli/queqiao/internal/lossmodel"
 )
 
 func livePath() Params {

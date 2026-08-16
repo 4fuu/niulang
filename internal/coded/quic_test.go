@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	wancongestion "github.com/icourses-dev/queqiao/internal/congestion"
-	"github.com/icourses-dev/queqiao/internal/pathsim"
+	wancongestion "github.com/bojieli/queqiao/internal/congestion"
+	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
 func testTLS(t *testing.T) (*tls.Config, *tls.Config) {

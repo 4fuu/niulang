@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/pep"
+	"github.com/bojieli/queqiao/internal/pep"
 )
 
 var (

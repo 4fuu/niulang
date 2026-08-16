@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/protocol"
-	"github.com/icourses-dev/queqiao/internal/session"
+	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/session"
 )
 
 // A fast OPEN is a connection-scoped optimization, never a standalone

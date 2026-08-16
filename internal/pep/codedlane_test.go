@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/metrics"
-	"github.com/icourses-dev/queqiao/internal/pathmodel"
-	"github.com/icourses-dev/queqiao/internal/pathsim"
-	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/metrics"
+	"github.com/bojieli/queqiao/internal/pathmodel"
+	"github.com/bojieli/queqiao/internal/pathsim"
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 // codedPair brings up a server and a client, optionally with a lossy emulated

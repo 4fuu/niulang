@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 // isolationLane builds a lane with a usable frame connection, which addLane

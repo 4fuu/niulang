@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/session"
-	"github.com/icourses-dev/queqiao/internal/socks5"
+	"github.com/bojieli/queqiao/internal/session"
+	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 // The store's own rules, stated where they can be checked cheaply: a token is

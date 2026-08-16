@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/socks5"
+	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 // TestUDPAssociationRescuesToTCP keeps the SOCKS UDP endpoint fixed while the

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/icourses-dev/queqiao/internal/pathsim"
+	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
 // Report is the machine-readable result of one benchmark invocation. Its

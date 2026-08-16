@@ -6,8 +6,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/protocol"
-	"github.com/icourses-dev/queqiao/internal/stripe"
+	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/stripe"
 )
 
 const (

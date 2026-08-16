@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/metrics"
-	"github.com/icourses-dev/queqiao/internal/protocol"
-	"github.com/icourses-dev/queqiao/internal/socks5"
+	"github.com/bojieli/queqiao/internal/metrics"
+	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 func testCertificate(t *testing.T) (tlsCertificate tls.Certificate, roots *x509.CertPool) {

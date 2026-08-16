@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/bojieli/queqiao/internal/pathmodel"
 )
 
 // lossyPipe is a pair of carriers connected through an erasure channel, so a

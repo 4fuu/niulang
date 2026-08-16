@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	"github.com/icourses-dev/queqiao/internal/coded"
-	wancongestion "github.com/icourses-dev/queqiao/internal/congestion"
-	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/bojieli/queqiao/internal/coded"
+	wancongestion "github.com/bojieli/queqiao/internal/congestion"
+	"github.com/bojieli/queqiao/internal/pathmodel"
 )
 
 type TransportKind string

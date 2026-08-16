@@ -35,10 +35,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/icourses-dev/queqiao/internal/baseline"
-	"github.com/icourses-dev/queqiao/internal/extproxy"
-	"github.com/icourses-dev/queqiao/internal/pathsim"
-	"github.com/icourses-dev/queqiao/internal/pep"
+	"github.com/bojieli/queqiao/internal/baseline"
+	"github.com/bojieli/queqiao/internal/extproxy"
+	"github.com/bojieli/queqiao/internal/pathsim"
+	"github.com/bojieli/queqiao/internal/pep"
 )
 
 type options struct {
