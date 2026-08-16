@@ -50,11 +50,20 @@ type frameConn struct {
 	// wantsCoding reports whether this lane's flow would rather spend bytes
 	// than round trips. Nil means it would.
 	wantsCoding func() bool
+	// packetsForcedToStream keeps SOCKS UDP on the control stream even where
+	// datagrams are available. It exists to measure the difference rather
+	// than to be a tuning knob, and defaults false.
+	packetsForcedToStream bool
 	// codedData and streamData count where this lane's payload actually went,
 	// which is the only way to tell "the class never changed" from "the class
 	// changed and coding continued".
 	codedData  atomic.Uint64
 	streamData atomic.Uint64
+	// codedPackets and streamPackets are the same question for SOCKS UDP,
+	// and the only way to confirm from outside that an association took the
+	// datagram substrate rather than falling back to the stream.
+	codedPackets  atomic.Uint64
+	streamPackets atomic.Uint64
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -64,6 +73,15 @@ type frameConn struct {
 // be called before the lane's goroutines start, because from then on the
 // answer is read on every write.
 func (c *frameConn) setCodingPolicy(wants func() bool) { c.wantsCoding = wants }
+
+// setPacketsOnStream keeps SOCKS UDP on the control stream even where the
+// connection has datagrams. Same ordering rule as above.
+//
+// It exists so the two substrates can be measured against each other on one
+// build, which is what the release gate asks for, and not as something to
+// tune: a UDP packet on a reliable ordered stream is the wrong shape for
+// every application that chose UDP, whatever it measures.
+func (c *frameConn) setPacketsOnStream(onStream bool) { c.packetsForcedToStream = onStream }
 
 // frameReadBuffer is sized above one default chunk so a data frame's header
 // and payload are normally satisfied from one underlying stream read.
@@ -119,7 +137,35 @@ func newSplitFrameConn(control io.ReadWriteCloser, bulk *coded.Path, maxPayload 
 // currency is a round trip and not a byte. So bulk stays on the stream and
 // everything else is coded.
 func (c *frameConn) bulkFrame(f protocol.Frame) bool {
-	return f.Header.Type == protocol.TypeData && c.codesData()
+	switch f.Header.Type {
+	case protocol.TypeData:
+		return c.codesData()
+	case protocol.TypePacket:
+		return c.packetsOnDatagrams()
+	default:
+		return false
+	}
+}
+
+// packetsOnDatagrams reports whether this lane's SOCKS UDP packets go over the
+// connection's datagrams.
+//
+// It does not ask whether the path is coding, which is the one place this
+// differs from data. A data frame is on the coded path for its parity, and
+// where parity costs more than a retransmission it belongs on the stream. A
+// UDP packet is there for the substrate itself: it must not be retransmitted,
+// because an application that chose UDP has already decided a late packet is
+// worse than a lost one, and it must not hold up the packet behind it, which
+// on a stream it does at every gap. Both of those are true on a clean path as
+// well as a lossy one, so the question is only whether the substrate exists.
+//
+// It exists exactly when QUIC negotiated DATAGRAM in both directions, which
+// is also what makes this symmetric without a capability of its own: both
+// endpoints build their coded path from the same connection state, so a
+// sender never routes a packet to a substrate its peer is not reading.
+// A TLS/TCP lane has no such path and keeps the stream framing unchanged.
+func (c *frameConn) packetsOnDatagrams() bool {
+	return c.bulk != nil && !c.packetsForcedToStream
 }
 
 // codesData reports whether this lane's data frames are going over the coded
@@ -184,6 +230,11 @@ func (c *frameConn) DataSubstrates() (coded, stream uint64) {
 	return c.codedData.Load(), c.streamData.Load()
 }
 
+// PacketSubstrates reports the same for SOCKS UDP packets.
+func (c *frameConn) PacketSubstrates() (datagram, stream uint64) {
+	return c.codedPackets.Load(), c.streamPackets.Load()
+}
+
 // CodedPath reports what the connection's coded substrate has done, or false
 // when this lane has none.
 //
@@ -199,14 +250,20 @@ func (c *frameConn) CodedPath() (coded.Stats, bool) {
 }
 
 func (c *frameConn) countData(f protocol.Frame, coded bool) {
-	if f.Header.Type != protocol.TypeData {
-		return
+	switch f.Header.Type {
+	case protocol.TypeData:
+		if coded {
+			c.codedData.Add(1)
+		} else {
+			c.streamData.Add(1)
+		}
+	case protocol.TypePacket:
+		if coded {
+			c.codedPackets.Add(1)
+		} else {
+			c.streamPackets.Add(1)
+		}
 	}
-	if coded {
-		c.codedData.Add(1)
-		return
-	}
-	c.streamData.Add(1)
 }
 
 func (c *frameConn) Write(f protocol.Frame) error {

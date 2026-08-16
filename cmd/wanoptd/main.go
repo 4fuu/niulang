@@ -47,6 +47,7 @@ type options struct {
 	transport                     string
 	quicPool                      bool
 	waitForOpenAck                bool
+	udpOnStream                   bool
 	congestion                    string
 	brutalBytesPerSec             uint64
 	adaptiveMinBytesSec           uint64
@@ -108,6 +109,7 @@ func run(args []string) error {
 			MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
 			EnableQUICPool:             opts.quicPool,
 			WaitForOpenAcknowledgement: opts.waitForOpenAck,
+			UDPOnStream:                opts.udpOnStream,
 			Congestion:                 pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
@@ -140,8 +142,9 @@ func run(args []string) error {
 			Congestion:        pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
-			MaxLanes: opts.maxLanes,
-			Logger:   logger,
+			MaxLanes:    opts.maxLanes,
+			Logger:      logger,
+			UDPOnStream: opts.udpOnStream,
 		})
 		if err != nil {
 			return err
@@ -179,6 +182,7 @@ func parseOptions(args []string) (options, error) {
 	fs.DurationVar(&opts.flowMaxLifetime, "flow-max-lifetime", 24*time.Hour, "maximum lifetime of one logical flow")
 	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
 	fs.BoolVar(&opts.quicPool, "quic-pool", true, "share one persistent QUIC connection for initial/control streams, and move classified bulk flows off it")
+	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry SOCKS UDP on the lane's control stream instead of the connection's datagrams; the measurement control for the datagram substrate, and it must be set the same way at both endpoints")
 	fs.BoolVar(&opts.waitForOpenAck, "wait-for-open-ack", false, "wait for OPEN_OK before answering SOCKS, costing one round trip per flow, in exchange for a precise failure when a destination is unreachable")
 	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionErasure), "QUIC congestion controller: erasure (default), reno, bbr, bbr-tuic, adaptive, or brutal")
 	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "fixed per-lane Brutal target in bytes/s (required with --congestion brutal)")

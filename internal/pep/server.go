@@ -52,6 +52,11 @@ type ServerConfig struct {
 	Metrics                 *metrics.Registry
 	MaxLanes                int
 	Logger                  *slog.Logger
+	// UDPOnStream keeps SOCKS UDP packets on the lane's control stream even
+	// where the QUIC connection negotiated datagrams. See the client's field:
+	// it is a measurement control, and both endpoints must agree for the
+	// comparison to mean anything.
+	UDPOnStream bool
 	// testLaneWriteHook is intentionally unexported and nil in production. It
 	// lets package integration tests reproduce loss of a specific logical
 	// frame without depending on encrypted QUIC packet layout.
@@ -417,6 +422,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	openFinished := time.Time{}
 	_ = conn.SetDeadline(time.Now().Add(handshakeBound(conn, s.cfg.HandshakeTimeout)))
 	fc := newFrameConn(conn, s.cfg.MaxPayload)
+	fc.setPacketsOnStream(s.cfg.UDPOnStream)
 	var (
 		hello      session.Hello
 		sessionID  [16]byte

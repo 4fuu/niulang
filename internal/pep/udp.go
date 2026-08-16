@@ -2,10 +2,23 @@ package pep
 
 // This file implements the SOCKS5 UDP-associate data plane. UDP packets are
 // carried as individual authenticated wanopt TypePacket frames, so packet
-// boundaries survive the reliable fallback transport. QUIC stream mode is
-// intentionally used for now: it works over the same auto-race/TCP rescue
-// path as CONNECT. Native QUIC DATAGRAM transport can be added behind this
-// interface later without changing the SOCKS contract.
+// boundaries survive whichever substrate carries them.
+//
+// Where the lane's QUIC connection negotiated DATAGRAM in both directions,
+// those frames go over the connection's datagrams; otherwise -- a TLS/TCP
+// lane, a peer without datagram support, or a datagram the transport refuses
+// -- they go over the control stream exactly as before. Nothing is
+// configured: QUIC's own capability exchange is what both endpoints read, so
+// a sender never routes a packet to a substrate its peer is not draining.
+//
+// The substrate is chosen for its semantics rather than its speed. An
+// application that chose UDP has already decided a late packet is worse than
+// a lost one, and a stream gives it the opposite: every loss is retransmitted
+// and holds up every packet behind it until it arrives. That is the wrong
+// trade for DNS, for QUIC inside this tunnel, and for anything interactive.
+// What it costs is that gaps are now normal, which is why the sequence number
+// is read through a replay window below rather than being required to be the
+// next one.
 
 import (
 	"bytes"
@@ -38,6 +51,57 @@ var errUDPControlClosed = errors.New("SOCKS UDP control connection closed")
 type udpCounters struct {
 	up   atomic.Uint64
 	down atomic.Uint64
+}
+
+// packetWindowWidth is how far out of order a UDP packet may arrive and still
+// be placed. It bounds the memory this costs to one word per direction.
+const packetWindowWidth = 64
+
+// packetWindow decides whether a UDP packet has already been delivered,
+// without requiring it to arrive in order.
+//
+// On the control stream the sequence numbers arrived in order and could not
+// gap, so an association simply demanded the next one and failed on anything
+// else. Over datagrams neither holds: a lost packet is not retransmitted, and
+// a later one can overtake an earlier one. A gap is then the ordinary case --
+// it is the loss the application asked for by choosing UDP -- and failing the
+// association on it would turn every dropped packet into a reconnect.
+//
+// So the sequence is used for what it can still decide. This is an
+// anti-replay window: the highest sequence seen and a bitmap of those just
+// below it. Above the window advances it, inside it is accepted once, below
+// it is too old to place and is dropped. A peer cannot make it hold anything.
+type packetWindow struct {
+	highest uint64
+	seen    uint64
+	started bool
+}
+
+func (w *packetWindow) admit(seq uint64) bool {
+	if !w.started {
+		w.started, w.highest, w.seen = true, seq, 1
+		return true
+	}
+	switch {
+	case seq > w.highest:
+		if shift := seq - w.highest; shift >= packetWindowWidth {
+			w.seen = 0
+		} else {
+			w.seen <<= shift
+		}
+		w.highest = seq
+		w.seen |= 1
+		return true
+	case w.highest-seq >= packetWindowWidth:
+		return false
+	default:
+		bit := uint64(1) << (w.highest - seq)
+		if w.seen&bit != 0 {
+			return false
+		}
+		w.seen |= bit
+		return true
+	}
 }
 
 func (c *Client) handleUDPAssociate(ctx context.Context, control net.Conn) {
@@ -420,18 +484,79 @@ func (c *Client) runClientUDPUplink(ctx context.Context, udpConn *net.UDPConn, f
 	}
 }
 
-func runClientUDPDownlink(ctx context.Context, udpConn *net.UDPConn, fc *frameConn, sessionID [16]byte, flowID uint64, peerMu *sync.RWMutex, peer **net.UDPAddr, activity chan<- struct{}, counters *udpCounters) error {
-	var expectedSequence uint64
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
+// udpFrames merges the two substrates an association's frames can arrive on
+// into one channel.
+//
+// They cannot be read from one call. The control stream is read synchronously
+// under the caller's deadline, and the datagrams are delivered by the
+// connection's demultiplexer to whichever flow they name -- so one reader per
+// substrate, both feeding the loop that does not care which it came from.
+//
+// The stream reader outlives a cancelled context by up to one blocked read.
+// That is the same bound the association's other workers have and is closed by
+// the lane's Close on every exit path, which is what actually unblocks it.
+func udpFrames(ctx context.Context, fc *frameConn, flowID uint64) (<-chan protocol.Frame, <-chan error) {
+	frames := make(chan protocol.Frame, 64)
+	errs := make(chan error, 1)
+	go func() {
+		for {
+			frame, err := fc.Read()
+			if err != nil {
+				select {
+				case errs <- err:
+				default:
+				}
+				return
+			}
+			select {
+			case frames <- frame:
+			case <-ctx.Done():
+				return
+			}
 		}
-		frame, err := fc.Read()
-		if err != nil {
+	}()
+	if bulk := fc.bulkFrames(flowID); bulk != nil {
+		go func() {
+			for {
+				select {
+				case frame, ok := <-bulk:
+					if !ok {
+						// The datagram substrate ending is not the
+						// association ending: the control stream still
+						// carries the close handshake, and a packet that
+						// was on a dead datagram path was lost, which is
+						// what a UDP packet is allowed to be.
+						return
+					}
+					select {
+					case frames <- frame:
+					case <-ctx.Done():
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	return frames, errs
+}
+
+func runClientUDPDownlink(ctx context.Context, udpConn *net.UDPConn, fc *frameConn, sessionID [16]byte, flowID uint64, peerMu *sync.RWMutex, peer **net.UDPAddr, activity chan<- struct{}, counters *udpCounters) error {
+	frames, errs := udpFrames(ctx, fc, flowID)
+	defer fc.releaseBulk(flowID)
+	var window packetWindow
+	for {
+		var frame protocol.Frame
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-errs:
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return err
+		case frame = <-frames:
 		}
 		if frame.Header.SessionID != sessionID || frame.Header.FlowID != flowID {
 			return errors.New("invalid UDP association frame")
@@ -442,10 +567,13 @@ func runClientUDPDownlink(ctx context.Context, udpConn *net.UDPConn, fc *frameCo
 		if frame.Header.Type != protocol.TypePacket || frame.Header.Flags != 0 {
 			return errors.New("invalid UDP association frame")
 		}
-		if frame.Header.Sequence != expectedSequence {
-			return fmt.Errorf("unexpected UDP packet sequence %d, want %d", frame.Header.Sequence, expectedSequence)
+		if !window.admit(frame.Header.Sequence) {
+			// Already delivered, or so far behind that it cannot be told
+			// apart from one that was. Either way it is dropped rather than
+			// fatal: a duplicate is not a peer misbehaving, it is a datagram
+			// substrate doing what one does.
+			continue
 		}
-		expectedSequence++
 		destination, payload, err := session.DecodeUDPPacket(frame.Payload)
 		if err != nil {
 			return err
@@ -510,6 +638,30 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 			}
 		}
 	}()
+	// The connection's datagrams feed the same channel. Only packets arrive
+	// there -- the close handshake and every other control frame stay on the
+	// stream -- so the loop below reads one channel and does not have to know
+	// which substrate a packet crossed on.
+	if bulk := fc.bulkFrames(flowID); bulk != nil {
+		defer fc.releaseBulk(flowID)
+		go func() {
+			for {
+				select {
+				case frame, ok := <-bulk:
+					if !ok {
+						return
+					}
+					select {
+					case frames <- frame:
+					case <-assocCtx.Done():
+						return
+					}
+				case <-assocCtx.Done():
+					return
+				}
+			}
+		}()
+	}
 	packets := make(chan udpDatagram, 32)
 	packetErr := make(chan error, 1)
 	go func() {
@@ -541,7 +693,7 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 	}()
 
 	var counters udpCounters
-	var expectedSequence uint64
+	var window packetWindow
 	var replySequence uint64
 	s.metrics.FlowStarted()
 	idleTimer := time.NewTimer(s.cfg.FlowIdleTimeout)
@@ -591,12 +743,14 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 				failed = true
 				goto done
 			}
-			if frame.Header.Sequence != expectedSequence {
-				endErr = fmt.Errorf("unexpected UDP packet sequence %d, want %d", frame.Header.Sequence, expectedSequence)
-				failed = true
-				goto done
+			if !window.admit(frame.Header.Sequence) {
+				// A duplicate, or one so far behind it cannot be told from
+				// one. Dropping it is not an error: over datagrams that is
+				// the substrate behaving normally, and failing the
+				// association would turn every reordered packet into a
+				// reconnect.
+				continue
 			}
-			expectedSequence++
 			resolveCtx, resolveCancel := context.WithTimeout(assocCtx, 10*time.Second)
 			addresses, resolveErr := s.cfg.DestinationPolicy.ResolveUDPAddr(resolveCtx, destination)
 			resolveCancel()

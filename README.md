@@ -139,10 +139,9 @@ finish. That case is now diagnosed -- lanes die of QUIC's idle timeout mid-burst
 and the rejoin is refused because the server's session went with its own
 connection -- and a flake in the TCP rescue path (about one run in eight, and
 every run under `-race`) is recorded in
-[`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md). UDP is currently carried over reliable stream frames (native QUIC
-DATAGRAM and TUN/VLESS ingress are not yet implemented), and a mid-session
-rescue creates a fresh authenticated association rather than resuming the old
-remote relay. The project has not passed all controlled-loss/resource release
+[`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md). TUN/VLESS ingress is
+not yet implemented, and a mid-session rescue creates a fresh authenticated
+association rather than resuming the old remote relay. The project has not passed all controlled-loss/resource release
 gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals
@@ -161,6 +160,15 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 - No HTTPS MITM: the optimizer forwards encrypted application bytes.
 - UDP health probing, UDP/TCP racing, fallback, and bounded mid-session lane
   replacement.
+- SOCKS5 UDP rides the connection's QUIC datagrams where QUIC negotiated them,
+  and the lane's control stream otherwise. An application that chose UDP has
+  already decided a late packet is worse than a lost one, and a stream gives it
+  the opposite. Measured across an emulated 15% loss path at a 200 ms round
+  trip, the worst packet takes 202 ms on datagrams against 448 to 658 ms on the
+  stream, where every loss holds up what is behind it. Nothing is configured:
+  QUIC's own capability exchange decides it, so a TLS/TCP lane or a peer without
+  datagram support keeps the previous framing. `--udp-on-stream` forces the old
+  substrate at both endpoints, as the control for measuring the new one.
 - Dedicated cold flows pipeline the authenticated `HELLO` and destination
   `OPEN` frames, preserving the original wire order of acknowledgements while
   removing one sequential China-US control exchange. Pooled streams retain

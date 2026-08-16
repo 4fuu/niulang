@@ -77,7 +77,15 @@ fresh authenticated association while retaining the local SOCKS UDP socket; it
 does not resume the old remote UDP relay or retransmit datagrams lost during the
 transport transition. TCP flows do resume: a replacement lane attaches to the
 existing session and the flow continues on it.
-Native QUIC DATAGRAM mode is a planned optimization for loss-sensitive UDP.
+`TypePacket` frames are carried on the connection's QUIC datagrams where
+DATAGRAM was negotiated in both directions, and on the lane's control stream
+otherwise. There is no capability of its own for this: both endpoints read the
+same QUIC connection state, so a sender never routes a packet to a substrate
+its peer is not draining, and a TLS/TCP lane is unchanged. Because a datagram
+is neither retransmitted nor ordered, a receiver no longer requires the next
+sequence number: it admits each once through a bounded anti-replay window and
+drops duplicates and packets too far behind to place. A gap is loss, which is
+what the application asked for by choosing UDP.
 
 If the server also advertises `CapabilityReserveControl`, a pooled client may
 set `FlagReserveControl` on its `OPEN` or `OPEN_FAST` frame. This marks lane 0

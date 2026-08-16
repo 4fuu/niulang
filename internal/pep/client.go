@@ -102,7 +102,12 @@ type ClientConfig struct {
 	// typed RESET, so an unreachable destination becomes a connection that
 	// opens and then closes rather than one that never opens. Set this when a
 	// caller needs the distinction more than it needs the round trip.
-	WaitForOpenAcknowledgement    bool
+	WaitForOpenAcknowledgement bool
+	// UDPOnStream keeps SOCKS UDP packets on the lane's control stream even
+	// where the QUIC connection negotiated datagrams. It is the control for
+	// measuring the datagram substrate against the one it replaced, and both
+	// endpoints must be set the same way for the comparison to mean anything.
+	UDPOnStream                   bool
 	Congestion                    CongestionControlKind
 	BrutalBytesPerSec             uint64
 	AdaptiveMinBytesSec           uint64
@@ -973,6 +978,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	}
 	_ = outer.SetDeadline(time.Now().Add(handshakeBound(outer, c.cfg.HandshakeTimeout)))
 	fc := newFrameConn(outer, c.cfg.MaxPayload)
+	fc.setPacketsOnStream(c.cfg.UDPOnStream)
 	if !alreadyAuthenticated {
 		if pipelineHello {
 			hello, helloErr := session.NewHello(c.cfg.Secret, sessionID, laneID, helloKind, time.Now())
@@ -1186,6 +1192,7 @@ func (c *Client) openFastJoinLane(ctx context.Context, sessionID [16]byte, flowI
 		return nil, err
 	}
 	fc := newFrameConn(outer, c.cfg.MaxPayload)
+	fc.setPacketsOnStream(c.cfg.UDPOnStream)
 	var payload [8]byte
 	binary.BigEndian.PutUint64(payload[:], laneID)
 	_ = outer.SetDeadline(time.Now().Add(handshakeBound(outer, c.cfg.HandshakeTimeout)))

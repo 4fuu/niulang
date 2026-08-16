@@ -74,7 +74,10 @@ preserve datagrams across the transition without exposing duplicate bytes.
 ## Stage 5 — TUN and release hardening
 
 - TUN integration and Clash Verge setup guide.
-- Native QUIC DATAGRAM mode for UDP, retaining stream/TCP fallback.
+- ~~Native QUIC DATAGRAM mode for UDP, retaining stream/TCP fallback.~~ Done:
+  chosen by QUIC's own capability exchange rather than configured, with the
+  control stream retained for lanes that have no datagrams. Measured emulated,
+  not live.
 - Cross-platform packaging.
 - Fuzzing, race tests, resource limits, and security review.
 - Reproducible benchmark reports and rollback instructions.

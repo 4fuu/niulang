@@ -228,9 +228,14 @@ removing that one node/rule.
 The current client accepts TCP CONNECT and bounded UDP ASSOCIATE. A production
 Clash integration still needs a TUN/VLESS ingress for transparent capture and
 full HTTP/3 behavior; a SOCKS profile can use UDP ASSOCIATE for applications
-that support SOCKS5 UDP. The current packet mode uses reliable stream frames,
-so native QUIC DATAGRAM remains a performance release gate for loss-sensitive
-UDP. No HTTPS MITM is needed for either mode.
+that support SOCKS5 UDP. Packets now ride the connection's QUIC datagrams
+where QUIC negotiated them, with the control stream as the fallback for a
+TLS/TCP lane or a peer without datagram support, so the release gate for
+loss-sensitive UDP is met in shape: a lost packet is no longer retransmitted
+and no longer holds up the one behind it. Emulated at 15% loss and a 200 ms
+round trip the worst delivered packet takes 202 ms against the stream's 448 to
+658. What remains for that gate is the live path and a fault matrix, not the
+mechanism. No HTTPS MITM is needed for either mode.
 
 On a host where Clash TUN installs a default route through `198.18.0.1`, the
 outer dev endpoint must be explicitly excluded from that route or the client
