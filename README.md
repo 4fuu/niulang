@@ -169,8 +169,11 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
   the path has one bottleneck per endpoint pair, and an open-loop probe
   delivers the same total however many connections carry it.
 - A PIAS-inspired policy that protects one-shot and interactive flows and moves
-  a classified bulk flow onto a connection of its own, so it does not put short
-  flows behind its congestion window. A negotiated control lane is additional.
+  a classified bulk flow's *data* onto a connection of its own, keeping its
+  *control* on the pooled one. That split does two things at once: short flows
+  keep a connection with no bulk congestion window on it, and the bulk flow
+  keeps an acknowledgement path with no bulk in front of it. A flow's data
+  plane is one connection, by construction rather than by policy.
 - No HTTPS MITM: the optimizer forwards encrypted application bytes.
 - UDP health probing, UDP/TCP racing, fallback, and bounded mid-session lane
   replacement.

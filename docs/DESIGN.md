@@ -97,13 +97,37 @@ retransmitting stream and 5.0 coded, and a small exchange goes the other way --
 trip and not a byte. Nothing is configured: the code reports whether it is
 coding from the measured floor.
 
-**Control and data ride different substrates on one connection.** A lane is a
-QUIC stream for control and that connection's datagrams for bulk, and the
-framing routes by frame type. A stream delivers in order, so at 42% erasure
-every gap stalls everything behind it. But acknowledgements must not be coded,
-because they release the data whose blocks they would then queue behind: with
-everything on one coded substrate the same channel carried 0.87 Mbit/s one way
-and 0.008 with acknowledgements coming back.
+**Control is never queued behind the data it releases.** This is one rule, and
+it is applied twice, at two layers, because it has to cover two kinds of flow.
+They are not alternatives and neither subsumes the other.
+
+*Within a connection, by substrate.* A lane is a QUIC stream for control and
+that connection's datagrams for coded data, and the framing routes by frame
+type. A stream delivers in order, so at 42% erasure every gap stalls everything
+behind it -- but acknowledgements must not be coded either, because they
+release the data whose blocks they would then be queued behind. Measured with
+everything on one coded substrate: 0.87 Mbit/s one way, 0.008 with
+acknowledgements coming back the other. A factor of a hundred.
+
+*Across connections, by plane.* That split only covers flows whose data is
+coded, and a bulk flow's is not: on a memoryless channel retransmission is
+cheaper than parity, so bulk rides a stream. If it rode the same stream as its
+own control, the flow's acknowledgements would sit strictly behind its own
+bulk, and one lost data frame would head-of-line block the acknowledgement that
+releases the peer's sender. So a bulk flow's *data plane* moves to a connection
+of its own while its *control plane* stays on the pooled one.
+
+That second split is what bulk isolation actually is, and it buys the
+interactive result twice over: short flows keep a connection with no bulk
+congestion window on it, and the bulk flow keeps a control path with no bulk
+in front of it. It is declined while the flow is alone on the pool, because
+paying a fresh congestion window to protect traffic that is not there costs
+about 8% of bulk goodput.
+
+A flow's data plane is exactly one connection either way. Not "at most one by
+policy" -- one by construction, in `dataLane`, so that a flow transiently
+holding two lanes during a recovery cannot stripe across them with nothing
+having decided to.
 
 **The code is a sliding window, not a block.** A block code must choose `(k,n)`
 when it seals, which means knowing the path before it has finished sending into
@@ -126,8 +150,8 @@ clean, and everything sized by it is sized for a clean path.
 Deleting aggregation does not mean one connection per client. Two other uses
 survive because neither is about capacity:
 
-- **Isolation.** A flow classified bulk moves to its own connection so it does
-  not head-of-line block short flows sharing the pooled one. This is a latency
+- **Isolation.** A flow classified bulk moves its data plane to a connection of
+  its own, keeping its control plane on the pooled one. This is a latency
   argument and the capacity finding leaves it untouched: measured at 200 ms and
   1% loss under a 50 MiB transfer, interactive requests see a 208 ms median
   against 323 ms, where 208 ms is the idle round trip.

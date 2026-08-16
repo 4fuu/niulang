@@ -93,10 +93,21 @@ what the application asked for by choosing UDP.
 
 If the server also advertises `CapabilityReserveControl`, a pooled client may
 set `FlagReserveControl` on its `OPEN` or `OPEN_FAST` frame. This marks lane 0
-as the authenticated control/rescue lane for that logical flow. After a
-joined lane is established, bulk `DATA` frames prefer joined lanes with
-independent QUIC congestion state; ACK, FIN, and interactive/control frames
-continue to use lane 0. If no joined lane is healthy, bulk traffic falls back
+as the authenticated control/rescue lane for that logical flow, and is what
+separates the flow's two planes.
+
+Once one joined lane is established and another flow is actually sharing the
+pooled connection, that flow's `DATA` moves to the joined lane -- exactly one,
+never several -- and `ACK`, `FIN`, `OPEN`, `RESET` and interactive frames
+continue to use lane 0. The reasons are two, and both are about what a bulk
+transfer does to traffic beside it: the joined lane's congestion window stays
+off the connection short flows share, and the flow's own acknowledgements stay
+off the stream carrying its own bulk, where a single lost `DATA` frame would
+head-of-line block them.
+
+If no joined lane is healthy, both planes use lane 0. Availability is worth
+more than isolation, and the reservation is a preference rather than a
+correctness dependency. If no joined lane is healthy, bulk traffic falls back
 to lane 0, so the capability is an isolation preference rather than a
 correctness dependency. The flag is never sent to a peer that did not
 negotiate the capability.

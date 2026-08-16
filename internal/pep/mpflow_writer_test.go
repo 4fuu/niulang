@@ -291,18 +291,73 @@ func TestBulkSelectionFallsBackToControlLane(t *testing.T) {
 	}
 }
 
-// Without a negotiated control lane there is nothing to reserve, so every
-// healthy lane is eligible for bulk.
-func TestBulkSelectionKeepsAllLanesWithoutReservation(t *testing.T) {
-	flow := &multipathFlow{
-		done: make(chan struct{}), lanes: map[uint64]*mpLane{0: {id: 0}, 1: {id: 1}},
+// A flow's data rides one lane, whatever lanes it happens to hold.
+//
+// This used to return every eligible lane and let the scheduler spread chunks
+// across them. With striping deleted there is no policy that grows a flow to
+// two data lanes, but a flow can still transiently hold two during a recovery
+// -- and then it would have striped across them with nothing having decided
+// to. One lane is now the structure rather than an outcome.
+func TestDataRidesOneLaneEvenWhenTheFlowHoldsTwo(t *testing.T) {
+	for _, reserve := range []bool{false, true} {
+		flow := &multipathFlow{
+			done:               make(chan struct{}),
+			lanes:              map[uint64]*mpLane{0: {id: 0}, 1: {id: 1}},
+			reserveControlLane: reserve,
+		}
+		candidates, err := flow.laneCandidates(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(candidates) != 1 {
+			t.Fatalf("reserve=%v: data selection produced %d lanes, want exactly one", reserve, len(candidates))
+		}
 	}
-	candidates, err := flow.laneCandidates(true)
+}
+
+// The two planes go to different places, which is the whole point of the
+// reservation: a bulk flow's data is not coded, so it rides a stream, and if
+// that were the stream its control rides then its own acknowledgements would
+// sit strictly behind its own bulk.
+func TestControlAndDataTakeDifferentLanesWhenAFlowIsIsolated(t *testing.T) {
+	flow := &multipathFlow{
+		done:               make(chan struct{}),
+		lanes:              map[uint64]*mpLane{0: {id: 0}, 1: {id: 1}},
+		reserveControlLane: true,
+		controlLaneShared:  func() bool { return true },
+	}
+	control, err := flow.laneCandidates(false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 2 {
-		t.Fatalf("unreserved bulk selection produced %d lanes, want both", len(candidates))
+	data, err := flow.laneCandidates(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control[0].id != 0 {
+		t.Fatalf("control took lane %d, want the pooled control lane", control[0].id)
+	}
+	if data[0].id != 1 {
+		t.Fatalf("data took lane %d, want the isolated lane", data[0].id)
+	}
+}
+
+// Isolation is declined while nothing else is on the pooled connection, and
+// then both planes share it. Paying a fresh congestion window to protect
+// traffic that is not there costs about 8% of bulk goodput for nothing.
+func TestBothPlanesShareTheControlLaneWhileItIsUnshared(t *testing.T) {
+	flow := &multipathFlow{
+		done:               make(chan struct{}),
+		lanes:              map[uint64]*mpLane{0: {id: 0}, 1: {id: 1}},
+		reserveControlLane: true,
+		controlLaneShared:  func() bool { return false },
+	}
+	data, err := flow.laneCandidates(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 1 || data[0].id != 0 {
+		t.Fatalf("data took lane %d, want the control lane it was never moved off", data[0].id)
 	}
 }
 
@@ -426,10 +481,11 @@ func TestProvenCompleteFlowDoesNotWaitForLaneReplacementForFinalACK(t *testing.T
 }
 
 // Isolation costs a bulk flow its warmed-up path, so it is paid only while
-// another flow is actually using the pooled control connection. A flow alone on
-// the pool keeps the control lane in its bulk set; the moment a second flow
-// arrives, the next selection moves off it.
-func TestBulkSelectionYieldsControlLaneOnlyWhenPoolIsShared(t *testing.T) {
+// another flow is actually using the pooled control connection. A flow alone
+// on the pool keeps its data on the control lane; the moment a second flow
+// arrives, the next selection moves the data plane off it -- and it is a move,
+// not a widening: one lane before and one after.
+func TestTheDataPlaneMovesOffTheControlLaneWhenThePoolIsShared(t *testing.T) {
 	var shared atomic.Bool
 	flow := &multipathFlow{
 		done: make(chan struct{}),
@@ -445,8 +501,9 @@ func TestBulkSelectionYieldsControlLaneOnlyWhenPoolIsShared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 2 {
-		t.Fatalf("a flow alone on the pool got %d bulk lanes, want both", len(candidates))
+	if len(candidates) != 1 || candidates[0].id != 0 {
+		t.Fatalf("a flow alone on the pool put data on %d lanes starting at %d, want only the control lane",
+			len(candidates), candidates[0].id)
 	}
 
 	shared.Store(true)
@@ -455,6 +512,7 @@ func TestBulkSelectionYieldsControlLaneOnlyWhenPoolIsShared(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(candidates) != 1 || candidates[0].id != 1 {
-		t.Fatalf("a shared pool did not move bulk off lane 0: got %d lanes", len(candidates))
+		t.Fatalf("a shared pool put data on %d lanes starting at %d, want only the isolated lane",
+			len(candidates), candidates[0].id)
 	}
 }

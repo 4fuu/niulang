@@ -18,10 +18,17 @@ func laneRate(lane *mpLane, bytesPerSecond float64, rtt time.Duration) {
 	lane.rateMu.Unlock()
 }
 
-// Committing to one lane and then waiting for a queue slot lets a single lane
-// throttle the whole flow while another sits idle, and the producer stops, so
-// the scheduler never observes the imbalance it exists to correct.
-func TestEnqueueSpillsToTheNextLaneWhenPreferredIsFull(t *testing.T) {
+// A flow's data plane is one lane, so there is no spilling to another when it
+// is full: the flow really is limited by the connection carrying it, and it
+// waits.
+//
+// This replaces a test that asserted the opposite. With a flow's data striped
+// across lanes, committing to one and then waiting for a queue slot let a
+// single slow lane throttle the whole flow while another sat idle -- the
+// producer stopped, so no later frame was ever offered to the idle lane and
+// the scheduler never saw the imbalance it existed to correct. Striping is
+// deleted, and with it both the failure and the machinery that avoided it.
+func TestAFullDataLaneIsWaitedOnRatherThanSpilled(t *testing.T) {
 	flow := &multipathFlow{
 		ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 4),
 		chunkSize: defaultChunkSize, lanes: map[uint64]*mpLane{},
@@ -35,7 +42,6 @@ func TestEnqueueSpillsToTheNextLaneWhenPreferredIsFull(t *testing.T) {
 		writeDone: make(chan struct{}),
 	}
 	flow.lanes[0], flow.lanes[1] = full, idle
-	// Make lane 0 both the preferred lane and already full.
 	laneRate(full, 1<<30, time.Millisecond)
 	laneRate(idle, 1<<20, 10*time.Millisecond)
 	full.writeSlots <- struct{}{}
@@ -49,13 +55,24 @@ func TestEnqueueSpillsToTheNextLaneWhenPreferredIsFull(t *testing.T) {
 	go func() { done <- flow.enqueueOnHealthyLane(context.Background(), frame, true) }()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("enqueue with a full preferred lane: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("enqueue blocked on the full preferred lane instead of using the idle lane")
+		t.Fatalf("enqueue returned %v with the data lane full; it should have waited", err)
+	case <-time.After(250 * time.Millisecond):
 	}
-	if len(idle.writeQ) != 1 {
-		t.Fatalf("idle lane received %d frames, want the spilled frame", len(idle.writeQ))
+	if len(idle.writeQ) != 0 {
+		t.Fatalf("the other lane received %d frames; a flow's data must not spread across lanes", len(idle.writeQ))
+	}
+	// Drain a slot so the blocked enqueue completes and the goroutine ends.
+	<-full.writeQ
+	<-full.writeSlots
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("enqueue after the lane drained: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueue did not complete once its lane had room")
+	}
+	if len(full.writeQ) != 1 {
+		t.Fatalf("the data lane received %d frames, want the waited-for frame", len(full.writeQ))
 	}
 }

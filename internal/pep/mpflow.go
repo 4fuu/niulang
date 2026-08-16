@@ -214,11 +214,19 @@ type multipathFlow struct {
 	ackErr   chan error
 
 	classifier *classifier.Classifier
-	// reserveControlLane is negotiated for pooled flows. Lane 0 is the
-	// authenticated/persistent control stream; once a joined lane exists,
-	// bulk payloads prefer joined lanes so loss recovery for a large transfer
-	// cannot monopolize the interactive connection. If no joined lane is
-	// healthy, selection deliberately falls back to lane 0 for availability.
+	// reserveControlLane is negotiated for pooled flows and is what separates
+	// this flow's control plane from its data plane.
+	//
+	// Lane 0 is the authenticated, pooled connection and carries control:
+	// OPEN, ACK, FIN, RESET. Once this flow has a lane of its own, its data
+	// moves there and lane 0 keeps only control. Two things follow, and both
+	// are the reason the reservation exists rather than side effects of it:
+	// a bulk congestion window stays off the connection short flows share,
+	// and the flow's own acknowledgements stay off the stream carrying its
+	// own bulk.
+	//
+	// If no isolated lane is healthy, both planes fall back to lane 0. An
+	// available flow beats an isolated one.
 	reserveControlLane bool
 	// resumeRefused records that the peer answered a lane join by saying it
 	// does not know this session. That answer is permanent, so it ends the
@@ -854,41 +862,79 @@ func (f *multipathFlow) healthyLanes() []*mpLane {
 	return lanes
 }
 
-// laneCandidates returns the lanes eligible to carry a frame.
+// laneCandidates returns the lanes eligible to carry a frame, in preference
+// order. There is at most one for data, and the ordering matters only for
+// control.
 //
-// It does not rank them, and that is the point. Ranking was the previous
-// scheduler's core idea: estimate each lane's rate, predict which would deliver
-// soonest, and commit the frame there. Every prediction it got wrong put
-// numbered bytes behind a lane that had slowed, and the receiver could not
-// deliver past them. Under self-pacing a lane takes work when its own transport
-// has room, so which lane carries a chunk is an outcome rather than a choice,
-// and an order has nothing left to express.
+// This is the flow's control and data plane split, and it is a second one --
+// the framing has already split control from bulk *within* a connection, by
+// putting control frames on the QUIC stream and coded bulk on that
+// connection's datagrams. The two are not alternatives and neither subsumes
+// the other, because they cover different flows:
+//
+//   - A flow that would rather spend bytes than round trips gets the substrate
+//     split. Its data is coded onto datagrams, its control stays on the
+//     stream, and one connection carries both.
+//   - A bulk flow would rather spend round trips than bytes, so its data is
+//     not coded and rides a stream. If that were the same stream its control
+//     rides, the flow's own acknowledgements would sit strictly behind its own
+//     bulk, and a lost data frame would head-of-line block the acknowledgement
+//     that releases the peer's sender. So a bulk flow's data moves to a
+//     connection of its own and its control stays on the pooled one.
+//
+// Both are the same rule stated at different layers: what releases the data
+// must not be queued behind the data. The coded case measured that at a factor
+// of a hundred -- 0.87 Mbit/s one way against 0.008 when acknowledgements had
+// to come back over the same coded substrate.
+//
+// The candidates are not ranked by speed, and that is deliberate. Ranking was
+// the previous scheduler's core idea: estimate each lane's rate, predict which
+// would deliver soonest, and commit the frame there. Every prediction it got
+// wrong put numbered bytes behind a lane that had slowed, and the receiver
+// could not deliver past them.
 func (f *multipathFlow) laneCandidates(bulk bool) ([]*mpLane, error) {
 	lanes := f.healthyLanes()
 	if len(lanes) == 0 {
 		return nil, errors.New("no healthy lanes")
 	}
-	if !bulk || len(lanes) == 1 {
+	if !bulk {
+		// Control goes on the lowest-numbered healthy lane, which is lane zero
+		// whenever it is alive. That is the authenticated one, it is the one a
+		// peer can always answer on, and for an isolated bulk flow it is the
+		// one that is not carrying the bulk.
 		return lanes[:1], nil
 	}
-	if f.reserveControlLane {
-		// Lane zero is the initial authenticated stream by protocol. Exclude
-		// it only when at least one independent lane is healthy; retaining the
-		// fallback is essential during join failure and lane recovery.
-		bulkLanes := make([]*mpLane, 0, len(lanes))
-		var control *mpLane
-		for _, lane := range lanes {
-			if lane.id != 0 {
-				bulkLanes = append(bulkLanes, lane)
-				continue
-			}
-			control = lane
-		}
-		if len(bulkLanes) > 0 && f.isolateFromControlLane(control) {
-			lanes = bulkLanes
-		}
+	return f.dataLane(lanes), nil
+}
+
+// dataLane picks the single lane a flow's data rides.
+//
+// One lane, always. Striping a flow's data across several is deleted -- see
+// docs/DESIGN.md -- and this is where that is enforced rather than left as an
+// emergent property of how many lanes happen to exist. It used to return every
+// eligible lane and let the scheduler spread chunks over them, so a flow that
+// transiently held two lanes during a recovery would stripe across them with
+// nothing having decided to.
+func (f *multipathFlow) dataLane(lanes []*mpLane) []*mpLane {
+	if len(lanes) == 1 || !f.reserveControlLane {
+		return lanes[:1]
 	}
-	return lanes, nil
+	// Lane zero is the control plane. Prefer the isolated lane for data, but
+	// only once one is actually healthy: during a join failure or a lane
+	// recovery, falling back to lane zero is what keeps the flow alive, and an
+	// available flow beats an isolated one.
+	var control *mpLane
+	for _, lane := range lanes {
+		if lane.id == 0 {
+			control = lane
+			continue
+		}
+		if f.isolateFromControlLane(control) {
+			return []*mpLane{lane}
+		}
+		break
+	}
+	return lanes[:1]
 }
 
 // isolateFromControlLane reports whether a bulk flow should stop putting
@@ -1303,23 +1349,18 @@ func (f *multipathFlow) enqueueOnHealthyLane(ctx context.Context, frame protocol
 		}
 	}
 	for {
+		// One lane carries this plane: the isolated one for data, lane zero for
+		// control. This used to try each of several without blocking before
+		// committing to one, because with a flow's data striped across lanes,
+		// waiting on a full lane while another sat idle stopped the producer
+		// and hid the imbalance from the scheduler. There is nowhere to spill
+		// to now, and a full lane means what it says -- the flow is limited by
+		// the connection carrying it.
 		candidates, err := f.laneCandidates(bulk)
 		if err == nil {
-			// Try each lane in preference order without blocking. Committing to
-			// the best lane and then waiting for one of its queue slots lets a
-			// single lane throttle the whole flow while other lanes sit idle:
-			// the producer stops, so no later frame is ever offered to them and
-			// the scheduler never sees the imbalance it was meant to correct.
-			// A lane that is full and a lane that is unusable are both simply
-			// skipped here; tryEnqueueFrameClass has already transitioned an
-			// unusable lane so the recovery coordinator can replace it.
-			for _, lane := range candidates {
-				if accepted, _ := f.tryEnqueueFrameClass(lane, frame, bulk); accepted {
-					return nil
-				}
+			if accepted, _ := f.tryEnqueueFrameClass(candidates[0], frame, bulk); accepted {
+				return nil
 			}
-			// Every eligible lane is full, so the flow really is transport
-			// limited. Wait on the first.
 			if err = f.enqueueFrameClass(ctx, candidates[0], frame, bulk); err == nil {
 				return nil
 			}

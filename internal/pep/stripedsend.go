@@ -454,9 +454,8 @@ func (f *multipathFlow) watchChunkCompletion(ctx context.Context, sched *stripe.
 	}
 }
 
-// laneCarriesData reports whether this lane may carry payload for the flow's
-// current class, preserving the rule that only bulk flows stripe and that a
-// reserved control lane keeps out of bulk.
+// laneCarriesData reports whether this lane is the one carrying this flow's
+// data plane. Exactly one is, and a reserved control lane is not it.
 func (f *multipathFlow) laneCarriesData(lane *mpLane, bulk bool) bool {
 	candidates, err := f.laneCandidates(bulk)
 	if err != nil {
