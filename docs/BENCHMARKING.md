@@ -178,18 +178,33 @@ SOCKS5 endpoints and swaps which goes first each round, keeping a comparison
 inside one path window. Expect to need well over ten rounds, and report
 completion counts rather than only medians.
 
-Three mistakes produced confident, wrong results during this project's
-campaigns. All three are cheap to avoid and expensive to miss:
+Five mistakes produced confident, wrong results during this project's
+campaigns. All five are cheap to avoid and expensive to miss:
 
 - **Use the literal server IP.** A hostname that a local TUN-mode proxy
   resolves to a fake IP means both transports are measured *through the
   existing tunnel*, not over the path under test.
 - **Bind the outer socket to the physical interface** (`--local-address`) on
   both clients, for the same reason, and give both the same timeout.
+- **Prove the binding worked, don't assume it.** Have the server report the
+  source address it sees. On 2026-08-16 an unbound datagram arrived from
+  `23.135.236.244`, the existing tunnel's exit, and a bound one from
+  `120.244.189.31`, the real uplink — same host, same destination, one flag
+  apart. Third-party clients need their own equivalent (`inet4_bind_address`
+  for sing-box outbounds), and they need checking too.
+- **Clear `NO_PROXY` before using curl.** `curl` honours `NO_PROXY` even when a
+  proxy is named explicitly with `--socks5-hostname`, so a shell exporting
+  `NO_PROXY=*` sends every "proxied" transfer straight to the origin and
+  reports it as a success. Use `env -u NO_PROXY -u no_proxy curl --noproxy ''`.
 - **Make the remote oracle concurrent.** A single-threaded `http.server` lets a
   lingering connection from one trial delay the next; before this was fixed,
   queqiao measured 1.19 Mbit/s against the reference's 4.52, and with a threaded
   oracle and nothing else changed the two measured 0.478 and 0.522.
+
+**Measure a fixed duration, not a fixed object, when the stacks are far apart.**
+A 16 MiB object is four round trips for a QUIC stack on a fast path and three
+minutes for VLESS over TCP on the same path; a 20-second window measures the
+rate each one actually sustains and keeps completion honest.
 
 Stop every temporary listener when the campaign ends. An earlier session left
 an authenticated listener bound to all interfaces for thirteen hours.

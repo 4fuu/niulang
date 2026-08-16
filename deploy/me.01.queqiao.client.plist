@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS LaunchAgent for the queqiao local client.
+
+  Install:
+    cp deploy/me.01.queqiao.client.plist ~/Library/LaunchAgents/
+    # edit the paths and <EGRESS-IP> below
+    launchctl load ~/Library/LaunchAgents/me.01.queqiao.client.plist
+
+  Restart after the client stalls (see docs/DEPLOYING.md):
+    launchctl kickstart -k gui/$(id -u)/me.01.queqiao.client
+
+  See docs/DEPLOYING.md for the egress side and the Clash profile.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>me.01.queqiao.client</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.queqiao/bin/queqiaod</string>
+    <string>--mode</string>
+    <string>local</string>
+
+    <!-- The SOCKS5 ingress Clash forwards to. Loopback only. -->
+    <string>--listen</string>
+    <string>127.0.0.1:12080</string>
+
+    <!-- A literal IP, never a hostname: with fake-IP DNS a hostname resolves
+         to an address inside the tunnel. -->
+    <string>--remote</string>
+    <string>EGRESS-IP:12540</string>
+
+    <!-- Must equal the server certificate's CN/SAN. This is a verified TLS
+         name presented as SNI, not a DNS lookup. -->
+    <string>--server-name</string>
+    <string>queqiao.node</string>
+    <string>--root-ca</string>
+    <string>/Users/YOU/.queqiao/cert.pem</string>
+    <string>--secret-file</string>
+    <string>/Users/YOU/.queqiao/secret</string>
+
+    <!-- Not optional when Clash runs in TUN mode. Clash installs a default
+         route through 198.18.0.1, so without this binding queqiao's own outer
+         connection is captured by Clash and tunnelled through whatever proxy
+         Clash is using. if:en0 re-resolves the physical address before each
+         dial, so DHCP changes are handled. Verify with tcpdump on the egress
+         host that the source address arriving is your real uplink. -->
+    <string>--local-address</string>
+    <string>if:en0</string>
+
+    <!-- Loopback-only counters: flows, lanes, fallbacks, controller state. -->
+    <string>--metrics-listen</string>
+    <string>127.0.0.1:12090</string>
+
+    <string>--log-level</string>
+    <string>info</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restarts on crash. It does NOT rescue the stall documented in
+       docs/DEPLOYING.md: a stalled client keeps running and keeps accepting
+       connections, so launchd sees a healthy process. That one needs an
+       explicit kickstart. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/.queqiao/client.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/.queqiao/client.log</string>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>
