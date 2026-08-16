@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/protocol"
 )
 
 // isolationLane builds a lane with a usable frame connection, which addLane
@@ -29,9 +29,9 @@ func newIsolationTestFlow(t *testing.T, reserveControl bool) *multipathFlow {
 	return flow
 }
 
-// --max-lanes bounds the lanes carrying bulk payload. A flow that negotiated
-// the control-lane reservation keeps lane zero for interactive and rescue
-// traffic in addition to that budget.
+// A flow's data lives on one lane. A flow that negotiated the control-lane
+// reservation keeps lane zero for interactive and rescue traffic in addition
+// to that one.
 //
 // Counting the control lane against the budget makes the server reject and
 // close every joined bulk lane. The peer sees an immediate EOF, retries, and
@@ -42,7 +42,7 @@ func TestServerAdmitsBulkLanesBesidesTheControlLane(t *testing.T) {
 	if err := flow.addLane(isolationLane(t, 0)); err != nil {
 		t.Fatal(err)
 	}
-	session := &serverFlow{flow: flow, maxLanes: serverLaneBudget(1, flow.reserveControlLane)}
+	session := &serverFlow{flow: flow, maxLanes: serverLaneBudget(flow.reserveControlLane)}
 	if err := session.addLane(isolationLane(t, 1)); err != nil {
 		t.Fatalf("server refused the only bulk lane: %v", err)
 	}
@@ -52,13 +52,13 @@ func TestServerAdmitsBulkLanesBesidesTheControlLane(t *testing.T) {
 }
 
 // Without the reservation there is no separate control lane, so the budget is
-// exactly --max-lanes and a second lane must be refused.
+// exactly one and a second lane must be refused.
 func TestServerBudgetIsExactWithoutControlReservation(t *testing.T) {
 	flow := newIsolationTestFlow(t, false)
 	if err := flow.addLane(isolationLane(t, 0)); err != nil {
 		t.Fatal(err)
 	}
-	session := &serverFlow{flow: flow, maxLanes: serverLaneBudget(1, flow.reserveControlLane)}
+	session := &serverFlow{flow: flow, maxLanes: serverLaneBudget(flow.reserveControlLane)}
 	// A lane over budget is admitted only by retiring an existing one, so the
 	// total never exceeds the configured maximum.
 	_ = session.addLane(isolationLane(t, 1))
@@ -67,23 +67,22 @@ func TestServerBudgetIsExactWithoutControlReservation(t *testing.T) {
 	}
 }
 
-// A bulk flow must be able to leave the shared pooled connection even when only
-// one bulk lane is configured: that isolation, not striping, is what keeps
-// interactive traffic off a bulk congestion window.
+// A bulk flow must be able to leave the shared pooled connection with one data
+// lane: isolation, not striping, is what keeps interactive traffic off a bulk
+// congestion window. Striping is deleted; this is the property that outlived
+// it, and it is a latency argument rather than a capacity one.
 func TestBulkIsolationAppliesAtOneConfiguredLane(t *testing.T) {
 	for _, test := range []struct {
 		name           string
-		maxLanes       int
 		reserveControl bool
 		wantBulkBudget int
 		wantReserve    int
 	}{
-		{"isolated bulk at one lane", 1, true, 1, 1},
-		{"no reservation keeps one total lane", 1, false, 1, 0},
-		{"striping budget is the bulk budget", 4, true, 4, 1},
+		{"isolated bulk keeps a control lane beside its own", true, 1, 1},
+		{"no reservation keeps one total lane", false, 1, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			budget, reserve := bulkLaneBudget(test.maxLanes, test.reserveControl)
+			budget, reserve := bulkLaneBudget(test.reserveControl)
 			if budget != test.wantBulkBudget || reserve != test.wantReserve {
 				t.Fatalf("budget=%d reserve=%d, want %d and %d", budget, reserve, test.wantBulkBudget, test.wantReserve)
 			}
@@ -119,9 +118,8 @@ func TestPooledFlowCountTracksOpenAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		MaxLanes: 1, InitialLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

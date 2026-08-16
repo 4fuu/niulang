@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/session"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/session"
 )
 
 func randomFlowID() (uint64, error) {

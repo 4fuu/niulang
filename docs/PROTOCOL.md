@@ -1,4 +1,4 @@
-# wanopt wire protocol (draft 1)
+# queqiao wire protocol (draft 1)
 
 This is a design document, not a compatibility guarantee. Wire versions must
 be negotiated explicitly before a release.

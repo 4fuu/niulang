@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	"github.com/icourses-dev/wanopt/internal/coded"
-	wancongestion "github.com/icourses-dev/wanopt/internal/congestion"
-	"github.com/icourses-dev/wanopt/internal/pathmodel"
+	"github.com/icourses-dev/queqiao/internal/coded"
+	wancongestion "github.com/icourses-dev/queqiao/internal/congestion"
+	"github.com/icourses-dev/queqiao/internal/pathmodel"
 )
 
 type TransportKind string
@@ -28,7 +28,7 @@ const (
 	TransportAuto TransportKind = "auto"
 )
 
-const defaultALPN = "wanopt/1"
+const defaultALPN = "queqiao/1"
 
 const (
 	defaultAdaptiveMinBytesPerSec = 64 * 1024
@@ -40,7 +40,7 @@ const (
 //
 // Erasure is the default and the only one that should normally be chosen. Reno
 // leaves the apNet quic-go default untouched and is the safe control. BBR is
-// the original wanopt controller. BBRTUIC is a faithful Go port of TUIC's
+// the original queqiao controller. BBRTUIC is a faithful Go port of TUIC's
 // quinn-congestions BBR model. Adaptive is a conservative rate-estimating
 // controller for unknown paths. Brutal is a fixed-rate mode for controlled
 // experiments where the operator knows the per-lane budget.
@@ -220,7 +220,7 @@ func (c *quicStreamConn) Close() error {
 		if c.closeConn {
 			// Dedicated lanes own their QUIC connection and socket. Pooled
 			// streams deliberately leave both alive for other flows.
-			err = c.conn.CloseWithError(0, "wanopt lane closed")
+			err = c.conn.CloseWithError(0, "queqiao lane closed")
 			if c.packet != nil {
 				_ = c.packet.Close()
 			}
@@ -256,7 +256,7 @@ func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPoo
 	tlsConn := conn.(*tls.Conn)
 	if tlsConn.ConnectionState().NegotiatedProtocol != defaultALPN {
 		_ = tlsConn.Close()
-		return nil, errors.New("remote did not negotiate wanopt ALPN")
+		return nil, errors.New("remote did not negotiate queqiao ALPN")
 	}
 	return tlsConn, nil
 }
@@ -270,7 +270,7 @@ func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPoo
 // window within a small multiple of the RTT. On a 200 ms path with a few
 // percent packet loss, loss recovery delays consumption enough that the
 // window stops growing, and the *receive window* rather than congestion
-// control becomes the binding constraint. Measured with cmd/wanoptbench at
+// control becomes the binding constraint. Measured with cmd/queqiaobench at
 // 200 ms RTT and 1--5% loss, a 512 KiB initial stream window cost 30--40%
 // goodput against an otherwise identical TUIC-shaped reference.
 //
@@ -382,7 +382,7 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 	controller := configureQUICController(conn, ccfg)
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		_ = conn.CloseWithError(0, "unable to open wanopt stream")
+		_ = conn.CloseWithError(0, "unable to open queqiao stream")
 		if packetConn != nil {
 			_ = packetConn.Close()
 		}

@@ -4,14 +4,14 @@ These measurements were run from the China client host to the fixed egress
 `icourses-dev` (`23.135.236.244:12443`, TLS SNI `icourses-dev.01.me`). This
 document contains results from more than one measurement window. The earlier
 pilot sections used the then-valid physical source address `192.168.3.66`;
-the final matched TUIC/WANOPT campaign and the UDP smoke test used the current
+the final matched TUIC/QUEQIAO campaign and the UDP smoke test used the current
 physical source address `172.20.10.2`, with the Clash TUN route excluded from
 the outer connection. The existing Xray, sing-box, Cloudflare, Nginx,
 WireGuard, and Clash configurations were not modified.
 
 The endpoint binary was built as Linux/amd64 from the checked-out source and
 verified by SHA-256 before each isolated systemd-run controller instance. The
-normal `wanoptd-dev.service` was restored and verified active after the
+normal `queqiaod-dev.service` was restored and verified active after the
 campaign.
 
 ## Method
@@ -47,7 +47,7 @@ guarantee and is not an unattended default.
 
 For context, the existing matched endpoint campaign measured Hysteria 2 at
 30.2 Mbps (HTTP N=1) and 170.7 Mbps (N=8), and TUIC at 18.7 and 120.6 Mbps.
-Those numbers came from a separate campaign and are not a claim that wanopt
+Those numbers came from a separate campaign and are not a claim that queqiao
 currently beats either implementation.
 
 ## API and browsing latency
@@ -65,7 +65,7 @@ application response; other failures and 20-second timeouts count as failed.
 
 The reused-Brutal OpenAI p95 is a severe tail, despite a low median. The
 earlier TUIC/Hysteria 2 campaign completed 45/45 requests for both transports;
-wanopt therefore does not yet meet the low-latency reliability bar.
+queqiao therefore does not yet meet the low-latency reliability bar.
 
 ## Aggregate pacing and interactive reserve
 
@@ -105,7 +105,7 @@ profiles until those gates pass.
 ## Post-hardening deployment smoke
 
 After the campaign, the metrics-enabled Linux/amd64 build was installed in
-the isolated `wanoptd-dev.service` and its SHA-256 was verified on both
+the isolated `queqiaod-dev.service` and its SHA-256 was verified on both
 hosts. A clean 10 MiB CacheFly transfer through one adaptive QUIC lane
 returned HTTP 200, exactly 10,485,760 body bytes, and curl exit 0 in 2.736 s
 (3.83 MB/s application body rate). The client-side completion counters showed
@@ -239,20 +239,20 @@ and controlled loss/reordering/MTU, prolonged-soak, and dedicated upload
 campaigns remain release gates. Flow-idle/lifetime limits and timeout metrics
 are now implemented, but their resource-pressure behavior still needs a
 dedicated soak campaign. The existing
-`wanoptd-dev.service` on `:12443` was not changed by the isolated controller
+`queqiaod-dev.service` on `:12443` was not changed by the isolated controller
 tests and remains the rollback path.
 
 ## Latest development deployment
 
 The lifecycle-hardening commit `efa358a` was built as Linux/amd64 and
-installed as `/usr/local/bin/wanoptd` for `wanoptd-dev.service`; the pre-fix
-binary is retained at `/usr/local/bin/wanoptd-rollback-pre-efa358a` (and the
+installed as `/usr/local/bin/queqiaod` for `queqiaod-dev.service`; the pre-fix
+binary is retained at `/usr/local/bin/queqiaod-rollback-pre-efa358a` (and the
 older documented rollback remains available). The deployed SHA-256 is
 `a7b183ffb2891d2495056fa6adaa4697d3cefd0c6e0700d7a2b678bb52180475`.
 After restart, a fresh Google `generate_204` returned HTTP 204 in 1.043 s and
 a one-flow 10-MiB CacheFly smoke returned HTTP 200 with exactly 10,485,760
 bytes. Local and remote metrics both reported zero failed flows and zero flow
-timeouts. `wanoptd-dev`, Xray, sing-box, Cloudflare, Nginx, and the other
+timeouts. `queqiaod-dev`, Xray, sing-box, Cloudflare, Nginx, and the other
 pre-existing services were all active; no temporary `:12444` benchmark unit
 was left running.
 
@@ -261,7 +261,7 @@ was left running.
 The following measurements were taken after the UDP-association hardening,
 using source revision `fd2ffac` (the UDP-hardening build immediately before
 the deployed address-resolver revision). The current service is
-`55363f9` (`wanoptd dev-55363f9`, remote binary SHA-256
+`55363f9` (`queqiaod dev-55363f9`, remote binary SHA-256
 `0de7071fee1601d8b28ffaebe7b6c902b5b70d99b3d088ecfb2342f7a5949113`); the
 transport code is unchanged between those two revisions. The local outer
 socket was explicitly bound to `172.20.10.2`. These trials are a new,
@@ -275,36 +275,36 @@ were received. Five trials were run for each profile:
 | Profile | Completion | Completion times (s) | Median completion | Median goodput |
 |---|---:|---|---:|---:|
 | TUIC, existing server inbound `:2444` | 5/5 | 5.763, 2.590, 8.405, 10.192, 7.282 | 7.282 s | 11.52 Mbps |
-| WANOPT safe default, one lane | 5/5 | 15.743, 18.233, 15.178, 31.863, 16.560 | 16.560 s | 5.07 Mbps |
-| WANOPT forced QUIC, one lane | 3/5 | 26.688, 14.747, 26.819, 88.897 partial, 10.002 no body | — | — |
-| WANOPT forced TLS/TCP, one lane | 3/5 | 12.708, 18.044, 23.144, 10.002 no body, 10.002 no body | — | — |
+| QUEQIAO safe default, one lane | 5/5 | 15.743, 18.233, 15.178, 31.863, 16.560 | 16.560 s | 5.07 Mbps |
+| QUEQIAO forced QUIC, one lane | 3/5 | 26.688, 14.747, 26.819, 88.897 partial, 10.002 no body | — | — |
+| QUEQIAO forced TLS/TCP, one lane | 3/5 | 12.708, 18.044, 23.144, 10.002 no body, 10.002 no body | — | — |
 
 The forced profiles are reported for diagnostic separation, not as competing
 production recommendations. On this window TUIC had the lower median
-completion time and higher median goodput. WANOPT's `auto` mode completed all
+completion time and higher median goodput. QUEQIAO's `auto` mode completed all
 five safe-default trials, while the forced QUIC and forced TCP runs each had
 two application failures. The path is sufficiently variable that a single
 five-trial median is not a capacity guarantee; longer repeated blocks, loss
 injection, and tail-percentile reporting are required before selecting an
 unattended controller.
 
-Three SOCKS5 UDP-associate DNS queries to `1.1.1.1:53` through WANOPT `auto`
+Three SOCKS5 UDP-associate DNS queries to `1.1.1.1:53` through QUEQIAO `auto`
 also completed with valid 71-byte replies and matching transaction IDs. Both
 local and remote metrics reported:
 
 ```text
-wanopt_flows_started_total 3
-wanopt_flows_completed_total 3
-wanopt_flows_failed_total 0
-wanopt_bytes_up_total 87
-wanopt_bytes_down_total 183
-wanopt_lane_failures_total 0
-wanopt_lane_replacements_total 0
+queqiao_flows_started_total 3
+queqiao_flows_completed_total 3
+queqiao_flows_failed_total 0
+queqiao_bytes_up_total 87
+queqiao_bytes_down_total 183
+queqiao_lane_failures_total 0
+queqiao_lane_replacements_total 0
 ```
 
 For the final smoke the client used `--local-address auto`; it selected the
 then-current physical `172.20.10.2` and completed over QUIC with
-`wanopt_fallbacks_total 0`. Earlier in the same window, a fixed address became
+`queqiao_fallbacks_total 0`. Earlier in the same window, a fixed address became
 invalid when DHCP moved the host to `172.20.10.4`, producing
 `bind: can't assign requested address`; this is the operational failure that
 the automatic resolver is intended to prevent. If multiple physical IPv4
@@ -317,7 +317,7 @@ local dual-stack server). It does not yet demonstrate recovery of every
 intermittent-loss pattern on the real China-US path; native QUIC DATAGRAM and
 loss/reordering campaign coverage remain release gates. The service was left
 active on `:12443` and the previous binary is available at
-`/usr/local/bin/wanoptd-rollback-fd2ffac` on the server.
+`/usr/local/bin/queqiaod-rollback-fd2ffac` on the server.
 
 ## Real-path mid-session UDP-to-TCP rescue
 
@@ -331,11 +331,11 @@ through the unchanged local SOCKS UDP endpoint completed in 9.51 s. The local
 metrics at recovery were:
 
 ```text
-wanopt_lane_failures_total 1
-wanopt_lane_replacements_total 1
-wanopt_fallbacks_total 1
-wanopt_udp_association_reconnects_total 1
-wanopt_udp_association_rescue_failures_total 0
+queqiao_lane_failures_total 1
+queqiao_lane_replacements_total 1
+queqiao_fallbacks_total 1
+queqiao_udp_association_reconnects_total 1
+queqiao_udp_association_rescue_failures_total 0
 ```
 
 The local association then closed cleanly with one completed and zero failed
@@ -396,7 +396,7 @@ Commit `efa358a` also fixes a server lifecycle bug found by a debug-log
 campaign. The QUIC server used the per-stream `HandshakeTimeout` while waiting
 for the next stream on an already-established connection. With the default
 10-second value, a long transfer with no new stream caused the server to close
-the entire active connection with `wanopt session complete`. This produced
+the entire active connection with `queqiao session complete`. This produced
 repeated lane failures and replacements at approximately ten-second
 intervals. The fix waits for the next stream with the server context instead;
 the accepted stream still has its bounded authentication deadline, and the
@@ -406,7 +406,7 @@ handshake timeout is 300 ms, then verifies a successful transfer.
 
 The fix was deployed only to the existing development service on `:12443`;
 the service stayed active and the previous binary was copied to
-`/usr/local/bin/wanoptd-rollback-pre-efa358a`. It does not select BBR or alter
+`/usr/local/bin/queqiaod-rollback-pre-efa358a`. It does not select BBR or alter
 the existing Clash, Xray, sing-box, Cloudflare, Nginx, or WireGuard services.
 
 Immediately after deployment, a five-trial one-lane 10-MiB CacheFly block was
@@ -431,7 +431,7 @@ selection, not evidence that the controller is correct under all paths.
 A fresh five-trial TUIC control through the existing `127.0.0.1:12086` node
 completed 5/5 in 49.262, 24.309, 12.089, 7.969, and 8.301 seconds (median
 12.089 s, about 6.94 Mb/s). The wide within-window spread confirms that the
-China-to-US path is currently highly variable; the WANOPT result still fails
+China-to-US path is currently highly variable; the QUEQIAO result still fails
 the bulk reliability bar, and no production performance claim is made from a
 single block.
 
@@ -474,16 +474,16 @@ post-body replacement storm. Commit `bd1b808` bounds recovery to eight
 attempts and applies exponential backoff after successful-but-immediately-
 closed joins as well as failed handshakes. The follow-up block is evidence
 that this guard prevents churn, not proof of lossless resume or universal BBR
-stability. BBR remains opt-in and is not selected by `wanoptd-dev.service`;
+stability. BBR remains opt-in and is not selected by `queqiaod-dev.service`;
 controlled loss/reordering, interactive-under-bulk, upload, soak, and
 multi-path campaigns remain release gates.
 
 ## Latest controlled loss-window matrix (b053b96)
 
 After the final-ACK cleanup fix (`b053b96`), a fresh isolated Linux/amd64
-build was installed as `/usr/local/bin/wanoptd-b053b96` and tested on the
+build was installed as `/usr/local/bin/queqiaod-b053b96` and tested on the
 temporary QUIC listener `23.135.236.244:12444`. The live
-`wanoptd-dev.service` on `:12443`, TUIC listener, Xray, sing-box, Cloudflare,
+`queqiaod-dev.service` on `:12443`, TUIC listener, Xray, sing-box, Cloudflare,
 Nginx, WireGuard, and Clash profile were not changed. The client was bound
 with `--local-address auto`; all trials used one physical China-to-US path
 and the exact 10 MiB CacheFly object. A row was complete only for curl exit 0,
@@ -495,9 +495,9 @@ reliability.
 | Profile | N=1 completion | N=1 completion times (s) | N=1 successful goodput (Mb/s) | N=2 completion | N=2 aggregate goodput (Mb/s) |
 |---|---:|---|---|---:|---|
 | TUIC control | 5/5 | 25.233, 12.874, 12.488, 10.746, 13.614 | 3.324, 6.162, 6.516, 6.717, 7.806 (median 6.516) | 10/10 | 3.675, 4.631, 7.209, 7.799, 8.124 (median 7.209) |
-| WANOPT BBR-shaped, independent lane | 4/5 | 57.017, 56.709, failed at 10.001, 75.807, 64.055 | 1.107, 1.310, 1.471, 1.479 (successful median 1.390) | 10/10 | 2.269, 2.612, 2.653, 3.153, 3.535 (median 2.653) |
-| WANOPT BBR-shaped, pooled control stream | 5/5 | 33.645, 46.244, 39.410, 48.946, 49.860 | 1.682, 1.714, 1.814, 2.129, 2.493 (median 1.814) | 10/10 | 1.601, 1.815, 2.082, 2.196, 2.319 (median 2.082) |
-| WANOPT Reno control | 0/5 | 1,015,808--1,310,702 bytes delivered at the 120-s deadline; one dial failed at 12.803 s | no complete row | 0/10 | 999,424--1,260,858 bytes per flow at the 120-s deadline |
+| QUEQIAO BBR-shaped, independent lane | 4/5 | 57.017, 56.709, failed at 10.001, 75.807, 64.055 | 1.107, 1.310, 1.471, 1.479 (successful median 1.390) | 10/10 | 2.269, 2.612, 2.653, 3.153, 3.535 (median 2.653) |
+| QUEQIAO BBR-shaped, pooled control stream | 5/5 | 33.645, 46.244, 39.410, 48.946, 49.860 | 1.682, 1.714, 1.814, 2.129, 2.493 (median 1.814) | 10/10 | 1.601, 1.815, 2.082, 2.196, 2.319 (median 2.082) |
+| QUEQIAO Reno control | 0/5 | 1,015,808--1,310,702 bytes delivered at the 120-s deadline; one dial failed at 12.803 s | no complete row | 0/10 | 999,424--1,260,858 bytes per flow at the 120-s deadline |
 
 These are not capacity estimates: the China-to-US path was visibly in a
 severe loss/throttle window, and no configuration was tested simultaneously
@@ -515,9 +515,9 @@ total-time observations:
 | Profile | HTTP success | Times (s) | Median / p95 (s) |
 |---|---:|---|---:|
 | TUIC | 10/10 | 0.489, 1.025, 0.477, 0.474, 0.679, 0.666, 0.541, 0.723, 0.515, 1.326 | 0.592 / 1.326 |
-| WANOPT BBR-shaped | 10/10 | 2.023, 4.936, 3.191, 2.687, 1.818, 1.465, 1.880, 3.086, 2.087, 4.422 | 2.355 / 4.936 |
-| WANOPT Adaptive | 10/10 | 2.232, 3.874, 1.908, 3.570, 1.658, 7.472, 2.310, 2.147, 1.617, 1.980 | 2.139 / 7.472 |
-| WANOPT Brutal, 1 MiB/s/lane | 10/10 | 2.760, 3.908, 7.096, 4.156, 7.072, 1.606, 2.820, 5.890, 2.856, 3.599 | 3.658 / 7.096 |
+| QUEQIAO BBR-shaped | 10/10 | 2.023, 4.936, 3.191, 2.687, 1.818, 1.465, 1.880, 3.086, 2.087, 4.422 | 2.355 / 4.936 |
+| QUEQIAO Adaptive | 10/10 | 2.232, 3.874, 1.908, 3.570, 1.658, 7.472, 2.310, 2.147, 1.617, 1.980 | 2.139 / 7.472 |
+| QUEQIAO Brutal, 1 MiB/s/lane | 10/10 | 2.760, 3.908, 7.096, 4.156, 7.072, 1.606, 2.820, 5.890, 2.856, 3.599 | 3.658 / 7.096 |
 
 The latency observations reinforce the workload policy: a fixed-rate bulk
 controller creates queueing delay for fresh short requests, while a custom
@@ -558,8 +558,8 @@ exactly 10,485,760 zero bytes from China through one QUIC lane.
 | Profile | Completion | Upload times (s) | Median goodput |
 |---|---:|---|---:|
 | TUIC control | 5/5 | 12.845, 14.935, 11.961, 12.440, 13.411 | 6.53 Mb/s |
-| WANOPT live safe default (Reno/auto) | 5/5 | 26.696, 13.945, 16.410, 39.882, 22.101 | 3.79 Mb/s |
-| WANOPT BBR-shaped, isolated `:12444` | 5/5 | 54.431, 61.711, 30.195, 29.500, 39.423 | 2.13 Mb/s |
+| QUEQIAO live safe default (Reno/auto) | 5/5 | 26.696, 13.945, 16.410, 39.882, 22.101 | 3.79 Mb/s |
+| QUEQIAO BBR-shaped, isolated `:12444` | 5/5 | 54.431, 61.711, 30.195, 29.500, 39.423 | 2.13 Mb/s |
 
 The sink confirms that the upload direction is also materially weaker than
 TUIC in this measurement window. BBR completed the logical request but was
@@ -577,11 +577,11 @@ bulk flow.
 | Profile | Bulk completion | Bulk bytes per flow at deadline | Interactive success | Interactive times (s), median / maximum |
 |---|---:|---|---:|---:|
 | TUIC control | 0/8 | 7,503,800--7,602,104 | 10/10 | 3.151 / 8.468 |
-| WANOPT live safe default | 0/8 | 999,424--3,440,604 | 10/10 | 3.571 / 6.534 |
+| QUEQIAO live safe default | 0/8 | 999,424--3,440,604 | 10/10 | 3.571 / 6.534 |
 
 Neither endpoint provided a useful bulk result in this severe loss window;
 the interactive rows are therefore tail-latency observations under a
-stressed path, not evidence that WANOPT has overtaken TUIC. A production
+stressed path, not evidence that QUEQIAO has overtaken TUIC. A production
 policy must gate bulk admission on path health and preserve an explicit
 interactive reserve rather than infer safety from successful HTTP status
 alone.
@@ -611,7 +611,7 @@ complete row requires HTTP 200, curl exit 0, and exactly 10,485,760 bytes.
 | Profile | N=1 completion | N=1 goodput (Mb/s) | N=2 completion | N=2 aggregate goodput (Mb/s) |
 |---|---:|---|---:|---|
 | TUIC, contemporaneous control | 5/5 | 1.737, 5.810, 6.022, 5.493, 2.691 (median 5.493) | not rerun in this block | not rerun |
-| WANOPT `bbr-tuic`, independent lane | 5/5 | 3.657, 3.126, 1.767, 3.424, 2.685 (median 3.126) | 9/10 flows complete; one pair had one dial failure | 5.660, 5.989, 5.442, incomplete, 4.612 (successful-pair median 5.660) |
+| QUEQIAO `bbr-tuic`, independent lane | 5/5 | 3.657, 3.126, 1.767, 3.424, 2.685 (median 3.126) | 9/10 flows complete; one pair had one dial failure | 5.660, 5.989, 5.442, incomplete, 4.612 (successful-pair median 5.660) |
 
 The port is materially better than the old custom BBR in the previous
 campaign, and its two-flow successful pairs are close to the contemporaneous
@@ -631,7 +631,7 @@ single-flow and failure gates.
 
 Five serial 10-MiB uploads to the bounded US-side sink completed `5/5` in
 `13.818, 16.059, 17.779, 16.176, 19.922` seconds (median 16.176 s,
-approximately 5.19 Mb/s). This is better than the earlier WANOPT BBR upload
+approximately 5.19 Mb/s). This is better than the earlier QUEQIAO BBR upload
 median but below the same campaign's TUIC control and remains experimental.
 
 The corrected IW/RTT candidate then completed three exact 10-MiB confirmation
@@ -651,7 +651,7 @@ the live deployment; they must be stopped before a clean handoff.
 ## Authenticated pooled fast-stream campaign (1d7a556)
 
 The pooled fast-stream implementation was tested after the controller campaign
-without changing `wanoptd-dev.service` or its `:12443` listener. The isolated
+without changing `queqiaod-dev.service` or its `:12443` listener. The isolated
 servers used the `70d431a` Linux/amd64 binary (SHA-256
 `5cfaa72031cecc018898aa9de0aee511448630bd79b89c5c9819ac55c929ece3`) on
 `:12446` with `adaptive` and `:12447` with `bbr-tuic`. The client used a
@@ -713,13 +713,13 @@ The instrumented candidate was run on isolated UDP `:12448`; the live `:12443`
 service remained unchanged. The existing TUIC client on `127.0.0.1:12086` and
 server inbound `:2444` were the contemporaneous control.
 
-One fresh WANOPT Google `generate_204` request completed in 5.256 s. Its
+One fresh QUEQIAO Google `generate_204` request completed in 5.256 s. Its
 measured critical path was:
 
 | Stage | Duration |
 |---|---:|
 | Outer QUIC connection establishment | 2.869 s |
-| WANOPT Hello authentication round trip | 0.905 s |
+| QUEQIAO Hello authentication round trip | 0.905 s |
 | Remaining flow-open path, including `OPEN` / `OPEN_OK` | 0.382 s |
 | US-side DNS plus destination TCP connect | 0.0057 s |
 | Curl destination TLS complete | 4.445 s from request start |
@@ -728,19 +728,19 @@ measured critical path was:
 The server-side profile independently measured 0.996 s waiting for the
 post-Hello `OPEN`, only 5.7 ms dialing the destination, and 1.402 s running the
 proxied application flow. This rules out US-side DNS/TCP establishment as the
-dominant latency. The impaired China-to-US outer handshake plus WANOPT's two
+dominant latency. The impaired China-to-US outer handshake plus QUEQIAO's two
 serial control exchanges dominate a cold request.
 
 A persistent authenticated QUIC pool removed most of that cost. Three serial
-WANOPT requests completed in 4.858, 2.694, and 0.818 s. The first still paid a
+QUEQIAO requests completed in 4.858, 2.694, and 0.818 s. The first still paid a
 2.444-s outer handshake; subsequent `OPEN_FAST` streams took about 0.264--0.265
 s to open. The same-window TUIC control completed three requests in 0.590,
 0.555, and 0.532 s. TUIC therefore retained both a lower median and lower
-variance, but the warm WANOPT floor is no longer multi-second: the remaining
+variance, but the warm QUEQIAO floor is no longer multi-second: the remaining
 fixed protocol cost is approximately one China-US `OPEN_FAST` round trip plus
 the end-to-end destination TLS/request exchange.
 
-The bulk profile exposed two additional release blockers. One pooled WANOPT
+The bulk profile exposed two additional release blockers. One pooled QUEQIAO
 10-MiB download completed in 51.475 s (1.63 Mb/s application goodput). During
 the transfer, the remote controller entered recovery while its pacing-rate
 telemetry ranged from roughly 2.6 to 15.4 MB/s; QUIC connection bytes sent
@@ -754,7 +754,7 @@ same-window TUIC trial received 9,272,598 of 10,485,760 bytes before its 60-s
 timeout, confirming that the path itself was also in a severe degradation
 window; this single pair is diagnostic, not a throughput ranking.
 
-Finally, after the WANOPT response body completed, a normal last-lane EOF was
+Finally, after the QUEQIAO response body completed, a normal last-lane EOF was
 not recognized as completed on the client. The recovery manager opened six
 sequential zero-payload replacement lanes and eventually reported the bounded
 45-s replacement timeout. Curl had already received the exact body, so this
@@ -779,7 +779,7 @@ QUIC connection, the first Initial packet reached the US host at
 approximately 2.25 s, 3.1 s, and 3.6 s. The client eventually completed, but
 the loss/PTO schedule—not CPU, HMAC verification, DNS, or the destination
 dial—accounted for the seconds of delay. A separate debug run measured an
-outer QUIC dial of 7.85 s, with 0.28 s for the WANOPT Hello exchange and 0.26 s
+outer QUIC dial of 7.85 s, with 0.28 s for the QUEQIAO Hello exchange and 0.26 s
 for the remaining flow-open path; the server spent 0.12 ms authenticating and
 only 0.4 ms dialing the oracle.
 
@@ -806,16 +806,16 @@ campaign were:
 | Profile | Resulting total times (s) |
 |---|---|
 | Existing TUIC control | 0.492, 0.421, 0.382, 0.378, 0.346 |
-| WANOPT pooled `OPEN_FAST` | 0.563, 7.643, 2.008, 0.825, 2.009 |
-| WANOPT fresh QUIC (legacy sequential control) | 4.906 in the captured sample; other fresh trials ranged from ~1.9 to ~9.7 |
-| WANOPT fresh QUIC (pipelined HELLO+OPEN candidate) | 8.658, 1.756, 3.272, 3.212, plus one 10-s proxy-close failure |
+| QUEQIAO pooled `OPEN_FAST` | 0.563, 7.643, 2.008, 0.825, 2.009 |
+| QUEQIAO fresh QUIC (legacy sequential control) | 4.906 in the captured sample; other fresh trials ranged from ~1.9 to ~9.7 |
+| QUEQIAO fresh QUIC (pipelined HELLO+OPEN candidate) | 8.658, 1.756, 3.272, 3.212, plus one 10-s proxy-close failure |
 
 These rows are intentionally diagnostic rather than a throughput or latency
 release claim: the China path changed during the interleaved trials. They do
 show the causal split. TUIC's persistent connection avoids repeated QUIC
-handshakes; WANOPT's pooled mode removes repeated authentication but still
+handshakes; QUEQIAO's pooled mode removes repeated authentication but still
 depends on the health of one QUIC connection; and the pipeline removes one
-WANOPT request/response RTT without changing the UDP loss behavior.
+QUEQIAO request/response RTT without changing the UDP loss behavior.
 
 The candidate passed the full Go, race, vet, and protocol integration suites.
 It must still be tested with the automatic TCP race and pooled first-stream

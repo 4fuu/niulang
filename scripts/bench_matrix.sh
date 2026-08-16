@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run the emulated-path comparison matrix between wanopt and the TUIC-shaped
-# reference proxy. Every row is produced by cmd/wanoptbench in one process
+# Run the emulated-path comparison matrix between queqiao and the TUIC-shaped
+# reference proxy. Every row is produced by cmd/queqiaobench in one process
 # against a seeded path emulator, so a difference between the two stacks in the
 # same block is attributable to the transports rather than to a path window.
 #
@@ -8,20 +8,20 @@
 # see docs/MEASUREMENTS-*.md for those.
 set -Euo pipefail
 
-output=${WANOPT_OUTPUT:-}
-trials=${WANOPT_TRIALS:-5}
-congestion=${WANOPT_CONGESTION:-bbr-tuic}
-timeout_seconds=${WANOPT_TIMEOUT:-180s}
-gate=${WANOPT_GATE:-0}
-tolerance=${WANOPT_TOLERANCE:-0.10}
-json_dir=${WANOPT_JSON_DIR:-}
+output=${QUEQIAO_OUTPUT:-}
+trials=${QUEQIAO_TRIALS:-5}
+congestion=${QUEQIAO_CONGESTION:-bbr-tuic}
+timeout_seconds=${QUEQIAO_TIMEOUT:-180s}
+gate=${QUEQIAO_GATE:-0}
+tolerance=${QUEQIAO_TOLERANCE:-0.10}
+json_dir=${QUEQIAO_JSON_DIR:-}
 
 usage() {
     cat >&2 <<'EOF'
 Usage: bench_matrix.sh [--output FILE] [--trials N] [--congestion NAME]
                        [--gate] [--tolerance FRACTION] [--json-dir DIR]
 
---gate makes each block fail when wanopt falls behind the reference by more
+--gate makes each block fail when queqiao falls behind the reference by more
 than --tolerance, or completes fewer transfers, so a transport regression is
 rejected rather than merely printed. --json-dir writes one machine-readable
 record per block, which is what makes results comparable across commits.
@@ -69,7 +69,7 @@ bench() {
     if ((gate)); then
         extra+=(--gate --tolerance "$tolerance")
     fi
-    if ! go run ./cmd/wanoptbench --trials "$trials" --congestion "$congestion" \
+    if ! go run ./cmd/queqiaobench --trials "$trials" --congestion "$congestion" \
         --timeout "$timeout_seconds" "${extra[@]}" "$@"; then
         failures=$((failures + 1))
     fi

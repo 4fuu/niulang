@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/pep"
+	"github.com/icourses-dev/queqiao/internal/pep"
 )
 
 var (
@@ -57,9 +57,6 @@ type options struct {
 	fallbackDelay                 time.Duration
 	udpFailureThreshold           int
 	udpCooldown                   time.Duration
-	initialLanes                  int
-	maxLanes                      int
-	bulkStartLanes                int
 	allowPrivate                  bool
 	logLevel                      string
 	jsonLogs                      bool
@@ -69,7 +66,7 @@ type options struct {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "wanoptd: %v\n", err)
+		fmt.Fprintf(os.Stderr, "queqiaod: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -80,7 +77,7 @@ func run(args []string) error {
 		return err
 	}
 	if opts.showVersion {
-		fmt.Printf("wanoptd %s commit=%s built=%s go=%s\n", version, commit, buildDate, goVersion())
+		fmt.Printf("queqiaod %s commit=%s built=%s go=%s\n", version, commit, buildDate, goVersion())
 		return nil
 	}
 	logger, err := newLogger(opts.logLevel, opts.jsonLogs)
@@ -114,8 +111,7 @@ func run(args []string) error {
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
 			FallbackDelay: opts.fallbackDelay, UDPFailureThreshold: opts.udpFailureThreshold,
-			UDPCooldown: opts.udpCooldown, InitialLanes: opts.initialLanes,
-			MaxLanes: opts.maxLanes, BulkStartLanes: opts.bulkStartLanes, Logger: logger,
+			UDPCooldown: opts.udpCooldown, Logger: logger,
 		})
 		if err != nil {
 			return err
@@ -142,7 +138,6 @@ func run(args []string) error {
 			Congestion:        pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
-			MaxLanes:    opts.maxLanes,
 			Logger:      logger,
 			UDPOnStream: opts.udpOnStream,
 		})
@@ -162,7 +157,7 @@ func run(args []string) error {
 
 func parseOptions(args []string) (options, error) {
 	var opts options
-	fs := flag.NewFlagSet("wanoptd", flag.ContinueOnError)
+	fs := flag.NewFlagSet("queqiaod", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&opts.mode, "mode", "", "agent mode: local or server")
 	fs.StringVar(&opts.listen, "listen", "", "local SOCKS5 or remote agent listen address")
@@ -193,9 +188,6 @@ func parseOptions(args []string) (options, error) {
 	fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before starting TCP fallback in auto mode")
 	fs.IntVar(&opts.udpFailureThreshold, "udp-failure-threshold", 3, "consecutive UDP failures before temporary TCP-only mode")
 	fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "how long to suppress UDP after repeated failures")
-	fs.IntVar(&opts.initialLanes, "initial-lanes", 1, "number of QUIC lanes to open after a flow is established (1-8)")
-	fs.IntVar(&opts.maxLanes, "max-lanes", 4, "ceiling on QUIC lanes carrying bulk payload per flow (1-8); lanes are added only when a controlled probe measures a gain, so this is a bound and not a target. A negotiated control lane is additional; set 1 to disable striping")
-	fs.IntVar(&opts.bulkStartLanes, "bulk-start-lanes", 1, "bulk lanes to open when a flow becomes bulk (growth beyond this requires measured gain)")
 	fs.BoolVar(&opts.allowPrivate, "allow-private-destinations", false, "allow the server to reach private/link-local destinations")
 	fs.StringVar(&opts.logLevel, "log-level", "info", "debug, info, warn, or error")
 	fs.BoolVar(&opts.jsonLogs, "json-logs", false, "write structured JSON logs")
@@ -262,12 +254,6 @@ func parseOptions(args []string) (options, error) {
 	}
 	if opts.flowIdleTimeout <= 0 || opts.flowMaxLifetime <= 0 || opts.flowIdleTimeout > opts.flowMaxLifetime {
 		return opts, errors.New("flow idle timeout must be positive and no longer than flow max lifetime")
-	}
-	if opts.initialLanes < 1 || opts.initialLanes > 8 {
-		return opts, errors.New("--initial-lanes must be between 1 and 8")
-	}
-	if opts.maxLanes < 1 || opts.maxLanes > 8 || opts.bulkStartLanes < 1 || opts.bulkStartLanes > opts.maxLanes {
-		return opts, errors.New("invalid lane settings")
 	}
 	if opts.mode == "local" {
 		if opts.remote == "" || opts.serverName == "" {

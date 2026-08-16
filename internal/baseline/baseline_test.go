@@ -27,8 +27,8 @@ func testCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	}
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "wanopt.test"},
-		DNSNames:     []string{"wanopt.test"},
+		Subject:      pkix.Name{CommonName: "queqiao.test"},
+		DNSNames:     []string{"queqiao.test"},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -104,7 +104,7 @@ func startReference(t *testing.T, token []byte) harness {
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: socksListener.Addr().String(), RemoteAddr: packet.LocalAddr().String(),
-		ServerName: "wanopt.test", RootCAs: roots, Token: token,
+		ServerName: "queqiao.test", RootCAs: roots, Token: token,
 		Transport: TUICTransport(), DialTimeout: 5 * time.Second, Logger: logger,
 	})
 	if err != nil {
@@ -245,7 +245,7 @@ func TestReferenceRejectsAWrongToken(t *testing.T) {
 	clientToken := make([]byte, tokenSize) // all zeroes: deliberately wrong
 	client, err := NewClient(ClientConfig{
 		ListenAddr: socksListener.Addr().String(), RemoteAddr: packet.LocalAddr().String(),
-		ServerName: "wanopt.test", RootCAs: roots, Token: clientToken,
+		ServerName: "queqiao.test", RootCAs: roots, Token: clientToken,
 		Transport: TUICTransport(), DialTimeout: 3 * time.Second, Logger: logger,
 	})
 	if err != nil {

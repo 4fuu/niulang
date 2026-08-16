@@ -1,7 +1,7 @@
 package pep
 
 // This file implements the SOCKS5 UDP-associate data plane. UDP packets are
-// carried as individual authenticated wanopt TypePacket frames, so packet
+// carried as individual authenticated queqiao TypePacket frames, so packet
 // boundaries survive whichever substrate carries them.
 //
 // Where the lane's QUIC connection negotiated DATAGRAM in both directions,
@@ -30,9 +30,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/session"
-	"github.com/icourses-dev/wanopt/internal/socks5"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/session"
+	"github.com/icourses-dev/queqiao/internal/socks5"
 )
 
 const (

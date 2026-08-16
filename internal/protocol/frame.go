@@ -1,4 +1,4 @@
-// Package protocol defines the versioned, bounded wanopt frame envelope.
+// Package protocol defines the versioned, bounded queqiao frame envelope.
 package protocol
 
 import (

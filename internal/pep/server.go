@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	"github.com/icourses-dev/wanopt/internal/classifier"
-	"github.com/icourses-dev/wanopt/internal/limiter"
-	"github.com/icourses-dev/wanopt/internal/metrics"
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/session"
+	"github.com/icourses-dev/queqiao/internal/classifier"
+	"github.com/icourses-dev/queqiao/internal/limiter"
+	"github.com/icourses-dev/queqiao/internal/metrics"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/session"
 )
 
 // Must exceed the client's bounded lane-replacement wait so a final-ACK loss
@@ -50,7 +50,6 @@ type ServerConfig struct {
 	StreamReceiveWindow     uint64
 	ConnectionReceiveWindow uint64
 	Metrics                 *metrics.Registry
-	MaxLanes                int
 	Logger                  *slog.Logger
 	// UDPOnStream keeps SOCKS UDP packets on the lane's control stream even
 	// where the QUIC connection negotiated datagrams. See the client's field:
@@ -117,8 +116,8 @@ func (a *quicAuthState) shared() bool {
 // control lane against the bulk maximum makes the server reject and close
 // every joined bulk lane, which the peer sees as an immediate EOF and retries,
 // churning through lanes instead of transferring.
-func serverLaneBudget(maxLanes int, reserveControl bool) int {
-	bulk, control := bulkLaneBudget(maxLanes, reserveControl)
+func serverLaneBudget(reserveControl bool) int {
+	bulk, control := bulkLaneBudget(reserveControl)
 	return bulk + control
 }
 
@@ -173,12 +172,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.MaxSessions > maxConfiguredSessions {
 		return nil, fmt.Errorf("maximum sessions must not exceed %d", maxConfiguredSessions)
-	}
-	if cfg.MaxLanes <= 0 {
-		cfg.MaxLanes = 8
-	}
-	if cfg.MaxLanes > 8 {
-		return nil, errors.New("maximum lane count must not exceed 8")
 	}
 	if cfg.Congestion == "" {
 		cfg.Congestion = defaultCongestion()
@@ -367,7 +360,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	// ordering is important during shutdown: a handler blocked in Read must be
 	// released before Wait can complete.
 	defer wg.Wait()
-	defer conn.CloseWithError(0, "wanopt session complete")
+	defer conn.CloseWithError(0, "queqiao session complete")
 	controller := configureQUICController(conn, congestionConfig{
 		kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
 		adaptiveMinBytesPerSec: s.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: s.cfg.AdaptiveMaxBytesSec,
@@ -593,7 +586,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0
 	flow.controlLaneShared = auth.shared
-	serverSession := &serverFlow{flow: flow, maxLanes: serverLaneBudget(s.cfg.MaxLanes, flow.reserveControlLane)}
+	serverSession := &serverFlow{flow: flow, maxLanes: serverLaneBudget(flow.reserveControlLane)}
 	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
 		flow.closeAll()
 		return

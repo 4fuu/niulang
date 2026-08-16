@@ -44,10 +44,10 @@ this is the measured limit of the filter.
 One seed reproduces one loss pattern exactly. That property has its own test,
 because everything else depends on it.
 
-**`internal/baseline`** (runnable as `cmd/wanoptref`) — a TUIC-shaped reference
+**`internal/baseline`** (runnable as `cmd/queqiaoref`) — a TUIC-shaped reference
 proxy: one authenticated QUIC connection, one bidirectional stream per relayed
 TCP connection, a short destination header, then unframed copying. It runs on
-the same quic-go fork and the same congestion controllers wanopt uses, with
+the same quic-go fork and the same congestion controllers queqiao uses, with
 TUIC's published transport windows.
 
 It is a control, not a claim to be native TUIC. Comparing against a separately
@@ -66,10 +66,10 @@ benchmark gains four more stacks:
 | `vless-ws` | sing-box, VLESS over WebSocket | TCP relay |
 
 Each runs as a server the emulator forwards to and a client exposing SOCKS5,
-over exactly the same seeded path as wanopt. The client trusts exactly the
+over exactly the same seeded path as queqiao. The client trusts exactly the
 server's certificate, so nothing disables verification.
 
-**`cmd/wanoptbench`** — runs the selected stacks over one emulated path in a
+**`cmd/queqiaobench`** — runs the selected stacks over one emulated path in a
 single process and reports per-trial rows, a summary, optional JSON, and an
 optional regression gate.
 
@@ -87,7 +87,7 @@ producing a lossless result, and it applies backpressure where the packet relay
 would tail-drop.
 
 So `vless-ws` against `vless-tcp` is a fair comparison — it isolates
-WebSocket's framing cost — and `tuic` against `wanopt` is a fair comparison.
+WebSocket's framing cost — and `tuic` against `queqiao` is a fair comparison.
 `vless-tcp` against `tuic` is not. Emulating loss for a stream transport needs
 an IP-layer facility such as dummynet, which needs privilege this harness does
 not take.
@@ -99,7 +99,7 @@ partial rate**, alongside the completion rate.
 
 This matters. A median over completed trials alone rewards a transport for
 giving up: in a 35%-burst-loss block the reference completed 7 of 12 trials and
-wanopt 10 of 12, and scoring only the successes made the transport that
+queqiao 10 of 12, and scoring only the successes made the transport that
 finished the hard trials look slower than the one that abandoned them.
 `median_mbits_completed_only` is retained for continuity with older campaign
 notes and must never be compared across stacks with different completion rates.
@@ -113,36 +113,32 @@ queueing behind the bulk transfer.
 
 ```sh
 # Against real implementations rather than only the in-tree control.
-go run ./cmd/wanoptbench --stacks baseline,wanopt,tuic,hysteria2 \
+go run ./cmd/queqiaobench --stacks baseline,queqiao,tuic,hysteria2 \
     --sing-box /path/to/sing-box --rtt 200 --loss 1 --rate 100 --trials 5
 
 # The TCP family, which cannot be measured under loss.
-go run ./cmd/wanoptbench --stacks vless-tcp,vless-ws \
+go run ./cmd/queqiaobench --stacks vless-tcp,vless-ws \
     --sing-box /path/to/sing-box --rtt 200 --loss 0 --rate 100 --trials 4
 
 # The standard matrix, five trials per cell.
 ./scripts/bench_matrix.sh --trials 5 --output /tmp/matrix.tsv
 
 # One cell, both stacks, with a machine-readable record and a CI gate.
-go run ./cmd/wanoptbench --rtt 200 --loss 3 --rate 100 --trials 5 \
+go run ./cmd/queqiaobench --rtt 200 --loss 3 --rate 100 --trials 5 \
     --json /tmp/result.json --gate --tolerance 0.10
 
 # Does a bulk transfer damage interactive latency?
-go run ./cmd/wanoptbench --rtt 200 --loss 1 --rate 100 \
+go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
     --bytes $((50*1024*1024)) --interactive --trials 5
 
 # Correlated loss, controller held constant so the transports are compared
 # rather than the controllers.
-go run ./cmd/wanoptbench --rtt 178 --loss 35 --loss-burst 10 --rate 50 \
+go run ./cmd/queqiaobench --rtt 178 --loss 35 --loss-burst 10 --rate 50 \
     --bytes $((4*1024*1024)) --congestion brutal --brutal-rate 12 --trials 12
-
-# Lane aggregation, which needs a path that polices per source address.
-go run ./cmd/wanoptbench --stacks wanopt --rtt 200 --loss 1 --rate 400 \
-    --per-flow-rate 25 --bytes $((100*1024*1024)) --lanes 4 --initial-lanes 4
 
 # A reverse-path-heavy regime, which is where a transport that layers its own
 # acknowledgements over QUIC gets into trouble.
-go run ./cmd/wanoptbench --rtt 200 --loss 0.5 --loss-up 25 --rate 100 \
+go run ./cmd/queqiaobench --rtt 200 --loss 0.5 --loss-up 25 --rate 100 \
     --bytes $((32*1024*1024)) --trials 4
 ```
 
@@ -157,14 +153,15 @@ serialization clock, one queue, one loss process -- starts both transfers
 together, and reports each one's share:
 
 ```sh
-go run ./cmd/wanoptbench --contend wanopt,baseline --rtt 200 --rate 100 \
-    --bytes $((20*1024*1024)) --lanes 4 --initial-lanes 4 --trials 6
+go run ./cmd/queqiaobench --contend queqiao,baseline --rtt 200 --rate 100 \
+    --bytes $((20*1024*1024)) --trials 6
 ```
 
-A share of 0.5 is an even split. The measurement is worth making before
-trusting any conclusion about lane count: four lanes measure 60 Mbit/s against
-one lane's 58 on a shared path run sequentially, which reads as harmless, and
-take 0.40 of the link against one lane's 0.51 when actually contended.
+A share of 0.5 is an even split. This is what found the last argument against
+striping before it was deleted: four lanes measured 60 Mbit/s against one
+lane's 58 on a shared path run sequentially, which reads as harmless, and took
+0.40 of the link against one lane's 0.51 when actually contended -- the same
+sequential number, and the opposite conclusion.
 
 ## Calibrating the instrument
 
@@ -191,7 +188,7 @@ campaigns. All three are cheap to avoid and expensive to miss:
   both clients, for the same reason, and give both the same timeout.
 - **Make the remote oracle concurrent.** A single-threaded `http.server` lets a
   lingering connection from one trial delay the next; before this was fixed,
-  wanopt measured 1.19 Mbit/s against the reference's 4.52, and with a threaded
+  queqiao measured 1.19 Mbit/s against the reference's 4.52, and with a threaded
   oracle and nothing else changed the two measured 0.478 and 0.522.
 
 Stop every temporary listener when the campaign ends. An earlier session left

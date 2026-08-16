@@ -63,7 +63,7 @@ all 18/18 requests per controller completed with the expected byte count.
 | Controller | One lane (Mbps) | Eight lanes (Mbps) |
 |---|---:|---:|
 | stock apNet QUIC (control) | 0.31 | 1.56 |
-| adaptive (wanopt) | 0.50 | 3.00 |
+| adaptive (queqiao) | 0.50 | 3.00 |
 | Brutal, 1 MiB/s per lane | 1.35 | 6.56 |
 
 The short-object result includes handshake and startup time, so it is not a
@@ -82,7 +82,7 @@ development result, not a production guarantee: the fixed rate is an operator
 target, each lane has its own controller, and the current prototype has no
 aggregate token bucket or seamless lane replacement.
 
-The server was restored to `wanoptd-dev.service` with its default controller
+The server was restored to `queqiaod-dev.service` with its default controller
 immediately after the experiment. No existing Xray, sing-box, Cloudflare,
 Nginx, WireGuard, or Clash configuration was changed.
 

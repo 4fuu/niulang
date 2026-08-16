@@ -5,9 +5,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/pathmodel"
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/session"
+	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/session"
 )
 
 // The path a client is on is not a property of the server. Moving from Wi-Fi

@@ -1,4 +1,4 @@
-# wanopt architecture
+# queqiao architecture
 
 ## Problem statement
 
@@ -8,7 +8,7 @@ tail behavior. QUIC-based TUIC and Hysteria 2 are substantially more robust,
 but ordinary Clash proxying still maps one application connection to one
 logical proxy flow.
 
-`wanopt` is a paired performance-enhancing proxy (PEP): the local agent
+`queqiao` is a paired performance-enhancing proxy (PEP): the local agent
 terminates the application-side socket, and the US agent creates the
 destination-side socket. Bytes in between are carried as numbered frames over
 one or more authenticated lanes.

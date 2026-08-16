@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/lossmodel"
+	"github.com/icourses-dev/queqiao/internal/lossmodel"
 )
 
 func livePath() Params {

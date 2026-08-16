@@ -1,6 +1,6 @@
-# wanopt
+# queqiao
 
-`wanopt` is an experimental, open-source performance-enhancing proxy for
+`queqiao` is an experimental, open-source performance-enhancing proxy for
 high-latency or lossy long-haul links. It is designed for the specific case
 where a client in China must always egress from one fixed US server.
 
@@ -57,31 +57,30 @@ different paths rather than two transports. Two controls exist for this:
 - `internal/pathsim` is a deterministic UDP path emulator — fixed delay, seeded
   loss, a bottleneck with tail-drop queueing, and an optional per-source-address
   policer. One seed reproduces one loss pattern.
-- `internal/baseline` (runnable as `cmd/wanoptref`) is a TUIC-shaped reference
+- `internal/baseline` (runnable as `cmd/queqiaoref`) is a TUIC-shaped reference
   proxy: one authenticated QUIC connection, one stream per relayed TCP
   connection, unframed copying, TUIC's published transport windows — built on
-  the same QUIC stack and controllers wanopt uses, so a measured gap is
+  the same QUIC stack and controllers queqiao uses, so a measured gap is
   attributable to the transport design rather than to the language or library.
 - `internal/extproxy` drives real implementations over the same emulated path,
   because an in-tree control on its own is a weak claim: sing-box for native
   TUIC v5 and Hysteria2, and VLESS over TLS and over WebSocket on a stream
   relay. Five trials each at 200 ms with every stack completing every trial,
-  wanopt measures 37.6 / 34.0 / 26.6 Mbit/s at 0 / 1 / 3% loss against native
+  queqiao measures 37.6 / 34.0 / 26.6 Mbit/s at 0 / 1 / 3% loss against native
   TUIC's 37.4 / 30.4 / 28.6 — broadly at parity, not uniformly ahead.
 
-`cmd/wanoptbench` runs both over one emulated path, emits JSON, and can fail a
-build with `--gate` when wanopt falls behind the reference;
+`cmd/queqiaobench` runs both over one emulated path, emits JSON, and can fail a
+build with `--gate` when queqiao falls behind the reference;
 `scripts/bench_matrix.sh` is the standard matrix and
 `scripts/bench_live_matched.sh` alternates trials between two running proxies
 on a real link. [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) explains what
-each knob models and how to read the numbers. On the emulated matrix, wanopt is
+each knob models and how to read the numbers. On the emulated matrix, queqiao is
 at or above the reference for single-flow goodput at 0-20% loss, for 4 and 8
 concurrent flows, for cold and warm request latency, and for CPU-bound datapath
-cost. Where a single connection is policed below the path's capacity -- the case
-striping exists for -- four lanes carry 50 MiB at 53.0 Mbit/s against the
-reference's 22.5. See
-[`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md) for the current numbers
-and the five transport defects that measuring them exposed, and
+cost. See
+[`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md) for the striping
+campaign and the five transport defects that measuring it exposed -- that
+document is superseded, and the striping it measures is deleted -- and
 [`docs/PERFORMANCE-20260812.md`](docs/PERFORMANCE-20260812.md) for the earlier
 campaign.
 
@@ -89,7 +88,7 @@ campaign.
 
 Measured against the real China-US path -- 263 ms average round trip, 226 to
 440 ms range, 5% loss, 48 ms of jitter -- fourteen alternating 8 MiB rounds:
-wanopt 10.24 Mbit/s mean against the reference's 10.59, ahead in 6 of 14 rounds.
+queqiao 10.24 Mbit/s mean against the reference's 10.59, ahead in 6 of 14 rounds.
 **Parity, not an advantage.**
 
 That campaign also found the emulator wrong in a way no emulated cell showed. A
@@ -101,7 +100,7 @@ bandwidth filter; removing it halved the throughput. Reverting cost nothing
 emulated. See [`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md) §7.6.
 
 An earlier campaign at 33% measured loss, 20 alternating 4 MiB trials, completed
-10/10 for both stacks with wanopt 23% ahead on the median; that run predates the
+10/10 for both stacks with queqiao 23% ahead on the median; that run predates the
 current transport and has not been repeated.
 
 ### Protecting interactive latency under bulk load
@@ -109,13 +108,13 @@ current transport and has not been repeated.
 A bulk transfer sharing one congestion-controlled connection with interactive
 traffic queues that traffic behind it. That is unavoidable for a single-connection
 design, and it is what classifying flows is for: once a flow is classified bulk,
-wanopt moves it onto its own QUIC connection and keeps the pooled control
+queqiao moves it onto its own QUIC connection and keeps the pooled control
 connection for short and interactive flows.
 
 Measured at 200 ms and 1% loss with a 50 MiB transfer running and small requests
-alongside, five trials (medians, reference / wanopt):
+alongside, five trials (medians, reference / queqiao):
 
-| | Reference | wanopt |
+| | Reference | queqiao |
 | --- | ---: | ---: |
 | bulk goodput | 57.3 Mbit/s | 52.0 Mbit/s |
 | interactive median | 323 ms | 208 ms |
@@ -135,15 +134,13 @@ shared control connection exists at all.
 
 ### Recommended configuration
 
-The measured configuration is `--quic-pool --optimistic-open`. Lane count needs
-no configuration: the client probes for it, settles on one lane on paths that do
-not reward striping, and grows where a per-source policer makes striping pay.
-Nothing else in the transport is tuned to a path either -- what a lane may commit
-ahead of its transport is a fraction of that transport's own congestion window,
-so it follows the path rather than a constant. Both flags remain opt-in because
-this project's release gates are not met, not because they measured badly.
+The measured configuration is `--quic-pool --optimistic-open`. There is nothing
+to size: a flow's data goes over one connection, and what it may commit ahead
+of its transport is a fraction of that transport's own congestion window, so it
+follows the path rather than a constant. Both flags remain opt-in because this
+project's release gates are not met, not because they measured badly.
 
-Outside the standard matrix, wanopt is ahead at 20 ms / 1 Gbit/s (708 against
+Outside the standard matrix, queqiao is ahead at 20 ms / 1 Gbit/s (708 against
 685 Mbit/s), at parity at 30 ms / 200 Mbit/s, ahead under 25% upstream loss
 (51.6 against 50.5), and far ahead where the path reorders: with 20 ms of
 jitter it measures 8.4 Mbit/s against 2.9, because reassembling by byte offset
@@ -151,7 +148,7 @@ does not stall a stream on an out-of-order packet the way relaying one does.
 
 The prototype is still not safe to use as a general-purpose production tunnel.
 Broader loss/soak campaigns remain outstanding, and under extreme correlated
-loss (35% in 10-packet bursts) wanopt's behavior still differs from the
+loss (35% in 10-packet bursts) queqiao's behavior still differs from the
 reference's: it completes more transfers but is slower on the ones both
 finish. That case is now diagnosed -- lanes die of QUIC's idle timeout mid-burst
 and the rejoin is refused because the server's session went with its own
@@ -167,15 +164,13 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 - One local SOCKS5/TUN-facing agent and one fixed-egress US agent.
 - One application TCP flow can be framed, reordered, and striped over
-  multiple QUIC lanes. The framing and reassembly work; the client decides how
-  many lanes to use by measuring. Striping delivers a large, reproducible gain
-  where a path polices each source address and none at all on a shared
-  bottleneck, which is what the measurement settles on in each case.
-- A PIAS-inspired policy that protects one-shot and interactive flows while
-  allocating additional lanes to bulk flows. `--max-lanes` is the ceiling on a
-  measured search rather than a target; a negotiated control lane is
-  additional, so one lane still means a classified bulk flow gets its own
-  connection.
+  one QUIC connection, framed so that arrival order does not gate delivery.
+  Striping a flow across several connections was tried, measured, and deleted:
+  the path has one bottleneck per endpoint pair, and an open-loop probe
+  delivers the same total however many connections carry it.
+- A PIAS-inspired policy that protects one-shot and interactive flows and moves
+  a classified bulk flow onto a connection of its own, so it does not put short
+  flows behind its congestion window. A negotiated control lane is additional.
 - No HTTPS MITM: the optimizer forwards encrypted application bytes.
 - UDP health probing, UDP/TCP racing, fallback, and bounded mid-session lane
   replacement.
@@ -202,33 +197,16 @@ gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 - Reproducible measurements for latency, throughput, loss, queueing, and
   application-visible failures.
 
-The client chooses its own lane count; there is no configuration to get right.
-A flow starts on one lane, and the lane manager adds another only after a
-controlled experiment measures that the last one raised goodput: it averages a
-window of samples at the current lane count, adds a lane, discards its
-handshake and ramp, averages another window, and compares. A probe that fails
-to clear 15% retires the search for that flow, so a path that does not reward
-striping pays for exactly one probe and then behaves like a single-lane
-transport. `--max-lanes` is the ceiling on that search (default 4, not a
-target); `--max-lanes 1` disables striping outright.
+There is no lane count to configure, because there is no lane count. A flow's
+data is carried by one connection. What used to sit here -- a controlled
+marginal-gain search that added a connection, measured whether goodput rose,
+and kept or retired it -- is deleted along with the striping it searched for.
 
-Established up front, lanes work: on a path policing each source address at
-25 Mbit/s, four lanes carry 50 MiB at 53.0 Mbit/s against a single lane's 22.3
-and the TUIC-shaped reference's 22.5, with every transfer completing. On a
-shared 100 Mbit/s bottleneck the same four lanes measure 60.6 against one lane's
-58.7 -- they do not aggregate, which is the correct outcome there.
+What that search concluded, on the emulated path that rewards striping, is
+recorded in [`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md); it does not
+describe the path this targets. See [`docs/DESIGN.md`](docs/DESIGN.md) for why
+that regime is not this one.
 
-The search now earns its keep rather than merely being safe. With nothing
-configured, the same policed path measures 33.2 Mbit/s against the reference's
-22.2; it used to measure 20.6, below what a single lane achieved. A probe that
-clears its gain bar doubles the target instead of adding one lane, so a transfer
-long enough to run two experiments reaches four lanes rather than three. The
-remaining gap to the pinned 53.0 is how long a controlled experiment takes, not
-what it concludes. A lane still takes several seconds to arrive when the
-search opens it mid-transfer, but that delay is the search's own baseline window
-rather than a transport cost: the secondary QUIC pool authenticates in 404 ms and
-the join completes in 606 ms. The earlier report of a 5.37 s authentication
-exchange does not reproduce.
 `--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
 initial/control streams and lets multiple short flows share its congestion
 controller. On a capable peer, bulk promotion also lazily creates one
@@ -256,7 +234,7 @@ correctness or TCP fallback.
 ```sh
 go test ./...
 go vet ./...
-go run ./cmd/wanoptd --help
+go run ./cmd/queqiaod --help
 ```
 
 The real-link benchmark harness will live under `scripts/` and will use an
@@ -267,7 +245,7 @@ On a macOS host where Clash TUN captures the numeric server address, the local
 agent can bind the outer socket to the physical source IP:
 
 ```sh
-wanoptd --mode local --listen 127.0.0.1:12080 \
+queqiaod --mode local --listen 127.0.0.1:12080 \
   --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
   --local-address auto --transport auto \
   --secret-file .dev/session.secret
@@ -285,11 +263,11 @@ controller. The rate is bytes per second per QUIC lane; it must be measured for
 the path and reduced if loss or interactive tail latency rises:
 
 ```sh
-wanoptd --mode local --listen 127.0.0.1:12080 \
+queqiaod --mode local --listen 127.0.0.1:12080 \
   --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
   --local-address auto --transport quic \
   --congestion brutal --brutal-bytes-per-sec 1048576 \
-  --max-lanes 8 --secret-file .dev/session.secret
+  --secret-file .dev/session.secret
 ```
 
 The matching server must use the same `--congestion` and rate. To constrain

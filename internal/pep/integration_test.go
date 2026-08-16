@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/metrics"
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/socks5"
+	"github.com/icourses-dev/queqiao/internal/metrics"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/socks5"
 )
 
 func testCertificate(t *testing.T) (tlsCertificate tls.Certificate, roots *x509.CertPool) {
@@ -34,8 +34,8 @@ func testCertificate(t *testing.T) (tlsCertificate tls.Certificate, roots *x509.
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "wanopt.test"},
-		DNSNames:     []string{"wanopt.test"},
+		Subject:      pkix.Name{CommonName: "queqiao.test"},
+		DNSNames:     []string{"queqiao.test"},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -96,7 +96,7 @@ func TestTLSOneLaneSOCKSEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: serverListener.Addr().String(), ServerName: "wanopt.test",
+		ListenAddr: "127.0.0.1:0", RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
 		Secret: secret, RootCAs: roots, Logger: logger,
 	})
 	if err != nil {
@@ -148,7 +148,7 @@ func TestTLSOneLaneSOCKSEndToEnd(t *testing.T) {
 		t.Fatalf("SOCKS connect failed: %v", reply)
 	}
 
-	payload := bytes.Repeat([]byte("wanopt-one-lane-"), 8192)
+	payload := bytes.Repeat([]byte("queqiao-one-lane-"), 8192)
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "wanopt.test",
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "queqiao.test",
 		Secret: secret, RootCAs: roots, Transport: transport, EnableQUICPool: transport == TransportQUIC, Logger: logger,
 	})
 	if err != nil {
@@ -348,8 +348,8 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, InitialLanes: 2, MaxLanes: 2, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger,
 		Metrics: metrics.New(),
 	})
 	if err != nil {
@@ -398,9 +398,9 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	// The per-stream authentication timeout must not be used as a timer for
 	// accepting the next QUIC stream. Keep this established flow idle beyond
 	// that bound, then prove that the same stream still transfers data. The old
-	// behavior closed the whole connection with "wanopt session complete".
+	// behavior closed the whole connection with "queqiao session complete".
 	time.Sleep(750 * time.Millisecond)
-	payload := bytes.Repeat([]byte("wanopt-quic-"), 8192)
+	payload := bytes.Repeat([]byte("queqiao-quic-"), 8192)
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -416,14 +416,17 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("echo mismatch: got %d bytes, want %d", len(got), len(payload))
 	}
-	if server.MaxObservedLanes() < 2 {
-		t.Fatalf("expected a joined QUIC lane, observed %d", server.MaxObservedLanes())
-	}
+	// This used to assert that a second lane had been joined. A flow's data
+	// lives on one lane now, and the only reason a second appears is bulk
+	// isolation, which TestBulkIsolationAppliesAtOneConfiguredLane covers and
+	// which needs another flow on the pool to be worth doing. What this test
+	// is for is that a pooled QUIC flow transfers correctly, which it just
+	// checked.
 	// A second logical flow must reuse the pooled QUIC connection without
 	// disturbing the first flow's session or destination stream.
 	conn2 := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
 	defer conn2.Close()
-	payload2 := bytes.Repeat([]byte("wanopt-pooled-flow-"), 1024)
+	payload2 := bytes.Repeat([]byte("queqiao-pooled-flow-"), 1024)
 	if _, err := conn2.Write(payload2); err != nil {
 		t.Fatal(err)
 	}
@@ -479,8 +482,7 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true,
-		MaxLanes: 2, ChunkSize: 4 * 1024, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -490,9 +492,8 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC,
-		InitialLanes: 2, MaxLanes: 2, ChunkSize: 4 * 1024, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -506,7 +507,7 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	payload := bytes.Repeat([]byte("wanopt-lane-recovery-"), 128*1024)
+	payload := bytes.Repeat([]byte("queqiao-lane-recovery-"), 128*1024)
 	writeErr := make(chan error, 1)
 	go func() {
 		_, err := conn.Write(payload)
@@ -516,13 +517,19 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 		writeErr <- err
 	}()
 
+	// Kill the flow's only lane. This used to wait for a second one and close
+	// the spare, which meant the transfer never actually lost the lane it was
+	// using -- the other one absorbed it. With a flow's data on one lane there
+	// is no spare, so closing it is a real failure and the transfer completes
+	// only if recovery opens a replacement and the session replays what the
+	// peer had not acknowledged onto it. That is a stronger test of the path
+	// this exists to cover.
 	deadline := time.Now().Add(5 * time.Second)
 	var failedLane *mpLane
 	for time.Now().Before(deadline) && failedLane == nil {
 		server.sessionsMu.RLock()
 		for _, sessionFlow := range server.sessions {
-			lanes := sessionFlow.flow.healthyLanes()
-			if len(lanes) >= 2 {
+			if lanes := sessionFlow.flow.healthyLanes(); len(lanes) >= 1 {
 				failedLane = lanes[0]
 				break
 			}
@@ -533,7 +540,7 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 		}
 	}
 	if failedLane == nil {
-		t.Fatal("two-lane flow was not established")
+		t.Fatal("no flow was established")
 	}
 	if err := failedLane.fc.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.Fatal(err)
@@ -584,7 +591,7 @@ func TestAutoTransportFallsBackToTCPWhenUDPUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "wanopt.test",
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
 		Secret: secret, RootCAs: roots, Transport: TransportAuto, FallbackDelay: 10 * time.Millisecond, Logger: logger,
 	})
 	if err != nil {
@@ -644,8 +651,7 @@ func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true,
-		MaxLanes: 2, ChunkSize: 4 * 1024, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -655,9 +661,8 @@ func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportAuto, FallbackDelay: 300 * time.Millisecond,
-		MaxLanes: 2, ChunkSize: 4 * 1024, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportAuto, FallbackDelay: 300 * time.Millisecond, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -672,7 +677,7 @@ func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
 	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	payload := bytes.Repeat([]byte("wanopt-auto-rescue-"), 32*1024)
+	payload := bytes.Repeat([]byte("queqiao-auto-rescue-"), 32*1024)
 	writeErr := make(chan error, 1)
 	go func() {
 		_, writeErrValue := conn.Write(payload)
@@ -764,7 +769,7 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "wanopt.test",
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
 		Secret: secret, RootCAs: roots, Transport: TransportTCP, Logger: logger, Metrics: metrics.New(),
 	})
 	if err != nil {
@@ -894,8 +899,7 @@ func TestLostFinalFINUsesOneTombstoneRescueWithoutStorm(t *testing.T) {
 	serverMetrics := metrics.New()
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true,
-		MaxLanes: 1, Logger: logger, Metrics: serverMetrics,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger, Metrics: serverMetrics,
 		testLaneWriteHook: func(frame protocol.Frame) error {
 			if frame.Header.Type == protocol.TypeClose && frame.Header.Flags&protocol.FlagFin != 0 && dropFirstServerFIN.CompareAndSwap(true, false) {
 				return errors.New("injected final FIN loss")
@@ -912,8 +916,8 @@ func TestLostFinalFINUsesOneTombstoneRescueWithoutStorm(t *testing.T) {
 	}
 	clientMetrics := metrics.New()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, InitialLanes: 1, MaxLanes: 1,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC,
 		Logger: logger, Metrics: clientMetrics,
 	})
 	if err != nil {
@@ -1011,7 +1015,7 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	}
 	clientMetrics := metrics.New()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "wanopt.test",
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
 		Secret: secret, RootCAs: roots, Transport: TransportTCP, Logger: logger, Metrics: clientMetrics,
 	})
 	if err != nil {

@@ -6,7 +6,7 @@ import (
 )
 
 func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
-	base := ClientConfig{ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "wanopt.test", Secret: []byte("0123456789abcdef")}
+	base := ClientConfig{ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "queqiao.test", Secret: []byte("0123456789abcdef")}
 	for name, mutate := range map[string]func(*ClientConfig){
 		"too many sessions":     func(c *ClientConfig) { c.MaxSessions = maxConfiguredSessions + 1 },
 		"invalid local address": func(c *ClientConfig) { c.LocalAddress = "not-an-address" },
@@ -36,7 +36,7 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 
 func TestTUICAlignedCongestionConfigurationIsAccepted(t *testing.T) {
 	base := ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "wanopt.test",
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "queqiao.test",
 		Secret: []byte("0123456789abcdef"), Congestion: CongestionBBRTUIC,
 	}
 	if _, err := NewClient(base); err != nil {

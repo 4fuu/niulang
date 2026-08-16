@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/fec"
-	"github.com/icourses-dev/wanopt/internal/lossmodel"
+	"github.com/icourses-dev/queqiao/internal/fec"
+	"github.com/icourses-dev/queqiao/internal/lossmodel"
 )
 
 // receiveOnly builds the half of a Path that arriving datagrams touch, without

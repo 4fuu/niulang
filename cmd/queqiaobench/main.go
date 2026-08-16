@@ -1,4 +1,4 @@
-// Command wanoptbench runs wanopt and a TUIC-shaped reference proxy over an
+// Command queqiaobench runs queqiao and a TUIC-shaped reference proxy over an
 // identical, deterministic emulated WAN path and reports goodput and latency.
 //
 // The live China-US link that this project targets moves between roughly 0%
@@ -35,10 +35,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/baseline"
-	"github.com/icourses-dev/wanopt/internal/extproxy"
-	"github.com/icourses-dev/wanopt/internal/pathsim"
-	"github.com/icourses-dev/wanopt/internal/pep"
+	"github.com/icourses-dev/queqiao/internal/baseline"
+	"github.com/icourses-dev/queqiao/internal/extproxy"
+	"github.com/icourses-dev/queqiao/internal/pathsim"
+	"github.com/icourses-dev/queqiao/internal/pep"
 )
 
 type options struct {
@@ -58,9 +58,7 @@ type options struct {
 	flows        string
 	congestion   string
 	brutalMbits  float64
-	lanes        int
 	chunkSize    int
-	initialLanes int
 	quicPool     bool
 	timeout      time.Duration
 	cpuProfile   string
@@ -76,15 +74,15 @@ type options struct {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "wanoptbench: %v\n", err)
+		fmt.Fprintf(os.Stderr, "queqiaobench: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
 	var opts options
-	fs := flag.NewFlagSet("wanoptbench", flag.ContinueOnError)
-	fs.StringVar(&opts.stacks, "stacks", "baseline,wanopt", "comma-separated stacks to measure")
+	fs := flag.NewFlagSet("queqiaobench", flag.ContinueOnError)
+	fs.StringVar(&opts.stacks, "stacks", "baseline,queqiao", "comma-separated stacks to measure")
 	fs.IntVar(&opts.rttMillis, "rtt", 200, "emulated round-trip time in milliseconds")
 	fs.Float64Var(&opts.lossPercent, "loss", 0, "per-packet loss percentage in each direction")
 	fs.Float64Var(&opts.lossBurst, "loss-burst", 0, "mean loss burst length in packets (0 or 1 gives independent loss)")
@@ -99,11 +97,9 @@ func run(args []string) error {
 	fs.IntVar(&opts.trials, "trials", 3, "trials per stack")
 	fs.StringVar(&opts.flows, "flows", "1", "comma-separated concurrent flow counts")
 	fs.StringVar(&opts.congestion, "congestion", "bbr-tuic", "congestion controller for both stacks")
-	fs.Float64Var(&opts.brutalMbits, "brutal-rate", 0, "wanopt fixed send rate in Mbit/s when --congestion=brutal")
-	fs.IntVar(&opts.lanes, "lanes", 0, "wanopt bulk-lane ceiling; 0 uses the product default (a measured search up to 4)")
-	fs.IntVar(&opts.chunkSize, "chunk", 0, "wanopt data frame size in bytes (0 selects the default)")
-	fs.IntVar(&opts.initialLanes, "initial-lanes", 1, "wanopt lanes opened before SOCKS CONNECT succeeds")
-	fs.BoolVar(&opts.quicPool, "quic-pool", true, "enable the wanopt pooled QUIC connection")
+	fs.Float64Var(&opts.brutalMbits, "brutal-rate", 0, "queqiao fixed send rate in Mbit/s when --congestion=brutal")
+	fs.IntVar(&opts.chunkSize, "chunk", 0, "queqiao data frame size in bytes (0 selects the default)")
+	fs.BoolVar(&opts.quicPool, "quic-pool", true, "enable the queqiao pooled QUIC connection")
 	fs.DurationVar(&opts.timeout, "timeout", 120*time.Second, "per-trial timeout")
 	fs.StringVar(&opts.cpuProfile, "cpuprofile", "", "write a CPU profile to this path")
 	fs.BoolVar(&opts.verbose, "verbose", false, "log transport diagnostics")
@@ -111,8 +107,8 @@ func run(args []string) error {
 	fs.BoolVar(&opts.interactive, "interactive", false, "issue small requests during the bulk transfer and report their latency")
 	fs.StringVar(&opts.singBox, "sing-box", "", "path to a sing-box binary, enabling the tuic and hysteria2 stacks")
 	fs.StringVar(&opts.jsonOut, "json", "", "also write the full result set to this path as JSON")
-	fs.StringVar(&opts.contend, "contend", "", "two stacks to run concurrently on one shared bottleneck, e.g. wanopt,baseline; reports each one's share of the link")
-	fs.BoolVar(&opts.gate, "gate", false, "exit non-zero when wanopt is worse than the reference beyond --tolerance")
+	fs.StringVar(&opts.contend, "contend", "", "two stacks to run concurrently on one shared bottleneck, e.g. queqiao,baseline; reports each one's share of the link")
+	fs.BoolVar(&opts.gate, "gate", false, "exit non-zero when queqiao is worse than the reference beyond --tolerance")
 	fs.Float64Var(&opts.tolerance, "tolerance", 0.10, "fractional goodput shortfall allowed by --gate")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -156,9 +152,9 @@ func run(args []string) error {
 	}
 	defer origin.Close()
 
-	fmt.Printf("# path rtt=%dms loss=%.2f%% burst=%.1f rate=%.1fMbit/s per_flow=%.1fMbit/s queue=%s seed=%d object=%s congestion=%s lanes=%d\n",
+	fmt.Printf("# path rtt=%dms loss=%.2f%% burst=%.1f rate=%.1fMbit/s per_flow=%.1fMbit/s queue=%s seed=%d object=%s congestion=%s\n",
 		opts.rttMillis, opts.lossPercent, opts.lossBurst, opts.rateMbits, opts.perFlowMbits, humanQueue(pathCfg), opts.seed,
-		humanBytes(opts.bytes), opts.congestion, opts.lanes)
+		humanBytes(opts.bytes), opts.congestion)
 	fmt.Printf("stack\tflows\ttrial\tseconds\tmbits_per_sec\tcomplete\tnote\n")
 
 	if opts.contend != "" {
@@ -230,7 +226,7 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 
 	// One warm-up request establishes the QUIC connection so the measured
 	// transfer reflects steady-state transport behavior for both stacks. TUIC
-	// keeps a persistent connection, so charging wanopt for a cold handshake
+	// keeps a persistent connection, so charging queqiao for a cold handshake
 	// and not TUIC would be the wrong comparison; handshake cost is reported
 	// separately by the latency mode.
 	if err := warmUp(ctx, harness.socks, origin); err != nil {
@@ -459,7 +455,7 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 	}
 	// A stream-based transport needs the TCP relay; everything else is carried
 	// by the UDP one.
-	if kind := extproxy.Kind(stack); kind.Transport() == "tcp" && stack != "baseline" && stack != "wanopt" {
+	if kind := extproxy.Kind(stack); kind.Transport() == "tcp" && stack != "baseline" && stack != "queqiao" {
 		return startTCPStack(ctx, kind, opts, pathCfg, logger)
 	}
 
@@ -504,7 +500,7 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			return nil, err
 		}
 		client, err := baseline.NewClient(baseline.ClientConfig{
-			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "wanopt.test",
+			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "queqiao.test",
 			RootCAs: roots, Token: token, Transport: baseline.TUICTransport(),
 			Congestion:        baseline.CongestionKind(opts.congestion),
 			BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8), Logger: logger,
@@ -516,25 +512,25 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		go func() { _ = server.Serve(ctx, serverPacket) }()
 		go func() { _ = client.ServeListener(ctx, socksListener) }()
 		h.closes = append(h.closes, client.Close)
-	case "wanopt":
-		secret := []byte("wanoptbench-shared-secret-32bytes!")
+	case "queqiao":
+		secret := []byte("queqiaobench-shared-secret-32bytes!")
 		server, err := pep.NewServer(pep.ServerConfig{
 			ListenAddr: serverPacket.LocalAddr().String(), Certificate: certificate, Secret: secret,
 			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: opts.chunkSize,
 			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
-			MaxLanes: opts.lanes, Logger: logger,
+			Logger: logger,
 		})
 		if err != nil {
 			h.Close()
 			return nil, err
 		}
 		client, err := pep.NewClient(pep.ClientConfig{
-			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "wanopt.test",
+			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "queqiao.test",
 			Secret: secret, RootCAs: roots, Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
 			EnableQUICPool:    opts.quicPool,
 			Congestion:        pep.CongestionControlKind(opts.congestion),
 			BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
-			InitialLanes:      opts.initialLanes, MaxLanes: opts.lanes, Logger: logger,
+			Logger:            logger,
 		})
 		if err != nil {
 			h.Close()
@@ -554,7 +550,7 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		}
 		// The third-party implementation needs its TLS material on disk, and
 		// the SOCKS listener has to be free for it to bind itself.
-		workDir, err := os.MkdirTemp("", "wanoptbench-"+stack+"-")
+		workDir, err := os.MkdirTemp("", "queqiaobench-"+stack+"-")
 		if err != nil {
 			h.Close()
 			return nil, err
@@ -858,8 +854,8 @@ func selfSignedCertificate() (tls.Certificate, *x509.CertPool, error) {
 	}
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "wanopt.test"},
-		DNSNames:     []string{"wanopt.test"},
+		Subject:      pkix.Name{CommonName: "queqiao.test"},
+		DNSNames:     []string{"queqiao.test"},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -896,8 +892,8 @@ func writeCertificateFiles(dir string) (certPath, keyPath string, err error) {
 	}
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "wanopt.test"},
-		DNSNames:     []string{"wanopt.test"},
+		Subject:      pkix.Name{CommonName: "queqiao.test"},
+		DNSNames:     []string{"queqiao.test"},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -957,7 +953,7 @@ func startTCPStack(ctx context.Context, kind extproxy.Kind, opts options, pathCf
 	h := &harness{socks: socksAddr, relay: relay}
 	h.closes = append(h.closes, func() { _ = relay.Close() })
 
-	workDir, err := os.MkdirTemp("", "wanoptbench-"+string(kind)+"-")
+	workDir, err := os.MkdirTemp("", "queqiaobench-"+string(kind)+"-")
 	if err != nil {
 		h.Close()
 		return nil, err

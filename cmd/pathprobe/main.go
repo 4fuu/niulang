@@ -31,7 +31,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/lossmodel"
+	"github.com/icourses-dev/queqiao/internal/lossmodel"
 )
 
 const (

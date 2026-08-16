@@ -12,7 +12,7 @@ func trial(stack string, flows int, mbits float64, complete bool) TrialRecord {
 
 // A median taken over completed trials alone rewards a transport for giving
 // up. In a 35%-burst-loss block the reference completed 7 of 12 trials and
-// wanopt 10 of 12, and reporting only successes made the transport that
+// queqiao 10 of 12, and reporting only successes made the transport that
 // finished the hard trials look slower than the one that abandoned them. The
 // headline statistic therefore has to include failures at their partial rate.
 func TestSummaryCountsFailedTrials(t *testing.T) {
@@ -21,8 +21,8 @@ func TestSummaryCountsFailedTrials(t *testing.T) {
 		trial("baseline", 1, 8, true), trial("baseline", 1, 8, true),
 		trial("baseline", 1, 0.2, false), trial("baseline", 1, 0.2, false),
 		// Finishes everything, more slowly on the hard trials.
-		trial("wanopt", 1, 7, true), trial("wanopt", 1, 7, true),
-		trial("wanopt", 1, 3, true), trial("wanopt", 1, 3, true),
+		trial("queqiao", 1, 7, true), trial("queqiao", 1, 7, true),
+		trial("queqiao", 1, 3, true), trial("queqiao", 1, 3, true),
 	}
 	summaries := summarize(trials)
 	if len(summaries) != 2 {
@@ -32,12 +32,12 @@ func TestSummaryCountsFailedTrials(t *testing.T) {
 	for _, s := range summaries {
 		byStack[s.Stack] = s
 	}
-	reference, subject := byStack["baseline"], byStack["wanopt"]
+	reference, subject := byStack["baseline"], byStack["queqiao"]
 	if reference.MedianCompleteMbits <= subject.MedianCompleteMbits {
 		t.Fatal("test data no longer reproduces the misleading completed-only comparison")
 	}
 	if subject.MedianMbits <= reference.MedianMbits {
-		t.Fatalf("all-trial median: wanopt %.2f, reference %.2f; the transport that "+
+		t.Fatalf("all-trial median: queqiao %.2f, reference %.2f; the transport that "+
 			"finished every trial must not rank lower", subject.MedianMbits, reference.MedianMbits)
 	}
 	if reference.CompletionRate != 0.5 || subject.CompletionRate != 1 {
@@ -51,7 +51,7 @@ func TestSummaryCountsFailedTrials(t *testing.T) {
 func TestGateFailsOnGoodputShortfall(t *testing.T) {
 	summaries := summarize([]TrialRecord{
 		trial("baseline", 1, 10, true), trial("baseline", 1, 10, true),
-		trial("wanopt", 1, 8, true), trial("wanopt", 1, 8, true),
+		trial("queqiao", 1, 8, true), trial("queqiao", 1, 8, true),
 	})
 	if err := gateReport(summaries, 0.10); err == nil {
 		t.Fatal("a 20 percent shortfall passed a 10 percent tolerance")
@@ -66,7 +66,7 @@ func TestGateFailsOnGoodputShortfall(t *testing.T) {
 func TestGateFailsOnCompletionShortfall(t *testing.T) {
 	summaries := summarize([]TrialRecord{
 		trial("baseline", 1, 10, true), trial("baseline", 1, 10, true),
-		trial("wanopt", 1, 10, true), trial("wanopt", 1, 10, false),
+		trial("queqiao", 1, 10, true), trial("queqiao", 1, 10, false),
 	})
 	if err := gateReport(summaries, 0.50); err == nil {
 		t.Fatal("a completion-rate regression passed the gate")
@@ -74,7 +74,7 @@ func TestGateFailsOnCompletionShortfall(t *testing.T) {
 }
 
 func TestGateRequiresBothStacks(t *testing.T) {
-	summaries := summarize([]TrialRecord{trial("wanopt", 1, 10, true)})
+	summaries := summarize([]TrialRecord{trial("queqiao", 1, 10, true)})
 	err := gateReport(summaries, 0.10)
 	if err == nil || !strings.Contains(err.Error(), "both stacks") {
 		t.Fatalf("gate error = %v, want a clear complaint about the missing reference", err)
@@ -84,7 +84,7 @@ func TestGateRequiresBothStacks(t *testing.T) {
 func TestGatePassesAtParity(t *testing.T) {
 	summaries := summarize([]TrialRecord{
 		trial("baseline", 1, 10, true), trial("baseline", 4, 20, true),
-		trial("wanopt", 1, 10.5, true), trial("wanopt", 4, 19.5, true),
+		trial("queqiao", 1, 10.5, true), trial("queqiao", 4, 19.5, true),
 	})
 	if err := gateReport(summaries, 0.10); err != nil {
 		t.Fatalf("parity failed the gate: %v", err)
@@ -94,7 +94,7 @@ func TestGatePassesAtParity(t *testing.T) {
 func TestReportRoundTripsAsJSON(t *testing.T) {
 	report := Report{
 		Path:   PathReport{RTTMillis: 200, LossPercent: 1, RateMbits: 100},
-		Trials: []TrialRecord{trial("wanopt", 1, 10, true)},
+		Trials: []TrialRecord{trial("queqiao", 1, 10, true)},
 	}
 	report.Summary = summarize(report.Trials)
 	path := filepath.Join(t.TempDir(), "report.json")
@@ -124,10 +124,10 @@ func TestMedianHandlesEvenAndEmpty(t *testing.T) {
 // makes the completion rate depend on setup luck.
 func TestSetupFailuresAreSeparatedFromTransportFailures(t *testing.T) {
 	trials := []TrialRecord{
-		{Stack: "wanopt", Flows: 1, MbitsPerSec: 10, Complete: true},
-		{Stack: "wanopt", Flows: 1, MbitsPerSec: 12, Complete: true},
-		{Stack: "wanopt", Flows: 1, MbitsPerSec: 0, Note: "warmup: EOF"},
-		{Stack: "wanopt", Flows: 1, MbitsPerSec: 0, Note: "setup: dial failed"},
+		{Stack: "queqiao", Flows: 1, MbitsPerSec: 10, Complete: true},
+		{Stack: "queqiao", Flows: 1, MbitsPerSec: 12, Complete: true},
+		{Stack: "queqiao", Flows: 1, MbitsPerSec: 0, Note: "warmup: EOF"},
+		{Stack: "queqiao", Flows: 1, MbitsPerSec: 0, Note: "setup: dial failed"},
 	}
 	summaries := summarize(trials)
 	got := summaries[0]
@@ -165,8 +165,8 @@ func TestPartialTransferStillCountsAsFailure(t *testing.T) {
 // completion rate.
 func TestAllSetupFailuresDoNotPanic(t *testing.T) {
 	got := summarize([]TrialRecord{
-		{Stack: "wanopt", Flows: 1, Note: "warmup: EOF"},
-		{Stack: "wanopt", Flows: 1, Note: "warmup: EOF"},
+		{Stack: "queqiao", Flows: 1, Note: "warmup: EOF"},
+		{Stack: "queqiao", Flows: 1, Note: "warmup: EOF"},
 	})[0]
 	if got.SetupFailures != 2 || got.CompletionRate != 0 || got.MedianMbits != 0 {
 		t.Fatalf("all-setup-failure cell = %+v, want zeroes and two setup failures", got)

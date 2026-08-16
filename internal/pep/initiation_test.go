@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/pathmodel"
-	"github.com/icourses-dev/wanopt/internal/pathsim"
+	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/icourses-dev/queqiao/internal/pathsim"
 )
 
 // Flow initiation is what an application feels. The first connection to a

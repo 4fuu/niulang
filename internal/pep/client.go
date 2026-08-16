@@ -13,15 +13,14 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	"github.com/icourses-dev/wanopt/internal/classifier"
-	wancongestion "github.com/icourses-dev/wanopt/internal/congestion"
-	"github.com/icourses-dev/wanopt/internal/limiter"
-	"github.com/icourses-dev/wanopt/internal/metrics"
-	"github.com/icourses-dev/wanopt/internal/pathmodel"
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/scheduler"
-	"github.com/icourses-dev/wanopt/internal/session"
-	"github.com/icourses-dev/wanopt/internal/socks5"
+	"github.com/icourses-dev/queqiao/internal/classifier"
+	wancongestion "github.com/icourses-dev/queqiao/internal/congestion"
+	"github.com/icourses-dev/queqiao/internal/limiter"
+	"github.com/icourses-dev/queqiao/internal/metrics"
+	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/session"
+	"github.com/icourses-dev/queqiao/internal/socks5"
 )
 
 // A peer that accepts a replacement stream and immediately closes it must not
@@ -122,10 +121,6 @@ type ClientConfig struct {
 	FallbackDelay           time.Duration
 	UDPFailureThreshold     int
 	UDPCooldown             time.Duration
-	InitialLanes            int
-	MaxLanes                int
-	BulkStartLanes          int
-	MinimumMarginalGain     float64
 	Logger                  *slog.Logger
 }
 
@@ -295,37 +290,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.FallbackDelay <= 0 {
 		cfg.FallbackDelay = 300 * time.Millisecond
 	}
-	if cfg.InitialLanes <= 0 {
-		cfg.InitialLanes = 1
-	}
-	if cfg.InitialLanes > 8 {
-		return nil, errors.New("initial lane count must be between 1 and 8")
-	}
-	if cfg.MaxLanes <= 0 {
-		// This is a ceiling on a measured search, not a target. A flow starts
-		// on one bulk lane and reaches this bound only by demonstrating, one
-		// controlled probe at a time, that each added lane raised its goodput;
-		// a path that does not reward striping stops after a single probe and
-		// stays at one lane. Four is where the measured benefit flattened on a
-		// per-flow-policed path, and independent congestion controllers past
-		// that point mostly add loss.
-		cfg.MaxLanes = 4
-	}
-	if cfg.MaxLanes > 8 {
-		return nil, errors.New("maximum lane count must not exceed 8")
-	}
-	if cfg.InitialLanes > cfg.MaxLanes {
-		return nil, errors.New("initial lane count cannot exceed maximum lane count")
-	}
-	if cfg.BulkStartLanes <= 0 {
-		cfg.BulkStartLanes = 1
-	}
-	if cfg.BulkStartLanes > cfg.MaxLanes {
-		cfg.BulkStartLanes = cfg.MaxLanes
-	}
-	if cfg.MinimumMarginalGain <= 0 {
-		cfg.MinimumMarginalGain = 0.10
-	}
 	return &Client{
 		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
 		budget: limiter.New(limiter.Config{
@@ -406,7 +370,7 @@ func (c *Client) closeQUICPool() {
 	c.quicPoolFast, c.quicPoolControl, c.quicPoolAuthenticated, c.quicPoolFastProven = false, false, false, false
 	c.quicMu.Unlock()
 	if conn != nil {
-		_ = conn.CloseWithError(0, "wanopt client stopped")
+		_ = conn.CloseWithError(0, "queqiao client stopped")
 	}
 	if packet != nil {
 		_ = packet.Close()
@@ -416,7 +380,7 @@ func (c *Client) closeQUICPool() {
 	c.bulkConns, c.bulkJoinUnavailableTil = nil, time.Time{}
 	c.bulkMu.Unlock()
 	for _, entry := range bulkConns {
-		entry.close("wanopt bulk pool stopped")
+		entry.close("queqiao bulk pool stopped")
 	}
 }
 
@@ -467,13 +431,6 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		_ = flow.fc.Close()
 		flowSession.closeAll()
 		return
-	}
-	if c.cfg.InitialLanes > 1 {
-		// An explicit initial-lane setting is a benchmark/operator choice. Wait
-		// for those lanes before acknowledging SOCKS CONNECT so the caller gets
-		// the requested topology deterministically. The default remains one
-		// pre-warmed lane and does not pay this cost.
-		c.openAdditionalLanes(ctx, flowSession, flow.sessionID, flow.flowID, flow.kind)
 	}
 	// Writing the reply is local again, so it is bounded again.
 	_ = inner.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
@@ -1037,7 +994,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 
 	if c.quicConn == nil || c.quicConn.Context().Err() != nil {
 		if c.quicConn != nil {
-			_ = c.quicConn.CloseWithError(0, "wanopt stale pooled connection")
+			_ = c.quicConn.CloseWithError(0, "queqiao stale pooled connection")
 		}
 		if c.quicPacket != nil {
 			_ = c.quicPacket.Close()
@@ -1055,7 +1012,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 	stream, err := c.quicConn.OpenStreamSync(dialCtx)
 	if err != nil {
 		if c.quicConn.Context().Err() != nil {
-			_ = c.quicConn.CloseWithError(0, "wanopt pooled connection failed")
+			_ = c.quicConn.CloseWithError(0, "queqiao pooled connection failed")
 			if c.quicPacket != nil {
 				_ = c.quicPacket.Close()
 			}
@@ -1290,7 +1247,7 @@ func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
 	live := c.bulkConns[:0]
 	for _, entry := range c.bulkConns {
 		if entry.conn.Context().Err() != nil && !entry.busy {
-			entry.close("wanopt stale bulk pool")
+			entry.close("queqiao stale bulk pool")
 			continue
 		}
 		live = append(live, entry)
@@ -1322,7 +1279,7 @@ func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
 	c.bulkMu.Lock()
 	if len(c.bulkConns) >= c.maxBulkConns() {
 		c.bulkMu.Unlock()
-		entry.close("wanopt bulk pool limit reached")
+		entry.close("queqiao bulk pool limit reached")
 		return nil, errors.New("bulk lane connection limit reached")
 	}
 	entry.busy = true
@@ -1331,14 +1288,22 @@ func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
 	return entry, nil
 }
 
-// maxBulkConns bounds the secondary connections one client may hold. A flow
-// never needs more than its lane budget, and lane zero is not a bulk lane.
-func (c *Client) maxBulkConns() int {
-	if c.cfg.MaxLanes <= 1 {
-		return 1
-	}
-	return c.cfg.MaxLanes
-}
+// isolatedBulkConns bounds the secondary connections one client may hold.
+//
+// It is a count of concurrently isolated bulk flows, not of lanes. A flow's
+// data lives on one lane, so a flow needs at most one of these -- but several
+// bulk flows can be in flight at once, and each has to have its own or
+// isolation is a queue rather than a policy. Capping this at one during the
+// striping excision would have let exactly one bulk flow at a time leave the
+// shared connection, which is the case the eight-flow live measurement is
+// about.
+//
+// Eight is what the lane ceiling used to permit and is a bound on descriptors
+// and handshakes rather than a tuning choice; a ninth concurrent bulk flow
+// stays on the pooled connection, which is where it started.
+const isolatedBulkConns = 8
+
+func (c *Client) maxBulkConns() int { return isolatedBulkConns }
 
 func (c *Client) bulkConnCount() int {
 	c.bulkMu.Lock()
@@ -1359,12 +1324,12 @@ func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
 	})
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		entry.close("wanopt bulk pool bootstrap failed")
+		entry.close("queqiao bulk pool bootstrap failed")
 		return nil, err
 	}
 	bootstrap, err := session.NewSessionID()
 	if err != nil {
-		entry.close("wanopt bulk pool bootstrap failed")
+		entry.close("queqiao bulk pool bootstrap failed")
 		return nil, err
 	}
 	outer := &quicStreamConn{stream: stream, conn: conn, controller: entry.controller, closeConn: false, bulk: connBulkPath(conn)}
@@ -1372,11 +1337,11 @@ func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
 	ok, err := clientAuthenticateKindResult(newFrameConn(outer, c.cfg.MaxPayload), c.cfg.Secret, bootstrap, 0, session.HelloPool, time.Now())
 	_ = outer.Close()
 	if err != nil {
-		entry.close("wanopt bulk pool authentication failed")
+		entry.close("queqiao bulk pool authentication failed")
 		return nil, err
 	}
 	if ok.Capabilities&session.CapabilityFastLaneJoin == 0 {
-		entry.close("wanopt bulk pool unsupported")
+		entry.close("queqiao bulk pool unsupported")
 		c.bulkMu.Lock()
 		c.bulkJoinUnavailableTil = time.Now().Add(bulkJoinCapabilityRetry)
 		c.bulkMu.Unlock()
@@ -1433,7 +1398,7 @@ func (c *Client) releaseBulkConn(entry *bulkConn, dead bool) {
 		}
 		c.bulkConns = remaining
 		c.bulkMu.Unlock()
-		entry.close("wanopt bulk pool failed")
+		entry.close("queqiao bulk pool failed")
 		return
 	}
 	if entry.idleTimer != nil {
@@ -1461,116 +1426,22 @@ func (c *Client) expireBulkConn(entry *bulkConn) {
 	c.bulkConns = remaining
 	c.bulkMu.Unlock()
 	if found {
-		entry.close("wanopt bulk pool idle")
+		entry.close("queqiao bulk pool idle")
 	}
 }
 
-func (c *Client) openAdditionalLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, initialKind TransportKind) {
-	if initialKind != TransportQUIC {
-		return
-	}
-	// Every additional lane is an independent authenticated QUIC connection,
-	// so each costs a full handshake. Opening them one after another charges
-	// SOCKS CONNECT the sum of those handshakes: with four configured lanes on
-	// a 200 ms path that measured 1.8 s before any application byte moved.
-	// They are independent operations, so open them concurrently and pay one
-	// handshake of latency instead.
-	wanted := c.cfg.InitialLanes - flow.laneCount()
-	if wanted <= 0 {
-		return
-	}
-	type joined struct {
-		lane *mpLane
-		err  error
-		id   uint64
-	}
-	results := make(chan joined, wanted)
-	started := 0
-	for range wanted {
-		if ctx.Err() != nil {
-			break
-		}
-		laneID, err := flow.allocateJoinID()
-		if err != nil {
-			break
-		}
-		started++
-		go func(laneID uint64) {
-			lane, err := c.openJoinLane(ctx, TransportQUIC, sessionID, flowID, laneID)
-			results <- joined{lane: lane, err: err, id: laneID}
-		}(laneID)
-	}
-	for range started {
-		result := <-results
-		if result.err != nil {
-			// A flow can finish while a speculative join is in the handshake.
-			// That is an expected shutdown race, not evidence that the UDP path
-			// is unhealthy; feeding it into the global cooldown causes unrelated
-			// new flows to fall back to TCP unnecessarily.
-			if ctx.Err() != nil || flow.doneChanClosed() {
-				continue
-			}
-			c.udpHealth.failure(time.Now())
-			c.cfg.Logger.Warn("additional lane unavailable", "lane", result.id, "error", result.err)
-			continue
-		}
-		if err := flow.addLane(result.lane); err != nil {
-			_ = result.lane.fc.Close()
-		}
-	}
-}
-
-// bulkLaneBudget splits a configured lane maximum into the lanes that may
-// carry bulk payload and the separately reserved control lane.
-//
-// A negotiated control lane is excluded from bulk selection, so it is not part
-// of a flow's bulk capacity: --max-lanes bounds the lanes that carry bulk
-// payload, and the reserved control lane is additional. Both endpoints must
-// agree on this, or the server rejects the bulk lanes the client opens.
-//
-// This is what makes bulk isolation work. A bulk flow left on the shared
-// pooled connection queues interactive traffic behind its congestion window;
-// moving it to its own connection is the point of classifying flows at all.
-// Measured at 200 ms and 1% loss with a 50 MiB transfer running, isolating
-// bulk took interactive requests from a 338 ms median and 545 ms 95th
-// percentile to 204 ms and 356 ms, for roughly 8% less bulk goodput. One
-// configured lane still means one bulk connection; striping beyond that
-// remains an explicit, measured decision.
-func bulkLaneBudget(maxLanes int, reserveControl bool) (bulk, controlReserve int) {
-	if maxLanes < 1 {
-		maxLanes = 1
-	}
+func bulkLaneBudget(reserveControl bool) (bulk, controlReserve int) {
 	if reserveControl {
-		return maxLanes, 1
+		return 1, 1
 	}
-	return maxLanes, 0
+	return 1, 0
 }
 
 func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, initialKind TransportKind) {
 	if initialKind != TransportQUIC {
 		return
 	}
-	// A negotiated control lane is excluded from bulk selection, so it is not
-	// part of the flow's bulk capacity. Planning in total lanes while lane 0
-	// cannot carry bulk payload caps a bulk transfer at one lane no matter how
-	// large --max-lanes is; measured on the emulated per-flow-policed path,
-	// that is the difference between using one lane's share and using several.
-	// The planner therefore reasons in bulk lanes, and the reservation is
-	// added back when the target is compared against the flow.
-	bulkBudget, controlReserve := bulkLaneBudget(c.cfg.MaxLanes, flow.reserveControlLane)
-	bulkStartLanes := c.cfg.BulkStartLanes
-	if bulkStartLanes < 1 {
-		bulkStartLanes = 1
-	}
-	if bulkStartLanes > bulkBudget {
-		bulkStartLanes = bulkBudget
-	}
-	planner := scheduler.New(scheduler.Config{
-		MaxLanes: bulkBudget, InteractiveLanes: 1, BulkStartLanes: bulkStartLanes,
-		MinimumMarginalGain: c.cfg.MinimumMarginalGain, InteractiveRTTBudget: 40 * time.Millisecond,
-	})
-	// What lane probes conclude belongs to the path they were run on.
-	pathModel := c.currentPathModel()
+	_, controlReserve := bulkLaneBudget(flow.reserveControlLane)
 	manageCtx, manageCancel := context.WithCancel(ctx)
 	defer manageCancel()
 	go func() {
@@ -1582,21 +1453,17 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 	}()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	prober := scheduler.NewLaneProbe(scheduler.ProbeConfig{MinGain: c.cfg.MinimumMarginalGain})
-	joins := make(chan laneJoinResult, maxLaneProbeAttempts)
+	joins := make(chan laneJoinResult, 1)
 	joinPending := false
-	var lastSample time.Time
-	var lastBytes uint64
+	isolated := false
 	var lastDecision time.Time
 	var recoveryBackoff time.Duration
 	var nextRecovery time.Time
 	recoveryAttempts := 0
 	var lastRecoveryAttempt time.Time
-	var growthBlockedUntil time.Time
-	var growthBackoff time.Duration
-	var seenLaneFailures uint64
-	growthAttempts := 0
-	growthSuppressed := false
+	var isolationBlockedUntil time.Time
+	var isolationBackoff time.Duration
+	isolationAttempts := 0
 	for {
 		select {
 		case <-flow.doneChan():
@@ -1621,33 +1488,30 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 						if manageCtx.Err() != nil || flow.doneChanClosed() {
 							return
 						}
-						prober.Cancel()
 						if errors.Is(result.err, errLaneJoinRejected) {
-							// The peer's ceiling, not a broken path. Stop
-							// probing and keep the lanes already held.
-							prober.Stop()
-							growthSuppressed = true
-							c.cfg.Logger.Debug("peer refused lane join; holding lane count", "lane", result.id, "error", result.err)
+							// The peer's ceiling, not a broken path. Keep the
+							// flow where it is.
+							isolated = true
+							c.cfg.Logger.Debug("peer refused lane join; flow stays on the shared connection", "lane", result.id, "error", result.err)
 							break
 						}
 						c.udpHealth.failure(time.Now())
-						c.cfg.Logger.Warn("adaptive lane unavailable", "lane", result.id, "error", result.err)
-						if growthBackoff == 0 {
-							growthBackoff = minLaneProbeBackoff
-						} else if growthBackoff < maxLaneProbeBackoff {
-							growthBackoff *= 2
-							if growthBackoff > maxLaneProbeBackoff {
-								growthBackoff = maxLaneProbeBackoff
+						c.cfg.Logger.Warn("bulk isolation lane unavailable", "lane", result.id, "error", result.err)
+						if isolationBackoff == 0 {
+							isolationBackoff = minLaneProbeBackoff
+						} else if isolationBackoff < maxLaneProbeBackoff {
+							isolationBackoff *= 2
+							if isolationBackoff > maxLaneProbeBackoff {
+								isolationBackoff = maxLaneProbeBackoff
 							}
 						}
-						growthBlockedUntil = time.Now().Add(growthBackoff)
+						isolationBlockedUntil = time.Now().Add(isolationBackoff)
 					default:
 						if err := flow.addLane(result.lane); err != nil {
 							_ = result.lane.fc.Close()
-							prober.Cancel()
 							break
 						}
-						prober.Confirm()
+						isolated = true
 						if controlReserve > 0 && flow.laneCount() == controlReserve+1 {
 							// The flow's first bulk lane is what moves it off
 							// the shared control connection, which is what
@@ -1663,24 +1527,6 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			}
 			snapshot := flow.snapshot()
 			now := time.Now()
-			// Lane failures are asynchronous. If a speculative lane disappears,
-			// suppress immediate re-probing; otherwise a lossy path can churn
-			// through authenticated lanes faster than QUIC can declare them dead.
-			failures := flow.laneFailureCount()
-			if failures != seenLaneFailures {
-				seenLaneFailures = failures
-				if snapshot.HealthyLanes > 0 {
-					if growthBackoff == 0 {
-						growthBackoff = minLaneProbeBackoff
-					} else if growthBackoff < maxLaneProbeBackoff {
-						growthBackoff *= 2
-						if growthBackoff > maxLaneProbeBackoff {
-							growthBackoff = maxLaneProbeBackoff
-						}
-					}
-					growthBlockedUntil = now.Add(growthBackoff)
-				}
-			}
 			if snapshot.HealthyLanes == 0 {
 				if flow.doneChanClosed() || recoveryAttempts >= maxLaneRecoveryAttempts {
 					return
@@ -1741,156 +1587,72 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 				nextRecovery = time.Time{}
 				lastRecoveryAttempt = time.Time{}
 			}
-			// Once a TCP rescue lane is installed, keep the session on that
-			// reliable lane. TCP/QUIC striping compounds head-of-line blocking
-			// and would make the fallback less predictable.
-			for _, lane := range flow.healthyLanes() {
-				if lane.kind == TransportTCP {
-					return
-				}
+			// Once a TCP rescue lane is installed, keep the session on it.
+			if hasTCPLane(flow) {
+				return
+			}
+			// Everything below is isolation, and it is over once it has
+			// happened: a flow's data lives on one lane, so there is never a
+			// second one to open.
+			if isolated || controlReserve == 0 || joinPending {
+				continue
 			}
 			// Isolation earns its cost only while another flow shares the
 			// control connection. A bulk transfer alone on it has nothing to
 			// protect, and moving it would spend a handshake and a fresh
 			// congestion window for no benefit: measured on an otherwise idle
 			// path that costs about 8% of bulk goodput.
-			//
-			// Without a negotiated control lane there is no shared connection
-			// to leave, so this hold does not apply and lane policy is
-			// whatever --max-lanes asks for.
-			holdOnControlLane := controlReserve > 0 && c.quicPoolActive.Load() <= 1
-			target := bulkStartLanes + controlReserve
-			if holdOnControlLane {
-				target = 0
-			}
-			prewarm := flow.laneCount() < target && shouldPrewarmBulkLane(snapshot)
-			if snapshot.Class != classifier.ClassBulk && !prewarm {
+			if c.quicPoolActive.Load() <= 1 {
 				continue
 			}
-			// Do not consume the decision interval while the flow is still NEW or
-			// INTERACTIVE. The classifier may cross its bulk byte/age boundary just
-			// after such a tick; delaying the first probe by another full interval
-			// leaves several MiB on the shared control connection on a fast path.
+			if snapshot.Class != classifier.ClassBulk && !shouldPrewarmBulkLane(snapshot) {
+				continue
+			}
+			// Do not consume the decision interval while the flow is still NEW
+			// or INTERACTIVE. The classifier may cross its bulk byte/age
+			// boundary just after such a tick.
 			if !lastDecision.IsZero() && now.Sub(lastDecision) < laneDecisionInterval {
 				continue
 			}
 			lastDecision = now
-			decision := scheduler.Decision{TargetLanes: bulkStartLanes, Class: snapshot.Class, Reason: "bounded bulk-lane prewarm"}
-			probeRequested := false
-			if snapshot.Class == classifier.ClassBulk {
-				// Goodput must be measured over the decision interval.
-				// Cumulative average goodput lags by the whole flow history, so
-				// a lane that immediately doubles the instantaneous rate still
-				// shows a small average change and growth stalls at the
-				// bootstrap target.
-				goodput := 0.0
-				if interval := now.Sub(lastSample); interval > 0 && !lastSample.IsZero() {
-					goodput = float64(snapshot.Bytes-lastBytes) / interval.Seconds()
-				} else if snapshot.Elapsed > 0 {
-					goodput = float64(snapshot.Bytes) / snapshot.Elapsed.Seconds()
-				}
-				lastSample, lastBytes = now, snapshot.Bytes
-				// The probe holds a baseline across the lane it added, so this
-				// gain describes that lane rather than whatever the path did
-				// between two ticks.
-				grow, gain := prober.Observe(goodput)
-				probeRequested = grow
-				// A concluded probe is evidence about the path, not about this
-				// flow, so it is recorded where the next flow will find it.
-				// Whether lanes help depends on the bottleneck being policed
-				// per connection or per endpoint pair, and that does not
-				// change between one download and the next.
-				if gain != 0 && pathModel != nil {
-					verdict := pathmodel.StripingRewarded
-					if gain <= 0 {
-						verdict = pathmodel.StripingRefused
+			if isolationAttempts >= maxLaneProbeAttempts || flow.doneChanClosed() ||
+				now.Before(isolationBlockedUntil) {
+				continue
+			}
+			laneID, err := flow.allocateJoinID()
+			if err != nil {
+				return
+			}
+			isolationAttempts++
+			joinPending = true
+			// Open the lane off the decision loop. On a saturated path the
+			// join's own handshake queues behind the flow's data and has been
+			// measured taking several seconds; doing it inline would leave the
+			// flow blind to a lane failure meanwhile.
+			go func() {
+				lane, err := c.openJoinLane(manageCtx, TransportQUIC, sessionID, flowID, laneID)
+				select {
+				case joins <- laneJoinResult{lane: lane, id: laneID, err: err}:
+				case <-manageCtx.Done():
+					if lane != nil {
+						_ = lane.fc.Close()
 					}
-					pathModel.RecordStriping(verdict)
 				}
-				refuses := pathModel != nil && pathModel.Striping() == pathmodel.StripingRefused
-				decision = planner.Decide(snapshot.Class, scheduler.Metrics{
-					CurrentLanes: snapshot.CurrentLanes - controlReserve, HealthyLanes: snapshot.HealthyLanes - controlReserve,
-					AvailableLanes: bulkBudget, MarginalGain: gain, ProbeReady: grow,
-					PathRefusesStriping: refuses,
-					BaselineRTT:         snapshot.BaselineRTT, CurrentRTT: snapshot.CurrentRTT,
-					UDPHealthy: c.udpHealth.allow(time.Now()),
-				})
-				if gain != 0 {
-					// One line per completed experiment: the measured effect of
-					// a lane that was actually added, and whether the search
-					// continues. This is the record an operator needs to tell
-					// "striping did not help here" from "striping never ran".
-					c.cfg.Logger.Debug("lane probe verdict", "gain", gain,
-						"lanes", flow.laneCount(), "exhausted", prober.Exhausted(),
-						"goodput_mbps", goodput*8/1e6)
-				}
-			}
-			decision.TargetLanes += controlReserve
-			if holdOnControlLane && flow.laneCount() <= controlReserve && !probeRequested {
-				// Stay on the shared connection while nothing else is using
-				// it. A later arrival flips this on the next tick.
-				//
-				// This hold declines isolation for its own sake, which costs a
-				// handshake and a fresh congestion window to protect traffic
-				// that is not there. It must not also decline a lane the probe
-				// has measured a gain for: the first bulk lane is exactly what
-				// moves a flow off the shared connection, so holding it
-				// unconditionally means a flow alone on the pool can never
-				// stripe no matter how much the path would reward it.
-				decision.TargetLanes = flow.laneCount()
-			}
-			if decision.TargetLanes < flow.laneCount() && snapshot.Class == classifier.ClassBulk {
-				// DATA already written on a lane remains in the peer's replay window
-				// until cumulatively acknowledged. Closing that lane here turns a
-				// policy demotion into a transport failure and causes the peer to
-				// retransmit the outstanding window on lane zero. Until the wire
-				// protocol has an acknowledged lane-drain exchange, retain every
-				// healthy lane for the lifetime of the flow and only suppress further
-				// growth. This preserves correctness and avoids replay amplification.
-				growthSuppressed = true
-			}
-			// Open at most one speculative lane per scheduler tick.  A flow can
-			// finish while a join is in flight; if the peer has already started
-			// tearing down the session, repeatedly filling the target in one tick
-			// creates an unbounded stream of authenticated joins (and can leave
-			// dozens of zero-byte lanes behind).  One bounded probe per tick keeps
-			// growth observable, gives the completion watcher a chance to stop the
-			// manager, and makes the configured lane cap a real resource bound.
-			mayGrow := flow.laneCount() < decision.TargetLanes && !growthSuppressed && !joinPending &&
-				growthAttempts < maxLaneProbeAttempts && !flow.doneChanClosed() &&
-				(now.After(growthBlockedUntil) || now.Equal(growthBlockedUntil)) &&
-				!(flow.finSent.Load() && flow.remoteFinSeen.Load())
-			if !mayGrow {
-				// Tell the probe its request went unserved, so it does not
-				// spend its one experiment measuring a lane that never opened.
-				prober.Cancel()
-			}
-			if mayGrow {
-				laneID, err := flow.allocateJoinID()
-				if err != nil {
-					return
-				}
-				growthAttempts++
-				joinPending = true
-				// Open the lane off the decision loop. On a saturated path the
-				// join's own handshake queues behind the flow's data and has
-				// been measured taking several seconds; doing it inline stops
-				// the sampler for that whole time, which destroys the very
-				// windows the probe is comparing and leaves the flow blind to
-				// a lane failure meanwhile.
-				go func() {
-					lane, err := c.openJoinLane(manageCtx, TransportQUIC, sessionID, flowID, laneID)
-					select {
-					case joins <- laneJoinResult{lane: lane, id: laneID, err: err}:
-					case <-manageCtx.Done():
-						if lane != nil {
-							_ = lane.fc.Close()
-						}
-					}
-				}()
-			}
+			}()
 		}
 	}
+}
+
+// hasTCPLane reports whether the flow has been rescued onto TLS/TCP. Once it
+// has, the session stays there: mixing a reliable stream lane with a QUIC one
+// compounds head-of-line blocking and makes the fallback less predictable.
+func hasTCPLane(flow *multipathFlow) bool {
+	for _, lane := range flow.healthyLanes() {
+		if lane.kind == TransportTCP {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldPrewarmBulkLane(snapshot flowSnapshot) bool {

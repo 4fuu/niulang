@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/session"
-	"github.com/icourses-dev/wanopt/internal/socks5"
+	"github.com/icourses-dev/queqiao/internal/session"
+	"github.com/icourses-dev/queqiao/internal/socks5"
 )
 
 // The store's own rules, stated where they can be checked cheaply: a token is
@@ -181,7 +181,7 @@ func TestARescuedUDPAssociationKeepsItsRemoteSourceAddress(t *testing.T) {
 	}
 	defer clientListener.Close()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "wanopt.test",
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "queqiao.test",
 		Secret: secret, RootCAs: roots, Transport: TransportAuto, FallbackDelay: 5 * time.Second,
 		UDPFailureThreshold: 1, UDPCooldown: time.Minute, Logger: logger,
 	})

@@ -29,7 +29,7 @@ latency, half-close, large uploads, and cancellation.
 Gate: bulk cannot cause the interactive RTT target to exceed the configured
 budget in controlled loss and bandwidth tests.
 
-Status: the gate now has a harness. `wanoptbench --interactive` issues small
+Status: the gate now has a harness. `queqiaobench --interactive` issues small
 requests during a bulk transfer and reports their distribution, split into
 connect and first-byte time. At 200 ms and 1% loss with a 50 MiB transfer
 running, interactive requests measure a 206 ms median and 367 ms 95th

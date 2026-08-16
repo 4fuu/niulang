@@ -64,7 +64,7 @@ jobs:
           echo "smoked $found fuzz targets"
           test "$found" -gt 0
 
-  # wanopt against the TUIC-shaped reference over one emulated path. Both
+  # queqiao against the TUIC-shaped reference over one emulated path. Both
   # stacks run in the same job on the same runner, so a slow or noisy machine
   # moves both rows together and the comparison survives it -- which is the
   # same reason the live harness alternates trials rather than running one
@@ -83,6 +83,6 @@ jobs:
         with:
           go-version-file: go.mod
       - run: |
-          go run ./cmd/wanoptbench --rtt 200 --loss 1 --rate 25 \
+          go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 25 \
             --bytes $((4 * 1024 * 1024)) --trials 3 --flows 1 \
             --gate --tolerance 0.25

@@ -1,5 +1,5 @@
 // Package baseline implements a TUIC-shaped reference proxy on the same QUIC
-// stack that wanopt uses.
+// stack that queqiao uses.
 //
 // It exists purely as a measurement control. TUIC's data path is: one
 // long-lived authenticated QUIC connection, one bidirectional stream per
@@ -7,8 +7,8 @@
 // and then unframed byte copying in both directions. Reproducing exactly that
 // shape in-process, over the identical quic-go fork and the identical
 // congestion controllers, isolates "what does the TUIC design achieve here"
-// from "what does the Go QUIC implementation achieve here", so a wanopt/TUIC
-// gap can be attributed to wanopt's own framing, scheduling, and windows
+// from "what does the Go QUIC implementation achieve here", so a queqiao/TUIC
+// gap can be attributed to queqiao's own framing, scheduling, and windows
 // rather than to language or library differences.
 //
 // The transport windows follow TUIC's published defaults: a fixed 8 MiB
@@ -31,21 +31,21 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
-	wancongestion "github.com/icourses-dev/wanopt/internal/congestion"
-	"github.com/icourses-dev/wanopt/internal/socks5"
+	wancongestion "github.com/icourses-dev/queqiao/internal/congestion"
+	"github.com/icourses-dev/queqiao/internal/socks5"
 )
 
 const (
-	// ALPN is deliberately distinct from the wanopt ALPN so a misconfigured
+	// ALPN is deliberately distinct from the queqiao ALPN so a misconfigured
 	// benchmark cannot silently measure the wrong listener.
-	ALPN = "wanopt-baseline/1"
+	ALPN = "queqiao-baseline/1"
 	// tokenSize matches TUIC's 32-byte authentication token.
 	tokenSize     = 32
 	maxAddrLength = 255
 )
 
 // CongestionKind selects the sender for the baseline connection so it can be
-// matched against a wanopt run.
+// matched against a queqiao run.
 type CongestionKind string
 
 const (
@@ -54,7 +54,7 @@ const (
 	CongestionBBRTUIC CongestionKind = "bbr-tuic"
 	// CongestionBrutal is not something TUIC offers. It exists here so a
 	// controller can be held constant while the transport design varies:
-	// otherwise a wanopt-with-Brutal versus reference-with-BBR result measures
+	// otherwise a queqiao-with-Brutal versus reference-with-BBR result measures
 	// the controller choice and says nothing about the transport.
 	CongestionBrutal CongestionKind = "brutal"
 )
@@ -103,7 +103,7 @@ func (t Transport) quicConfig() *quic.Config {
 		InitialStreamReceiveWindow: t.StreamReceiveWindow,
 		// Deliberately equal to the initial value: TUIC does not ramp its
 		// receive window, and this reference's whole worth is that it is shaped
-		// like TUIC. wanopt does ramp, which is a real advantage over TUIC and
+		// like TUIC. queqiao does ramp, which is a real advantage over TUIC and
 		// must not be read as a scheduler advantage; see DESIGN-MULTIPATH 7.6.
 		MaxStreamReceiveWindow:         t.StreamReceiveWindow,
 		InitialConnectionReceiveWindow: t.SendWindow,
@@ -248,7 +248,7 @@ type ClientConfig struct {
 	// LocalAddress binds the outer UDP socket to a specific local IP. On a
 	// host running a TUN-mode proxy, an unbound socket is captured by the TUN
 	// and the measurement would run through that tunnel rather than the path
-	// under test. wanopt has the same option, and a comparison is only valid
+	// under test. queqiao has the same option, and a comparison is only valid
 	// when both sides use it identically.
 	LocalAddress string
 	// DialTimeout bounds one connection attempt. Zero selects a default.

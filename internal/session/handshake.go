@@ -67,7 +67,7 @@ const (
 
 // Hello is authenticated with the configured pre-shared secret. TLS protects
 // it in transit; the MAC additionally prevents accidental acceptance by a
-// listener that shares a certificate but not the wanopt credential.
+// listener that shares a certificate but not the queqiao credential.
 type Hello struct {
 	Timestamp int64
 	Nonce     [16]byte
@@ -136,7 +136,7 @@ func (h Hello) Verify(secret []byte, now time.Time) error {
 
 func macHello(secret []byte, h Hello) [32]byte {
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte("wanopt/hello/v1\x00"))
+	mac.Write([]byte("queqiao/hello/v1\x00"))
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], uint64(h.Timestamp))
 	mac.Write(b[:])

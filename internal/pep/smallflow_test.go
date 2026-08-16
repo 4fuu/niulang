@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/classifier"
-	"github.com/icourses-dev/wanopt/internal/multipath"
-	"github.com/icourses-dev/wanopt/internal/pathmodel"
-	"github.com/icourses-dev/wanopt/internal/pathsim"
-	"github.com/icourses-dev/wanopt/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/classifier"
+	"github.com/icourses-dev/queqiao/internal/multipath"
+	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/icourses-dev/queqiao/internal/pathsim"
+	"github.com/icourses-dev/queqiao/internal/protocol"
 )
 
 // requestResponse serves a destination that answers each small request with a

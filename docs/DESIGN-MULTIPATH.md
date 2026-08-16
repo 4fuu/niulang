@@ -1,7 +1,7 @@
 # Multipath transport: design
 
 **Status: superseded. This describes a thesis the project has abandoned.**
-See [`DESIGN.md`](DESIGN.md) for what wanopt is now.
+See [`DESIGN.md`](DESIGN.md) for what queqiao is now.
 
 Striping one flow over several connections has been deleted. The reason is not
 that it worked badly here but that the premise was never true of this path: an
@@ -218,7 +218,7 @@ The measure of this design is how much it removes.
 | Timer-based head reinjection with pressure heuristic | Reinjection is a scheduler property |
 | Lane-count A/B probe, its exhaustion and RTT-collapse guards | A useless lane is never pulled from, so lane count stops being a dangerous decision |
 | Per-lane burst-tolerance search (`commit.go`) | It was scaling a quantity that had already run away; see 7.1 |
-| The pushing sender itself, and the `WANOPT_SELF_PACED` switch | The comparison it existed for is recorded |
+| The pushing sender itself, and the `QUEQIAO_SELF_PACED` switch | The comparison it existed for is recorded |
 | Virtual transmit clock, lane ranking by predicted arrival | A pulling sender never chooses a lane, so an order has nothing to express |
 | Frame-level replay window, its budget, eviction and "unreplayable" state | It held the same bytes the scheduler holds, under a second limit |
 | `WINDOW`, `PING` and `PONG` frame types | Specified, never sent; QUIC already provides both properties |
@@ -246,7 +246,7 @@ capability negotiation, and no compatibility break.
 
 ## 7. What the redesign measured
 
-All figures below are `cmd/wanoptbench` against the seeded path emulator, both
+All figures below are `cmd/queqiaobench` against the seeded path emulator, both
 stacks in one process, same path and same seed. "Reference" is
 `internal/baseline`, the TUIC-shaped control: one authenticated QUIC connection,
 one stream per relayed connection, unframed copying, on the same QUIC stack and
@@ -257,7 +257,7 @@ the same controller.
 A 37.5 Mbit/s four-lane result on the policed path had stopped reproducing, and
 the recorded explanation -- that a bottleneck's tolerance for a burst is a
 property of the path that no constant can capture -- was wrong. Instrumenting
-per-lane state over time (`WANOPT_LANE_TRACE=1`) found three separate faults,
+per-lane state over time (`QUEQIAO_LANE_TRACE=1`) found three separate faults,
 none of which is about burst tolerance.
 
 **The lane window was computed from quantities the window itself inflated.** It
@@ -288,7 +288,7 @@ bandwidth-delay products in flight, and ran the round trip at 400 ms against the
 path's 200. Requiring a full burst of unused window -- the rule the code already
 applied in DRAIN -- fixes it; the transfer now reaches ProbeBW and the round trip
 returns to 201 ms. This affected the reference equally, so it never showed up in
-a wanopt-versus-reference comparison, which is exactly why it survived.
+a queqiao-versus-reference comparison, which is exactly why it survived.
 
 ### 7.2 A fourth fault: a completed chunk stayed in the ready set
 
@@ -304,7 +304,7 @@ What gave it away was arithmetic: on a 264 ms path at 20% loss, a 320-chunk
 object was issued 481 times, and the emulator counted 74% more packets crossing
 the path than the reference needed for the same bytes.
 
-`Complete` now drops the chunk from the ready set. At 20% loss that took wanopt
+`Complete` now drops the chunk from the ready set. At 20% loss that took queqiao
 from 13.1 Mbit/s to 15.2 against the reference's 14.6, and the packet counts
 match the reference's to within half a percent. It also closed most of the
 concurrent-flow gap, from 4 and 8 flows at 59.2 Mbit/s against 62.1 and 68.3 to
@@ -331,7 +331,7 @@ the pool keeps the control lane; a flow sharing it yields within one chunk.
 The standard matrix (`scripts/bench_matrix.sh`, five trials per cell, every
 transfer completing on both stacks), medians in Mbit/s:
 
-| Block | Reference | wanopt |
+| Block | Reference | queqiao |
 | --- | ---: | ---: |
 | 10 MiB, 200 ms, 0% loss | 37.94 | 38.05 |
 | 10 MiB, 200 ms, 1% loss | 30.49 | **32.11** |
@@ -351,7 +351,7 @@ loss) are inside the spread of repeated runs. `bench_matrix.sh --gate
 The striping regime -- a path policing each source address at 25 Mbit/s, 200 ms,
 1% loss:
 
-| | Reference | wanopt |
+| | Reference | queqiao |
 | --- | ---: | ---: |
 | 20 MiB, 1 lane | 20.70 | **22.26** |
 | 20 MiB, 4 lanes | -- | **42.71** (1.92x one lane) |
@@ -370,7 +370,7 @@ making the policy bolder.
 
 Interactive requests during a 50 MiB bulk transfer, 200 ms, 1% loss:
 
-| | Reference | wanopt |
+| | Reference | queqiao |
 | --- | ---: | ---: |
 | bulk goodput | 57.29 | 52.00 |
 | interactive median | 323 ms | **208 ms** |
@@ -400,9 +400,9 @@ is amortised rather than dominating:
 | | Mbit/s |
 | --- | ---: |
 | Reference, one connection | 209.90 |
-| wanopt, one lane | 292.44 |
-| wanopt, four lanes, 16 MiB retention | 413.26 |
-| wanopt, four lanes, retention from the lanes | **536.18** |
+| queqiao, one lane | 292.44 |
+| queqiao, four lanes, 16 MiB retention | 413.26 |
+| queqiao, four lanes, retention from the lanes | **536.18** |
 
 That first reading was wrong, and the correction is worth keeping because the
 error is a common one: a limit was attributed to something structural when it
@@ -426,7 +426,7 @@ been isolated -- it may be the emulator itself at 45,000 packets a second.
 
 The independent-flow case separates more cleanly. Four concurrent flows at
 200 ms measure 196 Mbit/s through the reference, which multiplexes them onto one
-connection, against 343 for wanopt, which moves classified bulk flows onto their
+connection, against 343 for queqiao, which moves classified bulk flows onto their
 own. There the ceiling really is per connection and having more of them is worth
 proportionally more.
 
@@ -452,7 +452,7 @@ established before any of the earlier numbers were quoted.
 **Link utilisation is a function of the bandwidth-delay product, and it
 collapses.** One flow, one lane, 50 MiB, against a known bottleneck:
 
-| BDP | utilisation, wanopt | utilisation, reference |
+| BDP | utilisation, queqiao | utilisation, reference |
 | ---: | ---: | ---: |
 | 0.31 MB | 0.95 | 0.96 |
 | 0.62 MB | 0.93 | 0.92 |
@@ -487,7 +487,7 @@ nothing over letting it grow from 8 (0.34 against 0.33 at the worst cell), so
 the window is no longer the constraint. Utilisation against the TUIC-faithful
 reference, 200 MiB per cell:
 
-| | reference | wanopt |
+| | reference | queqiao |
 | --- | ---: | ---: |
 | 50 ms, 400 Mbit/s | 0.83 | 0.84 |
 | 100 ms, 400 Mbit/s | 0.60 | 0.60 |
@@ -518,17 +518,17 @@ write-ahead queue -- each was tested by changing it alone.
 
 **Striping loses share on a contended bottleneck.** This is the measurement that
 sequential benchmarking cannot make, and it required the emulator to grow a
-shared `Bottleneck` that two stacks contend for. wanopt and the reference, both
+shared `Bottleneck` that two stacks contend for. queqiao and the reference, both
 fetching at once through one 100 Mbit/s link at 200 ms, six trials:
 
-| wanopt lanes | wanopt share | ratio to the reference |
+| queqiao lanes | queqiao share | ratio to the reference |
 | ---: | ---: | ---: |
 | 1 | **0.514** | 1.06 |
 | 4 | **0.403** | 0.65 |
 
 One lane splits the link evenly and slightly better. Four lanes take a *third*
 less than one lane does, and the single-path reference ends up with about one
-and a half times wanopt's goodput. Four congestion windows on one bottleneck do
+and a half times queqiao's goodput. Four congestion windows on one bottleneck do
 not buy four shares; they buy less than one, because the flow is still a single
 ordered byte stream and the reordering and head-of-line cost of striping across
 a contended link exceeds what the extra windows win.
@@ -601,7 +601,7 @@ different startup, not a different scheduler.
 
 Every figure above is emulated. Run against the real China-US path -- 263 ms
 average round trip, 226 to 440 ms range, 5% loss, 48 ms of jitter -- the first
-campaign said something the emulator never had: **wanopt lost 17 of 18
+campaign said something the emulator never had: **queqiao lost 17 of 18
 alternating rounds**, 5.42 Mbit/s against the reference's 8.85.
 
 Disabling striping did not close it (4.34 against 8.84), so it was not the lane
@@ -622,7 +622,7 @@ against 9.92.
 
 The full campaign on the shipped configuration, fourteen alternating rounds:
 
-| | Reference | wanopt |
+| | Reference | queqiao |
 | --- | ---: | ---: |
 | mean | 10.59 Mbit/s | 10.24 Mbit/s |
 | rounds ahead | 8 of 14 | 6 of 14 |
@@ -663,9 +663,9 @@ this has not yet identified.
 ### 7.9 Scenarios outside the standard matrix
 
 The matrix covers one shape of path. These are the others, four to six trials
-each, medians in Mbit/s, reference then wanopt:
+each, medians in Mbit/s, reference then queqiao:
 
-| Scenario | Reference | wanopt |
+| Scenario | Reference | queqiao |
 | --- | ---: | ---: |
 | 20 ms, 1 Gbit/s, 100 MiB | 685.24 | **708.12** |
 | 30 ms, 200 Mbit/s, 0.1% loss | 180.98 | 180.76 |
@@ -697,7 +697,7 @@ recovery path treated a permanent answer as a transient one. A session
 identifier is random and is never reissued, so the first refusal is as
 informative as the twelfth; it now ends the flow's replacement grace.
 
-Twenty trials, 4 MiB each: wanopt completes 15 of the 16 transfers it starts,
+Twenty trials, 4 MiB each: queqiao completes 15 of the 16 transfers it starts,
 the reference 8 of 13 -- the other five fail or truncate. Both stacks lose a
 similar number of connections during setup, which is the path and not the
 transport. Medians are indistinguishable at this loss rate, so completion is the
@@ -705,7 +705,7 @@ only comparison that means anything here.
 
 What is left is that a lane still dies of QUIC's idle timeout mid-burst, and
 each death costs a rejoin. Raising the idle timeout is not the answer: measured
-at 30 seconds it made wanopt worse, because the same constant bounds how fast a
+at 30 seconds it made queqiao worse, because the same constant bounds how fast a
 genuinely black-holed path falls back to TCP.
 
 **The TCP rescue path is fixed.** The flake was not a data-path failure at all,

@@ -1,4 +1,4 @@
-module github.com/icourses-dev/wanopt
+module github.com/icourses-dev/queqiao
 
 go 1.25.0
 

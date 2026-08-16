@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/metrics"
-	"github.com/icourses-dev/wanopt/internal/pathmodel"
-	"github.com/icourses-dev/wanopt/internal/pathsim"
-	"github.com/icourses-dev/wanopt/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/metrics"
+	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/icourses-dev/queqiao/internal/pathsim"
+	"github.com/icourses-dev/queqiao/internal/protocol"
 )
 
 // codedPair brings up a server and a client, optionally with a lossy emulated
@@ -78,10 +78,9 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: remote, ServerName: "wanopt.test",
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: remote, ServerName: "queqiao.test",
 		Secret: secret, RootCAs: roots, Transport: TransportQUIC,
-		EnableQUICPool: pooled,
-		InitialLanes:   1, MaxLanes: 1, Logger: logger, Metrics: metrics.New(),
+		EnableQUICPool: pooled, Logger: logger, Metrics: metrics.New(),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -129,7 +129,7 @@ func NewBBRSender(initialPacketSize quiccongestion.ByteCount) *BBRSender {
 	if initialPacketSize < quiccongestion.MinInitialPacketSize {
 		initialPacketSize = quiccongestion.InitialPacketSize
 	}
-	// TUIC's BBR uses the standard 32-packet initial window. The old wanopt
+	// TUIC's BBR uses the standard 32-packet initial window. The old queqiao
 	// controller used ten packets, which unnecessarily serialized startup over
 	// a 200-ms path and made a single flow look much worse than TUIC before its
 	// estimator had any useful sample.

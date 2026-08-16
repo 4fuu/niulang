@@ -527,7 +527,7 @@ is the same number.
 ## Where the bulk throughput goes
 
 That measurement makes the question answerable. Traced on the live link during
-a 10 MB download (`WANOPT_LANE_TRACE=1`), in steady state:
+a 10 MB download (`QUEQIAO_LANE_TRACE=1`), in steady state:
 
 - offered 26–28 Mbit/s, which is just above the policer,
 - `maxbw` 15.4 Mbit/s, which is the delivered ceiling the probe measured,

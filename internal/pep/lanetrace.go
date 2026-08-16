@@ -9,7 +9,7 @@ import (
 )
 
 // laneTrace prints one line per lane per congestion sample when
-// WANOPT_LANE_TRACE is set. It exists because every question this transport has
+// QUEQIAO_LANE_TRACE is set. It exists because every question this transport has
 // had to answer -- why a window grew, why a bottleneck dropped, why one trial
 // was twice another -- is a question about per-lane state over time, and a
 // throughput number at the end of a transfer cannot answer any of them.
@@ -18,7 +18,7 @@ import (
 // are aggregated and this is deliberately raw.
 var laneTrace atomic.Bool
 
-func init() { laneTrace.Store(os.Getenv("WANOPT_LANE_TRACE") == "1") }
+func init() { laneTrace.Store(os.Getenv("QUEQIAO_LANE_TRACE") == "1") }
 
 var traceStart = time.Now()
 

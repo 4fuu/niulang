@@ -94,7 +94,7 @@ Each QUIC lane needs a loss-aware controller with a conservative initial
 packet size (1200 bytes) and path-specific MTU probing only after the base
 path is proven. The stock apNet QUIC controller is a useful correctness
 baseline, but it is not the best measured choice for this path. A matched
-development experiment with the apNet fork found that a wanopt adaptive
+development experiment with the apNet fork found that a queqiao adaptive
 controller improved median 256-KiB goodput from 0.31 to 0.50 Mbps for one lane
 and from 1.56 to 3.00 Mbps for eight lanes. A Hysteria-style fixed-rate
 controller at 1 MiB/s per lane reached 8.44 Mbps for a one-lane 10-MiB
@@ -126,7 +126,7 @@ pending.
 
 The project uses the maintained apNet QUIC fork and keeps the stock controller
 available. It does not import Hysteria's `internal/` packages or fork
-cryptography. Both BBR modes are opt-in: the original wanopt mode is an
+cryptography. Both BBR modes are opt-in: the original queqiao mode is an
 independent implementation of the public BBR model, while `bbr-tuic` is a
 separate Go implementation aligned with TUIC's public behavior. Neither is a
 claim that apNet quic-go itself provides BBR. A per-lane controller alone is unsafe: eight controllers can

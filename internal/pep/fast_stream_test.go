@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/session"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/session"
 )
 
 // A fast OPEN is a connection-scoped optimization, never a standalone
@@ -87,9 +87,8 @@ func TestQUICPoolLegacyCapabilityFallsBackToHello(t *testing.T) {
 	// the current capability set, while this test emulates an older peer.
 	server.quicCapabilities = 0
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		MaxLanes: 1, InitialLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,9 +147,8 @@ func TestQUICPoolConcurrentFastStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		MaxLanes: 1, InitialLanes: 1, MaxSessions: 16, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, MaxSessions: 16, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -224,9 +222,8 @@ func TestQUICPoolReconnectResetsAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		MaxLanes: 1, InitialLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -302,9 +299,8 @@ func TestQUICPoolFastUDPAssociation(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		MaxLanes: 1, InitialLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -365,9 +361,8 @@ func TestFastLaneJoinUsesSecondaryAuthenticatedPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		MaxLanes: 2, InitialLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -388,10 +383,11 @@ func TestFastLaneJoinUsesSecondaryAuthenticatedPool(t *testing.T) {
 	if lane.id != 1 || client.bulkConnCount() != 1 {
 		t.Fatalf("unexpected fast pool state: lane=%d connections=%d", lane.id, client.bulkConnCount())
 	}
-	// Concurrent bulk lanes must not share one secondary connection. Sharing
-	// gives them a single 4-tuple and a single congestion controller, which is
-	// exactly what one TUIC connection already provides and leaves striping
-	// with nothing to gain.
+	// Concurrently isolated bulk flows must not share one secondary
+	// connection. Sharing gives them a single congestion controller, which is
+	// what they were moved off the pooled connection to escape -- isolation
+	// would become a queue rather than a policy. This is no longer about
+	// striping, which is deleted; it is about the eight-flow case.
 	second, err := client.openFastJoinLane(ctx, flow.sessionID, flow.flowID, 2)
 	if err != nil {
 		t.Fatalf("second fast lane join: %v", err)
@@ -438,9 +434,8 @@ func TestQUICPoolFastRejectDowngradesToLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		MaxLanes: 1, InitialLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -509,9 +504,8 @@ func TestAFlowIsAnsweredBeforeItsOpenIsAcknowledged(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "wanopt.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true,
-		MaxLanes: 1, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

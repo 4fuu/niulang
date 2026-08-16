@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/icourses-dev/wanopt/internal/pathsim"
+	"github.com/icourses-dev/queqiao/internal/pathsim"
 )
 
 // Report is the machine-readable result of one benchmark invocation. Its
@@ -32,8 +32,6 @@ type PathReport struct {
 	Seed                int64   `json:"seed"`
 	ObjectBytes         int64   `json:"object_bytes"`
 	Congestion          string  `json:"congestion"`
-	MaxLanes            int     `json:"max_lanes"`
-	InitialLanes        int     `json:"initial_lanes"`
 	ChunkSize           int     `json:"chunk_size,omitempty"`
 	QUICPool            bool    `json:"quic_pool"`
 }
@@ -65,7 +63,7 @@ type InteractiveReport struct {
 //
 // The statistics deliberately include failed trials at their partial rate. A
 // median taken over completions alone rewards a transport for giving up: in a
-// 35%-burst-loss block the reference completed 7 of 12 trials and wanopt 10 of
+// 35%-burst-loss block the reference completed 7 of 12 trials and queqiao 10 of
 // 12, and reporting only successes made the transport that finished the hard
 // trials look slower than the one that abandoned them.
 type CellSummary struct {
@@ -98,8 +96,8 @@ func describePath(opts options, cfg pathsim.Config) PathReport {
 		JitterMillis: opts.jitterMillis,
 		RateMbits:    opts.rateMbits, PerFlowMbits: opts.perFlowMbits,
 		QueueBytes: cfg.QueueBytes, Seed: opts.seed, ObjectBytes: opts.bytes,
-		Congestion: opts.congestion, MaxLanes: opts.lanes, InitialLanes: opts.initialLanes,
-		ChunkSize: opts.chunkSize, QUICPool: opts.quicPool,
+		Congestion: opts.congestion,
+		ChunkSize:  opts.chunkSize, QUICPool: opts.quicPool,
 	}
 }
 
@@ -200,7 +198,7 @@ func printSummary(summaries []CellSummary) {
 	}
 }
 
-// gateReport fails when wanopt is materially worse than the reference in any
+// gateReport fails when queqiao is materially worse than the reference in any
 // cell measured for both, so a transport change can be rejected automatically
 // rather than only noticed by someone reading a table.
 func gateReport(summaries []CellSummary, tolerance float64) error {
@@ -223,7 +221,7 @@ func gateReport(summaries []CellSummary, tolerance float64) error {
 	compared := 0
 	for _, f := range flows {
 		reference, hasReference := byCell[f]["baseline"]
-		subject, hasSubject := byCell[f]["wanopt"]
+		subject, hasSubject := byCell[f]["queqiao"]
 		if !hasReference || !hasSubject {
 			continue
 		}
@@ -241,7 +239,7 @@ func gateReport(summaries []CellSummary, tolerance float64) error {
 		}
 	}
 	if compared == 0 {
-		return fmt.Errorf("gate requires both stacks; run with --stacks baseline,wanopt")
+		return fmt.Errorf("gate requires both stacks; run with --stacks baseline,queqiao")
 	}
 	if len(failures) > 0 {
 		for _, failure := range failures {
@@ -249,7 +247,7 @@ func gateReport(summaries []CellSummary, tolerance float64) error {
 		}
 		return fmt.Errorf("gate failed in %d of %d compared cells", len(failures), compared)
 	}
-	fmt.Printf("\ngate: wanopt is within %.0f%% of the reference in all %d compared cells\n", tolerance*100, compared)
+	fmt.Printf("\ngate: queqiao is within %.0f%% of the reference in all %d compared cells\n", tolerance*100, compared)
 	return nil
 }
 

@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/lossmodel"
+	"github.com/icourses-dev/queqiao/internal/lossmodel"
 )
 
 // Class is what a flow needs from the code. It decides the block length, which

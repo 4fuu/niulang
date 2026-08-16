@@ -1,9 +1,9 @@
-// Command wanoptref runs the TUIC-shaped reference proxy as a standalone
-// client or server so wanopt can be compared against it on a real link.
+// Command queqiaoref runs the TUIC-shaped reference proxy as a standalone
+// client or server so queqiao can be compared against it on a real link.
 //
 // It is a measurement control, not a product: it implements TUIC's data-path
 // shape (one authenticated QUIC connection, one bidirectional stream per
-// relayed TCP connection, unframed copying) on the same QUIC stack wanopt
+// relayed TCP connection, unframed copying) on the same QUIC stack queqiao
 // uses. Running both over the same path at the same time isolates the
 // transport design from the language and library, which a comparison against a
 // separately built native implementation cannot.
@@ -34,12 +34,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/baseline"
+	"github.com/icourses-dev/queqiao/internal/baseline"
 )
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "wanoptref: %v\n", err)
+		fmt.Fprintf(os.Stderr, "queqiaoref: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -61,11 +61,11 @@ func run(args []string) error {
 		genCert    string
 		logLevel   string
 	)
-	fs := flag.NewFlagSet("wanoptref", flag.ContinueOnError)
+	fs := flag.NewFlagSet("queqiaoref", flag.ContinueOnError)
 	fs.StringVar(&mode, "mode", "", "server, client, or gencert")
 	fs.StringVar(&listen, "listen", "", "server UDP address, or client SOCKS5 address")
 	fs.StringVar(&remote, "remote", "", "client: reference server address")
-	fs.StringVar(&serverName, "server-name", "wanopt.test", "TLS server name")
+	fs.StringVar(&serverName, "server-name", "queqiao.test", "TLS server name")
 	fs.StringVar(&tokenHex, "token", "", "32-byte shared token, hex encoded")
 	fs.StringVar(&tokenFile, "token-file", "", "file containing the hex-encoded token")
 	fs.StringVar(&certFile, "tls-cert", "", "server certificate PEM")

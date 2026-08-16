@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Measure one application flow per trial. The client configuration (especially
-# --initial-lanes/--max-lanes) is selected by the caller before this script is
+# transport settings) are selected by the caller before this script is
 # run; the output is intentionally one row per logical SOCKS connection, not
 # several independent downloads disguised as one result.
 set -Eeuo pipefail
 
-proxy=${WANOPT_SOCKS5:-127.0.0.1:12080}
-url=${WANOPT_URL:-https://cachefly.cachefly.net/10mb.test}
-expected_bytes=${WANOPT_EXPECTED_BYTES:-10485760}
-trials=${WANOPT_TRIALS:-5}
-timeout_seconds=${WANOPT_TIMEOUT_SECONDS:-90}
-output=${WANOPT_OUTPUT:--}
-label=${WANOPT_LABEL:-single-flow}
+proxy=${QUEQIAO_SOCKS5:-127.0.0.1:12080}
+url=${QUEQIAO_URL:-https://cachefly.cachefly.net/10mb.test}
+expected_bytes=${QUEQIAO_EXPECTED_BYTES:-10485760}
+trials=${QUEQIAO_TRIALS:-5}
+timeout_seconds=${QUEQIAO_TIMEOUT_SECONDS:-90}
+output=${QUEQIAO_OUTPUT:--}
+label=${QUEQIAO_LABEL:-single-flow}
 
 usage() {
     cat >&2 <<'EOF'
@@ -19,9 +19,7 @@ Usage: bench_single_flow.sh [--proxy host:port] [--url https://...] \
        [--expected-bytes N] [--trials N] [--timeout seconds] \
        [--label NAME] [--output FILE]
 
-The SOCKS client must already be running. Configure its lane count separately;
-for example, run one client with --initial-lanes=1 --max-lanes=1 and another
-with --initial-lanes=4 --max-lanes=4. A result is complete only when curl
+The SOCKS client must already be running. A result is complete only when curl
 exits successfully, returns HTTP 200, and receives the exact body length.
 EOF
 }
@@ -56,7 +54,7 @@ fi
 printf 'trial\tlabel\thttp_code\tbytes\ttotal_seconds\tspeed_bytes_per_sec\tcurl_exit\tcomplete\n' >"$out_fd"
 
 for ((trial = 1; trial <= trials; trial++)); do
-    result=$(mktemp "${TMPDIR:-/tmp}/wanopt-single.XXXXXX")
+    result=$(mktemp "${TMPDIR:-/tmp}/queqiao-single.XXXXXX")
     errfile="$result.err"
     trap 'rm -f "$result" "$errfile"' EXIT INT TERM
     set +e

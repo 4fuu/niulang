@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/lossmodel"
+	"github.com/icourses-dev/queqiao/internal/lossmodel"
 )
 
 // offer paces packets at a fixed rate through the relay, open loop, and reports

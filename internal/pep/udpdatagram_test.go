@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/coded"
-	"github.com/icourses-dev/wanopt/internal/metrics"
-	"github.com/icourses-dev/wanopt/internal/pathmodel"
-	"github.com/icourses-dev/wanopt/internal/pathsim"
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/socks5"
+	"github.com/icourses-dev/queqiao/internal/coded"
+	"github.com/icourses-dev/queqiao/internal/metrics"
+	"github.com/icourses-dev/queqiao/internal/pathmodel"
+	"github.com/icourses-dev/queqiao/internal/pathsim"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/socks5"
 )
 
 // A UDP packet's sequence number can no longer be required to be the next
@@ -253,8 +253,8 @@ func udpAssociationOver(t *testing.T, path pathsim.Config, onStream bool) (*net.
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: relay.LocalAddr(),
-		ServerName: "wanopt.test", Secret: secret, RootCAs: roots, Transport: TransportQUIC,
-		EnableQUICPool: true, InitialLanes: 1, MaxLanes: 1, Logger: logger,
+		ServerName: "queqiao.test", Secret: secret, RootCAs: roots, Transport: TransportQUIC,
+		EnableQUICPool: true, Logger: logger,
 		Metrics: metrics.New(), UDPOnStream: onStream,
 	})
 	if err != nil {

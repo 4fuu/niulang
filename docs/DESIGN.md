@@ -1,6 +1,6 @@
 # Design
 
-This is what wanopt is. `DESIGN-MULTIPATH.md` and `DESIGN-ERASURE.md` are
+This is what queqiao is. `DESIGN-MULTIPATH.md` and `DESIGN-ERASURE.md` are
 dated records of how it got here and what each step measured; where they
 disagree with this document, this one is current.
 

@@ -6,8 +6,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/stripe"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/stripe"
 )
 
 const (

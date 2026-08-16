@@ -8,8 +8,8 @@ import (
 
 	quiccongestion "github.com/apernet/quic-go/congestion"
 
-	"github.com/icourses-dev/wanopt/internal/lossmodel"
-	"github.com/icourses-dev/wanopt/internal/pathmodel"
+	"github.com/icourses-dev/queqiao/internal/lossmodel"
+	"github.com/icourses-dev/queqiao/internal/pathmodel"
 )
 
 func losses(n int) []quiccongestion.LostPacketInfo {

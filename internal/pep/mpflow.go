@@ -11,14 +11,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/icourses-dev/wanopt/internal/classifier"
-	"github.com/icourses-dev/wanopt/internal/coded"
-	"github.com/icourses-dev/wanopt/internal/limiter"
-	"github.com/icourses-dev/wanopt/internal/metrics"
-	"github.com/icourses-dev/wanopt/internal/multipath"
-	"github.com/icourses-dev/wanopt/internal/protocol"
-	"github.com/icourses-dev/wanopt/internal/session"
-	"github.com/icourses-dev/wanopt/internal/stripe"
+	"github.com/icourses-dev/queqiao/internal/classifier"
+	"github.com/icourses-dev/queqiao/internal/coded"
+	"github.com/icourses-dev/queqiao/internal/limiter"
+	"github.com/icourses-dev/queqiao/internal/metrics"
+	"github.com/icourses-dev/queqiao/internal/multipath"
+	"github.com/icourses-dev/queqiao/internal/protocol"
+	"github.com/icourses-dev/queqiao/internal/session"
+	"github.com/icourses-dev/queqiao/internal/stripe"
 )
 
 var nextTelemetryID atomic.Uint64

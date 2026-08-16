@@ -1,5 +1,5 @@
 // Package congestion contains the optional QUIC send controllers used by
-// wanopt. The default remains the controller shipped by apNet quic-go.
+// queqiao. The default remains the controller shipped by apNet quic-go.
 //
 // The pacer below is adapted from the MIT-licensed Hysteria 2 congestion
 // implementation (github.com/apernet/hysteria, core/internal/congestion).
