@@ -4,16 +4,34 @@
 high-latency or lossy long-haul links. It is designed for the specific case
 where a client in China must always egress from one fixed US server.
 
-The project is intended to make one logical application flow able to use an
-adaptive pool of independent encrypted transport lanes while preserving low
-latency for interactive traffic. The first transport implementation will use
-QUIC/UDP, with an authenticated TLS/TCP fallback when UDP is blocked or
-unstable.
+**The path this targets is an erasure channel, not a congested one.** It drops
+about 45% of packets independently of the rate anything sends at, and polices
+above a knee at roughly 14.5 Mbit/s delivered. Everything in the transport
+follows from that: a congestion controller that does not treat erasure as a
+signal to back off, an erasure code sized from the measured channel for traffic
+that wants latency, retransmission for traffic that wants bandwidth, and
+sequencing by byte offset so an out-of-order arrival is placed rather than
+waited for. [`docs/DESIGN.md`](docs/DESIGN.md) is the design of record.
 
-The scheduler is inspired by PIAS: new flows receive a short high-priority
-budget, sustained one-way flows are demoted to bulk, and bidirectional
-bursty flows remain interactive. Classification uses byte counts and timing,
-not HTTPS decryption or MITM.
+One flow is carried by one connection. The project began as a multipath design
+and no longer is: an open-loop probe of the live path delivers the same total
+whether the offered rate is split over 1, 2, 4 or 8 connections, so connection
+count cannot buy capacity here, and lanes past the knee turn memoryless loss
+into the correlated kind that defeats the code. The original observation that
+more TCP connections went faster was real and was misdiagnosed -- it is TCP's
+Mathis limit at 42% loss, not an ISP policing per 4-tuple -- and fixing the
+loss response captures the same gain on one connection. Separate connections
+remain for two things that are not aggregation: isolating a bulk flow so it
+does not delay interactive ones, and moving a session to a fresh connection
+when its own dies.
+
+The transport uses QUIC/UDP with an authenticated TLS/TCP fallback when UDP is
+blocked or unstable.
+
+Flow classification is inspired by PIAS: new flows receive a short
+high-priority budget, sustained one-way flows are demoted to bulk, and
+bidirectional bursty flows remain interactive. Classification uses byte counts
+and timing, not HTTPS decryption or MITM.
 
 ## Current status
 

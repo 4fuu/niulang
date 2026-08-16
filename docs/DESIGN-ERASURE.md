@@ -1,5 +1,10 @@
 # Transport for an erasure channel (2026-08-15)
 
+**Status: a dated findings log, not the design of record.** See
+[`DESIGN.md`](DESIGN.md) for the current thesis, which this campaign is what
+produced. Sections here are in the order they were found rather than the order
+they should be read.
+
 The path this project targets is not congested. It erases. About 42% of packets
 are dropped independently of the sending rate — at 1 Mbit/s as readily as at 12,
 and ICMP loses 37% at five packets a second. The measurement and its method are

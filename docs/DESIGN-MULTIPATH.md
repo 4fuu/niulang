@@ -1,7 +1,24 @@
 # Multipath transport: design
 
-Status: implemented and measured. Supersedes the lane scheduler described in
-`docs/PERFORMANCE-20260812.md`.
+**Status: superseded. This describes a thesis the project has abandoned.**
+See [`DESIGN.md`](DESIGN.md) for what wanopt is now.
+
+Striping one flow over several connections has been deleted. The reason is not
+that it worked badly here but that the premise was never true of this path: an
+open-loop UDP probe delivers the same total whether the offered rate is sent
+over 1, 2, 4 or 8 connections, so there is no per-4-tuple policer to exploit,
+and lanes past the knee turn memoryless loss into correlated loss and degrade
+the erasure code. The original observation that more TCP connections went
+faster was real, and was TCP's Mathis limit rather than an ISP: fixing the
+transport's loss response captures the same gain on one connection.
+
+This document is kept because most of what it measures is not about lanes. The
+self-pacing critique in section 2, the byte-offset framing in 3.1, the
+congestion-control evaluation in 7.6, the live campaign in 7.8 and the
+scenario table in 7.9 all describe the transport that remains. Read it as a
+record, not as a design.
+
+Supersedes the lane scheduler described in `docs/PERFORMANCE-20260812.md`.
 
 ## 1. What this is for
 
