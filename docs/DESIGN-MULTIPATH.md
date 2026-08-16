@@ -129,8 +129,14 @@ application stream that only this lane can deliver. A quarter of a congestion
 window shrinks with a lane that slows, is bounded above so a lane with a very
 large window cannot turn its queue into a buffer, and needs nothing configured.
 
-**W** is the flow's shared window across all lanes, and it is what couples
-them. It follows MPTCP's Linked Increase Algorithm (RFC 6356):
+**W** was the flow's shared window across all lanes, and it is what used to
+couple them. **It has been deleted** -- `laneAdmission.Total()` returns zero and
+nothing binds the lanes together any more, so admission today is `Q(lane)`
+alone. The rest of this subsection is kept as the record of what was tried and
+why it went, because the reasoning that removed it is the reasoning that
+explains the transport.
+
+It followed MPTCP's Linked Increase Algorithm (RFC 6356):
 
     on each acknowledged chunk of b bytes:
         W += min( alpha * b / W , b / W_of_that_lane )
@@ -151,6 +157,14 @@ rather than invent one:
 Property 2 is what the 50 MiB failure needed. Property 1 is what protects the
 common case. Property 3 is what makes a policed path -- where each lane has its
 own uncongested allowance -- grow to the aggregate.
+
+And property 2 is why it is gone. "Do no harm" is the right property for a
+general-purpose transport on the public internet and the wrong one here: this
+transport exists because its path polices per connection rather than per
+endpoint pair, so its whole purpose is to claim more of the link than one
+connection is allowed, and a mechanism whose job is to prevent exactly that has
+nothing to contribute. It was deleted rather than disabled so that nothing
+reads as though the property were merely switched off.
 
 Congestion signals come from the lanes' QUIC controllers: a lane entering loss
 recovery, or its congestion window shrinking. Decreases are rate-limited to one
@@ -518,9 +532,43 @@ quantity; that it settles on one lane there is luck rather than judgement.
 
 On the policed path each lane still holds two bandwidth-delay products in flight
 once it reaches ProbeBW, which is BBRv1's congestion-window gain and not
-something this design chose. Four lanes reach 41.6 Mbit/s where the lanes'
-combined policed allowance is 75; the gap is reordering and reassembly cost, and
-it has not been decomposed.
+something this design chose. Four lanes reach about 44 Mbit/s where the lanes'
+combined policed allowance was said to be 75, and that gap was recorded here as
+"reordering and reassembly cost, not decomposed".
+
+**It has now been decomposed, and it is neither.** Three trials per row, 50 MiB,
+200 ms, 1% loss, each source policed at 25 Mbit/s. `sources` is how many client
+address:port pairs the emulator's policer actually gave a bucket to, which it
+now reports:
+
+| lanes | Mbit/s | sources | tail drops |
+| ---: | ---: | ---: | --- |
+| 1 | 21.5-22.1 | 2 | 297-486 |
+| 2 | 21.9-23.4 | 3 | 340 / 2303 / 12397 |
+| 3 | 32.4-38.0 | 6 | 464-608 |
+| 4 | 43.3-45.2 | 9 | 219-342 |
+
+Three things fall out, and the first invalidates the premise.
+
+**The allowance was never 75.** The policer keys on address and port, and a
+striped flow presents far more of them than it has lanes -- 9 for four lanes,
+21 for eight -- because probes, joins and replacements each open their own
+socket. Four lanes are policed at 225 Mbit/s, not 75, and take 44 of it. Every
+bucket runs at about a fifth of what it is allowed.
+
+**So the path is not the constraint, and neither is reassembly.** Tail drops
+stay between 219 and 608 at one, three and four lanes: the sender is not
+overrunning the buckets, it is not filling them. Reassembly cost would show as
+a receiver that cannot keep up with what arrives; this is lanes that are idle,
+which is the same shape as the retention-bound error in 7.5 -- a limit
+attributed to something structural when it was a constant -- and is a better
+place to look than the reassembler.
+
+**The second lane is the anomaly.** It buys 5%, where the third and fourth buy
+about 11 Mbit/s each, and it is the only row whose tail drops are erratic: 340,
+2303 and 12397 across three trials of the same seeded path, against a few
+hundred everywhere else. Whatever the second lane does to the sender's pacing,
+it does not do at three or four. That is where the remaining work is.
 
 Startup itself is still expensive in latency, and correctly so rather than
 through a defect: the bandwidth estimate plateaus at round 8 and the controller

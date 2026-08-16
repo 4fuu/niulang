@@ -291,6 +291,13 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 		note = fmt.Sprintf("up=%d/%d,lost=%d,tail=%d down=%d/%d,lost=%d,tail=%d",
 			up.PacketsOut, up.PacketsIn, up.PacketsLost, up.PacketsDropped,
 			down.PacketsOut, down.PacketsIn, down.PacketsLost, down.PacketsDropped)
+		// How many source addresses the path saw, which is how many buckets a
+		// per-source policer applied. Lanes only multiply a per-source
+		// allowance if they arrive from different sources, so a striping
+		// number is uninterpretable without this.
+		if counter, ok := harness.relay.(interface{ Sources() int }); ok {
+			note += fmt.Sprintf(" sources=%d", counter.Sources())
+		}
 	}
 	var interactive *InteractiveReport
 	if opts.interactive {

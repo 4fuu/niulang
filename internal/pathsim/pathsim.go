@@ -506,6 +506,20 @@ func (r *Relay) LocalAddr() string { return r.local.LocalAddr().String() }
 // Stats returns the upstream (client to server) and downstream counters.
 func (r *Relay) Stats() (up, down Stats) { return r.upstream.stats(), r.downstream.stats() }
 
+// Sources is how many distinct client source addresses have been seen, which
+// is how many buckets a per-source policer has actually applied.
+//
+// It is the number a striping measurement turns on: lanes only multiply a
+// per-source allowance if they arrive from different sources, and a lane that
+// shares a connection with another shares its bucket too. Counting them is the
+// difference between measuring the transport and measuring how many sockets it
+// happened to open.
+func (r *Relay) Sources() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.peers)
+}
+
 func (r *Relay) Close() error {
 	r.mu.Lock()
 	if r.closed {
