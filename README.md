@@ -84,6 +84,31 @@ document is superseded, and the striping it measures is deleted -- and
 [`docs/PERFORMANCE-20260812.md`](docs/PERFORMANCE-20260812.md) for the earlier
 campaign.
 
+### Measured against deployed proxies on a real path
+
+[`docs/MEASUREMENTS-20260816.md`](docs/MEASUREMENTS-20260816.md) is a live
+China-US campaign against the implementations people actually run -- sing-box
+1.13.18 serving TUIC v5, Hysteria2, VLESS over TLS and VLESS over WebSocket --
+with no emulator anywhere. On that path queqiao is the fastest transport
+measured, 143.1 Mbit/s median against Hysteria2's 90.2 and TUIC's 76.8, ahead
+in all six rounds, and the two TCP-based VLESS configurations are two orders of
+magnitude behind at 0.63 and 0.39. Interactive latency is at parity with TUIC
+and Hysteria2 idle, and VLESS cannot carry a real-time video stream at all,
+losing a third to a half of it.
+
+**Two results go the other way and both are blocking.** Under its own bulk load
+queqiao's interactive tail degrades more than either competitor's -- SSH p99
+302 to 940 ms, voice loss 1.9% to 9.0% -- which is what flow classification and
+bulk isolation exist to prevent, and the emulated 208 ms result below does not
+reproduce there. And **the client stops moving data entirely after a median
+2.35 GiB of sustained transfer**, three reproductions out of three, with no
+self-recovery and only a client restart clearing it; the shipping `erasure`
+controller is marking 99.9% of its samples application-limited and its
+bandwidth estimate collapses to under 2% of the link. That path is not the
+45%-erasure channel this project targets, so the campaign tests the transport
+rather than the design's central claim -- but the stall is not the path's
+fault.
+
 ### The live link is the number to believe
 
 Measured against the real China-US path -- 263 ms average round trip, 226 to
