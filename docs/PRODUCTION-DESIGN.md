@@ -258,6 +258,17 @@ address as the PEP socket endpoint.
   existing Clash route. Deployment must be atomic and rollback must be a
   single service stop plus removal of the inactive Clash node.
 
+The limits above have to cover the work a peer can ask for and not only the
+bytes it can send, which is the distinction fuzzing the coded path's decoders
+found twice. A sliding-window symbol and a loss-estimator sample are each
+identified by a number taken off the wire, and both layers advanced their
+window towards that number one step at a time: a single datagram naming an
+identifier 2^30 ahead spun the receive loop for as many steps as it named,
+under the lock, allocating as it went. Neither is a frame-size limit or a
+buffered-byte limit, and neither would have been found by one. Both are
+bounded now, and `deep.yml` smokes every fuzz target weekly so the next one of
+this shape is found by the repository rather than by the path.
+
 ## Release gates
 
 Do not call the project production-ready until all of the following are

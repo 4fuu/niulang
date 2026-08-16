@@ -372,12 +372,15 @@ sealed believing the path was clean, and carried no parity at all. The transfer
 then ran entirely on retransmission. Measured directly: starting from a known
 floor rather than from zero is 1.03 against 1.74 Mbit/s. 51 s to 35 s.
 
-**Acknowledgements queued behind the data they gate.** This is the largest and
-is not yet fixed. The session's own ACK frames travel over the same coded lane
-whose progress they release, so each one waits behind a block pipeline that is
-waiting for it. Measured: the same channel carries 0.87 Mbit/s one-way and
-0.008 Mbit/s when the reverse direction has to carry acknowledgements — a
-factor of a hundred.
+**Acknowledgements queued behind the data they gate.** This was the largest,
+and it is what the control and data split above was built for. The session's
+own ACK frames travelled over the same coded lane whose progress they release,
+so each one waited behind a block pipeline that was waiting for it. Measured:
+the same channel carried 0.87 Mbit/s one way and 0.008 Mbit/s when the reverse
+direction had to carry acknowledgements — a factor of a hundred. A lane is now
+a stream for control and that connection's datagrams for bulk, and the framing
+routes by frame type: only DATA is eligible for the coded path, and everything
+that releases it stays on the stream.
 
 Two defects it exposed are worth recording because neither was visible from
 either side alone. The datagram limit is not a constant to guess: a connection
