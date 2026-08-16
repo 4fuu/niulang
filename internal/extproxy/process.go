@@ -5,7 +5,6 @@ import (
 	"context"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -42,8 +41,9 @@ func startProcess(ctx context.Context, binary string, args ...string) (*process,
 	cmd.Stdout = logs
 	cmd.Stderr = logs
 	// A new process group lets the whole implementation be signalled, since
-	// some of them spawn helpers.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// some of them spawn helpers. How that is asked for is the one thing
+	// about this harness that differs by operating system.
+	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -80,22 +80,13 @@ func (p *process) stop() {
 		if p.cmd.Process == nil {
 			return
 		}
-		pgid, err := syscall.Getpgid(p.cmd.Process.Pid)
-		if err == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGTERM)
-		} else {
-			_ = p.cmd.Process.Signal(syscall.SIGTERM)
-		}
+		terminateProcessGroup(p.cmd, false)
 		select {
 		case <-p.done:
 			return
 		case <-time.After(3 * time.Second):
 		}
-		if err == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		} else {
-			_ = p.cmd.Process.Kill()
-		}
+		terminateProcessGroup(p.cmd, true)
 		select {
 		case <-p.done:
 		case <-time.After(2 * time.Second):
