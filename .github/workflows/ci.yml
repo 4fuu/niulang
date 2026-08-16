@@ -1,0 +1,72 @@
+# What every push has to satisfy. Kept cheap on purpose: this repository is
+# private, so Actions minutes are billed, and the expensive campaigns live in
+# deep.yml where they run on a schedule instead of on every commit.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The build matrix exists because it has already caught something: the
+  # external-proxy harness used Setpgid, Getpgid and Kill directly and did not
+  # compile for Windows at all, on a tree whose tests were entirely green.
+  # Nothing but a cross-build finds that.
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - {os: linux, arch: amd64}
+          - {os: linux, arch: arm64}
+          - {os: darwin, arch: amd64}
+          - {os: darwin, arch: arm64}
+          - {os: windows, arch: amd64}
+          - {os: windows, arch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+        env:
+          GOOS: ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
+
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+  # -short skips the tests that bring QUIC up across an emulated 300 ms
+  # erasure path. Those are the slowest and the most timing-dependent, and a
+  # two-core hosted runner is the worst place to judge them; deep.yml runs
+  # them in full.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -short -timeout 20m ./...
