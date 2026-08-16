@@ -74,3 +74,70 @@ func DestinationFromUDPAddr(addr *net.UDPAddr) (string, error) {
 	}
 	return net.JoinHostPort(addr.IP.String(), fmt.Sprintf("%d", addr.Port)), nil
 }
+
+// UDPResumeMarker opens a UDP association whose remote relay may be retained
+// and reclaimed. It is a distinct marker rather than a flag inside the old one
+// because a server that predates it must not misread it: an older peer sees
+// neither UDPAssociationMarker nor a valid destination and refuses the flow,
+// which is the correct answer rather than a half-understood association. A
+// client only sends it where the server advertised CapabilityUDPResume, so
+// that refusal is not a path anyone reaches.
+var UDPResumeMarker = []byte{'W', 'O', 'U', 'D', 2}
+
+// UDPResumeTokenSize is the width of the token naming a retained relay. It is
+// the whole of the secret: a peer that authenticated on the same PSK is still
+// not entitled to another association's relay, so the token has to be
+// unguessable rather than merely unique.
+const UDPResumeTokenSize = 16
+
+// EncodeUDPResumeOpen builds the Open payload for a resumable association. A
+// nil token asks for a fresh relay and a token to name it by; otherwise the
+// token names the relay to reclaim.
+func EncodeUDPResumeOpen(token []byte) ([]byte, error) {
+	if len(token) != 0 && len(token) != UDPResumeTokenSize {
+		return nil, fmt.Errorf("UDP resume token is %d bytes, want %d", len(token), UDPResumeTokenSize)
+	}
+	return append(append([]byte(nil), UDPResumeMarker...), token...), nil
+}
+
+// DecodeUDPResumeOpen reports whether the payload opens a resumable
+// association, and which relay it asks to reclaim. A nil token with ok set is
+// a request for a fresh one.
+func DecodeUDPResumeOpen(payload []byte) (token []byte, ok bool) {
+	if len(payload) < len(UDPResumeMarker) || string(payload[:len(UDPResumeMarker)]) != string(UDPResumeMarker) {
+		return nil, false
+	}
+	rest := payload[len(UDPResumeMarker):]
+	switch len(rest) {
+	case 0:
+		return nil, true
+	case UDPResumeTokenSize:
+		return append([]byte(nil), rest...), true
+	default:
+		return nil, false
+	}
+}
+
+// EncodeUDPResumeGrant is the OPEN_OK payload answering a resumable open: the
+// token naming this association's relay from now on, and whether the relay is
+// the one that was asked for or a fresh one.
+//
+// The token is reissued on every open, including a successful resume. A token
+// that survived its own use would let a lane that failed once be replayed
+// against every later relay the association had.
+func EncodeUDPResumeGrant(resumed bool, token [UDPResumeTokenSize]byte) []byte {
+	out := make([]byte, 1, 1+UDPResumeTokenSize)
+	if resumed {
+		out[0] = 1
+	}
+	return append(out, token[:]...)
+}
+
+// DecodeUDPResumeGrant parses that answer.
+func DecodeUDPResumeGrant(payload []byte) (resumed bool, token [UDPResumeTokenSize]byte, ok bool) {
+	if len(payload) != 1+UDPResumeTokenSize || payload[0] > 1 {
+		return false, token, false
+	}
+	copy(token[:], payload[1:])
+	return payload[0] == 1, token, true
+}

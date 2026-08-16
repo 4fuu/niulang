@@ -320,15 +320,15 @@ func TestQUICPoolFastUDPAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("warm pooled flow: %v", err)
 	}
-	udpLane, _, err := client.openUDPAssociation(ctx)
+	association, err := client.openUDPAssociation(ctx, nil)
 	if err != nil {
 		t.Fatalf("fast UDP association: %v", err)
 	}
-	if !udpLane.fastOpen {
+	if !association.lane.fastOpen {
 		t.Fatal("UDP association repeated the per-stream Hello handshake")
 	}
 	_ = warm.outer.Close()
-	_ = udpLane.outer.Close()
+	_ = association.lane.outer.Close()
 	client.closeQUICPool()
 	cancel()
 	select {

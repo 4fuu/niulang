@@ -164,6 +164,10 @@ type Client struct {
 	// peerAckRanges records whether the server advertised that it can consume
 	// range acknowledgements.
 	peerAckRanges atomic.Bool
+	// peerUDPResume records whether the server advertised that it can retain
+	// a UDP association's relay across a lane failure. A client that asks a
+	// peer which did not say so has its flow refused, so this gates the ask.
+	peerUDPResume atomic.Bool
 
 	// bulkMu protects a bounded set of pre-authenticated secondary QUIC
 	// connections used only for fast lane joins. Keeping them separate from
@@ -630,6 +634,7 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 		return fail(fmt.Errorf("decode pipelined session acknowledgement: %w", err))
 	}
 	c.peerAckRanges.Store(helloOK.Capabilities&session.CapabilityAckRanges != 0)
+	c.peerUDPResume.Store(helloOK.Capabilities&session.CapabilityUDPResume != 0)
 	openAck, err := lane.fc.Read()
 	if err != nil {
 		return fail(fmt.Errorf("read pipelined flow acknowledgement: %w", err))
@@ -991,8 +996,19 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 			}); err != nil {
 				return fail(fmt.Errorf("send pipelined session hello: %w", err))
 			}
-		} else if err := clientAuthenticateKind(fc, c.cfg.Secret, sessionID, laneID, helloKind, time.Now()); err != nil {
-			return fail(err)
+		} else {
+			ok, authErr := clientAuthenticateKindResult(fc, c.cfg.Secret, sessionID, laneID, helloKind, time.Now())
+			if authErr != nil {
+				return fail(authErr)
+			}
+			// A dedicated lane learns the peer's capabilities from its own
+			// HELLO_OK, which this path used to read and discard. Only the
+			// UDP-resume bit is taken from it: that is the one a UDP
+			// association consults before sending its open, and a dedicated
+			// lane is what a UDP association runs on. The rest keep the
+			// pooled path they already had, because changing where a
+			// capability is learned changes which flows have it.
+			c.peerUDPResume.Store(ok.Capabilities&session.CapabilityUDPResume != 0)
 		}
 	}
 	_ = outer.SetDeadline(time.Time{})
@@ -1086,6 +1102,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig, 
 		c.quicPoolControl = ok.Capabilities&session.CapabilityReserveControl != 0
 		c.quicPoolAuthenticated = true
 		c.peerAckRanges.Store(ok.Capabilities&session.CapabilityAckRanges != 0)
+		c.peerUDPResume.Store(ok.Capabilities&session.CapabilityUDPResume != 0)
 		_ = outer.SetDeadline(time.Time{})
 		return outer, false, true, c.quicPoolControl, nil, nil
 	}
@@ -1109,6 +1126,7 @@ func (c *Client) publishPoolCapabilities(conn *quic.Conn, ok session.HelloOK) {
 	c.quicPoolControl = ok.Capabilities&session.CapabilityReserveControl != 0
 	c.quicPoolAuthenticated = true
 	c.peerAckRanges.Store(ok.Capabilities&session.CapabilityAckRanges != 0)
+	c.peerUDPResume.Store(ok.Capabilities&session.CapabilityUDPResume != 0)
 }
 
 // peerAcceptsAckRanges reports whether the server advertised that it can
@@ -1119,6 +1137,10 @@ func (c *Client) publishPoolCapabilities(conn *quic.Conn, ok session.HelloOK) {
 // not retrofit: the capability is per flow, and the only cost of being late is
 // that one early flow keeps the cumulative-only behavior.
 func (c *Client) peerAcceptsAckRanges() bool { return c.peerAckRanges.Load() }
+
+// peerResumesUDP reports whether the server said it can hold a UDP
+// association's relay open for the association that replaces it.
+func (c *Client) peerResumesUDP() bool { return c.peerUDPResume.Load() }
 
 // laneJoinResult carries an asynchronous lane join back to the decision loop.
 type laneJoinResult struct {

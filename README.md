@@ -140,8 +140,9 @@ and the rejoin is refused because the server's session went with its own
 connection -- and a flake in the TCP rescue path (about one run in eight, and
 every run under `-race`) is recorded in
 [`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md). TUN/VLESS ingress is
-not yet implemented, and a mid-session rescue creates a fresh authenticated
-association rather than resuming the old remote relay. The project has not passed all controlled-loss/resource release
+not yet implemented. A mid-session UDP rescue now reclaims the same remote
+relay socket by token, so the destination keeps seeing one source address, but
+datagrams in flight when the lane died are still lost rather than replayed. The project has not passed all controlled-loss/resource release
 gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals

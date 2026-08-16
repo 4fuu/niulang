@@ -77,6 +77,10 @@ type Server struct {
 	// current capability set; tests may set it to zero to model an older peer.
 	quicCapabilities uint64
 	quicFastStreams  atomic.Bool
+	// udpRelays holds the relay sockets of UDP associations whose lane died,
+	// so the replacement association keeps the source address the destination
+	// has been talking to.
+	udpRelays *udpRelayStore
 }
 
 type serverFlow struct {
@@ -216,7 +220,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		sessions:         make(map[[16]byte]*serverFlow),
 		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 		metrics:          cfg.Metrics,
-		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl | session.CapabilityFastLaneJoin | session.CapabilityAckRanges,
+		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl | session.CapabilityFastLaneJoin | session.CapabilityAckRanges | session.CapabilityUDPResume,
+		udpRelays:        newUDPRelayStore(),
 	}
 	server.quicFastStreams.Store(true)
 	return server, nil
@@ -497,7 +502,15 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 				}
 			})
 		} else {
-			hello, err = serverAuthenticateHello(fc, s.cfg.Secret, s.replay, time.Now())
+			// A TLS/TCP lane advertises only what is not a QUIC-pool
+			// concept. Fast streams, reserved control and fast lane joins
+			// all describe a pooled QUIC connection and mean nothing here,
+			// but a UDP association's relay is a socket on this server
+			// whichever transport reached it -- and a rescue from QUIC lands
+			// on exactly this path, so not saying so here is what makes the
+			// relay unreclaimable at the moment it matters most.
+			hello, err = serverAuthenticateHelloWithCapabilities(fc, s.cfg.Secret, s.replay, time.Now(),
+				s.quicCapabilities&session.CapabilityUDPResume)
 		}
 		if err != nil {
 			s.cfg.Logger.Warn("session authentication failed", "error", err)
@@ -550,7 +563,11 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		return
 	}
 	if session.IsUDPAssociation(open.Payload) {
-		s.handleUDPAssociation(ctx, conn, fc, sessionID, open.Header.FlowID)
+		s.handleUDPAssociation(ctx, conn, fc, sessionID, open.Header.FlowID, nil, false)
+		return
+	}
+	if token, resumable := session.DecodeUDPResumeOpen(open.Payload); resumable {
+		s.handleUDPAssociation(ctx, conn, fc, sessionID, open.Header.FlowID, token, true)
 		return
 	}
 	destination, err := session.DecodeDestination(open.Payload)

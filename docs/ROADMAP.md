@@ -64,12 +64,15 @@ gate itself: no live campaign has demonstrated this across three windows.
 - UDP/TCP race for new sessions.
 - TCP lane fallback.
 - Bounded in-session UDP rescue that keeps the local SOCKS socket while
-  opening a fresh authenticated association; TCP fallback is selected by the
-  shared UDP health machine.
+  opening a replacement authenticated association that reclaims the same remote
+  relay socket by token; TCP fallback is selected by the shared UDP health
+  machine.
 
 Gate: injected UDP loss/blocking causes new and existing sessions to recover
-within a measured bound, and a future resumable-association extension must
-preserve datagrams across the transition without exposing duplicate bytes.
+within a measured bound, and a resumable association must preserve the
+remote relay's source address across the transition without exposing duplicate
+bytes. The mechanism exists and is tested; the measured bound on the live path
+is what remains.
 
 ## Stage 5 — TUN and release hardening
 

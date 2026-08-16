@@ -43,6 +43,13 @@ const (
 	// advertised by the side that would *consume* those reports, because a
 	// peer that cannot parse them must never be sent them.
 	CapabilityAckRanges uint64 = 1 << 3
+	// CapabilityUDPResume allows a client to ask that a UDP association's
+	// remote relay socket be retained across a lane failure and reclaimed by
+	// the replacement association, so the destination keeps seeing one source
+	// address. A client must not ask unless the server advertised this: an
+	// older server reads the resume marker as neither an association nor a
+	// destination and refuses the flow.
+	CapabilityUDPResume uint64 = 1 << 4
 )
 
 var helloOKCapabilityMarker = [8]byte{'W', 'O', 'C', 'A', 'P', '0', '0', '1'}

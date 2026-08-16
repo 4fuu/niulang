@@ -48,8 +48,9 @@ control/interactive lane. Additional lanes are independent authenticated
 QUIC connections, each carrying a reliable stream of bounded frames. Every
 DATA frame carries a byte sequence number. The receiver uses a bounded
 reassembly window and emits cumulative acknowledgements. Selective ACK ranges
-and explicit resume tokens remain future protocol work; the current replay
-mechanism relies on duplicate-safe sequence reassembly.
+remain future protocol work for TCP flows; the current replay mechanism relies
+on duplicate-safe sequence reassembly. UDP associations do have a resume
+token, described under UDP preference and TCP fallback below.
 
 The implementation also has an explicit, opt-in QUIC stream pool. When
 `--quic-pool` is enabled, initial/control streams for concurrent flows share
@@ -195,14 +196,29 @@ The implementation now covers the basic bounded recovery path:
 
 For SOCKS5 UDP ASSOCIATE, the local UDP socket and its pinned peer survive a
 transport failure. The client cancels both workers for the dead lane, applies
-bounded exponential backoff, and opens a fresh authenticated association. The
-shared health machine suppresses QUIC after repeated failures, so `auto`
-selects TLS/TCP for the rescue. This deliberately does not pretend to be a
-lossless session resume: datagrams already in flight when the lane dies may be
-lost, and the old remote relay is released by its bounded idle timeout. A
-future protocol version should add an authenticated association-resume token
-and explicit packet replay/duplicate policy before loss-sensitive UDP is
-called production-grade.
+bounded exponential backoff, and opens a replacement authenticated
+association. The shared health machine suppresses QUIC after repeated
+failures, so `auto` selects TLS/TCP for the rescue.
+
+The remote relay now survives it too. The relay is a socket on the server, and
+its source address is what the destination has been answering; opening a new
+one moved the association to a different client mid-conversation, which the
+local socket surviving does nothing about. A resumable open is answered with a
+random 16-byte token naming that relay, the relay is retained when its lane
+fails, and the replacement association presents the token to reclaim it. The
+token is reissued on every open including a successful resume, so one that
+outlived its use cannot be replayed against the association's later relays;
+it is good once, expires in 30 seconds, and the number of relays a peer can
+make the server hold is bounded. A client only offers one where the server
+advertised `CapabilityUDPResume`, which both QUIC and TLS/TCP lanes do --
+without it on TCP the rescue arrives on the one transport that cannot
+reclaim anything.
+
+This still does not pretend to be a lossless session resume, and no longer
+tries to be: datagrams in flight when the lane dies are lost, which is what a
+UDP datagram is allowed to be and is now also true of one lost in transit,
+since packets ride QUIC datagrams. The duplicate policy the earlier note asked
+for is the receiver's anti-replay window.
 
 The controlled UDP-blackhole test transferred a complete 100 MiB response over
 a TCP rescue lane. This is development evidence, not a guarantee under all

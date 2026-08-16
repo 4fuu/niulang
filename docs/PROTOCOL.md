@@ -72,10 +72,14 @@ fragmentation is rejected, malformed datagrams are dropped locally, and an
 association is bounded by the configured idle timeout and maximum lifetime.
 The current implementation carries packets over reliable QUIC streams or
 TLS/TCP, preserving packet boundaries while allowing automatic TCP rescue for
-new and failed in-session associations. An in-session rescue for UDP still opens a
-fresh authenticated association while retaining the local SOCKS UDP socket; it
-does not resume the old remote UDP relay or retransmit datagrams lost during the
-transport transition. TCP flows do resume: a replacement lane attaches to the
+new and failed in-session associations. An in-session rescue for UDP opens a replacement
+authenticated association, retaining the local SOCKS UDP socket. Where the
+server advertised `CapabilityUDPResume`, the association's open carries the
+16-byte token its OPEN_OK granted, and the server hands back the same remote
+relay socket rather than binding a new one, so the destination keeps seeing one
+source address. The token is single-use and reissued on every open, expires in
+30 seconds, and buys nothing else: datagrams in flight when the lane died are
+not replayed. TCP flows do resume: a replacement lane attaches to the
 existing session and the flow continues on it.
 `TypePacket` frames are carried on the connection's QUIC datagrams where
 DATAGRAM was negotiated in both directions, and on the lane's control stream
