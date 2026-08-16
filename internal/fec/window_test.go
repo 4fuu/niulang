@@ -460,3 +460,37 @@ func TestWindowProtectsSmallTransfersCheaply(t *testing.T) {
 			"less than protecting each symbol alone", shared, isolated)
 	}
 }
+
+// The window's oldest identifier is advanced by evicting one identifier at a
+// time, because each eviction is a symbol the layer above has to be told will
+// never arrive. The identifier is the peer's to choose, though, so the number
+// of those steps is too: a single source symbol naming an ESI far ahead used
+// to walk the whole distance, evicting and appending a Lost entry per step
+// with the receiving path's lock held. It never returned.
+func TestASymbolNamedFarAheadDoesNotWalkTheWindowToReachIt(t *testing.T) {
+	d := NewWindowDecoder()
+	d.Source(0, []byte("hello"))
+
+	done := make(chan Delivery, 1)
+	go func() { done <- d.Source(1<<30, []byte("far")) }()
+	select {
+	case delivery := <-done:
+		// A window's worth of evictions is the most that can have anything to
+		// report, because a window's worth is the most that can be held.
+		if len(delivery.Lost) > maxDecoderWidth {
+			t.Fatalf("a jump of 2^30 reported %d symbols lost, past the %d a window holds",
+				len(delivery.Lost), maxDecoderWidth)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a source symbol 2^30 ahead of the window did not return")
+	}
+
+	// The window still works where it now is: the far symbol is inside it,
+	// and one beside it is admitted rather than refused.
+	if delivery := d.Source(1<<30+1, []byte("next")); len(delivery.Recovered) != 0 {
+		t.Fatalf("a source symbol recovered %d others", len(delivery.Recovered))
+	}
+	if d.Discarded() != 0 {
+		t.Fatalf("the symbol beside the jump was discarded")
+	}
+}

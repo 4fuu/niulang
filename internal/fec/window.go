@@ -323,8 +323,25 @@ func (d *WindowDecoder) admit(esi uint32, out *Delivery) bool {
 	}
 	if int32(esi-d.high) >= 0 {
 		d.high = esi + 1
-		for ; d.high-d.lo > width; d.lo++ {
+		// Identifiers leaving the window are walked, because each is a symbol
+		// the layer above has to be told will never arrive. But the
+		// identifier is the peer's to choose: one source symbol naming an ESI
+		// 2^30 ahead of the window makes this a loop of 2^30 evictions, each
+		// scanning the row set and appending a Lost entry, all of it under
+		// the receiving path's lock. One datagram off the wire wedges the
+		// receive loop and exhausts memory on the way.
+		//
+		// Only what was admitted can be held, and at most a window's worth
+		// can be admitted, so a window of evictions covers every slot and
+		// every row that could still refer to one. Past that the walk is
+		// counting out identifiers that were never there, and the window is
+		// moved to its new place in one step instead.
+		walked := d.lo + width
+		for ; d.high-d.lo > width && int32(d.lo-walked) < 0; d.lo++ {
 			d.evict(d.lo, out)
+		}
+		if d.high-d.lo > width {
+			d.lo = d.high - width
 		}
 	}
 	return true

@@ -96,6 +96,9 @@ type Estimator struct {
 	next    uint64
 	highest uint64
 	started bool
+	// discontinuities counts the arrivals whose sequence number was too far
+	// ahead to be a gap in this numbering. On a working path it is zero.
+	discontinuities uint64
 
 	// The Markov counters are floating point because they decay: a regime
 	// change has to be able to overwrite the history rather than be averaged
@@ -157,6 +160,17 @@ func (e *Estimator) Observe(seq uint64) {
 	// A jump larger than the ring means the undecided range no longer fits.
 	// Decide from the bottom until it does, before marking, so this packet's
 	// own slot is never one of the ones retired.
+	//
+	// How far that walks is the peer's to choose, though: the sequence number
+	// comes off the wire, and one datagram naming a sequence 2^32 ahead used
+	// to retire that many slots one at a time -- under the receiving path's
+	// lock, fabricating a loss for each -- and never returned. So a gap past
+	// what any real burst could be is a discontinuity in the numbering rather
+	// than a measurement of it, and the estimator restarts from where it now
+	// is instead of counting out the distance.
+	if e.highest-e.next > maxDecidedPerArrival {
+		e.restart(seq)
+	}
 	for e.highest-e.next >= ringSize {
 		e.decide()
 	}
@@ -164,6 +178,23 @@ func (e *Estimator) Observe(seq uint64) {
 	for e.highest-e.next >= uint64(e.cfg.ReorderTolerance) {
 		e.decide()
 	}
+}
+
+// maxDecidedPerArrival bounds how many sequence numbers one arrival may
+// retire. It is generous against anything a path does -- 8192 consecutive
+// losses is a path that has stopped rather than one that is dropping -- and
+// finite against anything a peer says.
+const maxDecidedPerArrival = 8 * ringSize
+
+// restart abandons the undecided window and begins again at seq. The two
+// sides of a discontinuity are not one sequence space, so nothing is carried
+// across: not the ring, and not the previous packet's fate, which is what the
+// conditional loss probabilities are chained on.
+func (e *Estimator) restart(seq uint64) {
+	e.arrived = [ringSize]bool{}
+	e.next, e.highest = seq, seq
+	e.havePrev = false
+	e.discontinuities++
 }
 
 // decide retires the lowest undecided sequence number.
@@ -266,6 +297,11 @@ type Snapshot struct {
 const minMemorylessSamples = 200
 
 // Snapshot reports the current estimate.
+// Discontinuities reports how many arrivals named a sequence too far ahead to
+// be a gap in this numbering. It is zero on a working path, and a way to tell
+// a path that is losing packets from a peer that is not numbering them.
+func (e *Estimator) Discontinuities() uint64 { return e.discontinuities }
+
 func (e *Estimator) Snapshot() Snapshot {
 	s := Snapshot{Reordered: e.reordered, Decided: e.decided, Samples: e.samples}
 	if e.samples <= 0 {

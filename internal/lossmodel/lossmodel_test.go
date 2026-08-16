@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/rand"
 	"testing"
+	"time"
 )
 
 // bernoulli returns the arrival pattern of an independent erasure channel.
@@ -248,5 +249,42 @@ func TestAnalyzeReproducesTheMeasuredChannel(t *testing.T) {
 		return n
 	}(); total != p.Lost {
 		t.Fatalf("burst histogram accounts for %d losses, want %d", total, p.Lost)
+	}
+}
+
+// The sequence number an arrival carries comes off the wire, so how far the
+// estimator walks to catch up with it is the peer's choice. A datagram naming
+// a sequence 2^32 ahead used to retire that many slots one at a time,
+// fabricating a loss for each, and never returned.
+func TestASequenceFarAheadIsADiscontinuityNotFourBillionLosses(t *testing.T) {
+	e := New(Config{})
+	for seq := uint64(0); seq < 200; seq++ {
+		e.Observe(seq)
+	}
+	before := e.Snapshot()
+
+	done := make(chan struct{})
+	go func() { e.Observe(1 << 32); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a sequence 2^32 ahead did not return")
+	}
+
+	if e.Discontinuities() != 1 {
+		t.Fatalf("the jump was counted as %d discontinuities", e.Discontinuities())
+	}
+	after := e.Snapshot()
+	if after.Samples > before.Samples+maxDecidedPerArrival {
+		t.Fatalf("the jump added %v samples, so it was counted out rather than skipped",
+			after.Samples-before.Samples)
+	}
+	// The estimator still works where it now is: the sequences beside the
+	// jump are counted as arrivals, not as the far side of a gap.
+	for seq := uint64(1 << 32); seq < 1<<32+200; seq++ {
+		e.Observe(seq)
+	}
+	if loss := e.Snapshot().Loss; loss > 0.5 {
+		t.Fatalf("a clean run after the jump measured %.2f loss", loss)
 	}
 }

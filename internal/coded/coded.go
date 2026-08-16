@@ -637,9 +637,16 @@ func (a *assembler) prune() {
 
 func parseFrames(payload []byte, out [][]byte) [][]byte {
 	for len(payload) >= frameHeader {
-		size := int(binary.BigEndian.Uint32(payload))
+		size := binary.BigEndian.Uint32(payload)
 		payload = payload[frameHeader:]
-		if size > len(payload) {
+		// Compared as a uint64 rather than converted to int first. On a
+		// 32-bit build int(uint32) wraps negative for anything past 2 GiB,
+		// a negative size passes a `size > len(payload)` test, and the slice
+		// below panics on a negative bound -- so four bytes off the wire
+		// take down a receive loop that has no recover above it. The bound
+		// is only accidentally safe on 64-bit, which is not a property to
+		// leave a wire parser resting on.
+		if uint64(size) > uint64(len(payload)) {
 			break
 		}
 		out = append(out, append([]byte(nil), payload[:size]...))
