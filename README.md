@@ -33,6 +33,22 @@ high-priority budget, sustained one-way flows are demoted to bulk, and
 bidirectional bursty flows remain interactive. Classification uses byte counts
 and timing, not HTTPS decryption or MITM.
 
+## Using it
+
+[`docs/DEPLOYING.md`](docs/DEPLOYING.md) is the practical guide: build, egress
+host, local client, and how to point Clash Verge or any mihomo-based client at
+it. The short version is that queqiao is not a protocol Clash speaks --
+`queqiaod --mode local` runs beside Clash and exposes a plain SOCKS5 ingress,
+and Clash forwards to it as a `socks5` node. Templates are in
+[`deploy/`](deploy).
+
+Two things in that document decide whether a deployment works at all. The
+client must be started with `--local-address if:en0`, because Clash's TUN mode
+would otherwise capture queqiao's own outer connection and carry it through the
+tunnel queqiao is replacing. And the local client stops moving data after about
+2.35 GiB of sustained transfer and needs restarting, which is why this is
+something to switch to deliberately rather than leave carrying a day's traffic.
+
 ## Current status
 
 The repository now contains an authenticated SOCKS-to-PEP prototype with

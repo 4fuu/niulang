@@ -1,0 +1,42 @@
+# queqiao — Clash Verge / mihomo profile template
+#
+# queqiao is not a protocol Clash speaks. The client (`queqiaod --mode local`)
+# runs as a separate process beside Clash and exposes a plain SOCKS5 ingress on
+# loopback; Clash forwards to it like any other SOCKS5 node.
+#
+# Before selecting this profile, confirm the client is up:
+#   nc -z 127.0.0.1 12080
+#   env -u NO_PROXY -u no_proxy curl --noproxy '' -sS \
+#       --socks5-hostname 127.0.0.1:12080 https://api.ipify.org
+# The second command must print the egress host's address.
+#
+# The client MUST be started with --local-address if:en0 (or a literal physical
+# IP). Clash's TUN mode installs a default route through 198.18.0.1, so without
+# that binding queqiao's own outer connection is captured by Clash and carried
+# through whatever proxy Clash is using — the tunnel it was meant to replace,
+# or a loop.
+#
+# See docs/DEPLOYING.md.
+
+proxies:
+  - name: queqiao
+    type: socks5
+    server: 127.0.0.1
+    port: 12080
+    # queqiao implements SOCKS5 UDP ASSOCIATE and carries the datagrams on the
+    # connection's QUIC datagrams where QUIC negotiated them, so an application
+    # that chose UDP keeps datagram semantics rather than having its packets
+    # serialised into a stream where one loss stalls everything behind it.
+    udp: true
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - queqiao
+      - DIRECT
+
+rules:
+  - DOMAIN-SUFFIX,cn,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy
