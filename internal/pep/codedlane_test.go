@@ -134,6 +134,15 @@ func socksDial(t *testing.T, socks string, destination net.Listener, deadline ti
 }
 
 // trySocksDial is socksDial for callers that want to handle a failure.
+//
+// The deadline bounds the SOCKS negotiation and is then restarted, so what the
+// caller gets is its own budget rather than whatever is left of one. Setting it
+// once at dial made every caller share a single wall clock with the flow's
+// setup, and on a 42% erasure channel setup has no small worst case: a QUIC
+// handshake alone can cost tens of seconds there. Two tests failed that way
+// before it was fixed here -- one in the blind half of a measurement, one
+// under -race while the rest of the tree saturated the machine -- and both
+// read as transport failures rather than as the harness running out of time.
 func trySocksDial(socks string, destination net.Listener, deadline time.Duration) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", socks, 5*time.Second)
 	if err != nil {
@@ -169,6 +178,7 @@ func trySocksDial(socks string, destination net.Listener, deadline time.Duration
 		conn.Close()
 		return nil, fmt.Errorf("SOCKS connect failed: %v", reply)
 	}
+	_ = conn.SetDeadline(time.Now().Add(deadline))
 	return conn, nil
 }
 
