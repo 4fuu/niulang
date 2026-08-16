@@ -48,7 +48,7 @@ var ErrClosed = errors.New("stripe: scheduler closed")
 // Keeping this an interface is what stops congestion control leaking into the
 // scheduler. The scheduler's job is to hand the oldest ready chunk to a lane
 // that has room; deciding how much room a lane has is a different question,
-// answered by the transport and by the flow's coupled controller.
+// answered by the lane's transport.
 type Windows interface {
 	// Lane is how many bytes this lane may hold that its transport has not yet
 	// taken, given how many it holds now. It is a write-ahead bound, not a
