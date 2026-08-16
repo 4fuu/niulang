@@ -86,33 +86,69 @@ func TestSmallExchangesAreRepairedOnceThePathIsKnown(t *testing.T) {
 	conn := dialWithRetries(t, socks, destination, 3)
 	defer conn.Close()
 
-	exchange := func(n int) []time.Duration {
+	// Each exchange gets its own deadline, and each batch its own budget.
+	// The flow used to run under the single deadline its dial had set, which
+	// covered the setup, the blind half and the measured half together -- so
+	// the two halves and the handshake competed for one 90-second budget on a
+	// path where the handshake alone can cost tens of seconds. When the blind
+	// half was slow the measured half never ran, and the test failed at
+	// whichever exchange happened to be in flight: two runs in eight, always
+	// at exactly 90 s, always before reaching the thing it asserts.
+	//
+	// A budget is not a bound on what is being measured. 30 s is a hundred
+	// round trips, so an exchange that hits it has stalled rather than been
+	// cut short, and a batch that hits its own has already said what it had
+	// to say.
+	const perExchange = 30 * time.Second
+	exchange := func(n int, budget time.Duration) []time.Duration {
 		var samples []time.Duration
 		request, reply := make([]byte, 16), make([]byte, 2700)
+		until := time.Now().Add(budget)
 		for i := 0; i < n; i++ {
+			// Checked before rather than after, so the budget decides
+			// whether another exchange starts and never truncates one that
+			// is already running. A batch always takes at least one sample.
+			if i > 0 && time.Now().After(until) {
+				break
+			}
+			if err := conn.SetDeadline(time.Now().Add(perExchange)); err != nil {
+				t.Fatal(err)
+			}
 			start := time.Now()
 			if _, err := conn.Write(request); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := io.ReadFull(conn, reply); err != nil {
-				t.Fatalf("exchange %d: %v", i, err)
+				t.Fatalf("exchange %d of %d: %v", i, n, err)
 			}
 			samples = append(samples, time.Since(start))
 		}
 		return samples
 	}
 
-	blind := median(exchange(10))
+	// The blind half is logged, not asserted, and it is the expensive one:
+	// every loss it takes waits out a probe timeout, which is the whole point
+	// of it. Its first exchange alone can cost twenty seconds, because a flow
+	// is answered as soon as its open is queued and on this path that open is
+	// often lost. So the budget has to be several times that or it reports
+	// one outlier as a median, and it is a wall clock rather than a count so
+	// that the cost of the case being demonstrated does not become the cost
+	// of the test. What makes the measured half fast is the seeding below,
+	// not the number of exchanges before it.
+	blindSamples := exchange(10, time.Minute)
+	blind := median(blindSamples)
 	// What the endpoint pair is already known to erase. A long-lived proxy
 	// learns this from its own traffic or from the prewarm; only the floor is
 	// seeded, because a delivered rate would also claim a share of the
 	// bottleneck and that is a different experiment.
 	pathmodel.Shared(key).Report(99, 0.42, 5000, 0, 0)
-	knowing := median(exchange(10))
+	knowingSamples := exchange(10, time.Minute)
+	knowing := median(knowingSamples)
 
 	roundTrip := 2 * oneWay
-	t.Logf("median exchange: %v when the path is unknown, %v once it is known (round trip %v)",
-		blind.Round(time.Millisecond), knowing.Round(time.Millisecond), roundTrip)
+	t.Logf("median exchange: %v over %d when the path is unknown, %v over %d once it is "+
+		"known (round trip %v)", blind.Round(time.Millisecond), len(blindSamples),
+		knowing.Round(time.Millisecond), len(knowingSamples), roundTrip)
 
 	// What matters is the absolute cost, not that seeding the model improved
 	// it. The two halves share a connection, and the controller measures the
