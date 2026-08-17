@@ -198,6 +198,30 @@ func TestTUICFirstPacketStartsFirstRound(t *testing.T) {
 	}
 }
 
+// QUIC has three packet-number spaces, and their numbers overlap. The
+// congestion-controller API does not identify the space, so a packet in a
+// later space can replace the sampler state for a packet with the same number
+// in an earlier one. Delivery-rate sampling tolerates the resulting missed or
+// short sample, but min_rtt cannot: one false minimum sizes every later BBR
+// target window. The RTT provider resolves packet-number spaces before it
+// publishes LatestRTT, so it is the authoritative sample when available.
+func TestTUICMinRTTUsesProviderAcrossPacketNumberSpaces(t *testing.T) {
+	sender := NewTUICBBRSender(1200)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	start := monotime.Now()
+
+	// Model packet zero in an earlier space, followed just before its ACK by
+	// packet zero in 1-RTT. The sampler can only retain the latter send time.
+	sendTUICPacket(sender, start, 0, 0, 1200)
+	sendTUICPacket(sender, start.Add(199*time.Millisecond), 1200, 0, 1200)
+	sender.OnCongestionEventEx(2400, start.Add(200*time.Millisecond),
+		[]quiccongestion.AckedPacketInfo{{PacketNumber: 0, BytesAcked: 1200}}, nil)
+
+	if got := sender.minRoundTrip(); got != 200*time.Millisecond {
+		t.Fatalf("min_rtt used the ambiguous packet sample: got %v, want provider RTT 200ms", got)
+	}
+}
+
 func TestTUICInitialPacingFieldMatchesNativeTransition(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
 	// With no RTT sample, the public rate uses TUIC's 100-ms fallback while the

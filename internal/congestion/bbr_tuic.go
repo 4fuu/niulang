@@ -441,10 +441,21 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	}
 	minRTTExpired := false
 	if ackedBytes > 0 {
-		// The sampler owns BBR's expiring minimum-RTT model. The RTT provider is
-		// only a startup pacing fallback before a packet sample exists.
-		if sample.minRTT > 0 {
-			minRTTExpired = b.refreshRTTSample(eventTime, sample.minRTT)
+		// The sampler owns BBR's expiring minimum-RTT model, but its packet
+		// table cannot distinguish QUIC's overlapping packet-number spaces:
+		// the public congestion callback carries a number, not its space. The
+		// RTT provider has already resolved that ambiguity in the ACK handler,
+		// so its latest sample is authoritative when it is available. Keeping
+		// our own expiring minimum still lets ProbeRTT replace an old sample;
+		// the provider supplies an event sample, not the permanent minimum.
+		rttSample := sample.minRTT
+		if b.rttStats != nil {
+			if latest := b.rttStats.LatestRTT(); latest > 0 {
+				rttSample = latest
+			}
+		}
+		if rttSample > 0 {
+			minRTTExpired = b.refreshRTTSample(eventTime, rttSample)
 		}
 		b.maxAckedPN = largestAck
 	}

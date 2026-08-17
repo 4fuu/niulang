@@ -180,6 +180,16 @@ func (e *Estimator) Observe(seq uint64) {
 	}
 }
 
+// ObserveOutcome records one packet fate when the transport already resolved
+// it. Callers should use either Observe, when gaps are their only loss signal,
+// or ObserveOutcome, when their acknowledgement API reports losses directly.
+// The latter is essential for QUIC congestion callbacks: packet numbers
+// overlap across encryption spaces and the public callback omits the space,
+// so inferring gaps from those numbers fabricates loss.
+func (e *Estimator) ObserveOutcome(arrived bool) {
+	e.record(arrived)
+}
+
 // maxDecidedPerArrival bounds how many sequence numbers one arrival may
 // retire. It is generous against anything a path does -- 8192 consecutive
 // losses is a path that has stopped rather than one that is dropping -- and
@@ -203,6 +213,10 @@ func (e *Estimator) decide() {
 	arrived := e.arrived[slot]
 	e.arrived[slot] = false
 	e.next++
+	e.record(arrived)
+}
+
+func (e *Estimator) record(arrived bool) {
 	e.decided++
 
 	e.samples++
