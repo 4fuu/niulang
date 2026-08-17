@@ -27,6 +27,8 @@ import (
 // FIN. Recovery is deliberately finite; the logical flow then fails closed
 // and the caller can retry.
 const (
+	maxTCPFallbackLanes = 16
+
 	maxLaneRecoveryAttempts = 8
 	laneRecoveryResetAfter  = 5 * time.Minute
 	// A rejected speculative lane must not be reopened on every scheduler tick.
@@ -67,6 +69,10 @@ type ClientConfig struct {
 	FlowMaxLifetime  time.Duration
 	MaxSessions      int
 	Transport        TransportKind
+	// TCPFallbackLanes is the number of independent TLS/TCP connections used
+	// for a classified bulk flow when the peer explicitly advertises support.
+	// One preserves the legacy fallback. Values above one never affect QUIC.
+	TCPFallbackLanes int
 	// EnableQUICPool keeps one persistent QUIC connection for initial and
 	// control streams, and is what makes opening a flow cost nothing.
 	//
@@ -165,7 +171,6 @@ type Client struct {
 	// a UDP association's relay across a lane failure. A client that asks a
 	// peer which did not say so has its flow refused, so this gates the ask.
 	peerUDPResume atomic.Bool
-
 	// bulkMu protects a bounded set of pre-authenticated secondary QUIC
 	// connections used only for fast lane joins. Keeping them separate from
 	// the control pool preserves the control lane's congestion state while
@@ -264,6 +269,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	if cfg.Transport != TransportAuto && cfg.Transport != TransportQUIC && cfg.Transport != TransportTCP {
 		return nil, fmt.Errorf("unsupported client transport %q", cfg.Transport)
+	}
+	if cfg.TCPFallbackLanes == 0 {
+		cfg.TCPFallbackLanes = 1
+	}
+	if cfg.TCPFallbackLanes < 1 || cfg.TCPFallbackLanes > maxTCPFallbackLanes {
+		return nil, fmt.Errorf("TCP fallback lanes must be between 1 and %d", maxTCPFallbackLanes)
 	}
 	if cfg.Congestion == "" {
 		cfg.Congestion = defaultCongestion()
@@ -426,7 +437,13 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	flowSession.openAckPending = flow.openPending
 	flowSession.onProtocolReset = c.disableQUICPoolFast
 	flowSession.helloAckPending = flow.helloPending
-	flowSession.onHelloOK = flow.onHelloOK
+	flowSession.tcpStriping.Store(flow.kind == TransportTCP && c.cfg.TCPFallbackLanes > 1 && flow.tcpStriping)
+	flowSession.onHelloOK = func(ok session.HelloOK) {
+		if flow.onHelloOK != nil {
+			flow.onHelloOK(ok)
+		}
+		flowSession.tcpStriping.Store(flow.kind == TransportTCP && c.cfg.TCPFallbackLanes > 1 && ok.Capabilities&session.CapabilityTCPStriping != 0)
+	}
 	flowSession.reserveControlLane = flow.reserveControl
 	flowSession.controlLaneShared = func() bool { return c.quicPoolActive.Load() > 1 }
 	if err := flowSession.addLane(&mpLane{id: flow.laneID, kind: flow.kind, fc: flow.fc}); err != nil {
@@ -479,6 +496,7 @@ type openedFlow struct {
 	// negotiated capabilities once the flow reader observes it.
 	helloPending bool
 	onHelloOK    func(session.HelloOK)
+	tcpStriping  bool
 }
 
 type authenticatedLane struct {
@@ -493,6 +511,7 @@ type authenticatedLane struct {
 	// for HELLO_OK, so the flow reader owns the acknowledgement.
 	helloPending bool
 	onHelloOK    func(session.HelloOK)
+	tcpStriping  bool
 }
 
 func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow, error) {
@@ -575,6 +594,7 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 		return &openedFlow{
 			fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID,
 			laneID: lane.laneID, kind: lane.kind, openPending: true, helloPending: true,
+			onHelloOK: lane.onHelloOK,
 		}, nil
 	}
 	// The server emits HELLO_OK before OPEN_OK, even though both client
@@ -593,8 +613,7 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 	if err := helloOK.UnmarshalBinary(helloAck.Payload); err != nil {
 		return fail(peerResponse(fmt.Errorf("decode pipelined session acknowledgement: %w", err)))
 	}
-	c.peerAckRanges.Store(helloOK.Capabilities&session.CapabilityAckRanges != 0)
-	c.peerUDPResume.Store(helloOK.Capabilities&session.CapabilityUDPResume != 0)
+	c.publishPeerCapabilities(helloOK)
 	openAck, err := lane.fc.Read()
 	if err != nil {
 		return fail(fmt.Errorf("read pipelined flow acknowledgement: %w", err))
@@ -609,7 +628,11 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 		return fail(peerResponse(errors.New("invalid pipelined flow acknowledgement")))
 	}
 	_ = lane.outer.SetDeadline(time.Time{})
-	return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind}, nil
+	return &openedFlow{
+		fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID,
+		laneID: lane.laneID, kind: lane.kind, onHelloOK: lane.onHelloOK,
+		tcpStriping: kind == TransportTCP && helloOK.Capabilities&session.CapabilityTCPStriping != 0,
+	}, nil
 }
 
 func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*openedFlow, error) {
@@ -848,7 +871,7 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 		return &openedFlow{
 			fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID,
 			laneID: lane.laneID, kind: lane.kind, openPending: true, reserveControl: lane.reserveControl,
-			helloPending: lane.helloPending, onHelloOK: lane.onHelloOK,
+			helloPending: lane.helloPending, onHelloOK: lane.onHelloOK, tcpStriping: lane.tcpStriping,
 		}, nil
 	}
 	response, err := lane.fc.Read()
@@ -875,6 +898,7 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 		if lane.onHelloOK != nil {
 			lane.onHelloOK(acknowledged)
 		}
+		lane.tcpStriping = lane.kind == TransportTCP && acknowledged.Capabilities&session.CapabilityTCPStriping != 0
 		lane.helloPending = false
 		if response, err = lane.fc.Read(); err != nil {
 			return fail(fmt.Errorf("read flow open acknowledgement: %w", err))
@@ -901,7 +925,7 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 	return &openedFlow{
 		fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID,
 		laneID: lane.laneID, kind: lane.kind, reserveControl: lane.reserveControl,
-		helloPending: lane.helloPending, onHelloOK: lane.onHelloOK,
+		helloPending: lane.helloPending, onHelloOK: lane.onHelloOK, tcpStriping: lane.tcpStriping,
 	}, nil
 }
 
@@ -972,6 +996,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	reserveControl := false
 	alreadyAuthenticated := false
 	var publishCapabilities func(session.HelloOK)
+	var negotiatedCapabilities uint64
 	switch kind {
 	case TransportTCP:
 		outer, err = dialTCP(ctx, c.cfg.RemoteAddr, c.cfg.ServerName, c.cfg.RootCAs, c.cfg.DialTimeout, c.cfg.LocalAddress)
@@ -1016,15 +1041,12 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 			if authErr != nil {
 				return fail(authErr)
 			}
-			// A dedicated lane learns the peer's capabilities from its own
-			// HELLO_OK, which this path used to read and discard. Only the
-			// UDP-resume bit is taken from it: that is the one a UDP
-			// association consults before sending its open, and a dedicated
-			// lane is what a UDP association runs on. The rest keep the
-			// pooled path they already had, because changing where a
-			// capability is learned changes which flows have it.
-			c.peerUDPResume.Store(ok.Capabilities&session.CapabilityUDPResume != 0)
+			negotiatedCapabilities = ok.Capabilities
+			c.publishPeerCapabilities(ok)
 		}
+	}
+	if publishCapabilities == nil {
+		publishCapabilities = c.publishPeerCapabilities
 	}
 	_ = outer.SetDeadline(time.Time{})
 	c.cfg.Logger.Debug("outer lane authenticated", "transport", kind, "dial_duration", outerReady.Sub(dialStarted), "authentication_duration", time.Since(outerReady), "pooled", pooled, "fast_open", fastOpen)
@@ -1032,6 +1054,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 		fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID,
 		fastOpen: fastOpen, reserveControl: reserveControl,
 		helloPending: !alreadyAuthenticated && pipelineHello, onHelloOK: publishCapabilities,
+		tcpStriping: kind == TransportTCP && negotiatedCapabilities&session.CapabilityTCPStriping != 0,
 	}, nil
 }
 
@@ -1157,6 +1180,14 @@ func (c *Client) peerAcceptsAckRanges() bool { return c.peerAckRanges.Load() }
 // association's relay open for the association that replaces it.
 func (c *Client) peerResumesUDP() bool { return c.peerUDPResume.Load() }
 
+// publishPeerCapabilities records capabilities that are valid on dedicated
+// lanes. Connection-scoped QUIC capabilities remain in the pool state; these
+// three are safe to learn from any authenticated lane.
+func (c *Client) publishPeerCapabilities(ok session.HelloOK) {
+	c.peerAckRanges.Store(ok.Capabilities&session.CapabilityAckRanges != 0)
+	c.peerUDPResume.Store(ok.Capabilities&session.CapabilityUDPResume != 0)
+}
+
 // laneJoinResult carries an asynchronous lane join back to the decision loop.
 type laneJoinResult struct {
 	lane *mpLane
@@ -1214,7 +1245,7 @@ func (c *Client) openJoinLane(ctx context.Context, kind TransportKind, sessionID
 		_ = lane.fc.Close()
 		return nil, errors.New("invalid lane join acknowledgement")
 	}
-	return &mpLane{id: laneID, kind: kind, fc: lane.fc}, nil
+	return &mpLane{id: laneID, kind: kind, fc: lane.fc, tcpStriping: lane.tcpStriping}, nil
 }
 
 // openFastJoinLane uses a bounded, separately authenticated QUIC connection
@@ -1496,9 +1527,19 @@ func bulkLaneBudget(reserveControl bool) (bulk, controlReserve int) {
 }
 
 func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, initialKind TransportKind) {
+	if initialKind == TransportTCP {
+		if c.cfg.TCPFallbackLanes > 1 {
+			c.manageTCPBundle(ctx, flow, sessionID, flowID)
+		}
+		return
+	}
 	if initialKind != TransportQUIC {
 		return
 	}
+	c.manageQUICLanes(ctx, flow, sessionID, flowID)
+}
+
+func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64) {
 	_, controlReserve := bulkLaneBudget(flow.reserveControlLane)
 	manageCtx, manageCancel := context.WithCancel(ctx)
 	defer manageCancel()
@@ -1646,11 +1687,16 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			}
 			// Once a TCP rescue lane is installed, keep the session on it.
 			if hasTCPLane(flow) {
+				retired := flow.retireLanesExcept(TransportTCP)
+				c.cfg.Logger.Info("flow handed off to TCP fallback", "retired_quic_lanes", retired, "tcp_lanes", flow.laneCount())
+				if c.cfg.TCPFallbackLanes > 1 {
+					c.manageTCPBundle(manageCtx, flow, sessionID, flowID)
+				}
 				return
 			}
 			// Everything below is isolation, and it is over once it has
-			// happened: a flow's data lives on one lane, so there is never a
-			// second one to open.
+			// happened: a QUIC flow's data lives on one lane, so there is never
+			// a second QUIC data lane to open.
 			if isolated || controlReserve == 0 || joinPending {
 				continue
 			}
@@ -1698,6 +1744,195 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 			}()
 		}
 	}
+}
+
+// manageTCPBundle maintains a bounded group of independent reliable paths for
+// a TCP-only flow. Extra lanes are opened only after bulk classification (or
+// its asymmetric-download prewarm), but one lane is always recoverable. The
+// expansion failure budget is deliberately separate from zero-lane recovery:
+// an endpoint refusing lane 16 must not prevent a later replacement of the
+// one connection the flow still needs to remain alive.
+func (c *Client) manageTCPBundle(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64) {
+	manageCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-flow.doneChan():
+			cancel()
+		case <-manageCtx.Done():
+		}
+	}()
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	joins := make(chan laneJoinResult, maxTCPFallbackLanes)
+	pending := 0
+	bundleFailures := 0
+	recoveryAttempts := 0
+	var lastRecoveryAttempt time.Time
+	bundleDisabled := false
+	activated := false
+	var nextAttempt time.Time
+	var retryBackoff time.Duration
+	var lastFailure time.Time
+	observedLaneFailures := flow.laneFailureCount()
+
+	launch := func() bool {
+		laneID, err := flow.allocateJoinID()
+		if err != nil {
+			return false
+		}
+		pending++
+		go func() {
+			lane, joinErr := c.openJoinLane(manageCtx, TransportTCP, sessionID, flowID, laneID)
+			select {
+			case joins <- laneJoinResult{lane: lane, id: laneID, err: joinErr}:
+			case <-manageCtx.Done():
+				if lane != nil {
+					_ = lane.fc.Close()
+				}
+			}
+		}()
+		return true
+	}
+
+	for {
+		select {
+		case <-flow.doneChan():
+			return
+		case <-manageCtx.Done():
+			return
+		case result := <-joins:
+			if pending > 0 {
+				pending--
+			}
+			if result.err != nil {
+				if manageCtx.Err() != nil || flow.doneChanClosed() {
+					return
+				}
+				if errors.Is(result.err, errLaneJoinRejected) {
+					bundleDisabled = true
+					if flow.laneCount() == 0 {
+						flow.resumeRefused.Store(true)
+						return
+					}
+					c.cfg.Logger.Debug("peer refused TCP bundle lane", "lane", result.id, "error", result.err)
+					continue
+				}
+				bundleFailures++
+				lastFailure = time.Now()
+				if retryBackoff == 0 {
+					retryBackoff = time.Second
+				} else if retryBackoff < 15*time.Second {
+					retryBackoff *= 2
+					if retryBackoff > 15*time.Second {
+						retryBackoff = 15 * time.Second
+					}
+				}
+				nextAttempt = time.Now().Add(retryBackoff)
+				if bundleFailures >= maxLaneRecoveryAttempts {
+					bundleDisabled = true
+				}
+				c.cfg.Logger.Warn("TCP bundle lane unavailable", "lane", result.id, "error", result.err, "failures", bundleFailures)
+				continue
+			}
+			if err := flow.addLane(result.lane); err != nil {
+				_ = result.lane.fc.Close()
+				continue
+			}
+			if flow.remoteFinSeen.Load() && flow.laneCount() > 1 {
+				// The peer has no more bytes to send. This join was launched before
+				// its FIN arrived and is no longer useful; keep one reliable lane
+				// for a possible upload half-close, but do not resurrect the bundle.
+				flow.closeFailedLane(result.lane)
+				continue
+			}
+			c.cfg.Logger.Debug("TCP bundle lane joined", "lane", result.id, "lanes", flow.laneCount())
+		case <-ticker.C:
+		}
+
+		if flow.finSent.Load() && flow.remoteFinSeen.Load() {
+			flow.closeAll()
+			return
+		}
+		// A fully closed local application has sent CLOSE_ABORT and explicitly
+		// declared that it will neither read nor write more bytes. Replacing the
+		// lane after the server acts on that marker can only resurrect a flow
+		// which is already complete.
+		if flow.localAbortSent.Load() || (flow.localClosed.Load() && flow.remoteFinSeen.Load()) {
+			return
+		}
+		flow.refreshClass()
+		now := time.Now()
+		failures := flow.laneFailureCount()
+		if failures > observedLaneFailures {
+			bundleFailures += int(failures - observedLaneFailures)
+			observedLaneFailures = failures
+			lastFailure = now
+			if bundleFailures >= maxLaneRecoveryAttempts {
+				bundleDisabled = true
+			}
+		}
+		if bundleFailures > 0 && !lastFailure.IsZero() && now.Sub(lastFailure) >= laneRecoveryResetAfter {
+			bundleFailures = 0
+			bundleDisabled = false
+			retryBackoff = 0
+			nextAttempt = time.Time{}
+			lastFailure = time.Time{}
+		}
+
+		snapshot := flow.snapshot()
+		healthy := tcpLaneCount(flow)
+		if healthy == 0 {
+			if pending != 0 || recoveryAttempts >= maxLaneRecoveryAttempts || now.Before(nextAttempt) {
+				continue
+			}
+			recoveryAttempts++
+			lastRecoveryAttempt = now
+			launch()
+			continue
+		}
+		// An accept-then-close peer must not reset the replacement budget on
+		// every successful handshake. Only a lane that remains healthy for a
+		// sustained dwell proves recovery, matching the QUIC rescue policy.
+		if recoveryAttempts > 0 && !lastRecoveryAttempt.IsZero() && now.Sub(lastRecoveryAttempt) >= laneRecoveryResetAfter {
+			recoveryAttempts = 0
+			lastRecoveryAttempt = time.Time{}
+		}
+		if flow.remoteFinSeen.Load() {
+			continue
+		}
+		if c.cfg.TCPFallbackLanes <= 1 || !flow.tcpStriping.Load() || bundleDisabled {
+			continue
+		}
+		if snapshot.Class != classifier.ClassBulk && !shouldPrewarmBulkLane(snapshot) {
+			continue
+		}
+		if !activated {
+			activated = true
+			flow.tcpStriping.Store(true)
+			c.cfg.Logger.Info("TCP fallback striping activated", "target_lanes", c.cfg.TCPFallbackLanes)
+		}
+		if now.Before(nextAttempt) {
+			continue
+		}
+		missing := c.cfg.TCPFallbackLanes - healthy - pending
+		for range missing {
+			if !launch() {
+				break
+			}
+		}
+	}
+}
+
+func tcpLaneCount(flow *multipathFlow) int {
+	count := 0
+	for _, lane := range flow.healthyLanes() {
+		if lane.kind == TransportTCP {
+			count++
+		}
+	}
+	return count
 }
 
 // hasTCPLane reports whether the flow has been rescued onto TLS/TCP. Once it
@@ -1764,6 +1999,9 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 	if err := flow.addLane(lane); err != nil {
 		_ = lane.fc.Close()
 		return err
+	}
+	if lane.kind == TransportTCP && c.cfg.TCPFallbackLanes > 1 {
+		flow.tcpStriping.Store(lane.tcpStriping)
 	}
 	c.metrics.LaneReplacement()
 	return nil

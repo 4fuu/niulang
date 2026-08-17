@@ -57,3 +57,23 @@ func TestTheConnectionPoolIsOnUnlessRefused(t *testing.T) {
 		t.Error("--quic-pool=false did not turn pooling off")
 	}
 }
+
+func TestTCPFallbackFlagsAreBoundedAndRoleScoped(t *testing.T) {
+	local := []string{
+		"--mode", "local", "--listen", "127.0.0.1:1080", "--remote", "peer:443",
+		"--server-name", "peer", "--secret-file", "/dev/null", "--tcp-fallback-lanes", "8",
+	}
+	opts, err := parseOptions(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.tcpFallbackLanes != 8 {
+		t.Fatalf("TCP fallback lanes = %d, want 8", opts.tcpFallbackLanes)
+	}
+	if _, err := parseOptions(append(append([]string(nil), local...), "--tcp-fallback-lanes", "17")); err == nil {
+		t.Fatal("17 TCP fallback lanes were accepted")
+	}
+	if _, err := parseOptions(append(append([]string(nil), local...), "--tcp-congestion", "bbr")); err == nil {
+		t.Fatal("local mode accepted the server-only TCP congestion flag")
+	}
+}

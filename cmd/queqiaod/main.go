@@ -46,6 +46,8 @@ type options struct {
 	flowIdleTimeout               time.Duration
 	flowMaxLifetime               time.Duration
 	transport                     string
+	tcpFallbackLanes              int
+	tcpCongestion                 string
 	quicPool                      bool
 	waitForOpenAck                bool
 	udpOnStream                   bool
@@ -105,6 +107,7 @@ func run(args []string) error {
 			DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
 			FlowIdleTimeout: opts.flowIdleTimeout, FlowMaxLifetime: opts.flowMaxLifetime,
 			MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
+			TCPFallbackLanes:           opts.tcpFallbackLanes,
 			EnableQUICPool:             opts.quicPool,
 			WaitForOpenAcknowledgement: opts.waitForOpenAck,
 			UDPOnStream:                opts.udpOnStream,
@@ -136,6 +139,8 @@ func run(args []string) error {
 			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: opts.allowPrivate, DialTimeout: opts.dialTimeout},
 			EnableTCP:         opts.transport == string(pep.TransportTCP) || opts.transport == string(pep.TransportAuto),
 			EnableQUIC:        opts.transport == string(pep.TransportQUIC) || opts.transport == string(pep.TransportAuto),
+			TCPFallbackLanes:  opts.tcpFallbackLanes,
+			TCPCongestion:     opts.tcpCongestion,
 			Congestion:        pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
@@ -177,6 +182,8 @@ func parseOptions(args []string) (options, error) {
 	fs.DurationVar(&opts.flowIdleTimeout, "flow-idle-timeout", 30*time.Minute, "maximum application-idle period before a flow is reset")
 	fs.DurationVar(&opts.flowMaxLifetime, "flow-max-lifetime", 24*time.Hour, "maximum lifetime of one logical flow")
 	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
+	fs.IntVar(&opts.tcpFallbackLanes, "tcp-fallback-lanes", 0, "TCP-only lanes per bulk flow (1-16; 0 uses role default: client 1, server 16)")
+	fs.StringVar(&opts.tcpCongestion, "tcp-congestion", "system", "server TCP congestion controller: system or a Linux TCP_CONGESTION name such as bbr")
 	fs.BoolVar(&opts.quicPool, "quic-pool", true, "share one persistent QUIC connection for initial/control streams, and move classified bulk flows off it")
 	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry SOCKS UDP on the lane's control stream instead of the connection's datagrams; the measurement control for the datagram substrate, and it must be set the same way at both endpoints")
 	fs.BoolVar(&opts.waitForOpenAck, "wait-for-open-ack", false, "wait for OPEN_OK before answering SOCKS, costing one round trip per flow, in exchange for a precise failure when a destination is unreachable")
@@ -232,6 +239,9 @@ func parseOptions(args []string) (options, error) {
 	if opts.transport != string(pep.TransportAuto) && opts.transport != string(pep.TransportQUIC) && opts.transport != string(pep.TransportTCP) {
 		return opts, errors.New("--transport must be auto, quic, or tcp")
 	}
+	if opts.tcpFallbackLanes < 0 || opts.tcpFallbackLanes > 16 {
+		return opts, errors.New("--tcp-fallback-lanes must be between 1 and 16, or 0 for the role default")
+	}
 	switch pep.CongestionControlKind(opts.congestion) {
 	case pep.CongestionReno, pep.CongestionBBR, pep.CongestionBBRTUIC,
 		pep.CongestionErasure, pep.CongestionAdaptive, pep.CongestionBrutal:
@@ -260,7 +270,7 @@ func parseOptions(args []string) (options, error) {
 		if opts.remote == "" || opts.serverName == "" {
 			return opts, errors.New("--remote and --server-name are required in local mode")
 		}
-		if given["tls-cert"] || given["tls-key"] || given["allow-private-destinations"] {
+		if given["tls-cert"] || given["tls-key"] || given["allow-private-destinations"] || given["tcp-congestion"] {
 			return opts, errors.New("server-only flags used in local mode")
 		}
 	} else {

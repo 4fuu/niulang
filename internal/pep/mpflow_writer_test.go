@@ -561,18 +561,18 @@ func TestBulkSelectionFallsBackToControlLane(t *testing.T) {
 	}
 }
 
-// A flow's data rides one lane, whatever lanes it happens to hold.
+// A QUIC flow's data rides one lane, whatever lanes it happens to hold.
 //
-// This used to return every eligible lane and let the scheduler spread chunks
-// across them. With striping deleted there is no policy that grows a flow to
-// two data lanes, but a flow can still transiently hold two during a recovery
+// This used to return every eligible QUIC lane and let the scheduler spread
+// chunks across them. There is no policy that grows a QUIC flow to two data
+// lanes, but a flow can still transiently hold two during a recovery
 // -- and then it would have striped across them with nothing having decided
 // to. One lane is now the structure rather than an outcome.
-func TestDataRidesOneLaneEvenWhenTheFlowHoldsTwo(t *testing.T) {
+func TestQUICDataRidesOneLaneEvenWhenTheFlowHoldsTwo(t *testing.T) {
 	for _, reserve := range []bool{false, true} {
 		flow := &multipathFlow{
 			done:               make(chan struct{}),
-			lanes:              map[uint64]*mpLane{0: {id: 0}, 1: {id: 1}},
+			lanes:              map[uint64]*mpLane{0: {id: 0, kind: TransportQUIC}, 1: {id: 1, kind: TransportQUIC}},
 			reserveControlLane: reserve,
 		}
 		candidates, err := flow.laneCandidates(true)
@@ -582,6 +582,52 @@ func TestDataRidesOneLaneEvenWhenTheFlowHoldsTwo(t *testing.T) {
 		if len(candidates) != 1 {
 			t.Fatalf("reserve=%v: data selection produced %d lanes, want exactly one", reserve, len(candidates))
 		}
+	}
+}
+
+func TestNegotiatedTCPFlowStripesOnlyAcrossPureTCPBundle(t *testing.T) {
+	flow := &multipathFlow{
+		done: make(chan struct{}),
+		lanes: map[uint64]*mpLane{
+			0: {id: 0, kind: TransportTCP},
+			1: {id: 1, kind: TransportTCP},
+			2: {id: 2, kind: TransportTCP},
+		},
+	}
+	flow.tcpStriping.Store(true)
+	candidates, err := flow.laneCandidates(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 3 {
+		t.Fatalf("negotiated TCP candidates = %d, want all three lanes", len(candidates))
+	}
+
+	flow.lanes[2].kind = TransportQUIC
+	candidates, err = flow.laneCandidates(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("mixed-transport candidates = %d, want one fail-safe lane", len(candidates))
+	}
+
+	flow.lanes[2].kind = TransportTCP
+	flow.tcpStriping.Store(false)
+	candidates, err = flow.laneCandidates(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("unnegotiated TCP candidates = %d, want legacy single lane", len(candidates))
+	}
+}
+
+func TestTCPStripingDoesNotUseTheUnknownRTTFloorForReinjection(t *testing.T) {
+	flow := &multipathFlow{}
+	flow.tcpStriping.Store(true)
+	if got := flow.reissueDelay(); got != tcpStripingReissueDelay {
+		t.Fatalf("TCP striping reissue delay = %v, want %v", got, tcpStripingReissueDelay)
 	}
 }
 

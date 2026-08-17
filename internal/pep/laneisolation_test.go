@@ -14,10 +14,43 @@ import (
 // isolationLane builds a lane with a usable frame connection, which addLane
 // requires.
 func isolationLane(t *testing.T, id uint64) *mpLane {
+	return isolationLaneKind(t, id, TransportQUIC)
+}
+
+func isolationLaneKind(t *testing.T, id uint64, kind TransportKind) *mpLane {
 	t.Helper()
 	local, remote := net.Pipe()
 	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
-	return &mpLane{id: id, kind: TransportQUIC, fc: newFrameConn(local, protocol.DefaultMaxPayload)}
+	return &mpLane{id: id, kind: kind, fc: newFrameConn(local, protocol.DefaultMaxPayload)}
+}
+
+func TestServerTCPHandoffRetiresQUICAndExpandsItsAdmissionCeiling(t *testing.T) {
+	flow := newIsolationTestFlow(t, false)
+	session := newServerFlow(flow, TransportQUIC, 8)
+	if err := session.addLane(isolationLaneKind(t, 0, TransportQUIC)); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.addLane(isolationLaneKind(t, 1, TransportTCP)); err != nil {
+		t.Fatalf("TCP handoff refused: %v", err)
+	}
+	if !session.tcpMode || session.maxLanes != 8 || !flow.tcpStriping.Load() {
+		t.Fatalf("handoff state tcp=%t max=%d striping=%t", session.tcpMode, session.maxLanes, flow.tcpStriping.Load())
+	}
+	lanes := flow.healthyLanes()
+	if len(lanes) != 1 || lanes[0].kind != TransportTCP {
+		t.Fatalf("handoff retained %+v, want only the TCP rescue", lanes)
+	}
+	for id := uint64(2); id <= 8; id++ {
+		if err := session.addLane(isolationLaneKind(t, id, TransportTCP)); err != nil {
+			t.Fatalf("TCP lane %d refused: %v", id, err)
+		}
+	}
+	if got := flow.laneCount(); got != 8 {
+		t.Fatalf("TCP lane count = %d, want admission ceiling 8", got)
+	}
+	if err := session.addLane(isolationLaneKind(t, 9, TransportQUIC)); err == nil {
+		t.Fatal("QUIC lane was admitted after TCP-only handoff")
+	}
 }
 
 func newIsolationTestFlow(t *testing.T, reserveControl bool) *multipathFlow {

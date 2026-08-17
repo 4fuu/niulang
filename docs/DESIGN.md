@@ -124,10 +124,13 @@ in front of it. It is declined while the flow is alone on the pool, because
 paying a fresh congestion window to protect traffic that is not there costs
 about 8% of bulk goodput.
 
-A flow's data plane is exactly one connection either way. Not "at most one by
-policy" -- one by construction, in `dataLane`, so that a flow transiently
-holding two lanes during a recovery cannot stripe across them with nothing
-having decided to.
+A QUIC flow's data plane is exactly one connection either way. Not "at most one
+by policy" -- one by construction, in `dataLane`, so that a flow transiently
+holding two QUIC lanes during recovery cannot stripe across them with nothing
+having decided to. The TCP-only fallback is an explicit exception: after
+`CapabilityTCPStriping` is authenticated, a classified bulk flow may use a
+bounded group of independent kernel-TCP connections. It never mixes QUIC and
+TCP lanes.
 
 **The code is a sliding window, not a block.** A block code must choose `(k,n)`
 when it seals, which means knowing the path before it has finished sending into
@@ -147,8 +150,8 @@ clean, and everything sized by it is sized for a clean path.
 
 ## Several connections, for reasons that are not aggregation
 
-Deleting aggregation does not mean one connection per client. Two other uses
-survive because neither is about capacity:
+Deleting QUIC aggregation does not mean one connection per client. Other uses
+survive:
 
 - **Isolation.** A flow classified bulk moves its data plane to a connection of
   its own, keeping its control plane on the pooled one. This is a latency
@@ -159,14 +162,23 @@ survive because neither is about capacity:
   dies, retaining what is unacknowledged and re-issuing it. This is what
   survives a UDP blackhole falling back to TCP, and what let a 100 MB download
   complete intact across a server restart.
+- **TCP fallback tail protection.** Where UDP is unavailable, an explicitly
+  negotiated TCP-only bulk flow may stripe byte offsets across several stock
+  kernel TCP connections. This is not a second congestion controller: BBR or
+  the host-selected controller remains authoritative on every socket. A small
+  acknowledgement-side scheduler window prevents one buffered TLS socket from
+  pre-claiming the stream, and a bounded oldest-first sweep reinjects only a
+  stalled head. Eight lanes are the measured operating point; sixteen is an
+  admission and experiment ceiling.
 
 Short flows still share a pooled connection, which is what makes a flow after
 the first cost no round trips: 1 ms against 306 ms.
 
 ## Non-goals
 
-- Aggregating capacity across connections. The path has one bottleneck per
-  endpoint pair and it has been probed.
+- Aggregating QUIC capacity across connections. TCP fallback striping is a
+  bounded tail-protection mechanism and cannot exceed the path's aggregate
+  bottleneck.
 - Fairness to other flows, TCP-friendliness, or coupled congestion control.
 - Decrypting or classifying HTTPS. Classification is behavioural -- byte
   counts, direction, idle gaps -- and is a policy hint, not a security

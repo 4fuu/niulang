@@ -123,6 +123,16 @@ to lane 0, so the capability is an isolation preference rather than a
 correctness dependency. The flag is never sent to a peer that did not
 negotiate the capability.
 
+For a flow established or rescued over TLS/TCP, a server may advertise
+`CapabilityTCPStriping`. A configured client can then authenticate additional
+`HELLO_JOIN` connections, up to the negotiated local and server ceiling of 16,
+and stripe the flow's offset-addressed `DATA` across them. Selective ACK ranges
+bound outstanding data and make unacknowledged chunks eligible for another
+lane after a hard failure. The first TCP rescue retires every QUIC lane and the
+server rejects later QUIC joins, so the scheduler never mixes transport
+semantics within one flow. Without the capability, or with the client's
+one-lane default, TLS/TCP retains the legacy single-connection behavior.
+
 `CLOSE` with `FlagFin` is a directional half-close. A sender may later send
 the same final sequence with `FlagCloseAbort` when its application socket has
 fully closed and the peer should release an otherwise idle keep-alive

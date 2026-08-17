@@ -84,9 +84,10 @@ var (
 )
 
 type mpLane struct {
-	id   uint64
-	kind TransportKind
-	fc   *frameConn
+	id          uint64
+	kind        TransportKind
+	fc          *frameConn
+	tcpStriping bool
 	// writeHook is an internal deterministic fault-injection point used by
 	// integration tests. Production lanes leave it nil, so the data path has
 	// only one predictable nil check before the real framed write.
@@ -281,6 +282,10 @@ type multipathFlow struct {
 	// ranges alongside the cumulative acknowledgement. It is only useful to a
 	// striped flow, and must never be assumed of a peer that did not say so.
 	ackRanges atomic.Bool
+	// tcpStriping is negotiated per flow. When true, and only while every
+	// healthy lane is TCP, the scheduler may distribute byte-offset chunks
+	// across all lanes and re-inject a retired lane's unacknowledged chunks.
+	tcpStriping atomic.Bool
 	// gapPending marks that the peer should be told what is held above a gap,
 	// which is an acknowledgement whose cumulative point has not moved.
 	gapPending atomic.Bool
@@ -646,6 +651,34 @@ func (f *multipathFlow) retireOldestLane() bool {
 	return true
 }
 
+// retireLanesExcept performs an intentional transport handoff without
+// reporting a path failure. Scheduler retirement is still immediate: chunks
+// assigned to a retired lane must be made available to the replacement TCP
+// bundle before the old socket's reader notices the close.
+func (f *multipathFlow) retireLanesExcept(kind TransportKind) int {
+	f.lanesMu.Lock()
+	retired := make([]*mpLane, 0)
+	for id, lane := range f.lanes {
+		if lane.closed.Load() || lane.kind == kind {
+			continue
+		}
+		delete(f.lanes, id)
+		if lane.closed.CompareAndSwap(false, true) {
+			retired = append(retired, lane)
+		}
+	}
+	f.lanesMu.Unlock()
+	for _, lane := range retired {
+		if sched := f.scheduler.Load(); sched != nil {
+			sched.RetireLane(lane.id)
+		}
+		if lane.fc != nil {
+			_ = lane.fc.Close()
+		}
+	}
+	return len(retired)
+}
+
 // retireLeastProductiveLane removes one non-control lane.  It is used only
 // after the scheduler has measured a negative marginal contribution or an
 // RTT-budget violation.  The first lane is retained as the control/rescue
@@ -915,8 +948,8 @@ func (f *multipathFlow) healthyLanes() []*mpLane {
 }
 
 // laneCandidates returns the lanes eligible to carry a frame, in preference
-// order. There is at most one for data, and the ordering matters only for
-// control.
+// order. QUIC has at most one for data; a negotiated TCP-only fallback may
+// return its bounded bundle. The ordering matters only for control.
 //
 // This is the flow's control and data plane split, and it is a second one --
 // the framing has already split control from bulk *within* a connection, by
@@ -959,15 +992,20 @@ func (f *multipathFlow) laneCandidates(bulk bool) ([]*mpLane, error) {
 	return f.dataLane(lanes), nil
 }
 
-// dataLane picks the single lane a flow's data rides.
+// dataLane selects the lanes a flow's data rides.
 //
-// One lane, always. Striping a flow's data across several is deleted -- see
-// docs/DESIGN.md -- and this is where that is enforced rather than left as an
-// emergent property of how many lanes happen to exist. It used to return every
-// eligible lane and let the scheduler spread chunks over them, so a flow that
-// transiently held two lanes during a recovery would stripe across them with
-// nothing having decided to.
+// QUIC remains one data lane. A negotiated TCP-only flow is the one exception:
+// each lane has its own kernel congestion controller, so the existing byte
+// scheduler stripes across them and re-injects work when one is retired.
 func (f *multipathFlow) dataLane(lanes []*mpLane) []*mpLane {
+	if f.tcpStriping.Load() && len(lanes) > 1 {
+		for _, lane := range lanes {
+			if lane.kind != TransportTCP {
+				return lanes[:1]
+			}
+		}
+		return lanes
+	}
 	if len(lanes) == 1 || !f.reserveControlLane {
 		return lanes[:1]
 	}

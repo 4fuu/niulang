@@ -72,6 +72,12 @@ const (
 	// chunkReissueInterval is how often the supervisor looks for chunks to
 	// re-offer.
 	chunkReissueInterval = 250 * time.Millisecond
+	// TCP already retransmits loss and does not expose QUIC's RTT telemetry to
+	// this layer. Treating its unknown RTT as the 200 ms floor re-injected every
+	// healthy chunk on the measured 200-250 ms path just before its protocol ACK
+	// arrived, nearly doubling physical bytes. A hard lane close still retires
+	// and reissues immediately; this delay covers only a live-but-stalled socket.
+	tcpStripingReissueDelay = 2 * time.Second
 	// laneEligibilityPoll is how long a lane waits before rechecking whether
 	// the flow's class now lets it carry data. Classification changes at most
 	// once or twice in a flow's life, so polling is cheaper than a broadcast.
@@ -150,6 +156,9 @@ func (f *multipathFlow) retentionBytes() int {
 // and a half was six of them on the path this targets: measured live, one
 // small flow in five cost 1.79 s instead of 0.29 waiting out that constant.
 func (f *multipathFlow) reissueDelay() time.Duration {
+	if f.tcpStriping.Load() {
+		return tcpStripingReissueDelay
+	}
 	longest := time.Duration(0)
 	for _, lane := range f.healthyLanes() {
 		if _, rtt := lane.sendRate(); rtt > longest {
@@ -250,9 +259,10 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 		// because a lane that dies may not have delivered what its transport
 		// accepted. Nothing narrower is needed now that a lane's admission is
 		// bounded by what its transport has not yet taken.
-		MaxOutstandingBytes: maxFlowOutstandingBytes,
-		Retention:           f.retentionBytes,
-		RetransmitAfter:     f.reissueDelay,
+		MaxOutstandingBytes:  maxFlowOutstandingBytes,
+		Retention:            f.retentionBytes,
+		RetransmitAfter:      f.reissueDelay,
+		ReliableReissueBurst: f.reliableReissueBurst(),
 		// A lane carrying its data over coded datagrams does not retransmit
 		// for itself: the code repairs most loss and not all, and what it
 		// cannot repair has no other way back on a single-lane flow.
@@ -303,6 +313,13 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 		return nil
 	}
 	return f.sendFinal(ctx, sched.Stats().SourceBytes)
+}
+
+func (f *multipathFlow) reliableReissueBurst() int {
+	if f.tcpStriping.Load() {
+		return 1
+	}
+	return 0
 }
 
 // superviseChunks re-offers chunks that a lane has gone quiet on. Self-pacing

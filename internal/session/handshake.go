@@ -51,6 +51,11 @@ const (
 	// older server reads the resume marker as neither an association nor a
 	// destination and refuses the flow.
 	CapabilityUDPResume uint64 = 1 << 4
+	// CapabilityTCPStriping allows one logical flow to use multiple independent
+	// TLS/TCP connections. The capability is deliberately TCP-only: applying
+	// the same policy to QUIC streams would multiply congestion controllers and
+	// undo the single-path QUIC design.
+	CapabilityTCPStriping uint64 = 1 << 5
 )
 
 var helloOKCapabilityMarker = [8]byte{'W', 'O', 'C', 'A', 'P', '0', '0', '1'}

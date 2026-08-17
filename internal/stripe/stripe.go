@@ -35,6 +35,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
 	"sync"
 	"time"
 )
@@ -59,6 +60,15 @@ type Windows interface {
 	// Total is how much the flow may hold unacknowledged across every lane. It
 	// is what stops N lanes claiming N times a single connection's share.
 	Total() int
+}
+
+// OutstandingWindows optionally bounds bytes assigned to a lane until the
+// peer acknowledges them. Stream writes normally supply the scheduler's clock,
+// but a kernel TCP write returns after copying into the socket buffer rather
+// than after congestion control sends the bytes. A TCP bundle therefore uses
+// this second bound to keep one socket from pre-claiming the whole stream.
+type OutstandingWindows interface {
+	Outstanding(laneID uint64, outstanding uint64) int
 }
 
 // Config bounds the scheduler.
@@ -103,6 +113,11 @@ type Config struct {
 	// because it spent that constant waiting for a chunk the code had failed
 	// to repair.
 	RetransmitAfter func() time.Duration
+	// ReliableReissueBurst bounds how many chunks already carried by reliable
+	// lanes a single timer sweep may copy. Zero keeps the unbounded legacy
+	// behavior. TCP striping sets one: the oldest missing byte is what blocks
+	// delivery, while copying every chunk behind it only multiplies traffic.
+	ReliableReissueBurst int
 	// Reliable reports whether a lane retransmits for itself. When nil every
 	// lane is taken to be reliable, which is what a lane on a QUIC stream is.
 	//
@@ -621,6 +636,12 @@ func (s *Scheduler) hasRoomLocked(laneID uint64, windowBytes int, chunk uint64) 
 		if total := s.cfg.Windows.Total(); total > 0 && s.totalBytes+chunk > uint64(total) {
 			return false
 		}
+		if windows, ok := s.cfg.Windows.(OutstandingWindows); ok {
+			outstanding := s.laneBytes[laneID]
+			if lane := windows.Outstanding(laneID, outstanding); lane > 0 && outstanding+chunk > uint64(lane) {
+				return false
+			}
+		}
 	}
 	queued := s.laneQueued[laneID]
 	if queued == 0 {
@@ -728,7 +749,7 @@ func (s *Scheduler) ReissueExpired() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.cfg.Now()
-	reissued := 0
+	candidates := make([]*outstanding, 0)
 	for _, out := range s.live {
 		if len(out.attempts) == 0 || len(out.attempts) > 1 {
 			// Already being carried by more than one lane; adding a third is
@@ -749,6 +770,20 @@ func (s *Scheduler) ReissueExpired() int {
 		// it.
 		if out.attempts[0].reliable && len(s.laneLoad) <= 1 {
 			continue
+		}
+		candidates = append(candidates, out)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].chunk.Offset < candidates[j].chunk.Offset
+	})
+	reissued := 0
+	reliableReissued := 0
+	for _, out := range candidates {
+		if out.attempts[0].reliable && s.cfg.ReliableReissueBurst > 0 {
+			if reliableReissued >= s.cfg.ReliableReissueBurst {
+				continue
+			}
+			reliableReissued++
 		}
 		// Push the deadline out so a chunk cannot be re-offered every tick
 		// while both attempts are still in flight.

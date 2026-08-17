@@ -59,9 +59,10 @@ The QUIC pool is enabled by default. Short and interactive flows share one
 bounded control connection, amortizing authentication and keeping its
 congestion window free from avoidable bulk queueing. If classified bulk work
 and competing work would share that connection, the bulk flow is moved to one
-lazily created secondary connection. One flow has exactly one data connection
-at a time: secondary connections isolate workloads and replace failed paths;
-they never aggregate one flow's capacity. The deleted multipath experiment and
+lazily created secondary connection. A QUIC flow has exactly one data
+connection at a time: secondary QUIC connections isolate workloads and replace
+failed paths; they never aggregate one flow's capacity. The deleted QUIC
+multipath experiment and
 its measurements are retained in
 [`DESIGN-MULTIPATH.md`](DESIGN-MULTIPATH.md).
 
@@ -84,6 +85,13 @@ replacement without duplicating bytes. Failed UDP associations retain the
 local SOCKS endpoint and reclaim the same remote relay socket using a scoped,
 single-use, expiring resume token. Datagrams in flight at failure can be lost;
 UDP recovery is not presented as lossless.
+
+When the authenticated TCP peer advertises `CapabilityTCPStriping`, a
+configured bulk fallback may instead maintain 2-16 independent TLS/TCP lanes.
+Byte offsets preserve ordering, the receiver reports selective ranges, and a
+failed lane's unacknowledged chunks are immediately eligible elsewhere. The
+mode is TCP-only, disabled at the client by its one-lane default, and does not
+change the QUIC state machine.
 
 ## Trust and resource boundaries
 

@@ -27,18 +27,25 @@ import (
 const completedSessionLinger = 90 * time.Second
 
 type ServerConfig struct {
-	ListenAddr                    string
-	Certificate                   tls.Certificate
-	Secret                        []byte
-	MaxPayload                    uint32
-	ChunkSize                     int
-	HandshakeTimeout              time.Duration
-	FlowIdleTimeout               time.Duration
-	FlowMaxLifetime               time.Duration
-	MaxSessions                   int
-	DestinationPolicy             DestinationPolicy
-	EnableTCP                     bool
-	EnableQUIC                    bool
+	ListenAddr        string
+	Certificate       tls.Certificate
+	Secret            []byte
+	MaxPayload        uint32
+	ChunkSize         int
+	HandshakeTimeout  time.Duration
+	FlowIdleTimeout   time.Duration
+	FlowMaxLifetime   time.Duration
+	MaxSessions       int
+	DestinationPolicy DestinationPolicy
+	EnableTCP         bool
+	EnableQUIC        bool
+	// TCPFallbackLanes is the admission ceiling for one negotiated TCP-only
+	// flow. The client chooses the active target; keeping the server ceiling at
+	// 16 lets operators compare 8 and 16 without changing the gateway.
+	TCPFallbackLanes int
+	// TCPCongestion selects the Linux kernel congestion controller inherited by
+	// accepted fallback sockets. "system" leaves the host default untouched.
+	TCPCongestion                 string
 	Congestion                    CongestionControlKind
 	BrutalBytesPerSec             uint64
 	AdaptiveMinBytesSec           uint64
@@ -76,6 +83,7 @@ type Server struct {
 	// is consistent for every stream on a connection. It is initialized to the
 	// current capability set; tests may set it to zero to model an older peer.
 	quicCapabilities uint64
+	tcpCapabilities  uint64
 	quicFastStreams  atomic.Bool
 	// udpRelays holds the relay sockets of UDP associations whose lane died,
 	// so the replacement association keeps the source address the destination
@@ -84,11 +92,13 @@ type Server struct {
 }
 
 type serverFlow struct {
-	flow      *multipathFlow
-	maxLanes  int
-	completed atomic.Bool
-	tombstone sync.Once
-	mu        sync.Mutex
+	flow        *multipathFlow
+	maxLanes    int
+	tcpMaxLanes int
+	tcpMode     bool
+	completed   atomic.Bool
+	tombstone   sync.Once
+	mu          sync.Mutex
 }
 
 // quicAuthState records authentication of the QUIC connection itself. The
@@ -125,6 +135,17 @@ func serverLaneBudget(reserveControl bool) int {
 func (s *serverFlow) addLane(lane *mpLane) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.tcpMode && lane.kind != TransportTCP {
+		return errors.New("flow has switched to TCP fallback")
+	}
+	if lane.kind == TransportTCP && !s.tcpMode {
+		// The first authenticated TCP rescue is a transport handoff, not another
+		// path in a mixed bundle. Retiring QUIC immediately re-offers its chunks
+		// to the reliable scheduler before admitting the TCP lane.
+		s.flow.retireLanesExcept(TransportTCP)
+		s.tcpMode = true
+		s.maxLanes = s.tcpMaxLanes
+	}
 	if s.flow.laneCount() >= s.maxLanes {
 		// The peer can detect a dead QUIC socket before this endpoint does
 		// (for example, when the return path is black-holed). Retire one
@@ -137,7 +158,23 @@ func (s *serverFlow) addLane(lane *mpLane) error {
 	if err := s.flow.addLane(lane); err != nil {
 		return err
 	}
+	if s.tcpMode && s.maxLanes > 1 {
+		s.flow.tcpStriping.Store(true)
+	}
 	return nil
+}
+
+func newServerFlow(flow *multipathFlow, initialKind TransportKind, tcpMaxLanes int) *serverFlow {
+	serverSession := &serverFlow{
+		flow: flow, maxLanes: serverLaneBudget(flow.reserveControlLane),
+		tcpMaxLanes: tcpMaxLanes,
+	}
+	if initialKind == TransportTCP {
+		serverSession.tcpMode = true
+		serverSession.maxLanes = tcpMaxLanes
+		flow.tcpStriping.Store(tcpMaxLanes > 1)
+	}
+	return serverSession
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -173,6 +210,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.MaxSessions > maxConfiguredSessions {
 		return nil, fmt.Errorf("maximum sessions must not exceed %d", maxConfiguredSessions)
+	}
+	if cfg.TCPFallbackLanes == 0 {
+		cfg.TCPFallbackLanes = maxTCPFallbackLanes
+	}
+	if cfg.TCPFallbackLanes < 1 || cfg.TCPFallbackLanes > maxTCPFallbackLanes {
+		return nil, fmt.Errorf("TCP fallback lanes must be between 1 and %d", maxTCPFallbackLanes)
+	}
+	var err error
+	cfg.TCPCongestion, err = normalizeTCPCongestion(cfg.TCPCongestion)
+	if err != nil {
+		return nil, err
 	}
 	if cfg.Congestion == "" {
 		cfg.Congestion = defaultCongestion()
@@ -216,7 +264,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 		metrics:          cfg.Metrics,
 		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl | session.CapabilityFastLaneJoin | session.CapabilityAckRanges | session.CapabilityUDPResume,
+		tcpCapabilities:  session.CapabilityAckRanges | session.CapabilityUDPResume,
 		udpRelays:        newUDPRelayStore(),
+	}
+	if cfg.TCPFallbackLanes > 1 {
+		server.tcpCapabilities |= session.CapabilityTCPStriping
 	}
 	server.quicFastStreams.Store(true)
 	return server, nil
@@ -255,6 +307,10 @@ func (s *Server) serveTCP(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen on remote TLS/TCP address: %w", err)
 	}
+	if err := setTCPListenerCongestion(listener, s.cfg.TCPCongestion); err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("configure remote TLS/TCP congestion control: %w", err)
+	}
 	return s.ServeListener(ctx, listener)
 }
 
@@ -282,6 +338,10 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener) error
 				return nil
 			}
 			return fmt.Errorf("accept remote lane: %w", acceptErr)
+		}
+		if err := setTCPConnCongestion(raw, s.cfg.TCPCongestion); err != nil {
+			_ = raw.Close()
+			return fmt.Errorf("configure accepted TLS/TCP congestion control: %w", err)
 		}
 		select {
 		case s.semaphore <- struct{}{}:
@@ -515,15 +575,11 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 				}
 			})
 		} else {
-			// A TLS/TCP lane advertises only what is not a QUIC-pool
-			// concept. Fast streams, reserved control and fast lane joins
-			// all describe a pooled QUIC connection and mean nothing here,
-			// but a UDP association's relay is a socket on this server
-			// whichever transport reached it -- and a rescue from QUIC lands
-			// on exactly this path, so not saying so here is what makes the
-			// relay unreclaimable at the moment it matters most.
+			// A TLS/TCP lane advertises only transport-independent recovery
+			// and explicitly TCP-scoped striping. QUIC pool capabilities do
+			// not belong on this connection.
 			hello, err = serverAuthenticateHelloWithCapabilities(fc, s.cfg.Secret, s.replay, time.Now(),
-				s.quicCapabilities&session.CapabilityUDPResume)
+				s.tcpCapabilities)
 		}
 		if err != nil {
 			s.cfg.Logger.Warn("session authentication failed", "error", err)
@@ -606,8 +662,9 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0
 	flow.controlLaneShared = auth.shared
-	serverSession := &serverFlow{flow: flow, maxLanes: serverLaneBudget(flow.reserveControlLane)}
-	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
+	initialKind := transportKindForConn(conn)
+	serverSession := newServerFlow(flow, initialKind, s.cfg.TCPFallbackLanes)
+	if err := serverSession.addLane(&mpLane{id: laneID, kind: initialKind, fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
 		flow.closeAll()
 		return
 	}

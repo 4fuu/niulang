@@ -277,6 +277,37 @@ func TestReissueAvoidsTheLaneAlreadyCarryingIt(t *testing.T) {
 	}
 }
 
+func TestReliableReissueBurstCopiesOnlyTheOldestExpiredChunk(t *testing.T) {
+	now := time.Now()
+	s := New(bytes.NewReader(make([]byte, 16*1024)), Config{
+		ChunkSize: 4 * 1024, LaneWindow: 4, RetransmitAfter: after(time.Second),
+		ReliableReissueBurst: 1, Now: func() time.Time { return now },
+	})
+	defer s.Close()
+	ctx := context.Background()
+	first, err := s.Next(ctx, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Next(ctx, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Next(ctx, 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	if got := s.ReissueExpired(); got != 1 {
+		t.Fatalf("reissued %d reliable chunks, want the bounded oldest one", got)
+	}
+	copy, err := s.Next(ctx, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copy.Offset != first.Offset {
+		t.Fatalf("reissued offset %d, want oldest %d", copy.Offset, first.Offset)
+	}
+}
+
 // Memory must stay bounded when lanes are slower than the source.
 func TestOutstandingIsBounded(t *testing.T) {
 	payload := make([]byte, 1024*1024)
@@ -578,6 +609,46 @@ type fixedWindows struct{ lane, total int }
 
 func (w fixedWindows) Lane(uint64, uint64) int { return w.lane }
 func (w fixedWindows) Total() int              { return w.total }
+
+type ackBoundWindows struct {
+	fixedWindows
+	outstanding int
+}
+
+func (w ackBoundWindows) Outstanding(uint64, uint64) int { return w.outstanding }
+
+func TestAcknowledgementWindowPreventsOneBufferedLaneClaimingAllWork(t *testing.T) {
+	s := New(bytes.NewReader(make([]byte, 64*1024)), Config{
+		ChunkSize: 4 * 1024, LaneWindow: 64, MaxOutstanding: 64,
+		Windows: ackBoundWindows{fixedWindows: fixedWindows{lane: 64 * 1024}, outstanding: 8 * 1024},
+	})
+	defer s.Close()
+	ctx := context.Background()
+	first, err := s.Next(ctx, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Wrote(0, first)
+	second, err := s.Next(ctx, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Wrote(0, second)
+
+	blocked, cancel := context.WithTimeout(ctx, 25*time.Millisecond)
+	defer cancel()
+	if _, err := s.Next(blocked, 0, 0); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("buffered lane exceeded its acknowledgement window: %v", err)
+	}
+	if _, err := s.Next(ctx, 1, 0); err != nil {
+		t.Fatalf("idle second lane could not take ready work: %v", err)
+	}
+
+	s.Complete(0, first)
+	if _, err := s.Next(ctx, 0, 0); err != nil {
+		t.Fatalf("acknowledgement did not release lane window: %v", err)
+	}
+}
 
 // The flow window is what stops N lanes claiming N times a single connection's
 // share, so it must bind even when every individual lane still has room.

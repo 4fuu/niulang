@@ -1080,6 +1080,103 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	}
 }
 
+func TestTCPFallbackStripesOneFlowAcrossFourLanes(t *testing.T) {
+	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destinationListener.Close()
+	prefix := bytes.Repeat([]byte("tcp-prefix-"), 8192)
+	tail := bytes.Repeat([]byte("striped-tcp-payload-"), 256*1024)
+	response := append(append([]byte(nil), prefix...), tail...)
+	go func() {
+		conn, acceptErr := destinationListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		request := make([]byte, len("request"))
+		if _, readErr := io.ReadFull(conn, request); readErr != nil {
+			return
+		}
+		if writeErr := writeFull(conn, prefix); writeErr != nil {
+			return
+		}
+		// Hold a body above the prewarm threshold long enough for the client to
+		// classify the one-way transfer and finish all three TLS lane joins.
+		time.Sleep(750 * time.Millisecond)
+		_ = writeFull(conn, tail)
+	}()
+
+	certificate, roots := testCertificate(t)
+	secret := []byte("integration-test-secret-value-32bytes")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var server *Server
+	var injectLaneFailure atomic.Bool
+	injectLaneFailure.Store(true)
+	server, err = NewServer(ServerConfig{
+		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
+		TCPFallbackLanes: 4, Logger: logger,
+		testLaneWriteHook: func(frame protocol.Frame) error {
+			if frame.Header.Type == protocol.TypeData && server != nil && server.maxObservedLanes.Load() == 4 && injectLaneFailure.CompareAndSwap(true, false) {
+				return errors.New("injected striped TCP lane failure")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(ClientConfig{
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportTCP, TCPFallbackLanes: 4, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errorsCh := make(chan error, 2)
+	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
+	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
+
+	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(response))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read striped response: %v", err)
+	}
+	if !bytes.Equal(got, response) {
+		t.Fatalf("striped response mismatch: got %d bytes, want %d", len(got), len(response))
+	}
+	if lanes := server.maxObservedLanes.Load(); lanes != 4 {
+		t.Fatalf("server observed %d lanes, want exactly four", lanes)
+	}
+	if injectLaneFailure.Load() {
+		t.Fatal("the four-lane transfer completed without exercising lane re-injection")
+	}
+	_ = conn.Close()
+
+	cancel()
+	for range 2 {
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("service shutdown: %v", err)
+		}
+	}
+}
+
 func dialTestSOCKS(t *testing.T, proxyAddr, destinationAddr string) net.Conn {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
