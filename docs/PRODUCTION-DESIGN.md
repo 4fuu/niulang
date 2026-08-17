@@ -165,9 +165,17 @@ expires when idle; it is an isolation mechanism, not adaptive multipath.
 ## UDP preference and TCP fallback
 
 Use a three-state health machine per endpoint: `HEALTHY`, `DEGRADED`, and
-`BLOCKED`. A new flow in `AUTO` races an authenticated QUIC handshake against
-TLS/TCP after a small delay; the first authenticated lane wins. Repeated UDP
-failures enter cooldown, while a periodic low-cost probe allows recovery.
+`BLOCKED`. A new flow in `AUTO` starts QUIC first and prepares an authenticated
+TLS/TCP connection after a small delay, but TCP is a warm standby rather than
+an equal race winner. A ready TCP connection waits through a separate QUIC
+preference window. If that window expires, TCP may serve the current request
+without producing negative UDP evidence; with pooling enabled, the coalesced
+QUIC attempt continues in the background and restores the shared pool if it
+succeeds. This matters on a lossy WAN: TCP can authenticate first and still
+carry data orders of magnitude more slowly. Only an explicit QUIC reachability
+failure paired with a successful TCP control is negative UDP evidence.
+Repeated differential failures enter cooldown; expiry admits a fresh QUIC
+attempt, and any QUIC success resets the health state.
 
 When UDP is blocked, new sessions use one TCP lane and keep the same frame
 protocol and destination semantics. TCP striping is not the default: nested

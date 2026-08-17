@@ -21,10 +21,11 @@ type Registry struct {
 	laneFailures     atomic.Uint64
 	laneReplacements atomic.Uint64
 	fallbacks        atomic.Uint64
-	// udpPathUnavailable counts comparative failures: QUIC either failed or
-	// did not authenticate before TLS/TCP reached the same configured endpoint.
-	// It is deliberately separate from fallbacks, which also includes flows
-	// sent directly to TCP while UDP is in cooldown.
+	// udpPathUnavailable counts conservative differential failures: QUIC
+	// explicitly failed while TLS/TCP reached the same configured endpoint.
+	// A pending QUIC handshake and a faster TCP handshake are not failures. It
+	// is deliberately separate from fallbacks, which also includes flows sent
+	// directly to TCP while UDP is in cooldown.
 	udpPathUnavailable atomic.Uint64
 	// endpointRaceFailures counts AUTO transport races in which neither QUIC
 	// nor TLS/TCP reached the configured endpoint. Keeping this separate from

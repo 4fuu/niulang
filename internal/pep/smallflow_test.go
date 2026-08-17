@@ -316,7 +316,7 @@ func TestQUICReachabilityTimeoutWithWorkingTCPEntersCooldown(t *testing.T) {
 		t.Fatalf("unexpected endpoint transport metrics: %+v", got)
 	}
 	for _, want := range []string{
-		"UDP path unavailable or too slow",
+		"UDP path explicitly failed",
 		"endpoint=egress.example:443",
 		"fallback=tcp",
 		"quic_error",
@@ -327,41 +327,214 @@ func TestQUICReachabilityTimeoutWithWorkingTCPEntersCooldown(t *testing.T) {
 	}
 }
 
-func TestSlowUDPPathIsReportedWhenTCPWinsTheDelayedRace(t *testing.T) {
-	var logs bytes.Buffer
+func TestReadyTCPDoesNotDisplaceSlowWorkingQUIC(t *testing.T) {
 	client := &Client{
 		cfg: ClientConfig{
 			RemoteAddr: "egress.example:443", Transport: TransportAuto, FallbackDelay: time.Millisecond,
-			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 		udpHealth: newUDPHealth(3, time.Minute), metrics: metrics.New(),
 	}
-	quicStopped := make(chan struct{})
-	client.dialPipelinedFlowForTest = func(ctx context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
+	quicRelease := make(chan struct{})
+	tcpReady := make(chan struct{})
+	client.dialPipelinedFlowForTest = func(_ context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
 		if kind == TransportQUIC {
-			<-ctx.Done()
-			close(quicStopped)
-			return nil, ctx.Err()
+			<-quicRelease
+			return &openedFlow{kind: TransportQUIC}, nil
 		}
+		close(tcpReady)
 		return &openedFlow{kind: TransportTCP}, nil
 	}
 
-	flow, err := client.openInitialFlow(context.Background(), "example.test:443")
-	if err != nil || flow == nil || flow.kind != TransportTCP {
-		t.Fatalf("delayed-race fallback flow = %+v, error = %v", flow, err)
+	result := make(chan openedFlowResult, 1)
+	go func() {
+		flow, err := client.openInitialFlow(context.Background(), "example.test:443")
+		result <- openedFlowResult{flow: flow, err: err}
+	}()
+	select {
+	case <-tcpReady:
+	case <-time.After(time.Second):
+		t.Fatal("TCP standby was not started")
 	}
 	select {
-	case <-quicStopped:
+	case got := <-result:
+		close(quicRelease)
+		t.Fatalf("ready TCP displaced pending QUIC: flow=%+v err=%v", got.flow, got.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(quicRelease)
+	got := <-result
+	if got.err != nil || got.flow == nil || got.flow.kind != TransportQUIC {
+		t.Fatalf("QUIC-preferred result = %+v, error = %v", got.flow, got.err)
+	}
+	if snapshot := client.metrics.Snapshot(); snapshot.Fallbacks != 0 || snapshot.UDPPathUnavailable != 0 {
+		t.Fatalf("a slow working QUIC path was reported as failed: %+v", snapshot)
+	}
+	if !client.udpHealth.allow(time.Now()) {
+		t.Fatal("a slow working QUIC path entered cooldown")
+	}
+}
+
+func TestReadyTCPDoesNotDisplaceSlowWorkingPooledQUIC(t *testing.T) {
+	client := &Client{
+		cfg: ClientConfig{
+			RemoteAddr: "egress.example:443", Transport: TransportAuto, FallbackDelay: time.Millisecond,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		udpHealth: newUDPHealth(3, time.Minute), metrics: metrics.New(),
+	}
+	quicRelease := make(chan struct{})
+	tcpReady := make(chan struct{})
+	client.dialAuthenticatedLaneForTest = func(_ context.Context, kind TransportKind) (*authenticatedLane, error) {
+		if kind == TransportQUIC {
+			<-quicRelease
+			return &authenticatedLane{kind: TransportQUIC}, nil
+		}
+		close(tcpReady)
+		return &authenticatedLane{kind: TransportTCP}, nil
+	}
+
+	result := make(chan laneResult, 1)
+	go func() {
+		lane, err := client.raceUDPAndTCP(context.Background())
+		result <- laneResult{lane: lane, err: err}
+	}()
+	select {
+	case <-tcpReady:
 	case <-time.After(time.Second):
-		t.Fatal("losing QUIC candidate was not canceled")
+		t.Fatal("TCP standby was not started")
 	}
-	got := client.metrics.Snapshot()
-	if got.UDPPathUnavailable != 1 || got.EndpointTransportRaceFailures != 0 {
-		t.Fatalf("unexpected endpoint transport metrics: %+v", got)
+	select {
+	case got := <-result:
+		close(quicRelease)
+		t.Fatalf("ready TCP displaced pending pooled QUIC: lane=%+v err=%v", got.lane, got.err)
+	case <-time.After(25 * time.Millisecond):
 	}
-	if text := logs.String(); !strings.Contains(text, "UDP path unavailable or too slow") ||
-		!strings.Contains(text, "quic_pending=true") {
-		t.Fatalf("slow UDP path was not logged as the degraded condition: %s", text)
+	close(quicRelease)
+	got := <-result
+	if got.err != nil || got.lane == nil || got.lane.kind != TransportQUIC {
+		t.Fatalf("QUIC-preferred pooled result = %+v, error = %v", got.lane, got.err)
+	}
+	if snapshot := client.metrics.Snapshot(); snapshot.Fallbacks != 0 || snapshot.UDPPathUnavailable != 0 {
+		t.Fatalf("a slow working pooled QUIC path was reported as failed: %+v", snapshot)
+	}
+}
+
+func TestReadyTCPIsCommittedAfterExplicitQUICFailure(t *testing.T) {
+	client := &Client{
+		cfg: ClientConfig{
+			RemoteAddr: "egress.example:443", Transport: TransportAuto, FallbackDelay: time.Millisecond,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),
+	}
+	quicRelease := make(chan struct{})
+	tcpReady := make(chan struct{})
+	client.dialPipelinedFlowForTest = func(_ context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
+		if kind == TransportQUIC {
+			<-quicRelease
+			return nil, &quic.HandshakeTimeoutError{}
+		}
+		close(tcpReady)
+		return &openedFlow{kind: TransportTCP}, nil
+	}
+
+	result := make(chan openedFlowResult, 1)
+	go func() {
+		flow, err := client.openInitialFlow(context.Background(), "example.test:443")
+		result <- openedFlowResult{flow: flow, err: err}
+	}()
+	select {
+	case <-tcpReady:
+	case <-time.After(time.Second):
+		t.Fatal("TCP standby was not started")
+	}
+	close(quicRelease)
+	got := <-result
+	if got.err != nil || got.flow == nil || got.flow.kind != TransportTCP {
+		t.Fatalf("explicit-failure fallback = %+v, error = %v", got.flow, got.err)
+	}
+	if snapshot := client.metrics.Snapshot(); snapshot.Fallbacks != 1 || snapshot.UDPPathUnavailable != 1 {
+		t.Fatalf("explicit differential failure was not recorded: %+v", snapshot)
+	}
+	if client.udpHealth.allow(time.Now()) {
+		t.Fatal("an explicit QUIC failure against working TCP did not enter cooldown")
+	}
+}
+
+func TestPreferenceGraceUsesTCPWithoutPoisoningUDPAndLatePoolRecovers(t *testing.T) {
+	client := &Client{
+		cfg: ClientConfig{
+			RemoteAddr: "egress.example:443", Transport: TransportAuto, EnableQUICPool: true,
+			FallbackDelay: time.Millisecond, FallbackGrace: 20 * time.Millisecond,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),
+	}
+	// Begin in cooldown to prove that a late successful QUIC pool attempt
+	// positively restores health after this request has already used TCP.
+	client.udpHealth.failure(time.Now())
+	quicRelease := make(chan struct{})
+	client.dialAuthenticatedLaneForTest = func(_ context.Context, kind TransportKind) (*authenticatedLane, error) {
+		if kind == TransportQUIC {
+			<-quicRelease
+			return &authenticatedLane{kind: TransportQUIC}, nil
+		}
+		return &authenticatedLane{kind: TransportTCP}, nil
+	}
+
+	lane, err := client.raceUDPAndTCP(context.Background())
+	if err != nil || lane == nil || lane.kind != TransportTCP {
+		t.Fatalf("preference-expiry result = %+v, error = %v", lane, err)
+	}
+	if snapshot := client.metrics.Snapshot(); snapshot.Fallbacks != 1 || snapshot.UDPPathUnavailable != 0 {
+		t.Fatalf("preference expiry was mistaken for UDP failure: %+v", snapshot)
+	}
+	close(quicRelease)
+	deadline := time.Now().Add(time.Second)
+	for !client.udpHealth.allow(time.Now()) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !client.udpHealth.allow(time.Now()) {
+		t.Fatal("late pooled QUIC success did not restore UDP health")
+	}
+}
+
+func TestLatePooledQUICFailureIsRecordedOnlyWhenItBecomesExplicit(t *testing.T) {
+	client := &Client{
+		cfg: ClientConfig{
+			RemoteAddr: "egress.example:443", Transport: TransportAuto, EnableQUICPool: true,
+			FallbackDelay: time.Millisecond, FallbackGrace: 20 * time.Millisecond,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),
+	}
+	quicRelease := make(chan struct{})
+	client.dialAuthenticatedLaneForTest = func(_ context.Context, kind TransportKind) (*authenticatedLane, error) {
+		if kind == TransportQUIC {
+			<-quicRelease
+			return nil, &quic.HandshakeTimeoutError{}
+		}
+		return &authenticatedLane{kind: TransportTCP}, nil
+	}
+
+	lane, err := client.raceUDPAndTCP(context.Background())
+	if err != nil || lane == nil || lane.kind != TransportTCP {
+		t.Fatalf("preference-expiry result = %+v, error = %v", lane, err)
+	}
+	if snapshot := client.metrics.Snapshot(); snapshot.UDPPathUnavailable != 0 {
+		t.Fatalf("pending QUIC was counted before it failed: %+v", snapshot)
+	}
+	close(quicRelease)
+	deadline := time.Now().Add(time.Second)
+	for client.metrics.Snapshot().UDPPathUnavailable == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if snapshot := client.metrics.Snapshot(); snapshot.UDPPathUnavailable != 1 {
+		t.Fatalf("explicit late QUIC failure was not recorded: %+v", snapshot)
+	}
+	if client.udpHealth.allow(time.Now()) {
+		t.Fatal("explicit late QUIC failure did not enter cooldown")
 	}
 }
 

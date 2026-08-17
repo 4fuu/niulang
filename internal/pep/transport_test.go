@@ -70,18 +70,17 @@ func TestQUICPathEvidenceExcludesPeerAndLifecycleFailures(t *testing.T) {
 func TestNegativeQUICEvidenceRequiresReachableTCPControl(t *testing.T) {
 	tests := []struct {
 		name      string
-		pending   bool
 		quic, tcp quicPathEvidence
 		want      quicPathEvidence
 	}{
 		{name: "timed out while TCP worked", quic: quicPathUnavailable, tcp: quicPathAvailable, want: quicPathUnavailable},
-		{name: "lost delayed race", pending: true, tcp: quicPathAvailable, want: quicPathUnavailable},
+		{name: "pending is not negative evidence", tcp: quicPathAvailable, want: quicPathNeutral},
 		{name: "peer closed while TCP worked", quic: quicPathNeutral, tcp: quicPathAvailable, want: quicPathNeutral},
 		{name: "both transports failed", quic: quicPathUnavailable, tcp: quicPathNeutral, want: quicPathNeutral},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := differentialQUICPathEvidence(test.pending, test.quic, test.tcp); got != test.want {
+			if got := differentialQUICPathEvidence(test.quic, test.tcp); got != test.want {
 				t.Fatalf("evidence = %d, want %d", got, test.want)
 			}
 		})

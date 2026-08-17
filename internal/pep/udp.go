@@ -264,18 +264,14 @@ done:
 	_ = udpConn.Close()
 }
 
-// rescueUDPAssociation opens a fresh authenticated association while keeping
-// the local SOCKS UDP socket alive. A new server-side UDP relay is intentional
-// for this first rescue implementation: it bounds protocol state and works
-// over both transports without a resumable UDP-session wire extension. At
-// most three attempts are made, with bounded exponential backoff. The active
-// lane ending is not treated as global path evidence: a peer restart or
-// application close looks identical there. Each replacement's comparative
-// QUIC/TCP race provides the path observation instead.
 // rescueUDPAssociation opens a replacement association, offering the token of
 // the relay the failed one was using. Every attempt offers the same token: the
 // server consumes it on the first attempt that reaches it, so a later attempt
 // simply gets a fresh relay, which is the outcome that existed before resume.
+// The failed established lane is not global path evidence: a peer restart or
+// application close looks identical there. AUTO nevertheless rescues this flow
+// directly over TCP instead of waiting for a fresh QUIC dial to time out. New
+// flows keep probing QUIC and make the endpoint-level path observation.
 func (c *Client) rescueUDPAssociation(ctx context.Context, controlClosed <-chan struct{}, resume []byte) (*udpAssociation, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxUDPReconnectAttempts; attempt++ {
@@ -284,7 +280,7 @@ func (c *Client) rescueUDPAssociation(ctx context.Context, controlClosed <-chan 
 		}
 		c.metrics.UDPAssociationReconnect()
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, c.cfg.DialTimeout+c.cfg.HandshakeTimeout)
-		association, err := c.openUDPAssociation(attemptCtx, resume)
+		association, err := c.openUDPAssociationMode(attemptCtx, resume, false, true)
 		attemptCancel()
 		if err == nil {
 			return association, nil
@@ -398,11 +394,22 @@ type udpAssociation struct {
 }
 
 func (c *Client) openUDPAssociation(ctx context.Context, resume []byte) (*udpAssociation, error) {
-	return c.openUDPAssociationMode(ctx, resume, false)
+	return c.openUDPAssociationMode(ctx, resume, false, false)
 }
 
-func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fastRetry bool) (*udpAssociation, error) {
-	lane, err := c.chooseAuthenticatedLane(ctx)
+func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fastRetry, rescue bool) (*udpAssociation, error) {
+	var lane *authenticatedLane
+	var err error
+	if rescue && c.cfg.Transport == TransportAuto {
+		// An established association already failed. Waiting for another QUIC
+		// dial proves nothing about the endpoint and can exceed the preserved
+		// SOCKS datagram's useful lifetime, so recover this flow over the warm
+		// standby transport without changing global UDP health.
+		c.metrics.Fallback()
+		lane, err = c.dialAuthenticatedCandidate(ctx, TransportTCP)
+	} else {
+		lane, err = c.chooseAuthenticatedLane(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +457,7 @@ func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fast
 		if !fastRetry && lane.fastOpen && resetCode(response.Payload) == session.ResetProtocol {
 			c.disableQUICPoolFast()
 			_ = lane.fc.Close()
-			return c.openUDPAssociationMode(ctx, resume, true)
+			return c.openUDPAssociationMode(ctx, resume, true, rescue)
 		}
 		_ = lane.fc.Close()
 		return nil, errors.New("remote UDP association rejected")

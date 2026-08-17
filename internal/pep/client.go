@@ -123,10 +123,18 @@ type ClientConfig struct {
 	StreamReceiveWindow     uint64
 	ConnectionReceiveWindow uint64
 	Metrics                 *metrics.Registry
-	FallbackDelay           time.Duration
-	UDPFailureThreshold     int
-	UDPCooldown             time.Duration
-	Logger                  *slog.Logger
+	// FallbackDelay is when AUTO starts connecting its warm-standby TCP
+	// candidate. It is not a deadline for QUIC and not a transport-selection
+	// race.
+	FallbackDelay time.Duration
+	// FallbackGrace is how long a ready TCP standby waits for QUIC. Expiry may
+	// serve the current flow over TCP, but it is neutral UDP evidence. With a
+	// pool, the QUIC attempt continues in the background so later flows can
+	// return to the preferred transport.
+	FallbackGrace       time.Duration
+	UDPFailureThreshold int
+	UDPCooldown         time.Duration
+	Logger              *slog.Logger
 }
 
 type Client struct {
@@ -153,6 +161,10 @@ type Client struct {
 	// dialPipelinedFlowForTest isolates the cold-flow transport race from the
 	// network in state-machine tests.
 	dialPipelinedFlowForTest func(context.Context, TransportKind, []byte) (*openedFlow, error)
+	// dialAuthenticatedLaneForTest isolates the pooled transport race. The
+	// production path still goes through dialAuthenticatedLane; tests can make
+	// TCP ready before QUIC without relying on scheduler timing or live loss.
+	dialAuthenticatedLaneForTest func(context.Context, TransportKind) (*authenticatedLane, error)
 
 	quicPoolFast bool
 	// quicPoolFastProven records that a fast open on this connection has been
@@ -213,6 +225,7 @@ func (b *bulkConn) close(reason string) {
 
 const bulkPoolIdleTimeout = 30 * time.Second
 const bulkJoinCapabilityRetry = 60 * time.Second
+const defaultFallbackGrace = 2 * time.Second
 
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.ListenAddr == "" || cfg.RemoteAddr == "" || cfg.ServerName == "" {
@@ -303,6 +316,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.FallbackDelay <= 0 {
 		cfg.FallbackDelay = 300 * time.Millisecond
 	}
+	if cfg.FallbackGrace <= 0 {
+		cfg.FallbackGrace = defaultFallbackGrace
+	}
 	return &Client{
 		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
 		budget: limiter.New(limiter.Config{
@@ -310,6 +326,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		}),
 		metrics: cfg.Metrics,
 	}, nil
+}
+
+func (c *Client) fallbackGrace() time.Duration {
+	if c.cfg.FallbackGrace <= 0 {
+		return defaultFallbackGrace
+	}
+	return c.cfg.FallbackGrace
 }
 
 func (c *Client) windows() flowWindows {
@@ -531,8 +554,8 @@ func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow,
 // OPEN back-to-back. This is wire-compatible with the original server (which
 // reads HELLO, writes HELLO_OK, then reads OPEN) and removes one sequential
 // request/response exchange from every cold flow. AUTO preserves the normal
-// UDP preference and races a delayed TCP candidate against the pipelined
-// QUIC candidate.
+// UDP preference and prepares a delayed TCP standby behind the pipelined QUIC
+// candidate.
 func (c *Client) openInitialFlow(ctx context.Context, destination string) (*openedFlow, error) {
 	payload, err := session.EncodeDestination(destination)
 	if err != nil {
@@ -659,10 +682,7 @@ func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*opened
 		}
 		tcpFlow, tcpErr := c.dialPipelinedCandidate(ctx, TransportTCP, payload)
 		tcpEvidence := classifyQUICPathEvidence(tcpErr)
-		c.observeUDPPath(
-			differentialQUICPathEvidence(false, quicEvidence, tcpEvidence),
-			false, result.err,
-		)
+		c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, tcpEvidence), result.err)
 		c.metrics.Fallback()
 		if tcpEvidence != quicPathAvailable {
 			c.reportEndpointTransportRaceFailure(result.err, tcpErr)
@@ -679,6 +699,14 @@ func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*opened
 		tcpResult <- openedFlowResult{flow: flow, err: err}
 	}()
 	var quicErr, tcpErr error
+	var tcpReady *openedFlow
+	var standbyTimer *time.Timer
+	var standbyC <-chan time.Time
+	defer func() {
+		if standbyTimer != nil {
+			standbyTimer.Stop()
+		}
+	}()
 	quicEvidence := quicPathNeutral
 	for quicResult != nil || tcpResult != nil {
 		select {
@@ -688,25 +716,54 @@ func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*opened
 			if quicEvidence == quicPathAvailable {
 				c.udpHealth.observe(quicEvidence, time.Now())
 				cancel()
+				closeOpenedFlow(tcpReady)
 				closeLateFlow(tcpResult)
 				return result.flow, result.err
 			}
 			quicErr = result.err
+			if tcpReady != nil {
+				c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, quicPathAvailable), quicErr)
+				c.metrics.Fallback()
+				cancel()
+				return tcpReady, nil
+			}
 		case result := <-tcpResult:
 			tcpResult = nil
 			tcpEvidence := classifyQUICPathEvidence(result.err)
 			if tcpEvidence == quicPathAvailable {
-				c.observeUDPPath(
-					differentialQUICPathEvidence(quicResult != nil, quicEvidence, tcpEvidence),
-					quicResult != nil, quicErr,
-				)
+				// TCP is a warm standby, not an equal race winner. A
+				// still-pending QUIC handshake has said nothing about UDP
+				// reachability, and on the target path TCP can authenticate
+				// first yet carry bulk data a thousand times more slowly.
+				// Keep the ready TCP flow bounded by the QUIC dial's own
+				// timeout and commit it only after QUIC explicitly fails.
+				if result.err == nil && quicResult != nil {
+					tcpReady = result.flow
+					standbyTimer = time.NewTimer(c.fallbackGrace())
+					standbyC = standbyTimer.C
+					continue
+				}
+				c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, tcpEvidence), quicErr)
 				c.metrics.Fallback()
 				cancel()
 				closeLateFlow(quicResult)
 				return result.flow, result.err
 			}
 			tcpErr = result.err
+		case <-standbyC:
+			// The preference window is an application-latency bound, not
+			// evidence that UDP is blocked. This cold, unpooled flow cannot
+			// reuse a late connection, so retire its QUIC candidate without
+			// changing endpoint health.
+			standbyC = nil
+			c.metrics.Fallback()
+			c.cfg.Logger.Debug("QUIC preference window elapsed; using TCP without penalizing UDP health",
+				"endpoint", c.cfg.RemoteAddr, "grace", c.fallbackGrace())
+			cancel()
+			closeLateFlow(quicResult)
+			return tcpReady, nil
 		case <-ctx.Done():
+			closeOpenedFlow(tcpReady)
 			closeLateFlow(quicResult)
 			closeLateFlow(tcpResult)
 			return nil, ctx.Err()
@@ -722,12 +779,12 @@ type openedFlowResult struct {
 }
 
 // observeUDPPath keeps the existing health state and makes its operational
-// meaning explicit. A negative observation is only produced in AUTO after TCP
-// reaches the same endpoint, so the warning distinguishes a blocked or
-// unacceptably slow UDP path from a generally unreachable server. TCP preserves
-// correctness, but it is a degraded path on the high-RTT links this transport
-// targets and must not be silent.
-func (c *Client) observeUDPPath(evidence quicPathEvidence, quicPending bool, quicErr error) {
+// meaning explicit. A negative observation is only produced in AUTO after
+// QUIC explicitly fails and TCP reaches the same endpoint. A merely pending
+// QUIC handshake is neutral: transport setup latency is not a throughput or
+// reachability verdict. TCP preserves correctness, but it is a degraded path
+// on the high-RTT links this transport targets and must not be silent.
+func (c *Client) observeUDPPath(evidence quicPathEvidence, quicErr error) {
 	if c.udpHealth != nil {
 		c.udpHealth.observe(evidence, time.Now())
 	}
@@ -742,13 +799,12 @@ func (c *Client) observeUDPPath(evidence quicPathEvidence, quicPending bool, qui
 	}
 	fields := []any{
 		"endpoint", c.cfg.RemoteAddr,
-		"quic_pending", quicPending,
 		"fallback", TransportTCP,
 	}
 	if quicErr != nil {
 		fields = append(fields, "quic_error", quicErr)
 	}
-	c.cfg.Logger.Warn("UDP path unavailable or too slow; TCP fallback is degraded", fields...)
+	c.cfg.Logger.Warn("UDP path explicitly failed; TCP fallback is degraded", fields...)
 }
 
 // reportEndpointTransportRaceFailure is the complement of observeUDPPath: TCP
@@ -773,10 +829,14 @@ func closeLateFlow(ch <-chan openedFlowResult) {
 	}
 	go func() {
 		result := <-ch
-		if result.flow != nil {
-			_ = result.flow.fc.Close()
-		}
+		closeOpenedFlow(result.flow)
 	}()
+}
+
+func closeOpenedFlow(flow *openedFlow) {
+	if flow != nil && flow.fc != nil {
+		_ = flow.fc.Close()
+	}
 }
 
 // errDestinationUnavailable is the peer saying it could not reach the
@@ -2010,18 +2070,25 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 func (c *Client) chooseAuthenticatedLane(ctx context.Context) (*authenticatedLane, error) {
 	switch c.cfg.Transport {
 	case TransportTCP:
-		return c.dialAuthenticatedLane(ctx, TransportTCP)
+		return c.dialAuthenticatedCandidate(ctx, TransportTCP)
 	case TransportQUIC:
-		return c.dialAuthenticatedLane(ctx, TransportQUIC)
+		return c.dialAuthenticatedCandidate(ctx, TransportQUIC)
 	case TransportAuto:
 		if !c.udpHealth.allow(time.Now()) {
 			c.metrics.Fallback()
-			return c.dialAuthenticatedLane(ctx, TransportTCP)
+			return c.dialAuthenticatedCandidate(ctx, TransportTCP)
 		}
 		return c.raceUDPAndTCP(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported transport %q", c.cfg.Transport)
 	}
+}
+
+func (c *Client) dialAuthenticatedCandidate(ctx context.Context, kind TransportKind) (*authenticatedLane, error) {
+	if c.dialAuthenticatedLaneForTest != nil {
+		return c.dialAuthenticatedLaneForTest(ctx, kind)
+	}
+	return c.dialAuthenticatedLane(ctx, kind)
 }
 
 type laneResult struct {
@@ -2031,10 +2098,15 @@ type laneResult struct {
 
 func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) {
 	raceCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	keepQUICAttempt := false
+	defer func() {
+		if !keepQUICAttempt {
+			cancel()
+		}
+	}()
 	quicResult := make(chan laneResult, 1)
 	go func() {
-		lane, err := c.dialAuthenticatedLane(raceCtx, TransportQUIC)
+		lane, err := c.dialAuthenticatedCandidate(raceCtx, TransportQUIC)
 		quicResult <- laneResult{lane: lane, err: err}
 	}()
 	timer := time.NewTimer(c.cfg.FallbackDelay)
@@ -2048,15 +2120,12 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		tcpLane, tcpErr := c.dialAuthenticatedLane(ctx, TransportTCP)
+		tcpLane, tcpErr := c.dialAuthenticatedCandidate(ctx, TransportTCP)
 		tcpEvidence := quicPathNeutral
 		if tcpErr == nil {
 			tcpEvidence = quicPathAvailable
 		}
-		c.observeUDPPath(
-			differentialQUICPathEvidence(false, classifyQUICPathEvidence(result.err), tcpEvidence),
-			false, result.err,
-		)
+		c.observeUDPPath(differentialQUICPathEvidence(classifyQUICPathEvidence(result.err), tcpEvidence), result.err)
 		c.metrics.Fallback()
 		if tcpErr != nil {
 			c.reportEndpointTransportRaceFailure(result.err, tcpErr)
@@ -2070,10 +2139,18 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 
 	tcpResult := make(chan laneResult, 1)
 	go func() {
-		lane, err := c.dialAuthenticatedLane(raceCtx, TransportTCP)
+		lane, err := c.dialAuthenticatedCandidate(raceCtx, TransportTCP)
 		tcpResult <- laneResult{lane: lane, err: err}
 	}()
 	var quicErr, tcpErr error
+	var tcpReady *authenticatedLane
+	var standbyTimer *time.Timer
+	var standbyC <-chan time.Time
+	defer func() {
+		if standbyTimer != nil {
+			standbyTimer.Stop()
+		}
+	}()
 	quicEvidence := quicPathNeutral
 	for quicResult != nil || tcpResult != nil {
 		select {
@@ -2082,25 +2159,52 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 			if result.err == nil {
 				c.udpHealth.observe(quicPathAvailable, time.Now())
 				cancel()
+				closeAuthenticatedLane(tcpReady)
 				closeLateLane(tcpResult)
 				return result.lane, nil
 			}
 			quicErr = result.err
 			quicEvidence = classifyQUICPathEvidence(result.err)
+			if tcpReady != nil {
+				c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, quicPathAvailable), quicErr)
+				c.metrics.Fallback()
+				cancel()
+				return tcpReady, nil
+			}
 		case result := <-tcpResult:
 			tcpResult = nil
 			if result.err == nil {
-				c.observeUDPPath(
-					differentialQUICPathEvidence(quicResult != nil, quicEvidence, quicPathAvailable),
-					quicResult != nil, quicErr,
-				)
+				if quicResult != nil {
+					tcpReady = result.lane
+					standbyTimer = time.NewTimer(c.fallbackGrace())
+					standbyC = standbyTimer.C
+					continue
+				}
+				c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, quicPathAvailable), quicErr)
 				c.metrics.Fallback()
 				cancel()
-				closeLateLane(quicResult)
 				return result.lane, nil
 			}
 			tcpErr = result.err
+		case <-standbyC:
+			standbyC = nil
+			c.metrics.Fallback()
+			c.cfg.Logger.Debug("QUIC preference window elapsed; using TCP without penalizing UDP health",
+				"endpoint", c.cfg.RemoteAddr, "grace", c.fallbackGrace())
+			if c.cfg.EnableQUICPool {
+				// The current request has its bounded answer, while the one
+				// coalesced pool dial keeps running. Its eventual success
+				// restores QUIC for later flows; an explicit failure is the
+				// conservative evidence the cooldown requires.
+				keepQUICAttempt = true
+				c.finishLatePooledQUIC(quicResult, cancel)
+			} else {
+				cancel()
+				closeLateLane(quicResult)
+			}
+			return tcpReady, nil
 		case <-ctx.Done():
+			closeAuthenticatedLane(tcpReady)
 			closeLateLane(quicResult)
 			closeLateLane(tcpResult)
 			return nil, ctx.Err()
@@ -2110,14 +2214,34 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 	return nil, fmt.Errorf("QUIC failed (%v); TCP fallback failed (%v)", quicErr, tcpErr)
 }
 
+func (c *Client) finishLatePooledQUIC(ch <-chan laneResult, cancel context.CancelFunc) {
+	go func() {
+		defer cancel()
+		result := <-ch
+		if result.err == nil {
+			c.udpHealth.observe(quicPathAvailable, time.Now())
+		} else {
+			c.observeUDPPath(
+				differentialQUICPathEvidence(classifyQUICPathEvidence(result.err), quicPathAvailable),
+				result.err,
+			)
+		}
+		closeAuthenticatedLane(result.lane)
+	}()
+}
+
 func closeLateLane(ch <-chan laneResult) {
 	if ch == nil {
 		return
 	}
 	go func() {
 		result := <-ch
-		if result.lane != nil {
-			_ = result.lane.fc.Close()
-		}
+		closeAuthenticatedLane(result.lane)
 	}()
+}
+
+func closeAuthenticatedLane(lane *authenticatedLane) {
+	if lane != nil && lane.fc != nil {
+		_ = lane.fc.Close()
+	}
 }

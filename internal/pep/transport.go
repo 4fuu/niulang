@@ -162,13 +162,14 @@ func classifyQUICPathEvidence(err error) quicPathEvidence {
 
 // differentialQUICPathEvidence requires the TCP control to reach the same
 // endpoint before a negative QUIC observation becomes global. A pending QUIC
-// attempt that loses the delayed race is a comparative timeout. If TCP also
+// attempt is not evidence at all: TCP can authenticate sooner on a lossy path
+// and still be orders of magnitude worse once it carries data. If TCP also
 // failed, the endpoint or whole uplink may be down and QUIC is not singled out.
-func differentialQUICPathEvidence(quicPending bool, quicEvidence, tcpEvidence quicPathEvidence) quicPathEvidence {
+func differentialQUICPathEvidence(quicEvidence, tcpEvidence quicPathEvidence) quicPathEvidence {
 	if tcpEvidence != quicPathAvailable {
 		return quicPathNeutral
 	}
-	if quicPending || quicEvidence == quicPathUnavailable {
+	if quicEvidence == quicPathUnavailable {
 		return quicPathUnavailable
 	}
 	return quicPathNeutral

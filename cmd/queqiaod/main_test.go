@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // A default is not an instruction.
 //
@@ -75,5 +78,23 @@ func TestTCPFallbackFlagsAreBoundedAndRoleScoped(t *testing.T) {
 	}
 	if _, err := parseOptions(append(append([]string(nil), local...), "--tcp-congestion", "bbr")); err == nil {
 		t.Fatal("local mode accepted the server-only TCP congestion flag")
+	}
+}
+
+func TestFallbackStandbyWindowsAreExplicitAndBounded(t *testing.T) {
+	local := []string{
+		"--mode", "local", "--listen", "127.0.0.1:1080", "--remote", "peer:443",
+		"--server-name", "peer", "--secret-file", "/dev/null",
+		"--fallback-delay", "25ms", "--fallback-grace", "3s",
+	}
+	opts, err := parseOptions(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.fallbackDelay != 25*time.Millisecond || opts.fallbackGrace != 3*time.Second {
+		t.Fatalf("fallback windows = %v/%v, want 25ms/3s", opts.fallbackDelay, opts.fallbackGrace)
+	}
+	if _, err := parseOptions(append(append([]string(nil), local...), "--fallback-grace", "0s")); err == nil {
+		t.Fatal("zero QUIC preference grace was accepted")
 	}
 }

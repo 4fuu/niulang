@@ -77,8 +77,11 @@ DATAGRAM support, packets use it; TLS/TCP and capability-free peers use the
 lane control stream. The receiver applies a bounded anti-replay window.
 
 Each remote endpoint has `healthy`, `degraded`, and `blocked` UDP health. New
-work in `auto` mode races QUIC against delayed TLS/TCP; repeated UDP failures
-enter a cooldown, and later probes allow QUIC to become preferred again.
+work in `auto` mode starts QUIC first and prepares delayed TLS/TCP as a warm
+standby. TCP becoming ready first is neutral; only an explicit QUIC
+reachability failure confirmed by working TCP advances the conservative
+failure detector. Repeated differential failures enter a cooldown, and later
+probes allow QUIC to become preferred again.
 
 Failed TCP flows use bounded sequence-aware replay over an authenticated
 replacement without duplicating bytes. Failed UDP associations retain the

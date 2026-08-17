@@ -58,6 +58,7 @@ type options struct {
 	aggregateBytesPerSec          uint64
 	interactiveReserveBytesPerSec uint64
 	fallbackDelay                 time.Duration
+	fallbackGrace                 time.Duration
 	udpFailureThreshold           int
 	udpCooldown                   time.Duration
 	allowPrivate                  bool
@@ -114,8 +115,9 @@ func run(args []string) error {
 			Congestion:                 pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
-			FallbackDelay: opts.fallbackDelay, UDPFailureThreshold: opts.udpFailureThreshold,
-			UDPCooldown: opts.udpCooldown, Logger: logger,
+			FallbackDelay: opts.fallbackDelay, FallbackGrace: opts.fallbackGrace,
+			UDPFailureThreshold: opts.udpFailureThreshold,
+			UDPCooldown:         opts.udpCooldown, Logger: logger,
 		})
 		if err != nil {
 			return err
@@ -193,7 +195,8 @@ func parseOptions(args []string) (options, error) {
 	fs.Uint64Var(&opts.adaptiveMaxBytesSec, "adaptive-max-bytes-per-sec", 200*1024*1024, "Adaptive controller maximum rate in bytes/s")
 	fs.Uint64Var(&opts.aggregateBytesPerSec, "aggregate-bytes-per-sec", 0, "optional aggregate byte budget shared by all lanes and flows (0 disables)")
 	fs.Uint64Var(&opts.interactiveReserveBytesPerSec, "interactive-reserve-bytes-per-sec", 0, "reserved aggregate budget for new/interactive traffic")
-	fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before starting TCP fallback in auto mode")
+	fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before preparing warm-standby TCP in auto mode; QUIC remains preferred until it explicitly fails")
+	fs.DurationVar(&opts.fallbackGrace, "fallback-grace", 2*time.Second, "time a ready TCP standby waits for QUIC; expiry is not counted as UDP failure")
 	fs.IntVar(&opts.udpFailureThreshold, "udp-failure-threshold", 3, "consecutive UDP failures before temporary TCP-only mode")
 	fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "how long to suppress UDP after repeated failures")
 	fs.BoolVar(&opts.allowPrivate, "allow-private-destinations", false, "allow the server to reach private/link-local destinations")
@@ -260,7 +263,7 @@ func parseOptions(args []string) (options, error) {
 	if opts.interactiveReserveBytesPerSec > opts.aggregateBytesPerSec {
 		return opts, errors.New("interactive reserve cannot exceed aggregate byte budget")
 	}
-	if opts.fallbackDelay < 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0 {
+	if opts.fallbackDelay < 0 || opts.fallbackGrace <= 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0 {
 		return opts, errors.New("invalid UDP fallback settings")
 	}
 	if opts.flowIdleTimeout <= 0 || opts.flowMaxLifetime <= 0 || opts.flowIdleTimeout > opts.flowMaxLifetime {

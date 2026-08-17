@@ -36,6 +36,12 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 - Outer EOF following a peer CLOSE is treated as a normal read half-close,
   preserving the lane's final-ACK/write direction without delaying retirement
   of a lane that fails before sending CLOSE.
+- AUTO transport selection now treats TCP as a warm standby: a faster TCP
+  handshake cannot count as UDP failure or drive the endpoint into TCP-only
+  cooldown. A separate preference grace bounds application delay, pooled QUIC
+  recovery continues behind a grace-expired TCP request, and only explicit
+  QUIC failure confirmed by a working TCP control advances the conservative
+  UDP-failure detector.
 
 ## v0.1.0 - planned
 
