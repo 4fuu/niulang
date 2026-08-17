@@ -70,3 +70,26 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -short -timeout 20m ./...
+
+  # Exercise the actual release path, including embedded version metadata and
+  # deterministic archive creation. One target is enough here; release.yml
+  # packages the complete six-target matrix.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: package smoke test
+        run: |
+          build_date=$(git show -s --format=%cI HEAD)
+          go run ./cmd/queqiaopack \
+            --version v0.0.0-ci --commit "${GITHUB_SHA}" \
+            --build-date "$build_date" --targets linux/amd64 \
+            --output dist
+          cd dist
+          sha256sum -c SHA256SUMS
+          tar -xzf queqiaod_v0.0.0-ci_linux_amd64.tar.gz
+          ./queqiaod_v0.0.0-ci_linux_amd64/queqiaod --version |
+            grep -F "queqiaod v0.0.0-ci commit=${GITHUB_SHA}"

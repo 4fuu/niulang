@@ -120,3 +120,20 @@ The sink requires an explicit bounded `Content-Length`, accepts one request by
 default, and exits after that request. It must not be left as a public
 service; use a temporary systemd unit or process supervisor and verify that
 the listener is gone after the measurement.
+
+## Fallback soak
+
+`fallback_soak.sh` repeatedly withdraws UDP under live associations, verifies
+TCP rescue and remote relay-source preservation, restores UDP on the same
+endpoint, and verifies that post-cooldown health probes return new associations
+to QUIC. It runs both normal and race-detector repetitions and emits a
+checksummed provenance bundle:
+
+```sh
+./scripts/fallback_soak.sh --runs 50 --race-runs 20 \
+  --output-dir /tmp/queqiao-fallback-soak
+```
+
+This is the deterministic release soak and runs weekly at a smaller count. It
+does not replace intermittent firewall and NAT tests on the real China-US
+path.

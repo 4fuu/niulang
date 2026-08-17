@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -93,8 +95,11 @@ func TestGatePassesAtParity(t *testing.T) {
 
 func TestReportRoundTripsAsJSON(t *testing.T) {
 	report := Report{
-		Path:   PathReport{RTTMillis: 200, LossPercent: 1, RateMbits: 100},
-		Trials: []TrialRecord{trial("queqiao", 1, 10, true)},
+		SchemaVersion: 1,
+		Arguments:     []string{"--rtt", "200", "--seed", "7"},
+		Path:          PathReport{RTTMillis: 200, LossPercent: 1, RateMbits: 100, Seed: 7},
+		Trials:        []TrialRecord{trial("queqiao", 1, 10, true)},
+		Latency:       []LatencyRecord{{Stack: "queqiao", Trial: 1, ColdMillis: 210, WarmMillis: 201, Complete: true}},
 	}
 	report.Summary = summarize(report.Trials)
 	path := filepath.Join(t.TempDir(), "report.json")
@@ -103,6 +108,27 @@ func TestReportRoundTripsAsJSON(t *testing.T) {
 	}
 	if err := writeReport(path, report); err != nil {
 		t.Fatalf("rewriting an existing report: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Report
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SchemaVersion != 1 || decoded.Path.Seed != 7 || len(decoded.Latency) != 1 {
+		t.Fatalf("report lost reproducibility fields: %+v", decoded)
+	}
+}
+
+func TestSourceProvenanceNamesTheCheckout(t *testing.T) {
+	source := describeSource()
+	if source.Revision == "" || source.CommitTime == "" {
+		t.Fatalf("source provenance does not identify the checkout: %+v", source)
+	}
+	if source.GoVersion == "" || source.GOOS == "" || source.GOARCH == "" {
+		t.Fatalf("source provenance does not identify the toolchain: %+v", source)
 	}
 }
 

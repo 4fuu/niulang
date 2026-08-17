@@ -123,6 +123,10 @@ go run ./cmd/queqiaobench --stacks vless-tcp,vless-ws \
 # The standard matrix, five trials per cell.
 ./scripts/bench_matrix.sh --trials 5 --output /tmp/matrix.tsv
 
+# An archival bundle: TSV, per-cell JSON, source/toolchain manifest, any dirty
+# source patch, and checksums. The directory must not already exist.
+./scripts/bench_matrix.sh --trials 5 --json-dir /tmp/queqiao-report
+
 # One cell, both stacks, with a machine-readable record and a CI gate.
 go run ./cmd/queqiaobench --rtt 200 --loss 3 --rate 100 --trials 5 \
     --json /tmp/result.json --gate --tolerance 0.10
@@ -169,6 +173,27 @@ sequential number, and the opposite conclusion.
 bounds every transport number taken through it: 1722 Mbit/s at 200 ms, 1784 at
 20 ms. Quote no result that is within a small factor of these without checking
 it first.
+
+## Archival reports and provenance
+
+`bench_matrix.sh --json-dir DIR` creates a self-checking report bundle instead
+of loose JSON files. `manifest.txt` records the commit, Go toolchain, target,
+matrix settings, and shell-escaped invocation. Every per-cell JSON report has
+schema version 1 and repeats the exact command arguments, seeded path settings,
+VCS revision/dirty bit, Go target, and complete module dependency graph. Cold
+and warm latency records and contention records are machine-readable too; they
+are no longer terminal-only output. `SHA256SUMS` covers the bundle.
+
+For a report intended to support a published claim, start from a clean tree so
+the recorded commit is sufficient to reproduce its source. A development run
+is still honest: `source-status.txt` records the dirty paths and `source.patch`
+captures tracked changes. Untracked files cannot be reconstructed from that
+patch, which is why an archival run must be clean.
+
+The emulator is deterministic for a given seed, but elapsed time is not:
+scheduler load, CPU frequency, kernel, and Go version still affect performance.
+Reproduce comparisons on a comparable host and judge paired stacks from the
+same cell, rather than expecting benchmark JSON to be byte-identical.
 
 ## Live campaigns
 

@@ -271,8 +271,9 @@ address as the PEP socket endpoint.
   authentication.
 - Destination allow/deny policy, including private-address rejection by
   default.
-- Per-user/session/flow limits for handshakes, lanes, frames, reassembly
-  bytes, reconnect rate, and application-idle/maximum-lifetime duration.
+- Connection/session/flow limits for handshakes, lanes, frames, reassembly
+  bytes, reconnect rate, and application-idle/maximum-lifetime duration. The
+  shared credential does not provide per-user identities or quotas.
 - Metrics and structured logs that never contain the shared secret or
   application plaintext.
 - A systemd unit isolated from Xray, sing-box, Cloudflare, Nginx, and the
@@ -289,6 +290,11 @@ under the lock, allocating as it went. Neither is a frame-size limit or a
 buffered-byte limit, and neither would have been found by one. Both are
 bounded now, and `deep.yml` smokes every fuzz target weekly so the next one of
 this shape is found by the repository rather than by the path.
+
+The Stage 5 review also found that the stream semaphore did not bound a QUIC
+connection that authenticated at TLS and then opened no stream. Accepted QUIC
+connections now have a separate `MaxSessions`-sized admission bound. The full
+trust-boundary review and residual risks are in `SECURITY-REVIEW.md`.
 
 ## Release gates
 

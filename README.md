@@ -42,6 +42,11 @@ it. The short version is that queqiao is not a protocol Clash speaks --
 and Clash forwards to it as a `socks5` node. Templates are in
 [`deploy/`](deploy).
 
+Tagged releases contain deterministic Linux, macOS, and Windows archives for
+amd64 and arm64, embedded build provenance, and SHA-256 checksums.
+[`docs/RELEASING.md`](docs/RELEASING.md) covers verification, atomic install,
+and rollback.
+
 Two things in that document decide whether a deployment works at all. The
 client must be started with `--local-address if:en0`, because Clash's TUN mode
 would otherwise capture queqiao's own outer connection and carry it through the

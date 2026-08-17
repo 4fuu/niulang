@@ -1,0 +1,72 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing v-prefixed tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Resolve immutable release inputs
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: |
+          case "$REQUESTED_VERSION" in
+            v*) ;;
+            *) echo "version must name an existing v-prefixed tag" >&2; exit 1 ;;
+          esac
+          git rev-parse --verify "refs/tags/${REQUESTED_VERSION}"
+          commit=$(git rev-list -n 1 "$REQUESTED_VERSION")
+          build_date=$(git show -s --format=%cI "$commit")
+          {
+            echo "version=$REQUESTED_VERSION"
+            echo "commit=$commit"
+            echo "build_date=$build_date"
+          } >> "$GITHUB_OUTPUT"
+      - name: Test
+        run: go test -short -timeout 20m ./...
+      - name: Scan reachable dependencies
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+      - name: Build release archives
+        run: |
+          go run ./cmd/queqiaopack \
+            --version '${{ steps.release.outputs.version }}' \
+            --commit '${{ steps.release.outputs.commit }}' \
+            --build-date '${{ steps.release.outputs.build_date }}' \
+            --output dist
+          cd dist
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: queqiaod-${{ steps.release.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: gh release create "$VERSION" dist/* --verify-tag --generate-notes

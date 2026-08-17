@@ -6,8 +6,14 @@ to point Clash Verge or any mihomo-based client at it.
 Read [the limits](#what-you-are-signing-up-for) before deploying this anywhere
 you care about. The project has not met the release gates in
 [`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md). The two tunnel-stall defects
-measured on 2026-08-16 are fixed and have deterministic regressions, but the
-broader live fallback, soak, packaging, and security gates remain open.
+measured on 2026-08-16 are fixed and have deterministic regressions. A live
+UDP blackhole recovered over TCP in 9.51 seconds, and release packaging is now
+reproducible; broader intermittent-loss, soak, resource, and security gates
+remain open.
+
+The deployment trust boundaries and resource ceilings are enumerated in
+[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md). In particular, the local SOCKS and
+metrics listeners are unauthenticated and should remain on loopback.
 
 ## The shape of a deployment
 
@@ -31,7 +37,22 @@ back by deleting one node and one rule.
 
 ## Build and install
 
-Go 1.25 or later.
+Go 1.25.13 or later. Earlier Go 1.25 patch releases contain standard-library
+vulnerabilities reachable through the TLS, X.509, HTTP metrics, and network
+paths used by queqiao; the module directive enforces the patched toolchain.
+
+For a tagged build, prefer the release archive for the target host and verify
+its `SHA256SUMS`. [`RELEASING.md`](RELEASING.md) documents provenance, atomic
+installation, and rollback. To build the entire six-target release matrix from
+a checkout:
+
+```sh
+go run ./cmd/queqiaopack --version v0.1.0 \
+  --commit "$(git rev-parse HEAD)" \
+  --build-date "$(git show -s --format=%cI HEAD)" --output dist
+```
+
+For development builds:
 
 ```sh
 git clone https://github.com/bojieli/queqiao && cd queqiao
@@ -65,8 +86,8 @@ sudo chmod 600 key.pem secret
 verified TLS name, not a DNS lookup: the client dials the literal IP in
 `--remote` and presents this as SNI.
 
-Run it under systemd. [`deploy/queqiaod-dev.service`](../deploy/queqiaod-dev.service)
-is the hardened unit this project uses; the minimal form is:
+Run it under systemd. [`deploy/queqiaod.service`](../deploy/queqiaod.service)
+is the packaged hardened template; the minimal form is:
 
 ```ini
 [Service]
@@ -251,9 +272,11 @@ serving the alternatives:
 
 Also unfinished, and relevant to a daily driver: interactive latency still
 moves under queqiao's own bulk load, although the corrected live A/B is now in
-the range of the measured QUIC alternatives; TUN/VLESS ingress does not exist,
-so Clash's SOCKS hand-off is the only integration; and UDP-blocked, restart,
-and long-soak behaviour is unmeasured on a real path.
+the range of the measured QUIC alternatives. Clash's TUN-to-SOCKS hand-off is
+the supported transparent integration; direct TUN/VLESS ingress is not part of
+the current architecture. A real-path UDP blackhole recovered over TCP in
+9.51 seconds, but intermittent blocking, restart, and long-soak behaviour still
+need broader campaigns.
 
 ## Troubleshooting
 
