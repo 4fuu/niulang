@@ -546,6 +546,36 @@ func saturatingByteAdd(a quiccongestion.ByteCount, b uint64) quiccongestion.Byte
 // The emulator finding was real and is not addressed by this: on a constant
 // path the controller does stay in startup too long. Fixing that needs a
 // mechanism that does not also discard the live path's noise.
+// appLimited reports whether the application, rather than the path, is what
+// is holding the sending rate down. quic-go's congestion interface has no
+// OnApplicationLimited callback, so it has to be inferred, and the inference
+// has to be conservative in one specific direction: BBR only updates its
+// bandwidth filter from samples that are *not* app-limited, so marking too
+// eagerly does not make the estimate cautious, it stops the estimate existing.
+//
+// Being under the congestion window is not the test. A paced sender is almost
+// always under its window -- that is what pacing does -- so `priorInFlight <
+// window` is true nearly every event on a busy connection. Measured on a
+// healthy 100 Mbit/s transfer, that marked 347 of 347 samples app-limited and
+// left the bandwidth estimate at 18 kB/s, about seven hundred times under the
+// rate actually flowing. The controller was running with no working estimate
+// of the path at all.
+//
+// Outside Drain the rule is deliberately liberal: any unused window counts.
+// That looks wrong -- on a saturating transfer it marks nearly every sample,
+// and the bandwidth filter then updates only from the rare event that fills
+// the window exactly -- and it has been tightened twice and reverted twice.
+// Requiring a burst of unused window, or half the window, measures better on
+// the emulator and costs more than half the throughput on the real China-US
+// path, where delivery-rate samples are noisy-low and this marking is what
+// keeps them out of the filter. See TestTUICAppLimitedCountsAnyUnusedWindow-
+// OutsideDrain and DESIGN-MULTIPATH.md 7.6 before touching it again.
+//
+// A near-100% app-limited count in the telemetry is therefore expected, not a
+// symptom. Note also that the /metrics endpoint reports one lane: with
+// --quic-pool that is usually the pooled control connection, which really is
+// idle, so a low bandwidth estimate there says nothing about the lane carrying
+// the data.
 func (b *TUICBBRSender) appLimited(priorInFlight quiccongestion.ByteCount) bool {
 	window := b.GetCongestionWindow()
 	if priorInFlight >= window {

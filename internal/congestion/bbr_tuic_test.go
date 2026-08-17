@@ -670,3 +670,50 @@ func TestSeedBandwidthLeavesAnUnmeasuredRoundTripUnset(t *testing.T) {
 		t.Fatalf("min_rtt is %v from a seed alone, want 0 so the sender measures it", got)
 	}
 }
+
+// pruneStates drops the oldest quarter when the table fills. It ran on the
+// send path and rescanned the whole map once per entry removed -- about 17
+// million map iterations for one call at the 8192-entry bound, which at
+// 200 Mbit/s recurs roughly every 0.4 s.
+func TestPruneStatesDropsTheOldestQuarter(t *testing.T) {
+	e := newTUICBandwidthEstimator()
+	now := monotime.Now()
+	for i := 0; i < tuicMaxSendStates; i++ {
+		e.packetStates[quiccongestion.PacketNumber(i)] = tuicPacketState{
+			sentTime: now.Add(time.Duration(i) * time.Microsecond),
+		}
+	}
+	e.pruneStates()
+
+	removed := tuicMaxSendStates / 4
+	if len(e.packetStates) != tuicMaxSendStates-removed {
+		t.Fatalf("table holds %d after prune, want %d", len(e.packetStates), tuicMaxSendStates-removed)
+	}
+	// Packet numbers are assigned in send order, so the oldest are the lowest.
+	for i := 0; i < removed; i++ {
+		if _, ok := e.packetStates[quiccongestion.PacketNumber(i)]; ok {
+			t.Fatalf("packet %d survived the prune, want the oldest quarter gone", i)
+		}
+	}
+	for i := removed; i < tuicMaxSendStates; i++ {
+		if _, ok := e.packetStates[quiccongestion.PacketNumber(i)]; !ok {
+			t.Fatalf("packet %d was pruned, want the newest three quarters kept", i)
+		}
+	}
+}
+
+// A prune must stay cheap enough to sit on the send path.
+func BenchmarkPruneStates(b *testing.B) {
+	now := monotime.Now()
+	for b.Loop() {
+		b.StopTimer()
+		e := newTUICBandwidthEstimator()
+		for i := 0; i < tuicMaxSendStates; i++ {
+			e.packetStates[quiccongestion.PacketNumber(i)] = tuicPacketState{
+				sentTime: now.Add(time.Duration(i) * time.Microsecond),
+			}
+		}
+		b.StartTimer()
+		e.pruneStates()
+	}
+}
