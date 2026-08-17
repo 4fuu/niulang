@@ -240,23 +240,13 @@ serving the alternatives:
   configurations. Since the `min_rtt` fix in
   [`STALL-20260817.md`](STALL-20260817.md) the same windows measure about
   200 Mbit/s.
-- **Cancelled downloads can stall it.** A transfer aborted part-way through can
-  leave a flow hung, holding a connection the server keeps sending into.
-  Several of those saturate the link with data nobody reads, and the client
-  stops passing traffic until it is restarted. Transfers that run to completion
-  do not do this — 30 consecutive 16 MiB downloads left one connection open and
-  no residue. Nothing is corrupted either way: a stalled client returns zero
-  bytes, never wrong ones, and the server is unaffected. Diagnosis and
-  reproduction in [`STALL-20260817.md`](STALL-20260817.md).
-
-Until that is fixed, treat a queqiao node as something you switch to
-deliberately rather than something you leave carrying a laptop's day. When
-throughput drops to nothing, restart the client:
-
-```sh
-launchctl kickstart -k gui/$(id -u)/me.01.queqiao.client   # macOS
-systemctl --user restart queqiao-client                    # Linux
-```
+- **Cancelled downloads no longer retain flows.** The former failure left the
+  client and server sending into a closed application until several abandoned
+  transfers saturated the link. Local EOF is now signalled across the flow,
+  stalled response delivery escalates to a bounded full-close, and the peer
+  cancels its sender immediately. The original diagnosis and deterministic
+  regression coverage are in
+  [`STALL-20260817.md`](STALL-20260817.md).
 
 Also unfinished, and relevant to a daily driver: interactive latency degrades
 under queqiao's own bulk load more than the alternatives' does; TUN/VLESS
@@ -271,7 +261,7 @@ UDP-blocked, restart, and long-soak behaviour is unmeasured on a real path.
 | `curl` through the SOCKS port succeeds but reports your own IP | `NO_PROXY` is set; use `env -u NO_PROXY -u no_proxy curl --noproxy ''` |
 | Client starts, no flows ever appear in `/metrics` | Clash rules are not reaching the group that holds the node |
 | Handshake fails with a certificate error | `--server-name` does not match the certificate's CN/SAN, or `--root-ca` is the wrong file |
-| Works, then stops after a few GiB | the stall above; restart the client |
+| An older build works, then stops after several cancelled transfers | upgrade both endpoints; this was the abort lifecycle defect fixed in `STALL-20260817.md` |
 | Throughput fine, UDP applications fail | peer negotiated no QUIC datagrams and fell back to the control stream, or the lane is TLS/TCP |
 
 Logs are on stdout; `--log-level debug` reports the outer lane's transport,

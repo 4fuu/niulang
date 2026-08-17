@@ -45,11 +45,9 @@ and Clash forwards to it as a `socks5` node. Templates are in
 Two things in that document decide whether a deployment works at all. The
 client must be started with `--local-address if:en0`, because Clash's TUN mode
 would otherwise capture queqiao's own outer connection and carry it through the
-tunnel queqiao is replacing. And a download cancelled part-way through can
-leave a flow hung, which after several such aborts stops the client passing
-traffic until it is restarted -- transfers that run to completion are fine --
-which is why this is something to switch to deliberately rather than leave
-carrying a day's traffic. See [`docs/STALL-20260817.md`](docs/STALL-20260817.md).
+tunnel queqiao is replacing. The cancelled-download flow leak described in the
+same guide is fixed; its diagnosis and regression proof remain in
+[`docs/STALL-20260817.md`](docs/STALL-20260817.md).
 
 ## Current status
 
@@ -114,21 +112,21 @@ magnitude behind at 0.63 and 0.39. Interactive latency is at parity with TUIC
 and Hysteria2 idle, and VLESS cannot carry a real-time video stream at all,
 losing a third to a half of it.
 
-**Two results go the other way and both are blocking.** Under its own bulk load
+**One result goes the other way and is still blocking.** Under its own bulk load
 queqiao's interactive tail degrades more than either competitor's -- SSH p99
 302 to 940 ms, voice loss 1.9% to 9.0% -- which is what flow classification and
 bulk isolation exist to prevent, and the emulated 208 ms result below does not
-reproduce there. And **the client stops moving data entirely**, with no
-self-recovery and only a client restart clearing it.
+reproduce there.
 
 That stall has since been diagnosed as two unrelated defects, neither of them
 the path's doing -- it reproduces on the emulator with no network involved.
 [`docs/STALL-20260817.md`](docs/STALL-20260817.md) has both. A seeded round
 trip becoming a permanent `min_rtt` is **fixed**, and it was depressing every
 throughput number above by about 30%: the same live windows now measure around
-200 Mbit/s. What remains is triggered by *aborted* transfers, which that
-campaign's fixed-duration windows performed on every trial; 30 consecutive
-transfers run to completion leave no residue at all.
+200 Mbit/s. The other defect was triggered by *aborted* transfers, which that
+campaign's fixed-duration windows performed on every trial. It is also fixed:
+local close is now a bounded lifecycle event, and the peer cancels response
+work immediately rather than waiting for data the application discarded.
 
 That path is also not the 45%-erasure channel this project targets, so the
 campaign tests the transport rather than the design's central claim.
