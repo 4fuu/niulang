@@ -5,8 +5,9 @@ to point Clash Verge or any mihomo-based client at it.
 
 Read [the limits](#what-you-are-signing-up-for) before deploying this anywhere
 you care about. The project has not met the release gates in
-[`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md), and one defect measured on 2026-08-16
-will interrupt a working tunnel.
+[`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md). The two tunnel-stall defects
+measured on 2026-08-16 are fixed and have deterministic regressions, but the
+broader live fallback, soak, packaging, and security gates remain open.
 
 ## The shape of a deployment
 
@@ -248,10 +249,11 @@ serving the alternatives:
   regression coverage are in
   [`STALL-20260817.md`](STALL-20260817.md).
 
-Also unfinished, and relevant to a daily driver: interactive latency degrades
-under queqiao's own bulk load more than the alternatives' does; TUN/VLESS
-ingress does not exist, so Clash's SOCKS hand-off is the only integration; and
-UDP-blocked, restart, and long-soak behaviour is unmeasured on a real path.
+Also unfinished, and relevant to a daily driver: interactive latency still
+moves under queqiao's own bulk load, although the corrected live A/B is now in
+the range of the measured QUIC alternatives; TUN/VLESS ingress does not exist,
+so Clash's SOCKS hand-off is the only integration; and UDP-blocked, restart,
+and long-soak behaviour is unmeasured on a real path.
 
 ## Troubleshooting
 
