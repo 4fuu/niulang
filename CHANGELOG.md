@@ -20,6 +20,8 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   guidance, and a checksummed real-path TCP/UDP soak harness.
 - Separate metrics and structured warnings for UDP-path unavailability and
   configured endpoints that fail over both QUIC/UDP and TLS/TCP.
+- A light project icon in the README and release archives, so extracted release
+  documentation retains its branding without a broken relative image.
 
 ### Changed
 

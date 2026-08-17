@@ -1,4 +1,8 @@
-# queqiao
+<p align="center">
+  <img src="assets/queqiao-icon.png" width="180" alt="Queqiao icon: a magpie crossing a resilient packet bridge">
+</p>
+
+<h1 align="center">queqiao</h1>
 
 `queqiao` is an experimental, open-source performance-enhancing proxy for
 high-latency or lossy long-haul links. It is designed for the specific case
