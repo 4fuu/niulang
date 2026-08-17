@@ -66,6 +66,7 @@ type Server struct {
 	cfg              ServerConfig
 	replay           *session.ReplayGuard
 	semaphore        chan struct{}
+	connections      chan struct{}
 	sessionsMu       sync.RWMutex
 	sessions         map[[16]byte]*serverFlow
 	maxObservedLanes atomic.Int64
@@ -210,6 +211,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg:              cfg,
 		replay:           session.NewReplayGuard(10*time.Minute, cfg.MaxSessions*4),
 		semaphore:        make(chan struct{}, cfg.MaxSessions),
+		connections:      make(chan struct{}, cfg.MaxSessions),
 		sessions:         make(map[[16]byte]*serverFlow),
 		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
 		metrics:          cfg.Metrics,
@@ -342,17 +344,35 @@ func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn)
 			}
 			return fmt.Errorf("accept QUIC lane: %w", acceptErr)
 		}
+		if !s.admitConnection() {
+			_ = conn.CloseWithError(0x100, "server connection limit reached")
+			s.cfg.Logger.Warn("remote QUIC connection limit reached")
+			continue
+		}
 		// Session admission is performed per QUIC stream in handleQUIC. Holding
-		// one global semaphore slot for the lifetime of a multiplexed
+		// one slot from that session semaphore for the lifetime of a multiplexed
 		// connection would incorrectly reduce MaxSessions and prevent the
 		// connection from carrying the configured number of independent flows.
+		// The separate connection semaphore above bounds idle/untrusted peers.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer s.releaseConnection()
 			s.handleQUIC(ctx, conn)
 		}()
 	}
 }
+
+func (s *Server) admitConnection() bool {
+	select {
+	case s.connections <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseConnection() { <-s.connections }
 
 func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	var wg sync.WaitGroup

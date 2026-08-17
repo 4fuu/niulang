@@ -140,6 +140,92 @@ func TestUDPAssociationRescuesToTCP(t *testing.T) {
 	}
 }
 
+// Blocking UDP is not a one-way mode switch. AUTO has to use TCP while the
+// endpoint is in cooldown, then probe QUIC again after the cooldown and clear
+// the penalty when that probe succeeds. This covers the blocked/recovered
+// sequence without relying on a host firewall or wall-clock minutes.
+func TestIntermittentUDPBlockingReturnsToQUIC(t *testing.T) {
+	tcpListener, quicPacketConn := listenTCPAndUDPOnOnePort(t)
+	defer tcpListener.Close()
+	tlsCert, roots := testCertificate(t)
+	secret := []byte("intermittent-udp-test-secret-32b")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server, err := NewServer(ServerConfig{
+		ListenAddr: tcpListener.Addr().String(), Certificate: tlsCert, Secret: secret,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true,
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: tcpListener.Addr().String(), ServerName: "queqiao.test",
+		Secret: secret, RootCAs: roots, Transport: TransportAuto,
+		FallbackDelay: 250 * time.Millisecond, UDPFailureThreshold: 1, UDPCooldown: 150 * time.Millisecond,
+		DialTimeout: 2 * time.Second, HandshakeTimeout: 2 * time.Second, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serviceCtx, serviceCancel := context.WithCancel(context.Background())
+	defer serviceCancel()
+	firstQUICCtx, stopFirstQUIC := context.WithCancel(serviceCtx)
+	tcpErr := make(chan error, 1)
+	firstQUICErr := make(chan error, 1)
+	go func() { tcpErr <- server.ServeListener(serviceCtx, tcpListener) }()
+	go func() { firstQUICErr <- server.ServePacketConn(firstQUICCtx, quicPacketConn) }()
+
+	open := func(want TransportKind) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(serviceCtx, 5*time.Second)
+		defer cancel()
+		association, err := client.openUDPAssociation(ctx, nil)
+		if err != nil {
+			t.Fatalf("open UDP association expecting %s: %v", want, err)
+		}
+		if association.lane.kind != want {
+			_ = association.lane.fc.Close()
+			t.Fatalf("association transport = %s, want %s", association.lane.kind, want)
+		}
+		_ = association.lane.fc.Close()
+	}
+
+	open(TransportQUIC)
+	stopFirstQUIC()
+	select {
+	case <-firstQUICErr:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first QUIC listener did not stop")
+	}
+	open(TransportTCP)
+
+	// Restore UDP on the same endpoint. The next post-cooldown association is
+	// the health probe; a successful QUIC authentication makes UDP healthy.
+	restartedPacketConn, err := net.ListenPacket("udp", tcpListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedCtx, stopRestarted := context.WithCancel(serviceCtx)
+	defer stopRestarted()
+	restartedErr := make(chan error, 1)
+	go func() { restartedErr <- server.ServePacketConn(restartedCtx, restartedPacketConn) }()
+	time.Sleep(250 * time.Millisecond)
+	open(TransportQUIC)
+	if got := client.Metrics().Snapshot().Fallbacks; got == 0 {
+		t.Fatal("blocked interval did not record a TCP fallback")
+	}
+
+	serviceCancel()
+	for name, errors := range map[string]<-chan error{"TCP": tcpErr, "restarted QUIC": restartedErr} {
+		select {
+		case <-errors:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s service did not stop", name)
+		}
+	}
+}
+
 func openTestUDPAssociation(t *testing.T, control net.Conn) *net.UDPAddr {
 	t.Helper()
 	_ = control.SetDeadline(time.Now().Add(5 * time.Second))

@@ -71,3 +71,24 @@ func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestQUICConnectionsHaveAnAdmissionBound(t *testing.T) {
+	certificate, _ := testCertificate(t)
+	server, err := NewServer(ServerConfig{
+		ListenAddr: "127.0.0.1:0", Certificate: certificate,
+		Secret: []byte("0123456789abcdef"), MaxSessions: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !server.admitConnection() || !server.admitConnection() {
+		t.Fatal("the configured connection capacity was not admitted")
+	}
+	if server.admitConnection() {
+		t.Fatal("an unauthenticated QUIC connection exceeded the admission bound")
+	}
+	server.releaseConnection()
+	if !server.admitConnection() {
+		t.Fatal("released QUIC connection capacity was not reusable")
+	}
+}

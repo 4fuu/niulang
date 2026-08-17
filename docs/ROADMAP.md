@@ -75,16 +75,43 @@ deletion record are in `DESIGN-MULTIPATH.md`.
 Gate: injected UDP loss/blocking causes new and existing sessions to recover
 within a measured bound, and a resumable association must preserve the
 remote relay's source address across the transition without exposing duplicate
-bytes. The mechanism exists and is tested; the measured bound on the live path
-is what remains.
+bytes.
 
-## Stage 5 — TUN and release hardening
+Status: met for the bounded fallback mechanism. A live UDP blackhole recovered
+the same SOCKS5 UDP association over a fresh authenticated TCP lane in 9.51 s,
+preserving its local endpoint and remote relay source address. Deterministic
+tests cover TCP stream replay without duplicate bytes, relay-source
+preservation, single-use resume tokens, and repeated rescue under the race
+detector. Intermittent blocking and long-soak coverage remain Stage 5 release
+hardening rather than an unimplemented fallback mechanism.
 
-- TUN integration and Clash Verge setup guide.
+## Stage 5 — integration and release hardening
+
+- ~~TUN integration through Clash Verge and setup guide.~~ Done: Clash/mihomo
+  owns transparent TUN capture and hands selected traffic to queqiao's local
+  SOCKS5 TCP/UDP ingress. Direct in-process TUN/VLESS ingress is deliberately
+  outside the current two-process architecture.
 - ~~Native QUIC DATAGRAM mode for UDP, retaining stream/TCP fallback.~~ Done:
   chosen by QUIC's own capability exchange rather than configured, with the
   control stream retained for lanes that have no datagrams. Measured emulated,
   not live.
-- Cross-platform packaging.
-- Fuzzing, race tests, resource limits, and security review.
-- Reproducible benchmark reports and rollback instructions.
+- ~~Cross-platform packaging.~~ Done: deterministic Linux, macOS, and Windows
+  archives for amd64 and arm64, embedded provenance, SHA-256 checksums, and a
+  tag-driven release workflow.
+- ~~Fuzzing and race automation.~~ Done: the weekly deep workflow discovers
+  every fuzz target and runs the complete suite under the race detector.
+- ~~Resource-limit and security review.~~ Done for the paired SOCKS deployment:
+  documented trust boundaries and residual risk, bounded unauthenticated QUIC
+  connections, sessions, frames, flow buffers, replay state, relay sockets,
+  lanes, and lifetimes, plus pinned vulnerability scanning and an enforced
+  patched Go toolchain. Independent audit and live soak remain release gates.
+- ~~Reproducible benchmark reports.~~ Done: versioned JSON records include the
+  exact invocation, seeded path, VCS state, toolchain, module graph, latency,
+  and contention results; matrix bundles add the source patch and checksums.
+- ~~Deterministic intermittent-block and fallback soak.~~ Done: UDP is removed,
+  associations fall back to TCP without changing their relay source, UDP is
+  restored on the same endpoint, and post-cooldown probes return to QUIC. The
+  normal/race soak runs weekly with checksummed provenance.
+- Real-path intermittent firewall/NAT and long-duration soak campaigns.
+- ~~Documented rollback instructions.~~ Done: checksum verification, atomic
+  binary installation, retained prior builds, and explicit service rollback.

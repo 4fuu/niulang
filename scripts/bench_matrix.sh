@@ -8,6 +8,8 @@
 # see docs/MEASUREMENTS-*.md for those.
 set -Euo pipefail
 
+invocation=("$0" "$@")
+
 output=${QUEQIAO_OUTPUT:-}
 trials=${QUEQIAO_TRIALS:-5}
 congestion=${QUEQIAO_CONGESTION:-bbr-tuic}
@@ -51,6 +53,35 @@ while (($#)); do
 done
 
 [[ "$trials" =~ ^[1-9][0-9]*$ ]] || { echo "trials must be positive" >&2; exit 2; }
+if [[ -n "$json_dir" ]]; then
+    [[ ! -e "$json_dir" ]] || { echo "JSON report directory already exists: $json_dir" >&2; exit 1; }
+    source_status=$(git status --porcelain=v1 --untracked-files=normal)
+    tree_state=clean
+    if [[ -n "$source_status" ]]; then tree_state=modified; fi
+    mkdir -p "$json_dir"
+    if [[ -z "$output" ]]; then output=$json_dir/results.tsv; fi
+    {
+        echo 'format=queqiao-benchmark-bundle-v1'
+        echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "commit=$(git rev-parse HEAD)"
+        echo "tree_state=$tree_state"
+        echo "go_version=$(go version)"
+        echo "goos=$(go env GOOS)"
+        echo "goarch=$(go env GOARCH)"
+        echo "trials=$trials"
+        echo "congestion=$congestion"
+        echo "timeout=$timeout_seconds"
+        echo "gate=$gate"
+        echo "tolerance=$tolerance"
+        printf 'command='
+        printf '%q ' "${invocation[@]}"
+        printf '\n'
+    } >"$json_dir/manifest.txt"
+    if [[ -n "$source_status" ]]; then printf '%s\n' "$source_status" >"$json_dir/source-status.txt"
+    else : >"$json_dir/source-status.txt"
+    fi
+    git diff --binary HEAD >"$json_dir/source.patch"
+fi
 if [[ -n "$output" ]]; then
     [[ ! -e "$output" ]] || { echo "output already exists: $output" >&2; exit 1; }
     exec >"$output"
@@ -105,6 +136,15 @@ bench --rtt 200 --rate 100 --loss 1 --bytes 1024 --flows 1 --latency
 echo
 echo "## block G: interactive latency during a bulk transfer"
 bench --rtt 200 --rate 100 --loss 1 --bytes $((50 * 1024 * 1024)) --flows 1 --interactive
+
+if [[ -n "$json_dir" ]]; then
+    (
+        cd "$json_dir"
+        report_files=(manifest.txt source-status.txt source.patch block-*.json)
+        if [[ -f results.tsv ]]; then report_files+=(results.tsv); fi
+        shasum -a 256 "${report_files[@]}" >SHA256SUMS
+    )
+fi
 
 if ((failures)); then
     echo >&2 "bench_matrix: $failures block(s) failed the gate"

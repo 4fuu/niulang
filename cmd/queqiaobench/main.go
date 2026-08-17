@@ -157,11 +157,23 @@ func run(args []string) error {
 		humanBytes(opts.bytes), opts.congestion)
 	fmt.Printf("stack\tflows\ttrial\tseconds\tmbits_per_sec\tcomplete\tnote\n")
 
+	report := Report{
+		SchemaVersion: 1,
+		Source:        describeSource(),
+		Arguments:     append([]string(nil), args...),
+		Path:          describePath(opts, pathCfg),
+	}
 	if opts.contend != "" {
-		return measureContention(opts, pathCfg, origin)
+		report.Contention, err = measureContention(opts, pathCfg, origin)
+		if err != nil {
+			return err
+		}
+		if opts.jsonOut != "" {
+			return writeReport(opts.jsonOut, report)
+		}
+		return nil
 	}
 
-	report := Report{Path: describePath(opts, pathCfg)}
 	for _, stack := range strings.Split(opts.stacks, ",") {
 		stack = strings.TrimSpace(stack)
 		if stack == "" {
@@ -186,7 +198,8 @@ func run(args []string) error {
 	printSummary(report.Summary)
 
 	if opts.latency {
-		if err := measureLatency(opts, pathCfg, origin); err != nil {
+		report.Latency, err = measureLatency(opts, pathCfg, origin)
+		if err != nil {
 			return err
 		}
 	}
@@ -376,8 +389,9 @@ func summarizeProbes(samples []requestStages) string {
 		quantile(connect, 0.95), quantile(first, 0.95))
 }
 
-func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) error {
+func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) ([]LatencyRecord, error) {
 	fmt.Printf("\nstack\ttrial\tconnect_ms\trequest_ms\tnote\n")
+	var records []LatencyRecord
 	for _, stack := range strings.Split(opts.stacks, ",") {
 		stack = strings.TrimSpace(stack)
 		if stack == "" {
@@ -390,6 +404,7 @@ func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) error 
 			harness, err := startStack(ctx, stack, opts, cfg)
 			if err != nil {
 				fmt.Printf("%s\t%d\t\t\tsetup: %v\n", stack, trial, err)
+				records = append(records, LatencyRecord{Stack: stack, Trial: trial, Note: "setup: " + err.Error()})
 				cancel()
 				continue
 			}
@@ -407,12 +422,18 @@ func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) error 
 			} else if warmErr != nil {
 				note = "warm: " + warmErr.Error()
 			}
-			fmt.Printf("%s\t%d\t%.1f\t%.1f\t%s\n", stack, trial, float64(cold.Microseconds())/1000, float64(warm.Microseconds())/1000, note)
+			coldMillis := round3(float64(cold.Microseconds()) / 1000)
+			warmMillis := round3(float64(warm.Microseconds()) / 1000)
+			fmt.Printf("%s\t%d\t%.1f\t%.1f\t%s\n", stack, trial, coldMillis, warmMillis, note)
+			records = append(records, LatencyRecord{
+				Stack: stack, Trial: trial, ColdMillis: coldMillis, WarmMillis: warmMillis,
+				Complete: note == "", Note: note,
+			})
 			harness.Close()
 			cancel()
 		}
 	}
-	return nil
+	return records, nil
 }
 
 // ---------------------------------------------------------------- harness ---
@@ -987,10 +1008,10 @@ func startTCPStack(ctx context.Context, kind extproxy.Kind, opts options, pathCf
 // answers which is faster alone. Both flows start together and are given the
 // same object, so the share is read directly off the goodput and the slower one
 // is still carrying traffic while the faster one finishes.
-func measureContention(opts options, pathCfg pathsim.Config, origin *origin) error {
+func measureContention(opts options, pathCfg pathsim.Config, origin *origin) ([]ContentionRecord, error) {
 	stacks := strings.Split(opts.contend, ",")
 	if len(stacks) != 2 {
-		return errors.New("--contend needs exactly two stacks")
+		return nil, errors.New("--contend needs exactly two stacks")
 	}
 	for i := range stacks {
 		stacks[i] = strings.TrimSpace(stacks[i])
@@ -998,6 +1019,7 @@ func measureContention(opts options, pathCfg pathsim.Config, origin *origin) err
 	fmt.Printf("# contention on one shared bottleneck: %s vs %s\n", stacks[0], stacks[1])
 	fmt.Printf("trial\t%s\t%s\tshare_%s\tratio\n", stacks[0], stacks[1], stacks[0])
 	var shares []float64
+	var records []ContentionRecord
 	for trial := 1; trial <= opts.trials; trial++ {
 		cfg := pathCfg
 		cfg.Seed = pathCfg.Seed + int64(trial)*1000
@@ -1005,23 +1027,25 @@ func measureContention(opts options, pathCfg pathsim.Config, origin *origin) err
 
 		ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 		harnesses := make([]*harness, len(stacks))
-		failed := false
+		failure := ""
 		for i, stack := range stacks {
 			h, err := startStackOn(ctx, stack, opts, cfg, shared)
 			if err != nil {
 				fmt.Printf("%d\tsetup %s: %v\n", trial, stack, err)
-				failed = true
+				failure = fmt.Sprintf("setup %s: %v", stack, err)
 				break
 			}
 			harnesses[i] = h
 			if err := warmUp(ctx, h.socks, origin); err != nil {
 				fmt.Printf("%d\twarmup %s: %v\n", trial, stack, err)
-				failed = true
+				failure = fmt.Sprintf("warmup %s: %v", stack, err)
 				break
 			}
 		}
-		if !failed {
+		record := ContentionRecord{Trial: trial, StackA: stacks[0], StackB: stacks[1], Note: failure}
+		if failure == "" {
 			rates := make([]float64, len(stacks))
+			transferErrors := make([]error, len(stacks))
 			var wg sync.WaitGroup
 			for i := range stacks {
 				wg.Add(1)
@@ -1032,6 +1056,10 @@ func measureContention(opts options, pathCfg pathsim.Config, origin *origin) err
 					elapsed := time.Since(started)
 					if err == nil && n == opts.bytes && elapsed > 0 {
 						rates[i] = float64(n) * 8 / elapsed.Seconds() / 1e6
+					} else if err != nil {
+						transferErrors[i] = err
+					} else {
+						transferErrors[i] = fmt.Errorf("received %d of %d bytes", n, opts.bytes)
 					}
 				}(i)
 			}
@@ -1044,9 +1072,17 @@ func measureContention(opts options, pathCfg pathsim.Config, origin *origin) err
 			if rates[1] > 0 {
 				ratio = rates[0] / rates[1]
 			}
-			shares = append(shares, share)
+			record.MbitsA, record.MbitsB = round3(rates[0]), round3(rates[1])
+			record.ShareA, record.RatioAToB = round3(share), round3(ratio)
+			if transferErrors[0] == nil && transferErrors[1] == nil {
+				record.Complete = true
+				shares = append(shares, share)
+			} else {
+				record.Note = fmt.Sprintf("%s: %v; %s: %v", stacks[0], transferErrors[0], stacks[1], transferErrors[1])
+			}
 			fmt.Printf("%d\t%.2f\t%.2f\t%.3f\t%.2f\n", trial, rates[0], rates[1], share, ratio)
 		}
+		records = append(records, record)
 		for _, h := range harnesses {
 			if h != nil {
 				h.Close()
@@ -1059,5 +1095,5 @@ func measureContention(opts options, pathCfg pathsim.Config, origin *origin) err
 		fmt.Printf("\nmedian share of the bottleneck taken by %s: %.3f (0.5 is an even split)\n",
 			stacks[0], shares[len(shares)/2])
 	}
-	return nil
+	return records, nil
 }

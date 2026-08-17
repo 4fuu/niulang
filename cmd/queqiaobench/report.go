@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -15,9 +18,36 @@ import (
 // shape is deliberately stable: results are only useful for tracking a
 // transport across commits if they can be diffed, and a text table cannot be.
 type Report struct {
-	Path    PathReport    `json:"path"`
-	Trials  []TrialRecord `json:"trials"`
-	Summary []CellSummary `json:"summary"`
+	SchemaVersion int                `json:"schema_version"`
+	Source        SourceReport       `json:"source"`
+	Arguments     []string           `json:"arguments"`
+	Path          PathReport         `json:"path"`
+	Trials        []TrialRecord      `json:"trials"`
+	Summary       []CellSummary      `json:"summary"`
+	Latency       []LatencyRecord    `json:"latency,omitempty"`
+	Contention    []ContentionRecord `json:"contention,omitempty"`
+}
+
+// SourceReport makes a result attributable to the exact tree and toolchain
+// that produced it. Arguments and the seeded PathReport supply the other half
+// of reproducibility: what that binary was asked to measure.
+type SourceReport struct {
+	Revision   string         `json:"revision,omitempty"`
+	CommitTime string         `json:"commit_time,omitempty"`
+	Modified   bool           `json:"modified"`
+	GoVersion  string         `json:"go_version"`
+	GOOS       string         `json:"goos"`
+	GOARCH     string         `json:"goarch"`
+	Module     string         `json:"module,omitempty"`
+	Version    string         `json:"version,omitempty"`
+	Modules    []ModuleReport `json:"modules,omitempty"`
+}
+
+type ModuleReport struct {
+	Path    string `json:"path"`
+	Version string `json:"version,omitempty"`
+	Sum     string `json:"sum,omitempty"`
+	Replace string `json:"replace,omitempty"`
 }
 
 type PathReport struct {
@@ -26,6 +56,7 @@ type PathReport struct {
 	UpstreamLossPercent float64 `json:"upstream_loss_percent,omitempty"`
 	LossBurstPackets    float64 `json:"loss_burst_packets,omitempty"`
 	JitterMillis        float64 `json:"jitter_ms,omitempty"`
+	WanderMillis        float64 `json:"delay_wander_ms,omitempty"`
 	RateMbits           float64 `json:"rate_mbits"`
 	PerFlowMbits        float64 `json:"per_flow_mbits,omitempty"`
 	QueueBytes          int     `json:"queue_bytes"`
@@ -45,6 +76,27 @@ type TrialRecord struct {
 	Complete    bool               `json:"complete"`
 	Note        string             `json:"note,omitempty"`
 	Interactive *InteractiveReport `json:"interactive,omitempty"`
+}
+
+type LatencyRecord struct {
+	Stack      string  `json:"stack"`
+	Trial      int     `json:"trial"`
+	ColdMillis float64 `json:"cold_ms"`
+	WarmMillis float64 `json:"warm_ms"`
+	Complete   bool    `json:"complete"`
+	Note       string  `json:"note,omitempty"`
+}
+
+type ContentionRecord struct {
+	Trial     int     `json:"trial"`
+	StackA    string  `json:"stack_a"`
+	StackB    string  `json:"stack_b"`
+	MbitsA    float64 `json:"mbits_a"`
+	MbitsB    float64 `json:"mbits_b"`
+	ShareA    float64 `json:"share_a"`
+	RatioAToB float64 `json:"ratio_a_to_b"`
+	Complete  bool    `json:"complete"`
+	Note      string  `json:"note,omitempty"`
 }
 
 // InteractiveReport records latency of small requests issued while the bulk
@@ -93,12 +145,57 @@ func describePath(opts options, cfg pathsim.Config) PathReport {
 	return PathReport{
 		RTTMillis: opts.rttMillis, LossPercent: opts.lossPercent,
 		UpstreamLossPercent: opts.lossUp, LossBurstPackets: opts.lossBurst,
-		JitterMillis: opts.jitterMillis,
-		RateMbits:    opts.rateMbits, PerFlowMbits: opts.perFlowMbits,
+		JitterMillis: opts.jitterMillis, WanderMillis: opts.wanderMillis,
+		RateMbits: opts.rateMbits, PerFlowMbits: opts.perFlowMbits,
 		QueueBytes: cfg.QueueBytes, Seed: opts.seed, ObjectBytes: opts.bytes,
 		Congestion: opts.congestion,
 		ChunkSize:  opts.chunkSize, QUICPool: opts.quicPool,
 	}
+}
+
+func describeSource() SourceReport {
+	report := SourceReport{GoVersion: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}
+	info, ok := debug.ReadBuildInfo()
+	if ok {
+		report.Module, report.Version = info.Main.Path, info.Main.Version
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				report.Revision = setting.Value
+			case "vcs.time":
+				report.CommitTime = setting.Value
+			case "vcs.modified":
+				report.Modified = setting.Value == "true"
+			}
+		}
+		for _, dependency := range info.Deps {
+			module := ModuleReport{Path: dependency.Path, Version: dependency.Version, Sum: dependency.Sum}
+			if dependency.Replace != nil {
+				module.Replace = dependency.Replace.Path
+				if dependency.Replace.Version != "" {
+					module.Replace += "@" + dependency.Replace.Version
+				}
+			}
+			report.Modules = append(report.Modules, module)
+		}
+	}
+	// `go run` currently omits VCS build settings even in a checkout, and it is
+	// how the documented harness is invoked. Ask that checkout directly rather
+	// than silently emitting an unattributed report. A standalone installed
+	// binary still uses the immutable settings embedded by `go build` above.
+	if report.Revision == "" {
+		if output, err := exec.Command("git", "rev-parse", "HEAD").Output(); err == nil {
+			report.Revision = strings.TrimSpace(string(output))
+		}
+		if output, err := exec.Command("git", "show", "-s", "--format=%cI", "HEAD").Output(); err == nil {
+			report.CommitTime = strings.TrimSpace(string(output))
+		}
+		if output, err := exec.Command("git", "status", "--porcelain=v1", "--untracked-files=normal").Output(); err == nil {
+			report.Modified = len(output) != 0
+		}
+	}
+	sort.Slice(report.Modules, func(i, j int) bool { return report.Modules[i].Path < report.Modules[j].Path })
+	return report
 }
 
 func summarize(trials []TrialRecord) []CellSummary {

@@ -7,7 +7,7 @@
     # edit the paths and <EGRESS-IP> below
     launchctl load ~/Library/LaunchAgents/me.01.queqiao.client.plist
 
-  Restart after the client stalls (see docs/DEPLOYING.md):
+  Restart after upgrading the binary or changing configuration:
     launchctl kickstart -k gui/$(id -u)/me.01.queqiao.client
 
   See docs/DEPLOYING.md for the egress side and the Clash profile.
@@ -62,10 +62,9 @@
   <key>RunAtLoad</key>
   <true/>
 
-  <!-- Restarts on crash. It does NOT rescue the stall documented in
-       docs/DEPLOYING.md: a stalled client keeps running and keeps accepting
-       connections, so launchd sees a healthy process. That one needs an
-       explicit kickstart. -->
+  <!-- Restarts on an unsuccessful process exit. The cancelled-transfer stall
+       that previously left a live but unusable process is fixed and covered
+       by deterministic regressions; use kickstart after upgrades or edits. -->
   <key>KeepAlive</key>
   <dict>
     <key>SuccessfulExit</key>
