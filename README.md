@@ -45,9 +45,11 @@ and Clash forwards to it as a `socks5` node. Templates are in
 Two things in that document decide whether a deployment works at all. The
 client must be started with `--local-address if:en0`, because Clash's TUN mode
 would otherwise capture queqiao's own outer connection and carry it through the
-tunnel queqiao is replacing. And the local client stops moving data after about
-2.35 GiB of sustained transfer and needs restarting, which is why this is
-something to switch to deliberately rather than leave carrying a day's traffic.
+tunnel queqiao is replacing. And a download cancelled part-way through can
+leave a flow hung, which after several such aborts stops the client passing
+traffic until it is restarted -- transfers that run to completion are fine --
+which is why this is something to switch to deliberately rather than leave
+carrying a day's traffic. See [`docs/STALL-20260817.md`](docs/STALL-20260817.md).
 
 ## Current status
 
@@ -116,14 +118,20 @@ losing a third to a half of it.
 queqiao's interactive tail degrades more than either competitor's -- SSH p99
 302 to 940 ms, voice loss 1.9% to 9.0% -- which is what flow classification and
 bulk isolation exist to prevent, and the emulated 208 ms result below does not
-reproduce there. And **the client stops moving data entirely after a median
-2.35 GiB of sustained transfer**, three reproductions out of three, with no
-self-recovery and only a client restart clearing it; the shipping `erasure`
-controller is marking 99.9% of its samples application-limited and its
-bandwidth estimate collapses to under 2% of the link. That path is not the
-45%-erasure channel this project targets, so the campaign tests the transport
-rather than the design's central claim -- but the stall is not the path's
-fault.
+reproduce there. And **the client stops moving data entirely**, with no
+self-recovery and only a client restart clearing it.
+
+That stall has since been diagnosed as two unrelated defects, neither of them
+the path's doing -- it reproduces on the emulator with no network involved.
+[`docs/STALL-20260817.md`](docs/STALL-20260817.md) has both. A seeded round
+trip becoming a permanent `min_rtt` is **fixed**, and it was depressing every
+throughput number above by about 30%: the same live windows now measure around
+200 Mbit/s. What remains is triggered by *aborted* transfers, which that
+campaign's fixed-duration windows performed on every trial; 30 consecutive
+transfers run to completion leave no residue at all.
+
+That path is also not the 45%-erasure channel this project targets, so the
+campaign tests the transport rather than the design's central claim.
 
 ### The live link is the number to believe
 
