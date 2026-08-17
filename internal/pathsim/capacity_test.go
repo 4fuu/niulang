@@ -70,8 +70,17 @@ func TestForwardingCapacity(t *testing.T) {
 // limiter's queue is sized from the product and is exactly where a fault would
 // hide.
 func TestRateLimiterDeliversItsConfiguredRate(t *testing.T) {
+	rates := []float64{50, 200, 400}
+	if raceDetectorEnabled {
+		// Race instrumentation capped the two-core hosted runner near 180
+		// Mbit/s, so asking it to generate 200 or 400 Mbit/s measures CPU
+		// instrumentation rather than the rate limiter. Keep one attainable
+		// cell at every RTT for race coverage; the normal deep job retains the
+		// complete calibration matrix.
+		rates = []float64{50}
+	}
 	for _, rtt := range []time.Duration{50, 200, 400} {
-		for _, mbits := range []float64{50, 200, 400} {
+		for _, mbits := range rates {
 			rtt, mbits := rtt*time.Millisecond, mbits
 			name := fmt.Sprintf("rtt%v_rate%.0f", rtt, mbits)
 			t.Run(name, func(t *testing.T) {
