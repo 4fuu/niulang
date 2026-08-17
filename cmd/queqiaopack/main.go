@@ -335,6 +335,7 @@ func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 		"README.md",
 		"SECURITY.md",
 		"THIRD_PARTY_NOTICES.md",
+		"assets/queqiao-icon.png",
 		"docs/ARCHITECTURE.md",
 		"docs/DEPLOYING.md",
 		"docs/CREDENTIAL-ROTATION.md",

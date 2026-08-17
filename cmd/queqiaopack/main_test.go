@@ -20,6 +20,7 @@ func TestArchivesAreDeterministicAndKeepModes(t *testing.T) {
 	timestamp := time.Date(2026, time.August, 17, 3, 4, 6, 0, time.UTC)
 	files := []archiveFile{
 		{name: "README.md", mode: 0o644, data: []byte("release notes\n")},
+		{name: "assets/queqiao-icon.png", mode: 0o644, data: []byte("icon\n")},
 		{name: "queqiaod", mode: 0o755, data: []byte("binary\n")},
 	}
 	for _, format := range []string{"tar.gz", "zip"} {
@@ -48,11 +49,30 @@ func TestArchivesAreDeterministicAndKeepModes(t *testing.T) {
 				t.Fatal("identical inputs produced different archives")
 			}
 			modes := archiveModes(t, first, format)
-			if modes["queqiaod"] != 0o755 || modes["README.md"] != 0o644 {
+			if modes["queqiaod"] != 0o755 || modes["README.md"] != 0o644 || modes["assets/queqiao-icon.png"] != 0o644 {
 				t.Fatalf("archive modes = %v", modes)
 			}
 		})
 	}
+}
+
+// README is included in every release archive and refers to the project icon
+// by a relative path. Packaging one without the other leaves the first thing a
+// user opens with a broken image.
+func TestDistributionIncludesREADMEIcon(t *testing.T) {
+	files, err := readDistributionFiles(filepath.Clean(filepath.Join("..", "..")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if file.name == "assets/queqiao-icon.png" {
+			if len(file.data) < 8 || !bytes.Equal(file.data[:8], []byte("\x89PNG\r\n\x1a\n")) {
+				t.Fatal("packaged project icon is not a PNG")
+			}
+			return
+		}
+	}
+	t.Fatal("distribution omits assets/queqiao-icon.png")
 }
 
 func TestTargetsAreParsedOnceInRequestedOrder(t *testing.T) {
@@ -157,7 +177,7 @@ func archiveModes(t *testing.T, path, format string) map[string]os.FileMode {
 		}
 		defer reader.Close()
 		for _, file := range reader.File {
-			modes[filepath.Base(file.Name)] = file.Mode().Perm()
+			modes[archiveEntryRelativeName(file.Name)] = file.Mode().Perm()
 		}
 		return modes
 	}
@@ -180,7 +200,15 @@ func archiveModes(t *testing.T, path, format string) map[string]os.FileMode {
 		if err != nil {
 			t.Fatal(err)
 		}
-		modes[filepath.Base(header.Name)] = os.FileMode(header.Mode).Perm()
+		modes[archiveEntryRelativeName(header.Name)] = os.FileMode(header.Mode).Perm()
 	}
 	return modes
+}
+
+func archiveEntryRelativeName(name string) string {
+	parts := strings.SplitN(filepath.ToSlash(name), "/", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return parts[0]
 }

@@ -14,6 +14,10 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ValidateReleaseTests(unittest.TestCase):
+    def test_readme_icon_is_required_in_every_archive(self):
+        self.assertIn("README.md", MODULE.REQUIRED_ARCHIVE_FILES)
+        self.assertIn("assets/queqiao-icon.png", MODULE.REQUIRED_ARCHIVE_FILES)
+
     def test_checksums_reject_paths_and_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory, "SHA256SUMS")

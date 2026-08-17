@@ -22,6 +22,7 @@ REQUIRED_ARCHIVE_FILES = {
     "SECURITY.md",
     "THIRD_PARTY_LICENSES.txt",
     "THIRD_PARTY_NOTICES.md",
+    "assets/queqiao-icon.png",
     "deploy/clash-queqiao.yaml",
     "deploy/me.01.queqiao.client.plist",
     "deploy/queqiaod.service",
