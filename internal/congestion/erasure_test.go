@@ -1,6 +1,7 @@
 package congestion
 
 import (
+	"math/rand"
 	"testing"
 	"time"
 
@@ -28,6 +29,175 @@ func TestUnmeasuredLossIsTreatedAsCongestion(t *testing.T) {
 	got := e.congestive(lossmodel.Snapshot{}, losses(10))
 	if len(got) != 10 {
 		t.Fatalf("forwarded %d of 10 losses before the channel was measured", len(got))
+	}
+}
+
+func TestExplicitCongestionOutcomesDoNotInferAmbiguousPacketGaps(t *testing.T) {
+	e := NewErasureSender(1200)
+	acked := []quiccongestion.AckedPacketInfo{
+		{PacketNumber: 1000, BytesAcked: 1200},
+		{PacketNumber: 0, BytesAcked: 1200},
+	}
+	lost := []quiccongestion.LostPacketInfo{{PacketNumber: 500, BytesLost: 1200}}
+	e.OnCongestionEventEx(0, monotime.Now(), acked, lost)
+	snapshot := e.estimator.Snapshot()
+	if snapshot.Decided != 3 {
+		t.Fatalf("three explicit outcomes decided %d packet fates", snapshot.Decided)
+	}
+	if snapshot.Loss < 0.32 || snapshot.Loss > 0.34 {
+		t.Fatalf("one explicit loss in three outcomes measured %.3f", snapshot.Loss)
+	}
+}
+
+// A first flight can overrun a clean path's queue before the controller has
+// found its bottleneck. Those losses arrive in runs: they are evidence of
+// congestion, not evidence that the channel erases packets independently of
+// rate. Trusting the partial-round minimum here creates positive feedback --
+// the controller compensates for its own queue drops and sends still faster.
+func TestClusteredStartupLossDoesNotBecomeAnErasureFloor(t *testing.T) {
+	e := NewErasureSender(1200)
+	var acked []quiccongestion.AckedPacketInfo
+	var lost []quiccongestion.LostPacketInfo
+	for pn := 0; pn < 1000; pn++ {
+		if pn%100 < 50 {
+			acked = append(acked, quiccongestion.AckedPacketInfo{
+				PacketNumber: quiccongestion.PacketNumber(pn), BytesAcked: 1200,
+			})
+		} else {
+			lost = append(lost, quiccongestion.LostPacketInfo{
+				PacketNumber: quiccongestion.PacketNumber(pn), BytesLost: 1200,
+			})
+		}
+	}
+	e.OnCongestionEventEx(0, monotime.Now(), acked, lost)
+
+	if snapshot := e.estimator.Snapshot(); snapshot.Floor < 0.4 || snapshot.Memoryless {
+		t.Fatalf("test pattern is not an untrusted clustered floor: %+v", snapshot)
+	}
+	if got := e.arrivalRate(); got < 0.97 {
+		t.Fatalf("clustered startup loss produced arrival rate %.3f, want no material compensation", got)
+	}
+}
+
+// Gating the floor on evidence must not turn the erasure controller into plain
+// BBR. Once enough independent losses have been observed, compensation should
+// still converge on the channel's actual arrival rate.
+func TestIndependentLossBecomesAnErasureFloor(t *testing.T) {
+	e := NewErasureSender(1200)
+	rng := rand.New(rand.NewSource(1))
+	var acked []quiccongestion.AckedPacketInfo
+	var lost []quiccongestion.LostPacketInfo
+	for pn := 0; pn < 5000; pn++ {
+		if rng.Float64() >= 0.42 {
+			acked = append(acked, quiccongestion.AckedPacketInfo{
+				PacketNumber: quiccongestion.PacketNumber(pn), BytesAcked: 1200,
+			})
+		} else {
+			lost = append(lost, quiccongestion.LostPacketInfo{
+				PacketNumber: quiccongestion.PacketNumber(pn), BytesLost: 1200,
+			})
+		}
+	}
+	e.OnCongestionEventEx(0, monotime.Now(), acked, lost)
+
+	if got := e.arrivalRate(); got < 0.54 || got > 0.62 {
+		t.Fatalf("independent 42%% loss produced arrival rate %.3f, want about 0.58", got)
+	}
+}
+
+// A real erasure channel needs a conservative bootstrap before the formal
+// memoryless verdict has enough transitions. Otherwise BBR backs away from the
+// channel first and a short transfer spends most of its life recovering.
+func TestIndependentLossBootstrapsBeforeTheMemorylessVerdict(t *testing.T) {
+	e := NewErasureSender(1200)
+	rng := rand.New(rand.NewSource(2))
+	var acked []quiccongestion.AckedPacketInfo
+	var lost []quiccongestion.LostPacketInfo
+	for pn := 0; pn < 180; pn++ {
+		if rng.Float64() >= 0.42 {
+			acked = append(acked, quiccongestion.AckedPacketInfo{
+				PacketNumber: quiccongestion.PacketNumber(pn), BytesAcked: 1200,
+			})
+		} else {
+			lost = append(lost, quiccongestion.LostPacketInfo{
+				PacketNumber: quiccongestion.PacketNumber(pn), BytesLost: 1200,
+			})
+		}
+	}
+	e.OnCongestionEventEx(0, monotime.Now(), acked, lost)
+
+	if snapshot := e.estimator.Snapshot(); snapshot.Memoryless {
+		t.Fatalf("test already reached the formal memoryless verdict: %+v", snapshot)
+	}
+	if got := e.arrivalRate(); got >= 0.9 || got < 0.5 {
+		t.Fatalf("early independent loss produced arrival rate %.3f, want conservative compensation", got)
+	}
+}
+
+func TestPartiallyClusteredLossDoesNotBootstrapCompensation(t *testing.T) {
+	snapshot := lossmodel.Snapshot{
+		Decided:          1000,
+		Samples:          1000,
+		Loss:             0.90,
+		LossAfterArrival: 0.70,
+		Floor:            0.88,
+	}
+	if floor, _ := conservativeErasureFloor(snapshot); floor != 0 {
+		t.Fatalf("partially clustered loss produced erasure floor %.3f", floor)
+	}
+}
+
+func TestExtremeLossRequiresTheFormalVerdict(t *testing.T) {
+	snapshot := lossmodel.Snapshot{
+		Decided:          1000,
+		Samples:          1000,
+		Loss:             0.85,
+		LossAfterArrival: 0.84,
+		BurstFactor:      1,
+		Floor:            0.85,
+	}
+	if floor, _ := conservativeErasureFloor(snapshot); floor != 0 {
+		t.Fatalf("unconfirmed extreme loss produced erasure floor %.3f", floor)
+	}
+	snapshot.Memoryless = true
+	if floor, _ := conservativeErasureFloor(snapshot); floor != 0 {
+		t.Fatalf("short formal verdict produced extreme floor %.3f", floor)
+	}
+	snapshot.Decided = 2 * lossmodel.DefaultRoundSamples
+	if floor, _ := conservativeErasureFloor(snapshot); floor != snapshot.Floor {
+		t.Fatalf("formal verdict produced floor %.3f, want %.3f", floor, snapshot.Floor)
+	}
+}
+
+func TestAnEstablishedEarlyFloorSurvivesLaterClustering(t *testing.T) {
+	e := NewErasureSender(1200)
+	early := lossmodel.Snapshot{
+		Decided:          120,
+		Samples:          120,
+		Loss:             0.42,
+		LossAfterArrival: 0.41,
+		Floor:            0.38,
+	}
+	if floor, _ := e.establishedErasureFloor(early); floor != early.LossAfterArrival {
+		t.Fatalf("early independent floor = %.3f, want %.3f", floor, early.LossAfterArrival)
+	}
+
+	clustered := lossmodel.Snapshot{
+		Decided:          1000,
+		Samples:          1000,
+		Loss:             0.75,
+		LossAfterArrival: 0.40,
+		Floor:            0.60,
+	}
+	if floor, _ := e.establishedErasureFloor(clustered); floor != early.LossAfterArrival {
+		t.Fatalf("later clustering moved established floor to %.3f, want %.3f", floor, early.LossAfterArrival)
+	}
+
+	completed := clustered
+	completed.Decided = lossmodel.DefaultRoundSamples
+	completed.Floor = 0.41
+	if floor, _ := e.establishedErasureFloor(completed); floor != completed.Floor {
+		t.Fatalf("completed-round floor = %.3f, want %.3f", floor, completed.Floor)
 	}
 }
 

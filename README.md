@@ -112,11 +112,14 @@ magnitude behind at 0.63 and 0.39. Interactive latency is at parity with TUIC
 and Hysteria2 idle, and VLESS cannot carry a real-time video stream at all,
 losing a third to a half of it.
 
-**One result goes the other way and is still blocking.** Under its own bulk load
-queqiao's interactive tail degrades more than either competitor's -- SSH p99
-302 to 940 ms, voice loss 1.9% to 9.0% -- which is what flow classification and
-bulk isolation exist to prevent, and the emulated 208 ms result below does not
-reproduce there.
+**The former blocking interactive result has been remeasured.** The original
+build degraded from 302 to 940 ms SSH p99 under its own bulk load. After fixing
+two controller measurements, a three-round alternating live A/B measured a
+559 ms median bulk p99 and a 655 ms worst run; voice bulk p99 was 318 ms with
+8.2% loss. Those figures are in the range of the original loaded TUIC and
+Hysteria2 results rather than worse than both. The controlled reproduction and
+the rejected proactive-isolation tradeoff are in
+[`docs/STALL-20260817.md`](docs/STALL-20260817.md).
 
 That stall has since been diagnosed as two unrelated defects, neither of them
 the path's doing -- it reproduces on the emulator with no network involved.
@@ -127,6 +130,11 @@ throughput number above by about 30%: the same live windows now measure around
 campaign's fixed-duration windows performed on every trial. It is also fixed:
 local close is now a bounded lifecycle event, and the peer cancels response
 work immediately rather than waiting for data the application discarded.
+The same follow-up found that overlapping QUIC packet-number spaces corrupted
+two measurements: the delivery sampler produced a false RTT, and the loss
+model inferred fictitious gaps. RTT now comes from QUIC's space-aware provider,
+while the floor consumes QUIC's explicit ACK/loss outcomes. On the clean
+200 ms emulator, minimum RTT now stays at 200.1 ms and the floor at zero.
 
 That path is also not the 45%-erasure channel this project targets, so the
 campaign tests the transport rather than the design's central claim.
@@ -199,11 +207,11 @@ loss (35% in 10-packet bursts) queqiao's behavior still differs from the
 reference's: it completes more transfers but is slower on the ones both
 finish. That case is now diagnosed -- lanes die of QUIC's idle timeout mid-burst
 and the rejoin is refused because the server's session went with its own
-connection -- and a flake in the TCP rescue path (about one run in eight, and
-every run under `-race`) is recorded in
-[`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md). TUN/VLESS ingress is
-not yet implemented. A mid-session UDP rescue now reclaims the same remote
-relay socket by token, so the destination keeps seeing one source address, but
+connection. The former TCP-rescue acknowledgement-loop failure is fixed, and
+the UDP association rescue test now passes 50 consecutive focused runs and 20
+under `-race`. TUN/VLESS ingress is not yet implemented. A mid-session UDP
+rescue now reclaims the same remote relay socket by token, so the destination
+keeps seeing one source address, but
 datagrams in flight when the lane died are still lost rather than replayed. The project has not passed all controlled-loss/resource release
 gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 

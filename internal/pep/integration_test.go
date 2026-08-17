@@ -320,6 +320,29 @@ func mustUDPAddr(t *testing.T, address string) *net.UDPAddr {
 	return addr
 }
 
+func listenTCPAndUDPOnOnePort(t *testing.T) (net.Listener, net.PacketConn) {
+	t.Helper()
+	var lastErr error
+	for range 20 {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		packetConn, err := net.ListenPacket("udp", listener.Addr().String())
+		if err == nil {
+			t.Cleanup(func() {
+				_ = packetConn.Close()
+				_ = listener.Close()
+			})
+			return listener, packetConn
+		}
+		lastErr = err
+		_ = listener.Close()
+	}
+	t.Fatalf("could not reserve one TCP/UDP test port: %v", lastErr)
+	return nil, nil
+}
+
 func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -641,14 +664,7 @@ func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
 	certificate, roots := testCertificate(t)
 	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	packetConn, err := net.ListenPacket("udp", serverListener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	serverListener, packetConn := listenTCPAndUDPOnOnePort(t)
 	server, err := NewServer(ServerConfig{
 		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true, ChunkSize: 4 * 1024, Logger: logger,

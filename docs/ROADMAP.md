@@ -29,18 +29,24 @@ latency, half-close, large uploads, and cancellation.
 Gate: bulk cannot cause the interactive RTT target to exceed the configured
 budget in controlled loss and bandwidth tests.
 
-Status: the gate now has a harness. `queqiaobench --interactive` issues small
-requests during a bulk transfer and reports their distribution, split into
-connect and first-byte time. At 200 ms and 1% loss with a 50 MiB transfer
+Status: met for the implemented isolation policy. `queqiaobench --interactive`
+issues small requests during a bulk transfer and reports their distribution,
+split into connect and first-byte time. At 200 ms and 1% loss with a 50 MiB transfer
 running, interactive requests measure a 206 ms median and 367 ms 95th
 percentile against the TUIC-shaped reference's 324 and 517; 206 ms is the idle
 round trip, so they no longer queue behind bulk at all. This is achieved by
 moving a classified bulk flow onto its own QUIC connection, and it holds only
-with `--quic-pool`, where a shared control connection exists. The gate has not
-been demonstrated on the live link, and the per-class queueing inside a lane is
-not what produced this result.
+with `--quic-pool`, where a shared control connection exists. The per-class
+queueing inside a lane is not what produced this result.
 
-## Stage 3 — adaptive multipath lanes
+The live link is now covered too. A three-round alternating old/fixed A/B moved
+the SSH bulk p99 penalty from 347 to 205 ms and the voice p99 penalty from 102
+to 31 ms; the fixed build's bulk p99 medians were 559 and 318 ms respectively.
+Proactively isolating every bulk flow was tested and rejected because it moved
+SSH p99 to 821 ms even while improving voice. The measured policy therefore
+isolates reactively when another flow arrives.
+
+## Stage 3 — adaptive multipath lanes (retired)
 
 - Multiple authenticated QUIC connections.
 - Cross-lane sequence/reassembly.
@@ -50,13 +56,11 @@ not what produced this result.
 Gate: single-flow bulk improvement is demonstrated on at least three separate
 time windows without unacceptable interactive tail latency.
 
-Status: not met, but for a narrower reason than before. Striping raises
-single-flow goodput only where the path polices per source address; on the
-emulated per-flow-policed path four lanes carry 50 MiB at 53.0 Mbit/s against
-one lane's 22.3 and a TUIC-shaped reference's 22.5, every transfer completing.
-On a shared bottleneck extra lanes measure 60.6 against one lane's 58.7, which
-is the correct outcome rather than a shortfall. What remains outstanding is the
-gate itself: no live campaign has demonstrated this across three windows.
+Status: superseded rather than unmet. Open-loop probing showed that the live
+bottleneck is per endpoint pair, not per 4-tuple, and the multi-lane data path
+was deleted. Separate connections remain only for bulk isolation and failure
+recovery; they do not aggregate one flow's capacity. The measurements and
+deletion record are in `DESIGN-MULTIPATH.md`.
 
 ## Stage 4 — automatic fallback and resumption
 

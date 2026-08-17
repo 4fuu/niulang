@@ -170,6 +170,12 @@ classification and bulk isolation exist to protect, and on this path they did
 not protect it. The emulated result in `README.md` (208 ms interactive median
 under a 50 MiB transfer) does not reproduce here.
 
+> **Follow-up, 2026-08-17:** this blocking result no longer reproduces after
+> correcting ambiguous minimum-RTT samples and an untrusted erasure floor. A
+> three-round alternating old/fixed A/B measured fixed SSH and voice bulk p99
+> medians of 559 and 318 ms, versus 617 and 396 before the correction. See
+> [`STALL-20260817.md`](STALL-20260817.md#follow-up-closure-the-remaining-four-observations).
+
 ## The client stalls permanently under sustained transfer
 
 > **Superseded by [`STALL-20260817.md`](STALL-20260817.md).** This was two
@@ -240,10 +246,15 @@ path's side.
 | fuzz `FuzzWindowDecoderNeverPanics` | pass | 30.6M execs in 90 s |
 | byte integrity, live path | pass | every completed transfer matched SHA-256 |
 
-The UDP/TCP rescue flake is real and is roughly at its documented rate — one
-failure in six repeats — but the other half of the note in
+The UDP/TCP rescue flake appeared at roughly its documented rate — one failure
+in six repeats — but the other half of the note in
 `DESIGN-MULTIPATH.md`, that it appears on *every* run under `-race`, did not
 hold: the full suite passed clean under `-race`.
+
+> **Follow-up, 2026-08-17:** the current tree passes 50 consecutive focused
+> runs and 20 consecutive runs under the race detector. Treat the one-in-six
+> result as historical rather than a current defect; the closure evidence is
+> in [`STALL-20260817.md`](STALL-20260817.md#the-udp-rescue-failure-is-stale).
 
 **The stall is fail-stop, not data-corrupting.** Every completed transfer on
 every stack matched the origin's SHA-256, queqiao included, under load and

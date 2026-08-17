@@ -186,6 +186,20 @@ func TestReorderingBeyondToleranceIsCountedNotRewritten(t *testing.T) {
 	}
 }
 
+func TestExplicitOutcomesDoNotInferPacketNumberGaps(t *testing.T) {
+	e := New(Config{RoundSamples: 100})
+	for i := 0; i < 80; i++ {
+		e.ObserveOutcome(i%4 != 0)
+	}
+	s := e.Snapshot()
+	if s.Decided != 80 {
+		t.Fatalf("explicit outcomes decided %d packets, want 80", s.Decided)
+	}
+	if math.Abs(s.Loss-0.25) > 0.001 {
+		t.Fatalf("explicit outcomes measured loss %.3f, want 0.25", s.Loss)
+	}
+}
+
 // The estimator infers loss under a reorder tolerance; Analyze knows every
 // packet's fate. On an in-order stream they must agree, or one of them is
 // measuring something other than the channel.
