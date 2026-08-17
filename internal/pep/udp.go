@@ -888,6 +888,14 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 			counters.down.Add(uint64(len(packet.payload)))
 			resetIdle()
 		case err := <-frameErr:
+			if assocCtx.Err() != nil {
+				// Service shutdown closes the transport and cancels this context
+				// concurrently. The reader's EOF can win the select even though
+				// the association did not fail; keep shutdown from incrementing
+				// the failure counter nondeterministically.
+				retain = true
+				goto done
+			}
 			endErr = err
 			failed = true
 			// Same: the lane's stream ended under an association that had
@@ -900,6 +908,13 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 			s.cfg.Logger.Debug("UDP relay frame reader ended", "error", err)
 			goto done
 		case err := <-packetErr:
+			if assocCtx.Err() != nil {
+				// The relay read deadline observes the same cancellation. As with
+				// the frame reader, selecting its error first is still a clean
+				// service shutdown.
+				retain = true
+				goto done
+			}
 			endErr = err
 			failed = true
 			s.cfg.Logger.Debug("UDP relay packet reader ended", "error", err)
