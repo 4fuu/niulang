@@ -1,6 +1,8 @@
 package congestion
 
 import (
+	"slices"
+
 	"math/bits"
 	"time"
 
@@ -306,21 +308,29 @@ func (e *tuicBandwidthEstimator) onAckEvent(now monotime.Time, bytes, round uint
 	e.onAck(now, bytes, round, appLimited)
 }
 
+// pruneStates drops the oldest quarter of the table when it fills.
+//
+// Packet numbers are assigned in send order, so the oldest states are the
+// lowest numbers and one partial selection finds the cut. The previous version
+// rescanned the whole map to find a single oldest entry and did that 2048
+// times -- about 17 million map iterations, on the send path, every time an
+// 8192-entry table filled. At 200 Mbit/s that is roughly every 0.4 seconds.
 func (e *tuicBandwidthEstimator) pruneStates() {
 	remove := tuicMaxSendStates / 4
-	for i := 0; i < remove; i++ {
-		var oldestPN quiccongestion.PacketNumber
-		var oldest monotime.Time
-		first := true
-		for pn, state := range e.packetStates {
-			if first || state.sentTime.Before(oldest) {
-				oldestPN, oldest, first = pn, state.sentTime, false
-			}
-		}
-		if first {
-			return
-		}
-		delete(e.packetStates, oldestPN)
+	if remove <= 0 || len(e.packetStates) == 0 {
+		return
+	}
+	if remove >= len(e.packetStates) {
+		clear(e.packetStates)
+		return
+	}
+	numbers := make([]quiccongestion.PacketNumber, 0, len(e.packetStates))
+	for pn := range e.packetStates {
+		numbers = append(numbers, pn)
+	}
+	slices.Sort(numbers)
+	for _, pn := range numbers[:remove] {
+		delete(e.packetStates, pn)
 	}
 }
 
