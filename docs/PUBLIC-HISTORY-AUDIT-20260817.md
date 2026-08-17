@@ -35,6 +35,12 @@ The baseline does not waive a candidate scan: every new commit changes the
 history under review. The final zero-finding JSON and workflow run must be
 attached to the release-candidate evidence.
 
+The non-publishing candidate workflow subsequently scanned exact commit
+`c24fa15937f081e699016c6b482752c4c621f2ba` with the same pinned scanner and
+positive canary. It reported zero findings across 252 scanned commits and
+approximately 2.36 MB of patch content. The workflow retained the JSON report
+as candidate evidence.
+
 ## Operational identifiers
 
 The scan detects credentials, not privacy-sensitive infrastructure metadata.
@@ -50,5 +56,6 @@ or deployment documentation rather than private identifiers.
 No history rewrite was performed: no credential or private key was found, and
 rewriting signed collaboration history solely to remove an already-routable
 measurement address would destroy provenance without revoking that address.
-Field credentials and TLS material are rotated independently before the final
-candidate is approved.
+Field credentials and TLS material were rotated independently; superseded
+secret and key rollback copies were removed after the replacement pair passed
+validation. The exact-candidate history scan found no deployed credential.

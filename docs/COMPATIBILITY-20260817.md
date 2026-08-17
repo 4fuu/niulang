@@ -2,9 +2,10 @@
 
 ## Scope
 
-This is the local isolated compatibility gate for the public-readiness tree.
-The release-candidate workflow and review pull request must record the final
-full commit SHA; do not infer an approved commit from this dated report alone.
+This is the local isolated compatibility gate for public-readiness commit
+`c24fa15937f081e699016c6b482752c4c621f2ba`. It is evidence, not publication
+approval; the release workflow must still bind the reviewed full commit SHA to
+the successful candidate run.
 
 The previous deployed binary was `roadmap-cea99ea` at commit `cea99ea`, built
 with Go 1.25.13 and speaking wire protocol 3. The candidate tree was built with
@@ -26,6 +27,13 @@ patch upgrade. Returning to the previous/previous deployed pair is independent
 of credentials and uses the documented atomic binary rollback. The final
 candidate must rerun this matrix or demonstrate equivalent native/integration
 evidence if any wire, handshake, frame, SOCKS, or UDP code changes afterward.
+
+The downloaded Darwin arm64 archive was also installed by copying it to a
+temporary pathname and atomically renaming it over an isolated prior-version
+installation. The retained `roadmap-cea99ea` binary was then installed through
+the documented rollback pathname and compared byte-for-byte with the original.
+Both binaries reported their expected version and the exercise passed without
+touching the live service.
 
 ## Incompatible-version refusal
 

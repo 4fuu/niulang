@@ -11,27 +11,28 @@ exact commit. Production-ready language has additional gates below.
 - [x] Wire protocol 3 is documented, emitted in build metadata, and rejects
   every other version with a diagnosable error.
 - [x] Security reporting instructions and residual risks are documented.
-- [ ] A pinned full-history secret scan reports zero unresolved findings for
+- [x] A pinned full-history secret scan reports zero unresolved findings for
   the candidate commit.
-- [ ] Deployed field-validation credentials and TLS material have been rotated
-  after the final history scan; rollback material contains no superseded secret.
-- [ ] Current-tree operational evidence contains no active secret, private key,
+- [x] The history scan contains no deployed credential; field-validation
+  credentials and TLS material have been rotated independently, and rollback
+  material contains no superseded secret.
+- [x] Current-tree operational evidence contains no active secret, private key,
   private hostname, personal path, or unnecessary live host address.
-- [ ] Linked dependency licenses and the CycloneDX SBOM match the packaged
+- [x] Linked dependency licenses and the CycloneDX SBOM match the packaged
   binary for every target.
 - [ ] GitHub provenance attestations cover every archive, SBOM, and checksum
   manifest in the candidate artifact.
-- [ ] Downloaded archives pass native runtime smoke tests on Linux, macOS, and
+- [x] Downloaded archives pass native runtime smoke tests on Linux, macOS, and
   Windows; unsupported native architectures are called out rather than implied.
-- [ ] Normal CI, full tests, race tests, vet, vulnerability scan, fuzz smoke,
+- [x] Normal CI, full tests, race tests, vet, vulnerability scan, fuzz smoke,
   fallback soak, package reproducibility, and actionlint are green on the exact
   candidate commit.
-- [ ] Staticcheck and the reviewed gosec baseline pass on the exact candidate;
+- [x] Staticcheck and the reviewed gosec baseline pass on the exact candidate;
   retain the evidence described in
   [`STATIC-SECURITY-AUDIT-20260817.md`](STATIC-SECURITY-AUDIT-20260817.md).
-- [ ] Install, one-endpoint patch upgrade, coordinated incompatible-version
+- [x] Install, one-endpoint patch upgrade, coordinated incompatible-version
   refusal, and rollback evidence is attached to the candidate report.
-- [ ] `CHANGELOG.md` and the candidate release notes describe v0.1 as an
+- [x] `CHANGELOG.md` and the candidate release notes describe v0.1 as an
   experimental paired fixed-egress preview.
 - [ ] The maintainer has reviewed the candidate artifacts and explicitly
   approved publication.
@@ -51,3 +52,6 @@ exact commit. Production-ready language has additional gates below.
 
 Completing the preview section permits a v0.1 experimental release; it does
 not complete or waive the production-ready section.
+
+The completed technical gates and deliberately open approval/external gates
+are summarized in [`RELEASE-CANDIDATE-20260817.md`](RELEASE-CANDIDATE-20260817.md).

@@ -7,9 +7,10 @@ Public-preview release engineering is implemented: a fail-closed wire contract,
 current-tree privacy review, pinned full-history secret scan, exact linked-module
 licenses and CycloneDX SBOMs, reviewed static-analysis baseline, credential
 rotation tooling, real-path soak harness, and a non-publishing candidate
-workflow with six native runtime jobs. The exact candidate still has to execute
-those gates and receive maintainer approval; this roadmap does not authorize a
-tag or release.
+workflow with six native runtime jobs. A complete non-publishing candidate run
+has passed those gates. Publication still requires provenance on the exact
+public candidate, an independently protected maintainer approval, and every
+remaining preview blocker; this roadmap does not authorize a tag or release.
 
 ## Stage 0 — repository and measurement foundation
 

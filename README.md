@@ -47,9 +47,9 @@ starter profile in [`deploy/`](deploy) is only for an installation with no
 existing profile. Do not copy YAML directly into Verge's managed profile
 directory; follow the UI and reload instructions in the guide.
 
-Tagged releases contain deterministic Linux, macOS, and Windows archives for
-amd64 and arm64, embedded build metadata, CycloneDX SBOMs, SHA-256 checksums,
-and GitHub provenance attestations.
+Published releases contain deterministic Linux, macOS, and Windows archives
+for amd64 and arm64, embedded build metadata, CycloneDX SBOMs, SHA-256
+checksums, and GitHub provenance attestations.
 [`docs/RELEASING.md`](docs/RELEASING.md) covers verification, atomic install,
 and rollback.
 
@@ -61,7 +61,9 @@ pre-release gates are in
 static-analysis record in
 [`docs/STATIC-SECURITY-AUDIT-20260817.md`](docs/STATIC-SECURITY-AUDIT-20260817.md).
 Upgrade and incompatible-wire evidence is in
-[`docs/COMPATIBILITY-20260817.md`](docs/COMPATIBILITY-20260817.md).
+[`docs/COMPATIBILITY-20260817.md`](docs/COMPATIBILITY-20260817.md), and the
+non-publishing review handoff is
+[`docs/RELEASE-CANDIDATE-20260817.md`](docs/RELEASE-CANDIDATE-20260817.md).
 
 Two things in that document decide whether a deployment works at all. The
 client must be started with `--local-address if:en0`, because Clash's TUN mode

@@ -15,7 +15,7 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 - Deterministic CycloneDX software bills of materials and complete linked
   dependency license notices in release archives.
 - Non-publishing release-candidate automation with native archive smoke tests
-  and GitHub build-provenance attestations.
+  and GitHub build-provenance attestations when the repository is public.
 - Private-root/server-leaf/session-secret generation, coordinated rotation
   guidance, and a checksummed real-path TCP/UDP soak harness.
 

@@ -1,6 +1,7 @@
 # Static security audit — 2026-08-17
 
-This is the maintainer's pre-release static-analysis record. It is not an
+This is the maintainer's pre-release static-analysis record for exact candidate
+commit `c24fa15937f081e699016c6b482752c4c621f2ba`. It is not an
 independent security assessment; the independent review described in
 [`SECURITY-ASSESSMENT.md`](SECURITY-ASSESSMENT.md) remains a release gate.
 
@@ -15,7 +16,7 @@ readiness branch:
 | `go vet ./...` | Go version in `go.mod` | Pass |
 | Staticcheck `-checks=all,-U1000 ./...` | v0.7.0 | Pass after removing dead code and correcting the reported defects |
 | gosec `./...` | v2.28.0 | 124 reviewed findings; no unreviewed rule/file bucket |
-| Gitleaks full-history scan plus positive canary | v8.24.3, checksum-pinned | Pass; zero findings in 251 commits |
+| Gitleaks full-history scan plus positive canary | v8.24.3, checksum-pinned | Pass; zero findings in 252 scanned commits |
 
 The gosec total comprises G115 (95), G204 (2), G301 (3), G302 (2), G304
 (10), G306 (4), and G404 (8). The scan prompted three direct hardening changes:
@@ -64,5 +65,6 @@ go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
 ```
 
 The nonzero gosec process status is expected when reviewed findings exist; the
-baseline checker supplies the gating status. A final history scan must be run
-on the exact reviewed commit.
+baseline checker supplies the gating status. The non-publishing candidate
+workflow ran these gates on the exact commit named above. Any later commit
+selected for release must receive its own complete candidate run.
