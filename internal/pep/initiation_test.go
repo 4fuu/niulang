@@ -1,7 +1,6 @@
 package pep
 
 import (
-	"context"
 	"io"
 	"net"
 	"testing"
@@ -149,12 +148,23 @@ func TestThePrewarmLeavesTheUplinkMeasured(t *testing.T) {
 	// Start from nothing known about this uplink.
 	before := pathmodel.Shared(key).Current().Floor
 
-	client, _ := clientServerAcross(t, &path)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	client.prewarmPath(ctx)
+	// ServeListener starts the production uplink watcher, which performs one
+	// automatic prewarm. Calling prewarmPath here as well used to race a
+	// second artificial prewarm against it. Besides not representing the
+	// deployed behavior, the two probes could each consume the other's pooled
+	// connection budget and made this assertion intermittently observe neither
+	// completed measurement.
+	_, _ = clientServerAcross(t, &path)
+	deadline := time.Now().Add(prewarmTimeout + 5*time.Second)
+	var after float64
+	for time.Now().Before(deadline) {
+		after = pathmodel.Shared(key).Current().Floor
+		if after > 0 {
+			break
+		}
+		time.Sleep(measurementPoll)
+	}
 
-	after := pathmodel.Shared(key).Current().Floor
 	t.Logf("erasure floor known for this uplink: %.3f before the prewarm, %.3f after", before, after)
 	if after <= 0 {
 		t.Fatal("the prewarm left the uplink unmeasured, so the first flow on it " +

@@ -20,6 +20,16 @@ The normal CI run
 [`32018764158`](https://github.com/bojieli/queqiao/actions/runs/32018764158)
 also passed on that commit.
 
+A documentation-only successor was exercised as `v0.1.0-rc.2` in run
+[`32021752209`](https://github.com/bojieli/queqiao/actions/runs/32021752209).
+Every gate except race passed. The race detector reported no data race; a
+prewarm integration test intermittently failed because the harness manually
+started a second prewarm while `ServeListener` was already running the real
+automatic prewarm. That non-production duplicate probe was removed. The test
+then passed 20 consecutive race-enabled repetitions and the complete `pep`
+race package locally. `rc.2` is not an eligible release candidate; the corrected
+commit requires its own complete candidate run.
+
 ## Artifact evidence
 
 - Version: `v0.1.0-rc.1`
