@@ -310,12 +310,12 @@ type Snapshot struct {
 // noise exceeds the effect it is looking for.
 const minMemorylessSamples = 200
 
-// Snapshot reports the current estimate.
 // Discontinuities reports how many arrivals named a sequence too far ahead to
 // be a gap in this numbering. It is zero on a working path, and a way to tell
 // a path that is losing packets from a peer that is not numbering them.
 func (e *Estimator) Discontinuities() uint64 { return e.discontinuities }
 
+// Snapshot reports the current estimate.
 func (e *Estimator) Snapshot() Snapshot {
 	s := Snapshot{Reordered: e.reordered, Decided: e.decided, Samples: e.samples}
 	if e.samples <= 0 {

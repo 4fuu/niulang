@@ -23,15 +23,6 @@ func randomFlowID() (uint64, error) {
 	return id, nil
 }
 
-func clientAuthenticate(fc *frameConn, secret []byte, sessionID [16]byte, now time.Time) error {
-	return clientAuthenticateKind(fc, secret, sessionID, 0, session.HelloNew, now)
-}
-
-func clientAuthenticateKind(fc *frameConn, secret []byte, sessionID [16]byte, laneID uint64, kind session.HelloKind, now time.Time) error {
-	_, err := clientAuthenticateKindResult(fc, secret, sessionID, laneID, kind, now)
-	return err
-}
-
 func clientAuthenticateKindResult(fc *frameConn, secret []byte, sessionID [16]byte, laneID uint64, kind session.HelloKind, now time.Time) (session.HelloOK, error) {
 	hello, err := session.NewHello(secret, sessionID, laneID, kind, now)
 	if err != nil {
@@ -58,10 +49,6 @@ func clientAuthenticateKindResult(fc *frameConn, secret []byte, sessionID [16]by
 		return session.HelloOK{}, fmt.Errorf("decode session acknowledgement: %w", err)
 	}
 	return ok, nil
-}
-
-func serverAuthenticateHello(fc *frameConn, secret []byte, guard *session.ReplayGuard, now time.Time) (session.Hello, error) {
-	return serverAuthenticateHelloWithCapabilities(fc, secret, guard, now, 0)
 }
 
 func serverAuthenticateHelloWithCapabilities(fc *frameConn, secret []byte, guard *session.ReplayGuard, now time.Time, capabilities uint64) (session.Hello, error) {
@@ -119,15 +106,4 @@ func serverAuthenticateHelloFrameCallback(fc *frameConn, secret []byte, guard *s
 		return session.Hello{}, fmt.Errorf("send session acknowledgement: %w", err)
 	}
 	return hello, nil
-}
-
-func serverAuthenticate(fc *frameConn, secret []byte, guard *session.ReplayGuard, now time.Time) ([16]byte, error) {
-	hello, err := serverAuthenticateHello(fc, secret, guard, now)
-	if err != nil {
-		return [16]byte{}, err
-	}
-	if hello.Kind != session.HelloNew || hello.LaneID != 0 {
-		return [16]byte{}, errors.New("expected initial session hello")
-	}
-	return hello.SessionID, nil
 }

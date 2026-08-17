@@ -1,72 +1,258 @@
 name: release
 
+# Publication is deliberately manual. The requested tag must already exist,
+# point at the reviewed commit, and have a successful non-publishing release
+# candidate run for the same commit.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       version:
         description: Existing v-prefixed tag to publish
         required: true
         type: string
+      approved_commit:
+        description: Full reviewed commit SHA named by the tag
+        required: true
+        type: string
+      candidate_run_id:
+        description: Successful release-candidate workflow run ID for that commit
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  authorize:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+      build_date: ${{ steps.release.outputs.build_date }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - name: Resolve immutable release inputs
+          ref: ${{ inputs.version }}
+      - name: Verify review and immutable inputs
         id: release
         env:
-          REQUESTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          APPROVED_COMMIT: ${{ inputs.approved_commit }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          REPOSITORY: ${{ github.repository }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
-          case "$REQUESTED_VERSION" in
-            v*) ;;
-            *) echo "version must name an existing v-prefixed tag" >&2; exit 1 ;;
+          set -euo pipefail
+          test "$VISIBILITY" = public || {
+            echo "GitHub attestations and public releases require the reviewed repository to be public" >&2
+            exit 1
+          }
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || {
+            echo "version must be a release-safe v-prefixed semantic version" >&2
+            exit 1
+          }
+          case "$APPROVED_COMMIT" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "approved_commit must be a full lowercase SHA" >&2; exit 1 ;;
           esac
-          git rev-parse --verify "refs/tags/${REQUESTED_VERSION}"
-          commit=$(git rev-list -n 1 "$REQUESTED_VERSION")
+          case "$CANDIDATE_RUN_ID" in *[!0-9]*|'') echo "candidate_run_id must be numeric" >&2; exit 1 ;; esac
+          git rev-parse --verify "refs/tags/$VERSION"
+          commit=$(git rev-list -n 1 "$VERSION")
+          test "$commit" = "$APPROVED_COMMIT" || {
+            echo "tag commit $commit differs from reviewed commit $APPROVED_COMMIT" >&2
+            exit 1
+          }
+          run=$(gh api "repos/$REPOSITORY/actions/runs/$CANDIDATE_RUN_ID")
+          test "$(jq -r .name <<<"$run")" = "release candidate"
+          test "$(jq -r .path <<<"$run")" = ".github/workflows/release-candidate.yml"
+          test "$(jq -r .event <<<"$run")" = workflow_dispatch
+          test "$(jq -r .conclusion <<<"$run")" = success
+          test "$(jq -r .head_sha <<<"$run")" = "$commit"
           build_date=$(git show -s --format=%cI "$commit")
           {
-            echo "version=$REQUESTED_VERSION"
+            echo "version=$VERSION"
             echo "commit=$commit"
             echo "build_date=$build_date"
           } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.authorize.outputs.version }}
+      COMMIT: ${{ needs.authorize.outputs.commit }}
+      BUILD_DATE: ${{ needs.authorize.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.authorize.outputs.version }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Confirm candidate source
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
       - name: Test
         run: go test -short -timeout 20m ./...
       - name: Scan reachable dependencies
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
-      - name: Build release archives
+      - name: Build final release artifacts
         run: |
           go run ./cmd/queqiaopack \
-            --version '${{ steps.release.outputs.version }}' \
-            --commit '${{ steps.release.outputs.commit }}' \
-            --build-date '${{ steps.release.outputs.build_date }}' \
+            --version "$VERSION" \
+            --commit "$COMMIT" \
+            --build-date "$BUILD_DATE" \
             --output dist
-          cd dist
-          sha256sum -c SHA256SUMS
-      - uses: actions/upload-artifact@v7
+          ./scripts/validate_release.py dist
+          (cd dist && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: queqiaod-${{ steps.release.outputs.version }}
+          name: queqiaod-${{ needs.authorize.outputs.version }}
           path: dist/
           if-no-files-found: error
-      - name: Publish GitHub Release
+          retention-days: 30
+
+  native-smoke:
+    needs: [authorize, build]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: linux, arch: amd64, kind: unix}
+          - {runner: ubuntu-24.04-arm, os: linux, arch: arm64, kind: unix}
+          - {runner: macos-15-intel, os: darwin, arch: amd64, kind: unix}
+          - {runner: macos-15, os: darwin, arch: arm64, kind: unix}
+          - {runner: windows-2025, os: windows, arch: amd64, kind: windows}
+          - {runner: windows-11-arm, os: windows, arch: arm64, kind: windows}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: queqiaod-${{ needs.authorize.outputs.version }}
+          path: dist
+      - name: Run Unix archive
+        if: matrix.kind == 'unix'
+        shell: bash
+        env:
+          VERSION: ${{ needs.authorize.outputs.version }}
+          COMMIT: ${{ needs.authorize.outputs.commit }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          archive="dist/queqiaod_${VERSION}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+          mkdir smoke
+          tar -xzf "$archive" -C smoke
+          binary="smoke/queqiaod_${VERSION}_${TARGET_OS}_${TARGET_ARCH}/queqiaod"
+          output=$($binary --version)
+          echo "$output"
+          grep -F "commit=$COMMIT" <<<"$output"
+          grep -F "wire=3" <<<"$output"
+      - name: Run Windows archive
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.authorize.outputs.version }}
+          COMMIT: ${{ needs.authorize.outputs.commit }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = "dist/queqiaod_$env:VERSION`_windows_$env:TARGET_ARCH.zip"
+          Expand-Archive -Path $archive -DestinationPath smoke
+          $binary = "smoke/queqiaod_$env:VERSION`_windows_$env:TARGET_ARCH/queqiaod.exe"
+          $output = & $binary --version
+          Write-Output $output
+          if ($output -notmatch [regex]::Escape("commit=$env:COMMIT")) { throw 'commit metadata mismatch' }
+          if ($output -notmatch 'wire=3') { throw 'wire metadata mismatch' }
+
+  provenance:
+    needs: [authorize, build, native-smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: queqiaod-${{ needs.authorize.outputs.version }}
+          path: dist
+      - name: Attest every release file
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*
+
+  sbom-attestation:
+    needs: [authorize, build, native-smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: linux, arch: amd64, extension: tar.gz, binary: queqiaod}
+          - {os: linux, arch: arm64, extension: tar.gz, binary: queqiaod}
+          - {os: darwin, arch: amd64, extension: tar.gz, binary: queqiaod}
+          - {os: darwin, arch: arm64, extension: tar.gz, binary: queqiaod}
+          - {os: windows, arch: amd64, extension: zip, binary: queqiaod.exe}
+          - {os: windows, arch: arm64, extension: zip, binary: queqiaod.exe}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: queqiaod-${{ needs.authorize.outputs.version }}
+          path: dist
+      - name: Extract attestation subject
+        id: subject
+        env:
+          VERSION: ${{ needs.authorize.outputs.version }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          EXTENSION: ${{ matrix.extension }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          set -euo pipefail
+          base="queqiaod_${VERSION}_${TARGET_OS}_${TARGET_ARCH}"
+          mkdir subject
+          if test "$EXTENSION" = zip; then
+            unzip -q "dist/${base}.zip" -d subject
+          else
+            tar -xzf "dist/${base}.tar.gz" -C subject
+          fi
+          echo "binary=subject/${base}/${BINARY}" >> "$GITHUB_OUTPUT"
+          echo "sbom=dist/${base}.cdx.json" >> "$GITHUB_OUTPUT"
+      - name: Attest binary SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ steps.subject.outputs.binary }}
+          sbom-path: ${{ steps.subject.outputs.sbom }}
+
+  publish:
+    needs: [authorize, build, native-smoke, provenance, sbom-attestation]
+    runs-on: ubuntu-24.04
+    environment: public-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: queqiaod-${{ needs.authorize.outputs.version }}
+          path: dist
+      - name: Publish reviewed GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.release.outputs.version }}
-        run: gh release create "$VERSION" dist/* --verify-tag --generate-notes
+          VERSION: ${{ needs.authorize.outputs.version }}
+        run: gh release create "$VERSION" dist/* --repo '${{ github.repository }}' --verify-tag --generate-notes

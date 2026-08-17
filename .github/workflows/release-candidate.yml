@@ -1,0 +1,260 @@
+name: release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Non-publishing v0.1.0 release-candidate version
+        required: true
+        default: v0.1.0-rc.1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - run: go test -timeout 50m ./...
+      - run: go vet ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -checks=all,-U1000 ./...
+      - name: Gosec reviewed baseline
+        run: |
+          set +e
+          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
+            -fmt json -out gosec.json ./...
+          scanner_status=$?
+          set -e
+          test "$scanner_status" -eq 0 || test "$scanner_status" -eq 1
+          ./scripts/check_gosec.py gosec.json .
+      - name: Formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Workflow syntax
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Python helper tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Credential generator smoke test
+        run: ./scripts/test_generate_credentials.sh
+
+  race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - run: go test -race -timeout 110m ./...
+
+  vulnerability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Smoke every discovered fuzz target
+        run: |
+          set -euo pipefail
+          found=0
+          for pkg in $(go list ./...); do
+            for target in $(go test -list 'Fuzz.*' "$pkg" | grep '^Fuzz' || true); do
+              go test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime 60s
+              found=$((found + 1))
+            done
+          done
+          echo "smoked $found fuzz targets"
+          test "$found" -gt 0
+
+  fallback-soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - run: ./scripts/fallback_soak.sh --runs 20 --race-runs 5 --output-dir fallback-soak
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: candidate-fallback-soak-${{ github.run_id }}
+          path: fallback-soak/
+          if-no-files-found: warn
+          retention-days: 30
+
+  history-secret-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Scan all reachable history with a verified scanner
+        env:
+          QUEQIAO_SECRET_SCAN_REPORT: history-secret-scan.json
+        run: ./scripts/scan_history_secrets.sh .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: candidate-history-scan-${{ github.run_id }}
+          path: history-secret-scan.json
+          if-no-files-found: error
+          retention-days: 30
+
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Build the candidate twice
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v0\.1\.0-rc\.([0-9]|[1-9][0-9]*)$ ]] || {
+            echo "candidate version must be v0.1.0-rc.N with a numeric N" >&2
+            exit 1
+          }
+          build_date=$(git show -s --format=%cI "$GITHUB_SHA")
+          go run ./cmd/queqiaopack --version "$VERSION" --commit "$GITHUB_SHA" \
+            --build-date "$build_date" --output dist-first
+          go clean -cache
+          go run ./cmd/queqiaopack --version "$VERSION" --commit "$GITHUB_SHA" \
+            --build-date "$build_date" --output dist-second
+          diff -r dist-first dist-second
+          mv dist-first dist
+          ./scripts/validate_release.py dist
+          (cd dist && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: queqiaod-candidate-${{ github.run_id }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  native-smoke:
+    needs: package
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: linux, arch: amd64, kind: unix}
+          - {runner: ubuntu-24.04-arm, os: linux, arch: arm64, kind: unix}
+          - {runner: macos-15-intel, os: darwin, arch: amd64, kind: unix}
+          - {runner: macos-15, os: darwin, arch: arm64, kind: unix}
+          - {runner: windows-2025, os: windows, arch: amd64, kind: windows}
+          - {runner: windows-11-arm, os: windows, arch: arm64, kind: windows}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: queqiaod-candidate-${{ github.run_id }}
+          path: dist
+      - name: Run Unix archive
+        if: matrix.kind == 'unix'
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          archive="dist/queqiaod_${VERSION}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+          mkdir smoke
+          tar -xzf "$archive" -C smoke
+          binary="smoke/queqiaod_${VERSION}_${TARGET_OS}_${TARGET_ARCH}/queqiaod"
+          output=$($binary --version)
+          echo "$output"
+          grep -F "commit=${GITHUB_SHA}" <<<"$output"
+          grep -F "wire=3" <<<"$output"
+      - name: Run Windows archive
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = "dist/queqiaod_$env:VERSION`_windows_$env:TARGET_ARCH.zip"
+          Expand-Archive -Path $archive -DestinationPath smoke
+          $binary = "smoke/queqiaod_$env:VERSION`_windows_$env:TARGET_ARCH/queqiaod.exe"
+          $output = & $binary --version
+          Write-Output $output
+          if ($output -notmatch [regex]::Escape("commit=$env:GITHUB_SHA")) { throw 'commit metadata mismatch' }
+          if ($output -notmatch 'wire=3') { throw 'wire metadata mismatch' }
+
+  provenance:
+    if: github.event.repository.visibility == 'public'
+    needs: [full, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: queqiaod-candidate-${{ github.run_id }}
+          path: dist
+      - name: Attest every candidate file
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*
+
+  candidate-summary:
+    if: always()
+    needs: [full, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke, provenance]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every available gate
+        env:
+          FULL: ${{ needs.full.result }}
+          RACE: ${{ needs.race.result }}
+          VULN: ${{ needs.vulnerability.result }}
+          FUZZ: ${{ needs.fuzz.result }}
+          SOAK: ${{ needs.fallback-soak.result }}
+          HISTORY: ${{ needs.history-secret-scan.result }}
+          PACKAGE: ${{ needs.package.result }}
+          NATIVE: ${{ needs.native-smoke.result }}
+          PROVENANCE: ${{ needs.provenance.result }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for result in "$FULL" "$RACE" "$VULN" "$FUZZ" "$SOAK" "$HISTORY" "$PACKAGE" "$NATIVE"; do
+            test "$result" = success
+          done
+          if test "$VISIBILITY" = public; then
+            test "$PROVENANCE" = success
+          else
+            test "$PROVENANCE" = skipped
+            echo "Provenance is intentionally deferred: GitHub Free attestations require a public repository." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Candidate $CANDIDATE_VERSION at $GITHUB_SHA passed every available non-publishing gate." >> "$GITHUB_STEP_SUMMARY"

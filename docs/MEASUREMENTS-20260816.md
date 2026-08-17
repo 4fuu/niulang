@@ -48,14 +48,14 @@ tunnel it is meant to replace*. That was true on the first attempt and it was
 caught by asking the server what source address it saw:
 
 ```
-unbound socket        → server observed 23.135.236.244   (the existing tunnel's exit)
-bound to 192.168.3.66 → server observed 120.244.189.31   (the real China Mobile address)
+unbound socket             → server observed <TUNNEL-EGRESS-IP> (the existing tunnel's exit)
+bound to <CLIENT-LAN-IP>   → server observed <CLIENT-PUBLIC-IP> (the real mobile uplink)
 ```
 
 Every client here is therefore source-bound — `--local-address` for queqiaod,
 `inet4_bind_address` for the sing-box outbounds. A capture on the server's
 physical NIC during a simultaneous transfer through all four sing-box stacks
-recorded 516 inbound packets, every one from `120.244.189.31`.
+recorded 516 inbound packets, every one from `<CLIENT-PUBLIC-IP>`.
 
 This is the third time a variant of this mistake has cost a campaign; see the
 list in [`BENCHMARKING.md`](BENCHMARKING.md).

@@ -10,7 +10,7 @@ The earlier campaigns in [`MEASUREMENTS-20260810.md`](MEASUREMENTS-20260810.md)
 and [`PROFILE-20260811.md`](PROFILE-20260811.md) compared transports by running
 one after the other on the live China–US link. That link moves between roughly
 0% and 50% packet loss within minutes: during this session, three consecutive
-20-packet ICMP samples to `23.135.236.244` reported 33%, 40%, and 33% loss. A
+20-packet ICMP samples to `<EGRESS-IP>` reported 33%, 40%, and 33% loss. A
 sequential A/B on such a path measures the path window, not the transport, and
 the prior documents show the consequence directly — the same controller is
 reported at 60 KiB/s in one block and several Mbit/s in another.

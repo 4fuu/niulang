@@ -64,7 +64,7 @@ go test -race ./internal/pep -run "^(${tests})$" -count "$race_runs" -timeout 45
     2>&1 | tee "$output_dir/race.log" || status=$?
 
 (
-    cd "$output_dir"
+    cd "$output_dir" || exit
     shasum -a 256 manifest.txt source-status.txt source.patch normal.log race.log >SHA256SUMS
 )
 exit "$status"

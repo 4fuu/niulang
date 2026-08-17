@@ -3,8 +3,10 @@ package main
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -83,6 +85,65 @@ func TestChecksumsAreSorted(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	if !strings.HasSuffix(lines[0], "  a.zip") || !strings.HasSuffix(lines[1], "  z.zip") {
 		t.Fatalf("checksums are not sorted: %q", data)
+	}
+}
+
+func TestCycloneDXIsDeterministicAndNamesTheLinkedBinary(t *testing.T) {
+	cfg := config{
+		version: "v0.1.0-rc.1", commit: "0123456789abcdef",
+		buildDate: time.Date(2026, time.August, 17, 3, 4, 6, 0, time.UTC),
+	}
+	target := target{goos: "linux", goarch: "amd64"}
+	binarySum := sha256.Sum256([]byte("binary"))
+	modules := []linkedModule{{
+		Path: "example.com/dependency", Version: "v1.2.3", Sum: "h1:example",
+		LicenseID: "MIT",
+	}}
+	first, err := renderCycloneDX(cfg, target, binarySum, modules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := renderCycloneDX(cfg, target, binarySum, modules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("identical release inputs produced different SBOMs")
+	}
+	var bom cdxBOM
+	if err := json.Unmarshal(first, &bom); err != nil {
+		t.Fatal(err)
+	}
+	if bom.BOMFormat != "CycloneDX" || bom.SpecVersion != "1.5" || bom.Metadata.Component.Version != cfg.version {
+		t.Fatalf("unexpected SBOM identity: %+v", bom)
+	}
+	if !reflect.DeepEqual(bom.Metadata.Component.Licenses, []cdxLicenseChoice{{License: cdxLicense{ID: "MIT"}}}) {
+		t.Fatalf("root SBOM license = %+v, want MIT", bom.Metadata.Component.Licenses)
+	}
+	if got := bom.Metadata.Component.Properties[2].Value; got != "3" {
+		t.Fatalf("wire protocol property = %q, want 3", got)
+	}
+	if len(bom.Components) != 1 || bom.Components[0].Name != modules[0].Path || len(bom.Dependencies) != 1 {
+		t.Fatalf("linked dependency was not represented: %+v", bom)
+	}
+}
+
+func TestThirdPartyLicenseBundleUsesExactModuleText(t *testing.T) {
+	dir := t.TempDir()
+	licenseText := []byte("permission granted\n")
+	if err := os.WriteFile(filepath.Join(dir, "LICENSE"), licenseText, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data, err := renderThirdPartyLicenses([]linkedModule{{
+		Path: "example.com/dependency", Version: "v1.2.3", LicenseID: "MIT", Dir: dir,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range [][]byte{[]byte("example.com/dependency v1.2.3"), []byte("SPDX license: MIT"), licenseText} {
+		if !bytes.Contains(data, want) {
+			t.Fatalf("license bundle does not contain %q:\n%s", want, data)
+		}
 	}
 }
 

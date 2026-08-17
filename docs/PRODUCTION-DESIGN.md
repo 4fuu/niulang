@@ -2,7 +2,7 @@
 
 This document records the design I would take to production after the
 development measurements. It is deliberately conservative: the optimizer
-must improve the China-to-`icourses-dev` leg without changing the egress
+must improve the China-to-`<EGRESS-HOST>` leg without changing the egress
 location, terminating application TLS, or silently taking over the existing
 Clash profile.
 
@@ -34,7 +34,7 @@ local SOCKS5 ingress ------- classifier -- scheduler -- session controller
                                                      |
                                          US session/reassembly agent
                                                      |
-                                  destination dialer at icourses-dev
+                                  destination dialer at <EGRESS-HOST>
 ```
 
 The application connection remains end-to-end encrypted. The PEP sees the
@@ -232,9 +232,12 @@ association returned to QUIC. The exact procedure and metrics are recorded in
 ## Clash Verge integration
 
 The safe first integration is a local SOCKS5 node, for example
-`127.0.0.1:12080`. An inactive Clash profile can send its final `MATCH` rule
-to that node. The live profile remains untouched and can be restored by
-removing that one node/rule.
+`127.0.0.1:12080`, added to the existing live profile's manual selector while
+the previously selected node remains selected. This preserves the profile's
+DNS, TUN, providers, and routing rules and avoids maintaining a duplicate
+profile. Activation is one explicit selection under **Proxies**; rollback is
+selecting the previous node and removing the Queqiao node and group entry. The
+operator procedure is in [`DEPLOYING.md`](DEPLOYING.md#enabling-it-in-clash-verge).
 
 The current client accepts TCP CONNECT and bounded UDP ASSOCIATE. Clash/mihomo
 owns transparent TUN capture and hands selected TCP and UDP traffic to this
@@ -274,7 +277,8 @@ address as the PEP socket endpoint.
   application plaintext.
 - A systemd unit isolated from Xray, sing-box, Cloudflare, Nginx, and the
   existing Clash route. Deployment must be atomic and rollback must be a
-  single service stop plus removal of the inactive Clash node.
+  switch to the previous selected node, followed by a service stop and removal
+  of the Queqiao node and group entry.
 
 The limits above have to cover the work a peer can ask for and not only the
 bytes it can send, which is the distinction fuzzing the coded path's decoders

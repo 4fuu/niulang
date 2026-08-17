@@ -1,4 +1,13 @@
-# queqiao — Clash Verge / mihomo profile template
+# queqiao — starter Clash Verge / mihomo profile
+#
+# Use this complete profile only when Clash Verge has no existing usable
+# profile. If a profile already exists, do not add a second one: use the
+# recommended existing-profile procedure in docs/DEPLOYING.md, add the node to
+# top-level proxies, and add its name to the selector your rules already use.
+#
+# Import a new local profile through the Clash Verge UI. Do not copy this file
+# directly into the application's profiles directory; files placed there are
+# not automatically registered and do not appear on the Profiles page.
 #
 # queqiao is not a protocol Clash speaks. The client (`queqiaod --mode local`)
 # runs as a separate process beside Clash and exposes a plain SOCKS5 ingress on

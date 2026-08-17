@@ -39,13 +39,29 @@ and timing, not HTTPS decryption or MITM.
 host, local client, and how to point Clash Verge or any mihomo-based client at
 it. The short version is that queqiao is not a protocol Clash speaks --
 `queqiaod --mode local` runs beside Clash and exposes a plain SOCKS5 ingress,
-and Clash forwards to it as a `socks5` node. Templates are in
-[`deploy/`](deploy).
+and Clash forwards to it as a `socks5` node. The recommended Clash Verge path
+is to edit the profile already in use, add `queqiao` to its top-level
+`proxies:`, and add the same name to the `type: select` group reached by its
+rules. Queqiao then appears under **Proxies**, not as another profile. The
+starter profile in [`deploy/`](deploy) is only for an installation with no
+existing profile. Do not copy YAML directly into Verge's managed profile
+directory; follow the UI and reload instructions in the guide.
 
 Tagged releases contain deterministic Linux, macOS, and Windows archives for
-amd64 and arm64, embedded build provenance, and SHA-256 checksums.
+amd64 and arm64, embedded build metadata, CycloneDX SBOMs, SHA-256 checksums,
+and GitHub provenance attestations.
 [`docs/RELEASING.md`](docs/RELEASING.md) covers verification, atomic install,
 and rollback.
+
+No public release has been made yet. The supported preview scope and its
+limitations are in [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md),
+security reports follow [`SECURITY.md`](SECURITY.md), and the authoritative
+pre-release gates are in
+[`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md), with the maintainer's
+static-analysis record in
+[`docs/STATIC-SECURITY-AUDIT-20260817.md`](docs/STATIC-SECURITY-AUDIT-20260817.md).
+Upgrade and incompatible-wire evidence is in
+[`docs/COMPATIBILITY-20260817.md`](docs/COMPATIBILITY-20260817.md).
 
 Two things in that document decide whether a deployment works at all. The
 client must be started with `--local-address if:en0`, because Clash's TUN mode
@@ -309,7 +325,7 @@ go run ./cmd/queqiaod --help
 ```
 
 The real-link benchmark harness will live under `scripts/` and will use an
-isolated listener on `icourses-dev`; the existing Xray, sing-box, and Clash
+isolated listener on `<EGRESS-HOST>`; the existing Xray, sing-box, and Clash
 Verge services remain out of scope for automatic modification.
 
 On a macOS host where Clash TUN captures the numeric server address, the local
@@ -317,7 +333,7 @@ agent can bind the outer socket to the physical source IP:
 
 ```sh
 queqiaod --mode local --listen 127.0.0.1:12080 \
-  --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
+  --remote EGRESS-IP:12443 --server-name EGRESS-SNI \
   --local-address auto --transport auto \
   --secret-file .dev/session.secret
 ```
@@ -335,7 +351,7 @@ the path and reduced if loss or interactive tail latency rises:
 
 ```sh
 queqiaod --mode local --listen 127.0.0.1:12080 \
-  --remote 23.135.236.244:12443 --server-name icourses-dev.01.me \
+  --remote EGRESS-IP:12443 --server-name EGRESS-SNI \
   --local-address auto --transport quic \
   --congestion brutal --brutal-bytes-per-sec 1048576 \
   --secret-file .dev/session.secret
@@ -381,3 +397,8 @@ session authentication. It must impose limits on frame sizes, concurrent
 flows, buffered bytes, handshake work, and reconnect attempts. Rolling a new
 cryptographic primitive or accepting unauthenticated lane joins is out of
 scope.
+
+## License
+
+Queqiao is licensed under the [MIT License](LICENSE). Linked dependencies keep
+their respective licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).

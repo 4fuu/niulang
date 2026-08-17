@@ -1,5 +1,54 @@
 # Measurement harnesses
 
+## Static security gate
+
+`check_gosec.py` applies the reviewed rule-and-file ceilings from the public
+release audit to a full gosec JSON report. It rejects a new rule, a finding in
+a new file, or an increased bucket; it is intentionally stricter than a global
+rule exclusion.
+
+```sh
+go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
+  -fmt json -out gosec.json ./... || test $? -eq 1
+./scripts/check_gosec.py gosec.json .
+```
+
+## Public-history secret scan
+
+`scan_history_secrets.sh` downloads a pinned, checksum-verified Gitleaks binary,
+proves its rules detect a generated canary, and scans every reachable Git
+commit. The report path is controlled by `QUEQIAO_SECRET_SCAN_REPORT` and must
+remain outside a public artifact if it contains a finding.
+
+```sh
+QUEQIAO_SECRET_SCAN_REPORT=history-secret-scan.json \
+  ./scripts/scan_history_secrets.sh .
+```
+
+## Credential generation
+
+`generate_credentials.sh` creates a private P-256 root, bounded server leaf,
+and printable high-entropy session secret in a new mode-0700 directory. It
+verifies the chain and DNS identity and never writes into the repository.
+
+```sh
+./scripts/generate_credentials.sh --output /secure/new-credentials \
+  --server-name queqiao.node
+```
+
+See `docs/CREDENTIAL-ROTATION.md` before replacing a live set.
+
+## Release artifact validation
+
+`validate_release.py` verifies checksum coverage, safe archive paths, required
+documents, executable mode, binary/BUILDINFO hashes, internal/external SBOM
+identity, CycloneDX component/dependency coverage, wire version, and linked
+license coverage without extracting untrusted archive paths.
+
+```sh
+./scripts/validate_release.py dist
+```
+
 ## Emulated-path comparison (the fast inner loop)
 
 `bench_matrix.sh` runs queqiao and a TUIC-shaped reference proxy over one
@@ -111,7 +160,7 @@ python3 scripts/upload_sink.py --listen 0.0.0.0:28080 --max-bytes 67108864
 dd if=/dev/zero bs=1m count=10 2>/dev/null |
   curl --socks5-hostname 127.0.0.1:12081 --data-binary @- \
        --write-out '%{http_code}\t%{size_upload}\t%{time_total}\n' \
-       http://23.135.236.244:28080/
+       http://EGRESS-IP:28080/
 ```
 
 The sink requires an explicit bounded `Content-Length`, accepts one request by
@@ -134,6 +183,24 @@ checksummed provenance bundle:
 
 This is the deterministic release soak and runs weekly at a smaller count. It
 does not replace broader live NAT and middlebox campaigns.
+
+`field_soak.py` is the long-duration real-path harness. It keeps one SOCKS5 UDP
+association alive while opening independent verified HTTPS flows, snapshots
+metrics and process resources, writes redacted JSON Lines events, applies
+explicit success/tail gates, and checksums the evidence directory. Use an
+opaque path label rather than an ISP account or subscriber address.
+
+```sh
+./scripts/field_soak.py --socks 127.0.0.1:12080 \
+  --duration 86400 --interval 5 --https-every 12 \
+  --metrics-url http://127.0.0.1:12090/metrics --pid CLIENT_PID \
+  --label mobile-carrier-a-primary-443 \
+  --output-dir /tmp/queqiao-field-mobile-a
+```
+
+The harness does not create network diversity. Run it separately on the exact
+independent paths recorded in `docs/FIELD-VALIDATION.md`; endpoint-injected
+faults must be labeled as such.
 
 `udp_association_check.py` is the live-path companion. It sends DNS queries
 through one unchanged SOCKS5 UDP association, records every loss and latency as

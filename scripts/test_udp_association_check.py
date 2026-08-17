@@ -1,4 +1,5 @@
 import argparse
+import struct
 import unittest
 
 from scripts import udp_association_check as check
@@ -46,6 +47,35 @@ class DNSNameTests(unittest.TestCase):
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
                     check.encode_dns_name(name)
+
+
+class DNSResponseTests(unittest.TestCase):
+    @staticmethod
+    def response(name="example.com", transaction=7):
+        question = check.encode_dns_name(name) + struct.pack("!HH", 1, 1)
+        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + b"\xc0\x00\x02\x01"
+        return struct.pack("!HHHHHH", transaction, 0x8180, 1, 1, 0, 0) + question + answer
+
+    def test_accepts_success_with_an_answer(self):
+        check.validate_dns_response(self.response(), 7, "example.com")
+
+    def test_rejects_error_truncation_or_empty_answer(self):
+        for flags, answers in ((0x8182, 1), (0x8380, 1), (0x8180, 0)):
+            with self.subTest(flags=flags, answers=answers):
+                response = struct.pack("!HHHHHH", 7, flags, 1, answers, 0, 0)
+                with self.assertRaises(ValueError):
+                    check.validate_dns_response(response, 7)
+
+    def test_rejects_mismatched_question_or_truncated_answer(self):
+        with self.assertRaises(ValueError):
+            check.validate_dns_response(self.response(), 7, "other.example")
+        with self.assertRaises(ValueError):
+            check.validate_dns_response(self.response()[:-1], 7, "example.com")
+
+    def test_rejects_compression_pointer_loop(self):
+        response = struct.pack("!HHHHHH", 7, 0x8180, 1, 1, 0, 0) + b"\xc0\x0c"
+        with self.assertRaises(ValueError):
+            check.validate_dns_response(response, 7)
 
 
 if __name__ == "__main__":

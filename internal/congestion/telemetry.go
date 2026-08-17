@@ -149,24 +149,3 @@ func (t *telemetryState) snapshot() ControllerTelemetry {
 		InRecovery:       t.inRecovery.Load(),
 	}
 }
-
-func controllerModeName(mode uint32) string {
-	switch mode {
-	case ControllerModeStartup:
-		return "startup"
-	case ControllerModeDrain:
-		return "drain"
-	case ControllerModeProbeBW:
-		return "probe_bw"
-	case ControllerModeProbeRTT:
-		return "probe_rtt"
-	case ControllerModeAdaptive:
-		return "adaptive"
-	case ControllerModeBrutal:
-		return "brutal"
-	case ControllerModeStock:
-		return "stock"
-	default:
-		return "unknown"
-	}
-}

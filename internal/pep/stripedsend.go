@@ -178,19 +178,6 @@ func laneQueueBytes(cwnd int) int {
 	return queue
 }
 
-// congestionWindow reports what this lane's transport says the path will hold,
-// or zero when the transport does not expose it.
-//
-// Cached on the same short TTL the rate sample uses. Admission asks this for
-// every chunk offered to every lane, and reading it means a call into the QUIC
-// connection's statistics; at a few hundred chunks a second that cost lands
-// squarely in the throughput path, and the answer cannot meaningfully change
-// within a few milliseconds of a long-haul round trip.
-func (l *mpLane) congestionWindow() int {
-	cwnd, _ := l.congestionState()
-	return cwnd
-}
-
 // congestionState reports the transport's congestion window and what it
 // currently has in flight.
 func (l *mpLane) congestionState() (cwnd, inFlight int) {

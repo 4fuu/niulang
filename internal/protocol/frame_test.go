@@ -208,8 +208,16 @@ func TestAPeerOfAnotherVersionIsRefused(t *testing.T) {
 	}
 	for _, other := range []byte{Version - 1, Version + 1} {
 		raw[2] = other
-		if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err == nil {
+		_, err := DecodeHeader(raw[:], DefaultMaxPayload)
+		if err == nil {
 			t.Fatalf("a frame of version %d was accepted by version %d", other, Version)
+		}
+		var mismatch UnsupportedVersionError
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("version %d failed ambiguously: %v", other, err)
+		}
+		if mismatch.Peer != other || mismatch.Local != Version {
+			t.Fatalf("version mismatch = %+v, want peer %d local %d", mismatch, other, Version)
 		}
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bojieli/queqiao/internal/pep"
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 var (
@@ -77,7 +78,7 @@ func run(args []string) error {
 		return err
 	}
 	if opts.showVersion {
-		fmt.Printf("queqiaod %s commit=%s built=%s go=%s\n", version, commit, buildDate, goVersion())
+		fmt.Printf("queqiaod %s commit=%s built=%s go=%s wire=%d\n", version, commit, buildDate, goVersion(), protocol.Version)
 		return nil
 	}
 	logger, err := newLogger(opts.logLevel, opts.jsonLogs)

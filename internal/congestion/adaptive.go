@@ -28,7 +28,6 @@ type AdaptiveSender struct {
 
 	cwnd          quiccongestion.ByteCount
 	bytesInFlight quiccongestion.ByteCount
-	lastEvent     monotime.Time
 	windowStart   monotime.Time
 	windowAcked   quiccongestion.ByteCount
 	windowLost    quiccongestion.ByteCount

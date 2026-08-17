@@ -731,6 +731,84 @@ func TestExpectedCloseDoesNotCountAsLaneFailure(t *testing.T) {
 	}
 }
 
+func TestReadLaneTreatsEOFAfterRemoteCloseAsHalfClose(t *testing.T) {
+	inner, application := net.Pipe()
+	defer application.Close()
+	registry := metrics.New()
+	outer, peer := net.Pipe()
+	defer peer.Close()
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, registry)
+	lane := &mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}
+	flow.lanes[0] = lane
+	closeFrame := protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeClose, Flags: protocol.FlagFin,
+		SessionID: [16]byte{1}, FlowID: 7,
+	}}
+	readerDone := make(chan struct{})
+	go func() {
+		flow.readLane(lane)
+		close(readerDone)
+	}()
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- protocol.WriteFrame(peer, closeFrame)
+		_ = peer.Close()
+	}()
+
+	select {
+	case event := <-flow.events:
+		if event.frame.Header.Type != protocol.TypeClose {
+			t.Fatalf("reader delivered frame type %d, want CLOSE", event.frame.Header.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for peer CLOSE")
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-readerDone:
+	case <-time.After(time.Second):
+		t.Fatal("lane reader did not return after peer EOF")
+	}
+	if lane.closed.Load() {
+		t.Fatal("peer half-close retired the surviving write direction")
+	}
+	if got := registry.Snapshot().LaneFailures; got != 0 {
+		t.Fatalf("CLOSE followed by EOF exported %d lane failures", got)
+	}
+}
+
+func TestReadLaneRetiresUnexpectedEOFImmediately(t *testing.T) {
+	inner, application := net.Pipe()
+	defer application.Close()
+	registry := metrics.New()
+	outer, peer := net.Pipe()
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, registry)
+	lane := &mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}
+	flow.lanes[0] = lane
+	readerDone := make(chan struct{})
+	go func() {
+		flow.readLane(lane)
+		close(readerDone)
+	}()
+	_ = peer.Close()
+
+	select {
+	case <-readerDone:
+	case <-time.After(time.Second):
+		t.Fatal("lane reader did not return after unexpected EOF")
+	}
+	if !lane.closed.Load() {
+		t.Fatal("unexpected EOF left the lane schedulable")
+	}
+	if got := registry.Snapshot().LaneFailures; got != 1 {
+		t.Fatalf("unexpected EOF exported %d lane failures, want one", got)
+	}
+}
+
 func TestProvenCompleteFlowDoesNotWaitForLaneReplacementForFinalACK(t *testing.T) {
 	flow := &multipathFlow{
 		ctx: context.Background(), done: make(chan struct{}),

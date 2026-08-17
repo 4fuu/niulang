@@ -303,9 +303,13 @@ func (d *WindowDecoder) Repair(r RepairSymbol) Delivery {
 	return out
 }
 
-// Recovered, Lost and Discarded report what the decoder has done.
+// Recovered reports how many source symbols the decoder reconstructed.
 func (d *WindowDecoder) Recovered() uint64 { return d.recovered }
-func (d *WindowDecoder) Lost() uint64      { return d.lost }
+
+// Lost reports how many source symbols left the window unrecovered.
+func (d *WindowDecoder) Lost() uint64 { return d.lost }
+
+// Discarded reports how many unusable symbols or equations were dropped.
 func (d *WindowDecoder) Discarded() uint64 { return d.discarded }
 
 // admit brings esi into the window, sliding it forward and reporting whatever

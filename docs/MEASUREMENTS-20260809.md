@@ -4,14 +4,14 @@ These are development results, not a claim of production readiness.
 
 ## Controls and route isolation
 
-The real endpoint is `23.135.236.244:12443` with TLS SNI
-`icourses-dev.01.me`. `icourses-dev.01.me` itself resolves to a Clash fake IP
+The real endpoint is `<EGRESS-IP>:12443` with TLS SNI
+`<EGRESS-SNI>`. `<EGRESS-SNI>` itself resolves to a Clash fake IP
 on this host and must not be used as the socket endpoint.
 
 Clash Verge TUN had installed a default route through `198.18.0.1`. Numeric
 endpoint tests performed before that was discovered were invalid because the
 outer PEP connection was captured by the live Clash route. Valid tests bound
-the local outer socket to the physical address `192.168.3.66` using
+the local outer socket to the physical address `<CLIENT-LAN-IP>` using
 `--local-address`; no Clash profile was edited or switched. The development
 service alone listened on TCP and UDP `:12443`.
 

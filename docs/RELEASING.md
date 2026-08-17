@@ -21,7 +21,9 @@ go run ./cmd/queqiaopack \
 
 The default target set is Linux, macOS, and Windows on amd64 and arm64. The
 output directory must not already exist, preventing a new release from being
-mixed with stale artifacts. `SHA256SUMS` covers every archive.
+mixed with stale artifacts. Every target has an adjacent CycloneDX SBOM, and
+each archive contains the same SBOM plus complete license texts for the exact
+modules linked into its binary. `SHA256SUMS` covers every archive and SBOM.
 
 Verify a downloaded release before unpacking it:
 
@@ -36,6 +38,23 @@ Then confirm that the embedded metadata matches the tag:
 ./queqiaod --version
 cat BUILDINFO
 ```
+
+Both outputs must report `wire=3` / `wire_protocol=3`. Queqiao v0.1 accepts
+only wire protocol 3. Patch releases that retain that wire version support a
+one-endpoint-at-a-time rolling upgrade. A release that changes it requires a
+coordinated upgrade unless that release documents an explicit transition.
+The pre-release mixed-version and fail-closed evidence format is recorded in
+[`COMPATIBILITY-20260817.md`](COMPATIBILITY-20260817.md).
+
+Validate the complete directory before executing an archive:
+
+```sh
+./scripts/validate_release.py dist
+```
+
+The validator checks checksum coverage, archive paths and modes, build metadata,
+binary hashes, internal/external SBOM identity, dependency/license coverage,
+and the wire version.
 
 ## Atomic Unix installation
 
@@ -85,10 +104,40 @@ configuration. That preserves one variable per incident. The Clash side needs
 no binary rollback: select the previous profile or remove the `queqiao` SOCKS5
 node and rule.
 
-## Publishing
+## Non-publishing release candidate
 
-Pushing a `v*` tag starts `.github/workflows/release.yml`.
-The workflow derives the build date from the tagged commit, runs tests, builds
-all six archives, verifies their checksums, and attaches them to a GitHub
-Release. Tags are immutable release inputs; replace a bad release with a new
-version rather than moving its tag.
+Run `.github/workflows/release-candidate.yml` manually on the exact commit under
+review with a version such as `v0.1.0-rc.1`. It runs the full, race, fuzz,
+vulnerability, fallback, history-secret, reproducibility, and six-native-runner
+archive gates. It uploads candidate archives and evidence but cannot create a
+tag or GitHub Release.
+
+GitHub artifact attestations on Free/Pro/Team require a public repository. The
+candidate workflow therefore records them when the repository is public and
+explicitly reports them as deferred while it is private. Publication cannot
+run while the repository is private.
+
+## Review and publishing
+
+1. Review the candidate commit, all candidate workflow jobs, checksums, SBOMs,
+   secret-scan report, native smokes, and release checklist.
+2. Configure the GitHub `public-release` environment with the required human
+   reviewer and prevent administrator bypass where the repository plan permits.
+3. After approval, create an immutable `v*` tag on the reviewed commit. Do not
+   move a tag; replace a bad candidate with a new version.
+4. Manually run `.github/workflows/release.yml` with the tag, full reviewed
+   commit SHA, and successful candidate workflow run ID.
+
+The release workflow refuses a private repository, a moved/mismatched tag, or a
+candidate run for another commit. It rebuilds the final version, executes the
+downloaded archive on native Linux, macOS, and Windows runners for amd64 and
+arm64, creates build-provenance attestations for every published file and
+CycloneDX attestations for every binary, waits at the `public-release`
+environment, and only then creates the GitHub Release.
+
+Verify provenance after downloading:
+
+```sh
+gh attestation verify ./queqiaod_v0.1.0_linux_amd64.tar.gz \
+  --repo bojieli/queqiao
+```

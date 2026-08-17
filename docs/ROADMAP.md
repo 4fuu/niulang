@@ -3,6 +3,13 @@
 Stages 0--2 and 4 are implemented, Stage 3 was retired after measurement, and
 the repository-actionable Stage 5 gates are complete. Wider NAT/middlebox
 operation and independent third-party review remain external qualifications.
+Public-preview release engineering is implemented: a fail-closed wire contract,
+current-tree privacy review, pinned full-history secret scan, exact linked-module
+licenses and CycloneDX SBOMs, reviewed static-analysis baseline, credential
+rotation tooling, real-path soak harness, and a non-publishing candidate
+workflow with six native runtime jobs. The exact candidate still has to execute
+those gates and receive maintainer approval; this roadmap does not authorize a
+tag or release.
 
 ## Stage 0 — repository and measurement foundation
 
@@ -101,16 +108,19 @@ associations returned to QUIC.
   control stream retained for lanes that have no datagrams. Measured under
   seeded impairment and exercised on the live blocked/restored QUIC path.
 - ~~Cross-platform packaging.~~ Done: deterministic Linux, macOS, and Windows
-  archives for amd64 and arm64, embedded provenance, SHA-256 checksums, and a
-  tag-driven release workflow.
+  archives for amd64 and arm64, embedded metadata, SHA-256 checksums, exact
+  linked-dependency licenses, adjacent/embedded CycloneDX SBOMs, native runtime
+  smoke jobs, and a manual reviewed-commit release workflow. A tag push alone
+  cannot publish.
 - ~~Fuzzing and race automation.~~ Done: the weekly deep workflow discovers
   every fuzz target and runs the complete suite under the race detector.
 - ~~Resource-limit and security review.~~ Done for the paired SOCKS deployment:
   documented trust boundaries and residual risk, bounded unauthenticated QUIC
   connections, sessions, frames, flow buffers, replay state, relay sockets,
-  lanes, and lifetimes, plus pinned vulnerability scanning and an enforced
-  patched Go toolchain. Independent third-party audit remains external release
-  qualification rather than repository implementation work.
+  lanes, and lifetimes, plus pinned vulnerability/static/history scanning, a
+  reviewed gosec baseline, and an enforced patched Go toolchain. Independent
+  third-party audit remains external release qualification rather than
+  repository implementation work.
 - ~~Reproducible benchmark reports.~~ Done: versioned JSON records include the
   exact invocation, seeded path, VCS state, toolchain, module graph, latency,
   and contention results; matrix bundles add the source patch and checksums.

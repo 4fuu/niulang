@@ -1,7 +1,7 @@
 # Release-hardening and live fallback report — 2026-08-17
 
 This report closes the repository-actionable Stage 4/5 work after merge commit
-`1a0ba07`. Tests used an isolated server on `155.103.252.95:12541` and local
+`1a0ba07`. Tests used an isolated server on `<EGRESS-IP>:12541` and local
 SOCKS/metrics listeners on `127.0.0.1:12180/12190`; production remained on
 `12540` and `12080` until the isolated matrix passed.
 
@@ -74,16 +74,16 @@ queries are the expected UDP semantics during failure detection.
 Only after the isolated matrix passed were the two production binaries
 replaced atomically and their services restarted. The new server PID was
 `135146`; the new local PID was `31378`. A post-restart HTTPS request through
-the production SOCKS listener returned `155.103.252.95`.
+the production SOCKS listener returned the expected fixed egress address.
 
 The exact pre-upgrade binaries remain at:
 
 ```text
-/home/ubuntu/queqiao-node/bin/queqiaod-rollback-pre-1a0ba07
-/Users/boj/.queqiao/bin/queqiaod-rollback-pre-1a0ba07
+<SERVER-ROLLBACK-DIR>/queqiaod-rollback-pre-1a0ba07
+<CLIENT-ROLLBACK-DIR>/queqiaod-rollback-pre-1a0ba07
 ```
 
-Production remains on `155.103.252.95:12540` and `127.0.0.1:12080`. The
+Production remains on `<EGRESS-IP>:12540` and `127.0.0.1:12080`. The
 isolated 12541/12180/12190 listeners were stopped, and both their absence and
 the absence of the temporary firewall rule were verified.
 

@@ -5,7 +5,7 @@ taken on this developer machine, whose Clash TUN captures the fake-IP range
 `198.18.0.0/15`, and the measurement server's address routes into it:
 
 ```
-$ route -n get 23.135.236.244
+$ route -n get <EGRESS-IP>
   gateway: 198.18.0.1
   interface: utun4
 ```

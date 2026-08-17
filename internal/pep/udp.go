@@ -500,10 +500,8 @@ func (c *Client) runClientUDPUplink(ctx context.Context, udpConn *net.UDPConn, f
 			}
 			return err
 		}
-		if n == 0 {
-			// Zero-length UDP datagrams are valid and are encoded with an empty
-			// application payload. Keep the source association nevertheless.
-		}
+		// Zero-length UDP datagrams are valid and continue through the same
+		// association and SOCKS envelope as non-empty datagrams.
 		peerMu.Lock()
 		if *peer == nil {
 			*peer = cloneUDPAddr(addr)

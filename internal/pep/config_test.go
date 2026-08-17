@@ -81,7 +81,10 @@ func TestQUICConnectionsHaveAnAdmissionBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !server.admitConnection() || !server.admitConnection() {
+	if !server.admitConnection() {
+		t.Fatal("the first configured connection slot was not admitted")
+	}
+	if !server.admitConnection() {
 		t.Fatal("the configured connection capacity was not admitted")
 	}
 	if server.admitConnection() {

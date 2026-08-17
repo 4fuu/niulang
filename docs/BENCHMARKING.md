@@ -213,8 +213,8 @@ campaigns. All five are cheap to avoid and expensive to miss:
   both clients, for the same reason, and give both the same timeout.
 - **Prove the binding worked, don't assume it.** Have the server report the
   source address it sees. On 2026-08-16 an unbound datagram arrived from
-  `23.135.236.244`, the existing tunnel's exit, and a bound one from
-  `120.244.189.31`, the real uplink — same host, same destination, one flag
+  `<TUNNEL-EGRESS-IP>`, the existing tunnel's exit, and a bound one from
+  `<CLIENT-PUBLIC-IP>`, the real uplink — same host, same destination, one flag
   apart. Third-party clients need their own equivalent (`inet4_bind_address`
   for sing-box outbounds), and they need checking too.
 - **Clear `NO_PROXY` before using curl.** `curl` honours `NO_PROXY` even when a

@@ -161,20 +161,6 @@ func (s *udpRelayStore) claim(token []byte) *net.UDPConn {
 	return held.conn
 }
 
-// release drops a token's relay without handing it back, for an association
-// that ended cleanly.
-func (s *udpRelayStore) release(token [session.UDPResumeTokenSize]byte) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if held, ok := s.relays[token]; ok {
-		delete(s.relays, token)
-		_ = held.conn.Close()
-	}
-}
-
 func (s *udpRelayStore) sweepLocked(now time.Time) {
 	for token, held := range s.relays {
 		if now.After(held.expires) {

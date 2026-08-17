@@ -61,10 +61,9 @@ type PathModel struct {
 	aggregate []bandwidthSample
 }
 
-// Member identifies one contributor within a model. A pointer is stable for
-// its owner's lifetime and unique among live owners, which is all membership
-// needs.
-type Member uintptr
+// Member identifies one contributor within a model. Callers allocate these
+// monotonically; uniqueness among live owners is all membership needs.
+type Member uint64
 
 type report struct {
 	floor     float64

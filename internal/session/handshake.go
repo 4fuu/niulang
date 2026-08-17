@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -108,7 +109,11 @@ func (h *Hello) UnmarshalBinary(b []byte) error {
 	if len(b) != helloPayloadSize {
 		return fmt.Errorf("invalid hello length %d", len(b))
 	}
-	h.Timestamp = int64(binary.BigEndian.Uint64(b[0:8]))
+	rawTimestamp := binary.BigEndian.Uint64(b[0:8])
+	if rawTimestamp > math.MaxInt64 {
+		return errors.New("hello timestamp exceeds signed Unix range")
+	}
+	h.Timestamp = int64(rawTimestamp)
 	copy(h.Nonce[:], b[8:24])
 	copy(h.SessionID[:], b[24:40])
 	h.LaneID = binary.BigEndian.Uint64(b[40:48])
@@ -124,7 +129,7 @@ func (h Hello) Verify(secret []byte, now time.Time) error {
 	if len(secret) < 16 {
 		return errors.New("session secret must contain at least 16 bytes")
 	}
-	if delta := now.Unix() - h.Timestamp; delta > int64(maxClockSkew/time.Second) || delta < -int64(maxClockSkew/time.Second) {
+	if timestampOutsideSkew(h.Timestamp, now.Unix(), int64(maxClockSkew/time.Second)) {
 		return errors.New("hello timestamp outside allowed clock skew")
 	}
 	want := macHello(secret, h)
@@ -132,6 +137,21 @@ func (h Hello) Verify(secret []byte, now time.Time) error {
 		return errors.New("invalid session authentication")
 	}
 	return nil
+}
+
+func timestampOutsideSkew(timestamp, now, skew int64) bool {
+	lower, upper := now, now
+	if now < math.MinInt64+skew {
+		lower = math.MinInt64
+	} else {
+		lower -= skew
+	}
+	if now > math.MaxInt64-skew {
+		upper = math.MaxInt64
+	} else {
+		upper += skew
+	}
+	return timestamp < lower || timestamp > upper
 }
 
 func macHello(secret []byte, h Hello) [32]byte {
@@ -194,7 +214,11 @@ func (h *HelloOK) UnmarshalBinary(b []byte) error {
 	if len(b) != helloOKSize && len(b) != helloOKExtendedSize {
 		return fmt.Errorf("invalid hello acknowledgement length %d", len(b))
 	}
-	h.Timestamp = int64(binary.BigEndian.Uint64(b[0:8]))
+	rawTimestamp := binary.BigEndian.Uint64(b[0:8])
+	if rawTimestamp > math.MaxInt64 {
+		return errors.New("hello acknowledgement timestamp exceeds signed Unix range")
+	}
+	h.Timestamp = int64(rawTimestamp)
 	copy(h.Nonce[:], b[8:24])
 	h.Capabilities = 0
 	if len(b) == helloOKExtendedSize {

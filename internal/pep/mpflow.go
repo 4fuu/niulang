@@ -129,22 +129,6 @@ type mpLane struct {
 // traffic on a fast local path.
 const laneRateCacheTTL = 5 * time.Millisecond
 
-// serializationTime is how long this lane needs to put payload bytes on the
-// wire at its current estimated rate.
-func (l *mpLane) serializationTime(payload int) time.Duration {
-	rate, rtt := l.sendRate()
-	if rate <= 0 {
-		if rtt <= 0 {
-			return 0
-		}
-		// The RTT is known but the controller exposes no rate. One chunk per
-		// round trip is a deliberately pessimistic stand-in that still orders
-		// lanes consistently against each other.
-		rate = float64(defaultChunkSize) / rtt.Seconds()
-	}
-	return time.Duration(float64(payload) / rate * float64(time.Second))
-}
-
 func (l *mpLane) sendRate() (float64, time.Duration) {
 	l.rateMu.Lock()
 	defer l.rateMu.Unlock()
@@ -714,14 +698,23 @@ func (f *multipathFlow) allocateJoinID() (uint64, error) {
 // killed the reader for good.
 func (f *multipathFlow) readLane(lane *mpLane) {
 	go f.readLaneBulk(lane)
+	sawRemoteClose := false
 	for {
 		frame, err := lane.fc.Read()
 		if err != nil {
-			f.failLane(lane, fmt.Errorf("lane %d: %w", lane.id, err))
+			// A protocol CLOSE ends the peer's sending direction. The stream EOF
+			// that follows it is an expected half-close, while this lane's write
+			// direction remains available for the final ACK and response bytes.
+			if !sawRemoteClose {
+				f.failLane(lane, fmt.Errorf("lane %d: %w", lane.id, err))
+			}
 			return
 		}
 		if !f.deliverInbound(lane, frame) {
 			return
+		}
+		if frame.Header.Type == protocol.TypeClose {
+			sawRemoteClose = true
 		}
 	}
 }
@@ -844,12 +837,30 @@ func (f *multipathFlow) laneRetransmits(laneID uint64) bool {
 // goroutines, and notifies the flow-level recovery coordinator. A failed lane
 // is never selected again, even if a buffered write completes later.
 func (f *multipathFlow) failLane(lane *mpLane, err error) {
-	if lane == nil || !lane.closed.CompareAndSwap(false, true) {
+	if !f.closeFailedLane(lane) {
 		return
+	}
+	f.reportLaneFailure(lane, err)
+}
+
+// closeFailedLane atomically removes a broken lane from transport and
+// scheduling before any replacement decision observes it.
+func (f *multipathFlow) closeFailedLane(lane *mpLane) bool {
+	if lane == nil || !lane.closed.CompareAndSwap(false, true) {
+		return false
 	}
 	if lane.fc != nil {
 		_ = lane.fc.Close()
 	}
+	if sched := f.scheduler.Load(); sched != nil {
+		sched.RetireLane(lane.id)
+	}
+	return true
+}
+
+// reportLaneFailure exports and coordinates a lane already transitioned by
+// closeFailedLane.
+func (f *multipathFlow) reportLaneFailure(lane *mpLane, err error) {
 	if f.finished.Load() {
 		return
 	}
@@ -867,11 +878,6 @@ func (f *multipathFlow) failLane(lane *mpLane, err error) {
 	}
 	if f.metrics != nil {
 		f.metrics.LaneFailure()
-	}
-	// Hand back whatever this lane was carrying so another lane can finish it.
-	// A lost lane costs its window, not the transfer.
-	if sched := f.scheduler.Load(); sched != nil {
-		sched.RetireLane(lane.id)
 	}
 	f.laneFailures.Add(1)
 	if f.logger != nil {

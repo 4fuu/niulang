@@ -368,9 +368,10 @@ func (b *TUICBBRSender) MaybeExitSlowStart() {}
 func (b *TUICBBRSender) OnPacketAcked(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, _ quiccongestion.ByteCount, _ monotime.Time) {
 }
 
-// quic-go calls this once for every newly detected lost packet and then calls
-// OnCongestionEventEx with the complete loss batch. The extended callback is
-// the single source of truth, so the legacy callback deliberately does nothing.
+// OnCongestionEvent is the legacy loss callback. quic-go calls it once for
+// every newly detected lost packet and then calls OnCongestionEventEx with the
+// complete loss batch. The extended callback is the single source of truth, so
+// this callback deliberately does nothing.
 func (b *TUICBBRSender) OnCongestionEvent(_ quiccongestion.PacketNumber, _ quiccongestion.ByteCount, _ quiccongestion.ByteCount) {
 }
 

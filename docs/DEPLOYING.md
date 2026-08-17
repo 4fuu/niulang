@@ -70,18 +70,24 @@ scp queqiaod-linux-amd64 egress:/usr/local/bin/queqiaod
 
 ## The egress side
 
-Both ends authenticate with a shared 32-byte secret, and the client verifies
-the server's certificate against a pinned root, so a self-signed certificate is
-correct here — there is nothing to trust publicly.
+Both ends authenticate with one high-entropy shared secret, and the client
+verifies the server certificate against a pinned private root. Generate a
+bounded-lifetime leaf and printable secret outside the repository:
 
 ```sh
-sudo mkdir -p /etc/queqiao && cd /etc/queqiao
-sudo openssl req -x509 -newkey rsa:2048 -nodes \
-     -keyout key.pem -out cert.pem -days 3650 \
-     -subj "/CN=queqiao.node" -addext "subjectAltName=DNS:queqiao.node"
-sudo sh -c 'head -c 32 /dev/urandom > secret'
-sudo chmod 600 key.pem secret
+./scripts/generate_credentials.sh --output /secure/queqiao-credentials \
+  --server-name queqiao.node
+sudo install -d -m 0750 -o root -g queqiao /etc/queqiao
+sudo install -m 0644 /secure/queqiao-credentials/server.crt /etc/queqiao/cert.pem
+sudo install -m 0640 -o root -g queqiao \
+  /secure/queqiao-credentials/server.key /etc/queqiao/key.pem
+sudo install -m 0640 -o root -g queqiao \
+  /secure/queqiao-credentials/secret /etc/queqiao/secret
 ```
+
+Keep `root-ca.key` offline. The egress does not need it. Copy only
+`root-ca.crt` and `secret` to the client. The coordinated procedure and rollback
+rules are in [`CREDENTIAL-ROTATION.md`](CREDENTIAL-ROTATION.md).
 
 `--server-name` on the client must equal the certificate's name. It is a
 verified TLS name, not a DNS lookup: the client dials the literal IP in
@@ -114,14 +120,14 @@ reach the egress host's own private network.
 
 ## The client side
 
-Copy `cert.pem` and `secret` from the egress host to the client — the secret is
-a credential, so treat it accordingly (`chmod 600`).
+Copy `root-ca.crt` and `secret` from the trusted generation host to the client —
+the secret is a credential, so treat it accordingly (`chmod 600`).
 
 ```sh
 mkdir -p ~/.queqiao/bin && chmod 700 ~/.queqiao
 cp $(command -v queqiaod) ~/.queqiao/bin/
-scp egress:/etc/queqiao/cert.pem ~/.queqiao/cert.pem
-scp egress:/etc/queqiao/secret   ~/.queqiao/secret && chmod 600 ~/.queqiao/secret
+install -m 0644 /secure/queqiao-credentials/root-ca.crt ~/.queqiao/cert.pem
+install -m 0600 /secure/queqiao-credentials/secret ~/.queqiao/secret
 ```
 
 ```sh
@@ -201,14 +207,39 @@ honours `NO_PROXY` even when a proxy is named explicitly, so a shell with
 
 ## Enabling it in Clash Verge
 
-[`deploy/clash-queqiao.yaml`](../deploy/clash-queqiao.yaml) is a complete
-profile. Import it with **Profiles → New → Local**, paste or select the file,
-and leave your existing profile active until you have tested this one.
+The recommended integration is to add queqiao to the profile you already use.
+Do not create a second profile merely to add one node: it duplicates rules and
+DNS/TUN settings, makes switching more confusing, and is unnecessary. Create a
+local profile from [`deploy/clash-queqiao.yaml`](../deploy/clash-queqiao.yaml)
+only when Clash Verge has no usable profile at all.
 
-The node itself is three lines:
+Queqiao is a **node inside a profile**. After adding it, look for `queqiao` on
+Clash Verge's **Proxies** page, inside the selector you edited. It will not
+appear as a new card on the **Profiles** page.
+
+Before editing Clash, the standalone check in [the client section](#the-client-side)
+must pass:
+
+```sh
+nc -z 127.0.0.1 12080 && echo "ingress up"
+env -u NO_PROXY -u no_proxy curl --noproxy '' -sS \
+    --socks5-hostname 127.0.0.1:12080 https://api.ipify.org
+```
+
+If that fails, fix or start `queqiaod` first. A Clash profile cannot make a
+dead local SOCKS listener work.
+
+### Recommended: edit the existing profile
+
+1. In **Profiles**, identify the profile that is currently in use. Use Clash
+   Verge's backup feature, or copy the YAML text to a safe file, before editing.
+2. Right-click that profile and choose **Edit**, **Edit File**, or the
+   equivalent YAML editor in your Clash Verge Rev version. Use the editor
+   opened by Clash Verge so that Save performs validation and tells the
+   background core to reload.
+3. Add this item to the existing top-level `proxies:` list:
 
 ```yaml
-proxies:
   - name: queqiao
     type: socks5
     server: 127.0.0.1
@@ -216,34 +247,178 @@ proxies:
     udp: true          # queqiao implements SOCKS5 UDP ASSOCIATE
 ```
 
+If the profile has no top-level `proxies:` key because it uses only
+`proxy-providers`, create `proxies:` at the top level and put this item under
+it. Mihomo permits local proxies and providers in the same profile. If a node
+named `queqiao` already exists, update that item instead of creating a duplicate
+name.
+
+The `- name: queqiao` line must have exactly the same indentation as the other
+proxy `- name:` lines. In particular, do not put it under the previous node's
+`ws-opts:`, `reality-opts:`, or `tls:` block.
+
 `udp: true` is worth setting. queqiao carries SOCKS UDP on the connection's
 QUIC datagrams where QUIC negotiated them, so an application that chose UDP
 keeps datagram semantics instead of having its packets serialised into a stream
 where one loss stalls everything behind it.
 
-### Adding it to a profile you already use
+4. Find the selector that your rules actually use. For example, the final rule
+   below sends unmatched traffic to the group named `Auto`:
 
-You do not need a separate profile. Add the node above to your `proxies:`, add
-`queqiao` to whichever `proxy-groups` entry you select from, and you can switch
-to it from the Clash UI without touching your rules. Removing those two lines
-is the entire rollback.
+   ```yaml
+   rules:
+     - MATCH,Auto
+   ```
 
-If you would rather test it without any risk to a working setup, the safe path
-is the one in [`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md): a second,
-**inactive** profile whose final `MATCH` rule points at the queqiao node. Your
-live profile stays untouched and you switch back by selecting it again.
+   Add `queqiao` to that group's `proxies:` list. Prefer a group with
+   `type: select`, so selecting queqiao is an explicit operation:
+
+   ```yaml
+   proxy-groups:
+     - name: Auto
+       type: select
+       proxies:
+         - existing-node-a
+         - existing-node-b
+         - queqiao
+   ```
+
+   Adding the node only under top-level `proxies:` is not enough: it may be
+   valid but invisible in the selector. Creating a new group is also not
+   enough unless a rule routes traffic to that group.
+
+   A provider-backed group may have `use:` but no `proxies:` list. In that
+   case, keep `use:` and add a sibling `proxies:` list containing `queqiao`;
+   the two sources can coexist in one group.
+
+5. Save in Clash Verge. Keep the current node selected until the new entry has
+   passed its delay check. Then open **Proxies**, find the group edited above,
+   and select `queqiao`.
+
+A minimal complete before/after shape is:
+
+```yaml
+proxies:
+  - name: existing-node
+    # existing node fields remain unchanged
+  - name: queqiao
+    type: socks5
+    server: 127.0.0.1
+    port: 12080
+    udp: true
+
+proxy-groups:
+  - name: Auto
+    type: select
+    proxies:
+      - existing-node
+      - queqiao
+
+rules:
+  - DOMAIN-SUFFIX,cn,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,Auto
+```
+
+Keep the rest of the existing profile—including its DNS, TUN, rules, proxy
+providers, and other groups—unchanged.
+
+### Remote subscriptions and profile updates
+
+Editing the downloaded YAML of a remote subscription may be undone the next
+time that subscription updates. If the profile is provider-managed and updates
+automatically, put the same change in that profile's **Extension Script**
+instead. Replace `Auto` below with the exact, case-sensitive name of the
+`type: select` group you normally use:
+
+```javascript
+const QUEQIAO_GROUP = "Auto";
+
+function main(config) {
+  if (!Array.isArray(config.proxies)) config.proxies = [];
+
+  const exists = config.proxies.some((proxy) => proxy.name === "queqiao");
+  if (!exists) {
+    config.proxies.push({
+      name: "queqiao",
+      type: "socks5",
+      server: "127.0.0.1",
+      port: 12080,
+      udp: true,
+    });
+  }
+
+  const groups = config["proxy-groups"] || [];
+  const group = groups.find((item) => item.name === QUEQIAO_GROUP);
+  if (!group) {
+    throw new Error("queqiao: proxy group not found: " + QUEQIAO_GROUP);
+  }
+  if (group.type !== "select") {
+    throw new Error("queqiao: target group must have type select");
+  }
+  if (!Array.isArray(group.proxies)) group.proxies = [];
+  if (!group.proxies.includes("queqiao")) group.proxies.push("queqiao");
+
+  return config;
+}
+```
+
+Use a **profile-specific** extension script, not a global one, unless every
+profile on the machine should expose the local Queqiao node. Clash Verge Rev's
+official [custom-script documentation](https://www.clashverge.dev/guide/script.html)
+describes how the `main(config)` hook modifies the profile before Mihomo loads
+it. If the profile already has an extension script, merge the Queqiao logic
+into its existing `main` function; do not replace the script or add a second
+`main` function. If Save reports `proxy group not found`, correct
+`QUEQIAO_GROUP`; the script deliberately fails validation rather than silently
+adding an unreachable node.
+
+### If no profile exists
+
+Only for an empty Clash Verge installation:
+
+1. Open **Profiles → New → Local** (wording varies slightly by version).
+2. Select [`deploy/clash-queqiao.yaml`](../deploy/clash-queqiao.yaml), or paste
+   its contents into the new profile, and save it through the UI. The official
+   [local-profile guide](https://www.clashverge.dev/guide/profile.html)
+   notes that Verge copies a selected file into its managed profile directory.
+3. Activate the new profile, open **Proxies → Proxy**, run the delay check, and
+   select `queqiao`.
+
+Do not copy a YAML file directly into Clash Verge's `profiles/` directory and
+expect it to appear in the UI. The application tracks profile metadata
+separately; an unregistered file is deliberately invisible.
+
+### Files not to edit
+
+- Do not hand-edit `profiles.yaml`. It is Clash Verge's internal registry and
+  the running application can overwrite manual entries when it exits.
+- Do not hand-edit `clash-verge.yaml`. It is generated runtime output and will
+  be replaced the next time Clash Verge builds the active configuration.
+- Do not treat closing the main window as a core restart. On systems where
+  Clash Verge keeps Mihomo in a background service, use the application's
+  **Restart Core** action or save/reactivate the profile through the UI.
+
+If an external editor is unavoidable, edit the actual source profile—not the
+generated file—then explicitly reactivate the profile or restart the core.
+Using Clash Verge's editor is less error-prone because it validates before
+applying the change.
 
 ### Verify from Clash
 
-With the profile selected, check that traffic is really taking the new path —
-the client's own counters are the quickest answer:
+First confirm that `queqiao` appears in the intended group on **Proxies** and
+that its delay test succeeds. Select it, note the counters, generate traffic,
+and read the counters again:
 
 ```sh
-curl -s 127.0.0.1:12090/metrics | grep -E 'flows_(started|completed)_total|bytes_down_total'
+curl -fsS 127.0.0.1:12090/metrics \
+  | grep -E 'flows_(started|completed)_total|bytes_(up|down)_total'
 ```
 
-If `flows_started_total` stays at zero while you browse, Clash is not routing to
-the node: check that your rules reach the group holding it.
+`flows_started_total` and the byte counters must increase while browsing. If
+they do not, Clash is not routing to the node: confirm that queqiao is selected
+in the group named by the matching rule. Finally, verify the observed egress
+address is the Queqiao server's address, not the old proxy's address.
 
 ### Other mihomo clients
 
@@ -283,6 +458,12 @@ operation across other NATs and middleboxes still needs field evidence.
 
 | Symptom | Cause |
 | --- | --- |
+| A copied YAML exists on disk but does not appear under Profiles | Files are not auto-registered; edit the existing profile, or use **New → Local** through the UI only when no profile exists |
+| `queqiao` exists under `proxies:` but is absent from the Proxies page | Its name was not added to the `proxies:` list of the selector the UI displays |
+| `queqiao` appears, but selecting it does not increase Queqiao metrics | The matching rule routes to a different group, or the core still has an older generated configuration |
+| The edit disappears after a subscription refresh | The remote subscription replaced its downloaded YAML; apply the profile-specific Extension Script instead |
+| Save reports `did not find expected key` or another YAML error | The new list item is nested under the previous proxy; align `- name: queqiao` with the other proxy entries |
+| Closing and reopening the window does not apply the edit | Mihomo is still running as a background service; save/reactivate the profile or use **Restart Core** |
 | Everything works but the egress IP is your *old* proxy's | `--local-address` missing or not taking effect; verify with `tcpdump` on the egress |
 | `curl` through the SOCKS port succeeds but reports your own IP | `NO_PROXY` is set; use `env -u NO_PROXY -u no_proxy curl --noproxy ''` |
 | Client starts, no flows ever appear in `/metrics` | Clash rules are not reaching the group that holds the node |
@@ -302,6 +483,7 @@ launchctl unload ~/Library/LaunchAgents/me.01.queqiao.client.plist   # macOS
 sudo systemctl disable --now queqiaod                                # egress
 ```
 
-Then delete the node and its group entry from your Clash profile, or select the
-profile you were using before. Nothing else on the host is modified: queqiao
-installs no routes, no TUN device, and no system proxy settings.
+First select the previous node in Clash. Then delete the `queqiao` node and its
+group entry from the profile, or remove/disable its profile-specific Extension
+Script. Nothing else on the host is modified: queqiao installs no routes, no
+TUN device, and no system proxy settings.

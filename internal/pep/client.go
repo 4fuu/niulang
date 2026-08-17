@@ -17,7 +17,6 @@ import (
 	wancongestion "github.com/bojieli/queqiao/internal/congestion"
 	"github.com/bojieli/queqiao/internal/limiter"
 	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/protocol"
 	"github.com/bojieli/queqiao/internal/session"
 	"github.com/bojieli/queqiao/internal/socks5"
@@ -840,18 +839,6 @@ func resetCode(payload []byte) session.ResetCode {
 		return 0
 	}
 	return session.ResetCode(payload[0])
-}
-
-// currentPathModel is the model for the uplink and peer this client is
-// currently using, or nil before a connection has been made.
-func (c *Client) currentPathModel() *pathmodel.PathModel {
-	c.quicMu.Lock()
-	conn := c.quicConn
-	c.quicMu.Unlock()
-	if conn == nil {
-		return nil
-	}
-	return pathmodel.Shared(peerKey(conn))
 }
 
 // fastOpenProven reports whether a fast open has been acknowledged on the

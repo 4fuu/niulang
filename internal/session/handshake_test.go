@@ -1,6 +1,8 @@
 package session
 
 import (
+	"encoding/binary"
+	"math"
 	"testing"
 	"time"
 )
@@ -76,5 +78,42 @@ func TestHelloOKAcceptsInterimExtendedEnvelope(t *testing.T) {
 	}
 	if got.Capabilities != CapabilityFastStreams {
 		t.Fatalf("interim capability = %#x, want %#x", got.Capabilities, CapabilityFastStreams)
+	}
+}
+
+func TestHandshakeRejectsTimestampsOutsideSignedUnixRange(t *testing.T) {
+	secret := []byte("a sufficiently long test secret")
+	now := time.Unix(1_700_000_000, 0)
+	hello, err := NewHello(secret, [16]byte{}, 0, HelloNew, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawHello := hello.MarshalBinary()
+	binary.BigEndian.PutUint64(rawHello[:8], math.MaxUint64)
+	if err := new(Hello).UnmarshalBinary(rawHello); err == nil {
+		t.Fatal("hello accepted a timestamp that would overflow int64")
+	}
+
+	ok, err := NewHelloOK(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawOK := ok.MarshalBinary()
+	binary.BigEndian.PutUint64(rawOK[:8], math.MaxUint64)
+	if err := new(HelloOK).UnmarshalBinary(rawOK); err == nil {
+		t.Fatal("hello acknowledgement accepted a timestamp that would overflow int64")
+	}
+}
+
+func TestTimestampSkewComparisonDoesNotOverflow(t *testing.T) {
+	const skew = int64(maxClockSkew / time.Second)
+	if timestampOutsideSkew(math.MaxInt64, math.MaxInt64, skew) {
+		t.Fatal("equal upper-bound timestamps were rejected")
+	}
+	if timestampOutsideSkew(math.MinInt64, math.MinInt64, skew) {
+		t.Fatal("equal lower-bound timestamps were rejected")
+	}
+	if !timestampOutsideSkew(math.MinInt64, math.MaxInt64, skew) {
+		t.Fatal("maximally separated timestamps were accepted")
 	}
 }

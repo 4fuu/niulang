@@ -139,7 +139,7 @@ bench --rtt 200 --rate 100 --loss 1 --bytes $((50 * 1024 * 1024)) --flows 1 --in
 
 if [[ -n "$json_dir" ]]; then
     (
-        cd "$json_dir"
+        cd "$json_dir" || exit
         report_files=(manifest.txt source-status.txt source.patch block-*.json)
         if [[ -f results.tsv ]]; then report_files+=(results.tsv); fi
         shasum -a 256 "${report_files[@]}" >SHA256SUMS

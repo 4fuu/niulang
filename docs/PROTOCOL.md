@@ -1,7 +1,17 @@
-# queqiao wire protocol (draft 1)
+# queqiao wire protocol 3
 
-This is a design document, not a compatibility guarantee. Wire versions must
-be negotiated explicitly before a release.
+This document defines the wire contract shipped by the v0.1 release line.
+Version 3 is the only wire version those builds accept. A peer with any other
+version is rejected on its first frame with an explicit local/peer version
+error. Optional features that do not change existing frame semantics are
+negotiated through authenticated capability bits.
+
+There is deliberately no downgrade to version 2: its bulk datagrams use a
+different code and accepting identical-looking version-2 frames would make
+data disappear silently. Patch releases may be upgraded one endpoint at a
+time only while they retain wire version 3. A future release that changes the
+wire version requires a coordinated client/server upgrade unless it explicitly
+implements and documents a multi-version transition.
 
 ## Session transport
 
@@ -28,12 +38,13 @@ not frames. A receiver acknowledges contiguous bytes plus selective ranges.
 Frame types are `HELLO`, `HELLO_OK`, `OPEN`, `OPEN_OK`, `DATA`, `ACK`,
 `CLOSE`, `RESET`, `PACKET`, `OPEN_FAST`, and `OPEN_JOIN_FAST`.
 
-Draft 1 removed three: `WINDOW`, `PING` and `PONG`. All three were specified
+Version 2 removed three: `WINDOW`, `PING` and `PONG`. All three were specified
 and none was ever sent. A frame type that exists only in this document is worse
 than no frame type, because it reads as a property the implementation has. What
 each was for, and what actually provides it, is in "Backpressure" and
-"Liveness" below. The version byte is 2, so a draft-0 peer fails closed rather
-than misreading a renumbered type.
+"Liveness" below. Version 3 retains that frame envelope but changes bulk
+datagrams from the version-2 block code to the sliding-window code. The version
+byte is therefore 3 even though the frame fields are otherwise unchanged.
 
 ### Pooled QUIC authentication
 
@@ -185,4 +196,5 @@ transport.
 - Credentials are never logged.
 - Error messages do not disclose whether arbitrary destinations are reachable.
 - Handshake, frame, flow, buffer, and reconnect limits are configurable.
-- Version negotiation must fail closed for unsupported versions.
+- Version checks must fail closed, before authentication or allocation, for
+  every unsupported version and must report the peer and local versions.

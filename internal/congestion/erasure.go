@@ -3,7 +3,6 @@ package congestion
 import (
 	"sort"
 	"sync/atomic"
-	"unsafe"
 
 	quiccongestion "github.com/apernet/quic-go/congestion"
 	"github.com/apernet/quic-go/monotime"
@@ -11,6 +10,8 @@ import (
 	"github.com/bojieli/queqiao/internal/lossmodel"
 	"github.com/bojieli/queqiao/internal/pathmodel"
 )
+
+var nextErasureMemberID atomic.Uint64
 
 // ErasureSender is BBR on a path that erases packets for reasons that have
 // nothing to do with congestion.
@@ -85,8 +86,9 @@ type ErasureSender struct {
 	// path is shared with every other lane to the same endpoint pair, or nil
 	// for a lane that is on its own. share is this lane's allowance of the
 	// endpoint's bottleneck in bytes per second, zero while it is unknown.
-	path  *pathmodel.PathModel
-	share atomic.Uint64
+	path   *pathmodel.PathModel
+	share  atomic.Uint64
+	member pathmodel.Member
 }
 
 type packetOutcome struct {
@@ -159,7 +161,8 @@ func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmo
 
 func newErasureSender(initialPacketSize quiccongestion.ByteCount) *ErasureSender {
 	e := &ErasureSender{
-		inner: NewTUICBBRSender(initialPacketSize),
+		inner:  NewTUICBBRSender(initialPacketSize),
+		member: pathmodel.Member(nextErasureMemberID.Add(1)),
 		// A reorder tolerance wide enough for QUIC's acknowledgement
 		// aggregation: packets are acked in batches, and a batch boundary must
 		// not read as a gap.
@@ -270,7 +273,7 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		// together, and the share is what stops their probes compounding. An
 		// untrusted local estimate contributes zero weight rather than diluting
 		// a floor another lane has already established.
-		state := e.path.Report(pathmodel.Member(e.id()), floor, floorSamples,
+		state := e.path.Report(e.id(), floor, floorSamples,
 			float64(e.inner.bandwidth()), e.inner.minRoundTrip())
 		floor = state.Floor
 		e.share.Store(uint64(state.Share))
@@ -431,12 +434,9 @@ func (e *ErasureSender) Telemetry() ControllerTelemetry {
 	return t
 }
 
-// id identifies this lane within its shared model. The pointer is stable for
-// the controller's lifetime and unique among live controllers, which is
-// exactly what membership needs.
-func (e *ErasureSender) id() uintptr {
-	return uintptr(unsafe.Pointer(e))
-}
+// id identifies this lane within its shared model. It avoids pointer-derived
+// identity so a report never exposes an address, even inside the process.
+func (e *ErasureSender) id() pathmodel.Member { return e.member }
 
 // Share is this lane's allowance of the endpoint pair's bottleneck in bytes
 // per second, or zero when it is deciding alone or the bottleneck is not yet

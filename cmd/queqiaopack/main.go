@@ -11,6 +11,8 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"debug/buildinfo"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +24,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 var defaultTargets = []target{
@@ -55,6 +59,72 @@ type archiveFile struct {
 	name string
 	mode int64
 	data []byte
+}
+
+type linkedModule struct {
+	Path           string
+	Version        string
+	Sum            string
+	ReplacePath    string
+	ReplaceVersion string
+	ReplaceSum     string
+	LicenseID      string
+	Dir            string
+}
+
+type moduleLocation struct {
+	Path string
+	Dir  string
+}
+
+type cdxBOM struct {
+	Schema       string          `json:"$schema"`
+	BOMFormat    string          `json:"bomFormat"`
+	SpecVersion  string          `json:"specVersion"`
+	SerialNumber string          `json:"serialNumber"`
+	Version      int             `json:"version"`
+	Metadata     cdxMetadata     `json:"metadata"`
+	Components   []cdxComponent  `json:"components,omitempty"`
+	Dependencies []cdxDependency `json:"dependencies,omitempty"`
+}
+
+type cdxMetadata struct {
+	Timestamp string       `json:"timestamp"`
+	Component cdxComponent `json:"component"`
+}
+
+type cdxComponent struct {
+	Type       string             `json:"type"`
+	BOMRef     string             `json:"bom-ref"`
+	Group      string             `json:"group,omitempty"`
+	Name       string             `json:"name"`
+	Version    string             `json:"version,omitempty"`
+	Hashes     []cdxHash          `json:"hashes,omitempty"`
+	Licenses   []cdxLicenseChoice `json:"licenses,omitempty"`
+	Properties []cdxProperty      `json:"properties,omitempty"`
+}
+
+type cdxHash struct {
+	Algorithm string `json:"alg"`
+	Content   string `json:"content"`
+}
+
+type cdxLicenseChoice struct {
+	License cdxLicense `json:"license"`
+}
+
+type cdxLicense struct {
+	ID string `json:"id"`
+}
+
+type cdxProperty struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type cdxDependency struct {
+	Ref       string   `json:"ref"`
+	DependsOn []string `json:"dependsOn"`
 }
 
 func main() {
@@ -147,13 +217,19 @@ func packageRelease(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	checksums := make(map[string][sha256.Size]byte, len(cfg.targets))
+	moduleDirs, err := listModuleDirs(ctx, repoRoot)
+	if err != nil {
+		return err
+	}
+	checksums := make(map[string][sha256.Size]byte, len(cfg.targets)*2)
 	for _, target := range cfg.targets {
-		archiveName, sum, err := buildTarget(ctx, repoRoot, tempDir, resultDir, cfg, target, documents)
+		artifacts, err := buildTarget(ctx, repoRoot, tempDir, resultDir, cfg, target, documents, moduleDirs)
 		if err != nil {
 			return err
 		}
-		checksums[archiveName] = sum
+		for name, sum := range artifacts {
+			checksums[name] = sum
+		}
 	}
 	if err := writeChecksums(filepath.Join(resultDir, "SHA256SUMS"), checksums); err != nil {
 		return err
@@ -161,11 +237,11 @@ func packageRelease(ctx context.Context, cfg config) error {
 	if err := os.Rename(resultDir, outputDir); err != nil {
 		return fmt.Errorf("publish package directory: %w", err)
 	}
-	fmt.Printf("wrote %d release archives and SHA256SUMS to %s\n", len(cfg.targets), outputDir)
+	fmt.Printf("wrote %d release archives, %d CycloneDX SBOMs, and SHA256SUMS to %s\n", len(cfg.targets), len(cfg.targets), outputDir)
 	return nil
 }
 
-func buildTarget(ctx context.Context, repoRoot, tempDir, resultDir string, cfg config, target target, documents []archiveFile) (string, [sha256.Size]byte, error) {
+func buildTarget(ctx context.Context, repoRoot, tempDir, resultDir string, cfg config, target target, documents []archiveFile, moduleDirs map[string]string) (map[string][sha256.Size]byte, error) {
 	packageBase := fmt.Sprintf("queqiaod_%s_%s_%s", cfg.version, target.goos, target.goarch)
 	binaryName := "queqiaod"
 	if target.goos == "windows" {
@@ -173,7 +249,7 @@ func buildTarget(ctx context.Context, repoRoot, tempDir, resultDir string, cfg c
 	}
 	buildDir := filepath.Join(tempDir, "build", target.goos+"-"+target.goarch)
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
-		return "", [sha256.Size]byte{}, err
+		return nil, err
 	}
 	binaryPath := filepath.Join(buildDir, binaryName)
 	ldflags := strings.Join([]string{
@@ -190,22 +266,36 @@ func buildTarget(ctx context.Context, repoRoot, tempDir, resultDir string, cfg c
 		"GOARCH":      target.goarch,
 	})
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", [sha256.Size]byte{}, fmt.Errorf("build %s: %w\n%s", target, err, output)
+		return nil, fmt.Errorf("build %s: %w\n%s", target, err, output)
 	}
 	binary, err := os.ReadFile(binaryPath)
 	if err != nil {
-		return "", [sha256.Size]byte{}, fmt.Errorf("read %s binary: %w", target, err)
+		return nil, fmt.Errorf("read %s binary: %w", target, err)
 	}
 	binarySum := sha256.Sum256(binary)
-	files := make([]archiveFile, 0, len(documents)+2)
+	modules, err := readLinkedModules(binaryPath, moduleDirs)
+	if err != nil {
+		return nil, fmt.Errorf("read %s linked modules: %w", target, err)
+	}
+	sbom, err := renderCycloneDX(cfg, target, binarySum, modules)
+	if err != nil {
+		return nil, fmt.Errorf("render %s SBOM: %w", target, err)
+	}
+	licenses, err := renderThirdPartyLicenses(modules)
+	if err != nil {
+		return nil, fmt.Errorf("render %s third-party licenses: %w", target, err)
+	}
+	files := make([]archiveFile, 0, len(documents)+4)
 	files = append(files, archiveFile{name: binaryName, mode: 0o755, data: binary})
 	files = append(files, documents...)
+	files = append(files, archiveFile{name: "SBOM.cdx.json", mode: 0o644, data: sbom})
+	files = append(files, archiveFile{name: "THIRD_PARTY_LICENSES.txt", mode: 0o644, data: licenses})
 	files = append(files, archiveFile{
 		name: "BUILDINFO",
 		mode: 0o644,
 		data: []byte(fmt.Sprintf(
-			"version=%s\ncommit=%s\nbuild_date=%s\ntarget=%s\ngo=%s\nbinary_sha256=%x\n",
-			cfg.version, cfg.commit, cfg.buildDate.Format(time.RFC3339), target, runtime.Version(), binarySum,
+			"version=%s\ncommit=%s\nbuild_date=%s\ntarget=%s\ngo=%s\nwire_protocol=%d\nbinary_sha256=%x\n",
+			cfg.version, cfg.commit, cfg.buildDate.Format(time.RFC3339), target, runtime.Version(), protocol.Version, binarySum,
 		)),
 	})
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
@@ -222,24 +312,40 @@ func buildTarget(ctx context.Context, repoRoot, tempDir, resultDir string, cfg c
 		err = writeTarGzip(archivePath, packageBase, files, cfg.buildDate)
 	}
 	if err != nil {
-		return "", [sha256.Size]byte{}, fmt.Errorf("archive %s: %w", target, err)
+		return nil, fmt.Errorf("archive %s: %w", target, err)
 	}
 	archive, err := os.ReadFile(archivePath)
 	if err != nil {
-		return "", [sha256.Size]byte{}, err
+		return nil, err
 	}
-	return archiveName, sha256.Sum256(archive), nil
+	sbomName := packageBase + ".cdx.json"
+	if err := os.WriteFile(filepath.Join(resultDir, sbomName), sbom, 0o644); err != nil {
+		return nil, fmt.Errorf("write %s: %w", sbomName, err)
+	}
+	return map[string][sha256.Size]byte{
+		archiveName: sha256.Sum256(archive),
+		sbomName:    sha256.Sum256(sbom),
+	}, nil
 }
 
 func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 	names := []string{
+		"CHANGELOG.md",
 		"LICENSE",
 		"README.md",
+		"SECURITY.md",
+		"THIRD_PARTY_NOTICES.md",
+		"docs/ARCHITECTURE.md",
 		"docs/DEPLOYING.md",
+		"docs/CREDENTIAL-ROTATION.md",
+		"docs/KNOWN-LIMITATIONS.md",
+		"docs/PROTOCOL.md",
 		"docs/RELEASING.md",
+		"docs/SECURITY-REVIEW.md",
 		"deploy/clash-queqiao.yaml",
 		"deploy/me.01.queqiao.client.plist",
 		"deploy/queqiaod.service",
+		"internal/congestion/NOTICE",
 	}
 	files := make([]archiveFile, 0, len(names))
 	for _, name := range names {
@@ -250,6 +356,171 @@ func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 		files = append(files, archiveFile{name: name, mode: 0o644, data: data})
 	}
 	return files, nil
+}
+
+func listModuleDirs(ctx context.Context, repoRoot string) (map[string]string, error) {
+	cmd := exec.CommandContext(ctx, "go", "list", "-m", "-json", "all")
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list module locations: %w", err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(output)))
+	dirs := make(map[string]string)
+	for decoder.More() {
+		var module moduleLocation
+		if err := decoder.Decode(&module); err != nil {
+			return nil, fmt.Errorf("decode module location: %w", err)
+		}
+		if module.Path != "" && module.Dir != "" {
+			dirs[module.Path] = module.Dir
+		}
+	}
+	return dirs, nil
+}
+
+func readLinkedModules(binaryPath string, moduleDirs map[string]string) ([]linkedModule, error) {
+	info, err := buildinfo.ReadFile(binaryPath)
+	if err != nil {
+		return nil, err
+	}
+	modules := make([]linkedModule, 0, len(info.Deps))
+	for _, dependency := range info.Deps {
+		module := linkedModule{
+			Path: dependency.Path, Version: dependency.Version, Sum: dependency.Sum,
+			LicenseID: moduleLicenseID(dependency.Path), Dir: moduleDirs[dependency.Path],
+		}
+		if dependency.Replace != nil {
+			module.ReplacePath = dependency.Replace.Path
+			module.ReplaceVersion = dependency.Replace.Version
+			module.ReplaceSum = dependency.Replace.Sum
+			if replacementDir := moduleDirs[dependency.Replace.Path]; replacementDir != "" {
+				module.Dir = replacementDir
+			}
+			module.LicenseID = moduleLicenseID(dependency.Replace.Path)
+		}
+		if module.Dir == "" {
+			return nil, fmt.Errorf("linked module %s has no source directory", dependency.Path)
+		}
+		if module.LicenseID == "NOASSERTION" {
+			return nil, fmt.Errorf("linked module %s has no reviewed SPDX license classification", dependency.Path)
+		}
+		modules = append(modules, module)
+	}
+	sort.Slice(modules, func(i, j int) bool { return modules[i].Path < modules[j].Path })
+	return modules, nil
+}
+
+func moduleLicenseID(modulePath string) string {
+	switch modulePath {
+	case "github.com/andybalholm/brotli", "github.com/apernet/quic-go":
+		return "MIT"
+	case "github.com/klauspost/compress", "github.com/refraction-networking/utls",
+		"golang.org/x/crypto", "golang.org/x/net", "golang.org/x/sys":
+		return "BSD-3-Clause"
+	default:
+		return "NOASSERTION"
+	}
+}
+
+func renderCycloneDX(cfg config, target target, binarySum [sha256.Size]byte, modules []linkedModule) ([]byte, error) {
+	rootRef := fmt.Sprintf("queqiaod@%s:%s", cfg.version, target)
+	root := cdxComponent{
+		Type: "application", BOMRef: rootRef, Group: "github.com/bojieli/queqiao",
+		Name: "queqiaod", Version: cfg.version,
+		Hashes:   []cdxHash{{Algorithm: "SHA-256", Content: fmt.Sprintf("%x", binarySum)}},
+		Licenses: []cdxLicenseChoice{{License: cdxLicense{ID: "MIT"}}},
+		Properties: []cdxProperty{
+			{Name: "queqiao:commit", Value: cfg.commit},
+			{Name: "queqiao:target", Value: target.String()},
+			{Name: "queqiao:wire-protocol", Value: fmt.Sprint(protocol.Version)},
+			{Name: "queqiao:go-version", Value: runtime.Version()},
+		},
+	}
+	components := make([]cdxComponent, 0, len(modules))
+	refs := make([]string, 0, len(modules))
+	for _, module := range modules {
+		ref := module.Path + "@" + module.Version
+		properties := []cdxProperty{}
+		if module.Sum != "" {
+			properties = append(properties, cdxProperty{Name: "golang:module-sum", Value: module.Sum})
+		}
+		if module.ReplacePath != "" {
+			properties = append(properties,
+				cdxProperty{Name: "golang:replace-path", Value: module.ReplacePath},
+				cdxProperty{Name: "golang:replace-version", Value: module.ReplaceVersion},
+			)
+			if module.ReplaceSum != "" {
+				properties = append(properties, cdxProperty{Name: "golang:replace-sum", Value: module.ReplaceSum})
+			}
+		}
+		component := cdxComponent{
+			Type: "library", BOMRef: ref, Name: module.Path, Version: module.Version,
+			Properties: properties,
+		}
+		if module.LicenseID != "NOASSERTION" {
+			component.Licenses = []cdxLicenseChoice{{License: cdxLicense{ID: module.LicenseID}}}
+		}
+		components = append(components, component)
+		refs = append(refs, ref)
+	}
+	serialInput := append([]byte("queqiao/cyclonedx/v1\x00"+cfg.version+"\x00"+cfg.commit+"\x00"+target.String()+"\x00"), binarySum[:]...)
+	serialHash := sha256.Sum256(serialInput)
+	serialHash[6] = serialHash[6]&0x0f | 0x80 // deterministic UUID version 8
+	serialHash[8] = serialHash[8]&0x3f | 0x80
+	serial := fmt.Sprintf("urn:uuid:%x-%x-%x-%x-%x", serialHash[0:4], serialHash[4:6], serialHash[6:8], serialHash[8:10], serialHash[10:16])
+	bom := cdxBOM{
+		Schema:    "http://cyclonedx.org/schema/bom-1.5.schema.json",
+		BOMFormat: "CycloneDX", SpecVersion: "1.5", SerialNumber: serial, Version: 1,
+		Metadata:     cdxMetadata{Timestamp: cfg.buildDate.Format(time.RFC3339), Component: root},
+		Components:   components,
+		Dependencies: []cdxDependency{{Ref: rootRef, DependsOn: refs}},
+	}
+	data, err := json.MarshalIndent(bom, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func renderThirdPartyLicenses(modules []linkedModule) ([]byte, error) {
+	var output strings.Builder
+	output.WriteString("QUEQIAO THIRD-PARTY LICENSES\n\n")
+	output.WriteString("Generated from the exact modules linked into this binary.\n")
+	for _, module := range modules {
+		entries, err := os.ReadDir(module.Dir)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", module.Path, err)
+		}
+		var names []string
+		for _, entry := range entries {
+			upper := strings.ToUpper(entry.Name())
+			if !entry.IsDir() && (strings.HasPrefix(upper, "LICENSE") || strings.HasPrefix(upper, "COPYING") || strings.HasPrefix(upper, "NOTICE")) {
+				names = append(names, entry.Name())
+			}
+		}
+		sort.Strings(names)
+		if len(names) == 0 {
+			return nil, fmt.Errorf("linked module %s has no root license file", module.Path)
+		}
+		output.WriteString("\n================================================================\n")
+		fmt.Fprintf(&output, "%s %s\nSPDX license: %s\n", module.Path, module.Version, module.LicenseID)
+		if module.ReplacePath != "" {
+			fmt.Fprintf(&output, "Resolved replacement: %s %s\n", module.ReplacePath, module.ReplaceVersion)
+		}
+		for _, name := range names {
+			license, err := os.ReadFile(filepath.Join(module.Dir, name))
+			if err != nil {
+				return nil, fmt.Errorf("read %s %s: %w", module.Path, name, err)
+			}
+			fmt.Fprintf(&output, "\n--- %s ---\n", name)
+			output.Write(license)
+			if len(license) == 0 || license[len(license)-1] != '\n' {
+				output.WriteByte('\n')
+			}
+		}
+	}
+	return []byte(output.String()), nil
 }
 
 func writeTarGzip(path, root string, files []archiveFile, modTime time.Time) (returnErr error) {
@@ -304,7 +575,7 @@ func writeZip(path, root string, files []archiveFile, modTime time.Time) (return
 	for _, entry := range files {
 		header := &zip.FileHeader{Name: root + "/" + entry.name, Method: zip.Deflate}
 		header.SetMode(os.FileMode(entry.mode))
-		header.SetModTime(modTime)
+		header.Modified = modTime
 		writer, err := zw.CreateHeader(header)
 		if err != nil {
 			return err

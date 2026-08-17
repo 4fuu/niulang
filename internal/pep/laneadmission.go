@@ -54,16 +54,9 @@ func (f *multipathFlow) laneByID(laneID uint64) *mpLane {
 
 // sampleLaneCongestion reads each lane's transport for the telemetry the path
 // model and the lane trace are built from.
-//
-// Loss is read as a counter rather than an event because that is what QUIC
-// exposes: any increase since the last sample is a congestion episode, and the
-// controller's own per-lane rate limit collapses a burst of losses into one
-// decrease. Reading it on a timer rather than hooking the transport keeps this
-// dependency-free enough that a TCP rescue lane needs no special case.
 func (f *multipathFlow) sampleLaneCongestion(ctx context.Context) {
 	ticker := time.NewTicker(laneSampleInterval)
 	defer ticker.Stop()
-	lost := make(map[uint64]uint64)
 	for {
 		select {
 		case <-ctx.Done():
@@ -72,25 +65,13 @@ func (f *multipathFlow) sampleLaneCongestion(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		seen := make(map[uint64]bool)
 		for _, lane := range f.healthyLanes() {
-			seen[lane.id] = true
 			provider, ok := lane.fc.transport().(laneStatsProvider)
 			if !ok {
 				continue
 			}
 			stats := provider.transportStats()
-			rtt := stats.smoothedRTT
-			if rtt <= 0 {
-				rtt = stats.latestRTT
-			}
-			lost[lane.id] = stats.packetsLost
 			traceLane(f, lane.id, stats)
-		}
-		for id := range lost {
-			if !seen[id] {
-				delete(lost, id)
-			}
 		}
 	}
 }

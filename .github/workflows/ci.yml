@@ -1,6 +1,6 @@
 # What every push has to satisfy. Kept cheap on purpose: this repository is
-# private, so Actions minutes are billed, and the expensive campaigns live in
-# deep.yml where they run on a schedule instead of on every commit.
+# intentionally small; the expensive campaigns live in deep.yml where they run
+# on a schedule instead of on every commit.
 name: ci
 
 on:
@@ -34,8 +34,8 @@ jobs:
           - {os: windows, arch: amd64}
           - {os: windows, arch: arm64}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - run: go build ./...
@@ -46,8 +46,8 @@ jobs:
   vet:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - run: go vet ./...
@@ -58,6 +58,25 @@ jobs:
             echo "not gofmt'd:"; echo "$unformatted"; exit 1
           fi
 
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -checks=all,-U1000 ./...
+      - name: Gosec reviewed baseline
+        run: |
+          set +e
+          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
+            -fmt json -out gosec.json ./...
+          scanner_status=$?
+          set -e
+          test "$scanner_status" -eq 0 || test "$scanner_status" -eq 1
+          ./scripts/check_gosec.py gosec.json .
+
   # -short skips the tests that bring QUIC up across an emulated 300 ms
   # erasure path. Those are the slowest and the most timing-dependent, and a
   # two-core hosted runner is the worst place to judge them; deep.yml runs
@@ -65,13 +84,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - run: go test -short -timeout 20m ./...
       - name: live probe helper tests
-        run: python3 -m unittest scripts/test_udp_association_check.py
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: credential generator smoke test
+        run: ./scripts/test_generate_credentials.sh
 
   # Exercise the actual release path, including embedded version metadata and
   # deterministic archive creation. One target is enough here; release.yml
@@ -79,8 +100,8 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: package smoke test
@@ -92,6 +113,9 @@ jobs:
             --output dist
           cd dist
           sha256sum -c SHA256SUMS
+          cd ..
+          ./scripts/validate_release.py dist
+          cd dist
           tar -xzf queqiaod_v0.0.0-ci_linux_amd64.tar.gz
           ./queqiaod_v0.0.0-ci_linux_amd64/queqiaod --version |
             grep -F "queqiaod v0.0.0-ci commit=${GITHUB_SHA}"

@@ -102,6 +102,85 @@ def encode_dns_name(name):
     return bytes(encoded)
 
 
+def decode_dns_name(data, offset):
+    """Decode one possibly-compressed DNS name and return raw lowercase labels."""
+    labels = []
+    resume = None
+    visited = set()
+    encoded_length = 1
+    while True:
+        if offset >= len(data):
+            raise ValueError("truncated DNS name")
+        length = data[offset]
+        if length & 0xC0 == 0xC0:
+            if offset + 1 >= len(data):
+                raise ValueError("truncated DNS compression pointer")
+            pointer = ((length & 0x3F) << 8) | data[offset + 1]
+            if pointer >= len(data) or pointer in visited:
+                raise ValueError("invalid DNS compression pointer")
+            visited.add(pointer)
+            if resume is None:
+                resume = offset + 2
+            offset = pointer
+            continue
+        if length & 0xC0:
+            raise ValueError("invalid DNS label encoding")
+        offset += 1
+        if length == 0:
+            return b".".join(labels).lower(), resume if resume is not None else offset
+        if length > 63 or offset + length > len(data):
+            raise ValueError("truncated DNS label")
+        encoded_length += length + 1
+        if encoded_length > 255:
+            raise ValueError("DNS name exceeds 255 bytes")
+        labels.append(data[offset : offset + length])
+        offset += length
+
+
+def canonical_dns_name(name):
+    encoded = encode_dns_name(name)
+    decoded, consumed = decode_dns_name(encoded, 0)
+    if consumed != len(encoded):
+        raise ValueError("invalid encoded DNS name")
+    return decoded
+
+
+def validate_dns_response(data, transaction, expected_name=None, expected_type=1, expected_class=1):
+    if len(data) < 12:
+        raise ValueError("truncated DNS reply")
+    reply_transaction, flags, questions, answers, _, _ = struct.unpack("!HHHHHH", data[:12])
+    if reply_transaction != transaction:
+        raise ValueError("DNS transaction does not match")
+    if not flags & 0x8000:
+        raise ValueError("DNS reply flag is not set")
+    if flags & 0x7800:
+        raise ValueError("DNS reply has a non-query opcode")
+    if flags & 0x0200:
+        raise ValueError("DNS reply is truncated")
+    if flags & 0x000F:
+        raise ValueError(f"DNS reply has error code {flags & 0x000F}")
+    if questions != 1 or answers < 1:
+        raise ValueError("DNS reply does not contain one question and an answer")
+    question_name, offset = decode_dns_name(data, 12)
+    if offset + 4 > len(data):
+        raise ValueError("truncated DNS question")
+    question_type, question_class = struct.unpack("!HH", data[offset : offset + 4])
+    offset += 4
+    if expected_name is not None and question_name != canonical_dns_name(expected_name):
+        raise ValueError("DNS reply question name does not match")
+    if question_type != expected_type or question_class != expected_class:
+        raise ValueError("DNS reply question type or class does not match")
+    for _ in range(answers):
+        _, offset = decode_dns_name(data, offset)
+        if offset + 10 > len(data):
+            raise ValueError("truncated DNS answer")
+        _, _, _, data_length = struct.unpack("!HHIH", data[offset : offset + 10])
+        offset += 10
+        if offset + data_length > len(data):
+            raise ValueError("truncated DNS answer data")
+        offset += data_length
+
+
 def open_association(endpoint, timeout):
     control = socket.create_connection(endpoint, timeout)
     control.settimeout(timeout)
@@ -211,8 +290,7 @@ def main(arguments=None):
                         if time.monotonic() >= deadline:
                             raise TimeoutError("timed out after stale DNS replies")
                         continue
-                    if not dns_reply[2] & 0x80:
-                        raise ValueError("DNS reply flag is not set")
+                    validate_dns_response(dns_reply, transaction, options.name)
                     status, size = "ok", len(dns_reply)
                     successes += 1
                     break

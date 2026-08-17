@@ -120,6 +120,19 @@ type Frame struct {
 	Payload []byte
 }
 
+// UnsupportedVersionError identifies a peer that speaks a different wire
+// protocol. Keep this distinct from malformed headers: operators need to know
+// that a coordinated client/server upgrade is required, rather than chase a
+// network or credential failure.
+type UnsupportedVersionError struct {
+	Peer  byte
+	Local byte
+}
+
+func (e UnsupportedVersionError) Error() string {
+	return fmt.Sprintf("unsupported wire version %d (this build speaks %d)", e.Peer, e.Local)
+}
+
 func reserveControlFlagValid(t Type, flags uint16) bool {
 	return flags&FlagReserveControl == 0 || t == TypeOpen || t == TypeOpenFast
 }
@@ -230,6 +243,9 @@ func DecodeHeader(src []byte, maxPayload uint32) (Header, error) {
 	if src[0] != Magic0 || src[1] != Magic1 {
 		return Header{}, errors.New("invalid frame magic")
 	}
+	if src[2] != Version {
+		return Header{}, UnsupportedVersionError{Peer: src[2], Local: Version}
+	}
 	h := Header{
 		Version: src[2], Type: Type(src[3]), Flags: binary.BigEndian.Uint16(src[4:6]),
 		FlowID: binary.BigEndian.Uint64(src[22:30]), Sequence: binary.BigEndian.Uint64(src[30:38]),
@@ -279,7 +295,7 @@ func ParseFrame(b []byte, maxPayload uint32) (Frame, error) {
 		return Frame{}, err
 	}
 	rest := b[HeaderSize:]
-	if uint32(len(rest)) != h.PayloadLen {
+	if uint64(len(rest)) != uint64(h.PayloadLen) {
 		return Frame{}, fmt.Errorf("frame payload is %d bytes, header declares %d", len(rest), h.PayloadLen)
 	}
 	payload := make([]byte, len(rest))

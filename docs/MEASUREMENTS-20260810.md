@@ -1,11 +1,11 @@
 # Real-path measurements — 2026-08-10
 
 These measurements were run from the China client host to the fixed egress
-`icourses-dev` (`23.135.236.244:12443`, TLS SNI `icourses-dev.01.me`). This
+`<EGRESS-HOST>` (`<EGRESS-IP>:12443`, TLS SNI `<EGRESS-SNI>`). This
 document contains results from more than one measurement window. The earlier
-pilot sections used the then-valid physical source address `192.168.3.66`;
+pilot sections used the then-valid physical source address `<CLIENT-LAN-IP>`;
 the final matched TUIC/QUEQIAO campaign and the UDP smoke test used the current
-physical source address `172.20.10.2`, with the Clash TUN route excluded from
+physical source address `<TETHER-CLIENT-IP>`, with the Clash TUN route excluded from
 the outer connection. The existing Xray, sing-box, Cloudflare, Nginx,
 WireGuard, and Clash configurations were not modified.
 
@@ -264,7 +264,7 @@ the deployed address-resolver revision). The current service is
 `55363f9` (`queqiaod dev-55363f9`, remote binary SHA-256
 `0de7071fee1601d8b28ffaebe7b6c902b5b70d99b3d088ecfb2342f7a5949113`); the
 transport code is unchanged between those two revisions. The local outer
-socket was explicitly bound to `172.20.10.2`. These trials are a new,
+socket was explicitly bound to `<TETHER-CLIENT-IP>`. These trials are a new,
 matched time window and must not be mixed with the older pilot numbers above.
 
 The workload was the exact 10 MiB CacheFly object
@@ -303,9 +303,9 @@ queqiao_lane_replacements_total 0
 ```
 
 For the final smoke the client used `--local-address auto`; it selected the
-then-current physical `172.20.10.2` and completed over QUIC with
+then-current physical `<TETHER-CLIENT-IP>` and completed over QUIC with
 `queqiao_fallbacks_total 0`. Earlier in the same window, a fixed address became
-invalid when DHCP moved the host to `172.20.10.4`, producing
+invalid when DHCP moved the host to `<TETHER-PEER-IP>`, producing
 `bind: can't assign requested address`; this is the operational failure that
 the automatic resolver is intended to prevent. If multiple physical IPv4
 addresses are active, configure `if:NAME` or a literal address. The production
@@ -384,7 +384,7 @@ replacements (the counters also include the immediately preceding UDP smoke).
 This is consistent with the project’s release decision: the bounded rescue
 kept several flows complete, but tail reliability is not yet a production
 guarantee. The host’s DHCP address changed during the broader work between
-`172.20.10.2` and `172.20.10.4`; when the configured `--local-address` is not
+`<TETHER-CLIENT-IP>` and `<TETHER-PEER-IP>`; when the configured `--local-address` is not
 present, every outer dial fails locally with `bind: can't assign requested
 address`. A production client must discover the physical egress binding or
 receive a configuration update on DHCP change rather than silently retaining
@@ -482,7 +482,7 @@ multi-path campaigns remain release gates.
 
 After the final-ACK cleanup fix (`b053b96`), a fresh isolated Linux/amd64
 build was installed as `/usr/local/bin/queqiaod-b053b96` and tested on the
-temporary QUIC listener `23.135.236.244:12444`. The live
+temporary QUIC listener `<EGRESS-IP>:12444`. The live
 `queqiaod-dev.service` on `:12443`, TUIC listener, Xray, sing-box, Cloudflare,
 Nginx, WireGuard, and Clash profile were not changed. The client was bound
 with `--local-address auto`; all trials used one physical China-to-US path
@@ -550,7 +550,7 @@ evidence, not a performance claim.
 ## Dedicated US-side upload sink
 
 To avoid public-service shaping and application limits, a temporary bounded
-HTTP POST sink was run on `23.135.236.244:28080`. It accepted a fixed number
+HTTP POST sink was run on `<EGRESS-IP>:28080`. It accepted a fixed number
 of requests, required an exact `Content-Length`, and was stopped immediately
 after each block; the port was verified closed afterward. Each request sent
 exactly 10,485,760 zero bytes from China through one QUIC lane.
@@ -655,7 +655,7 @@ without changing `queqiaod-dev.service` or its `:12443` listener. The isolated
 servers used the `70d431a` Linux/amd64 binary (SHA-256
 `5cfaa72031cecc018898aa9de0aee511448630bd79b89c5c9819ac55c929ece3`) on
 `:12446` with `adaptive` and `:12447` with `bbr-tuic`. The client used a
-physical source binding (`--local-address auto`), SNI `icourses-dev.01.me`,
+physical source binding (`--local-address auto`), SNI `<EGRESS-SNI>`,
 and the fixed public address. All HTTP results below preserve the exact-body
 and curl-exit completion rule; a 200 response with a timeout is incomplete.
 
