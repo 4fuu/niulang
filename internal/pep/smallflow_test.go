@@ -387,6 +387,12 @@ func TestAShortFlowCostsARoundTrip(t *testing.T) {
 	})
 	// The path has to be known before the question is asked: a flow on an
 	// unmeasured path is carried uncoded, which is a different experiment.
+	// Discovery and the prewarm have their own integration test. Seed this
+	// timing test explicitly so scheduler speed under -race cannot decide how
+	// many of its measured flows run before the asynchronous prewarm finishes.
+	loopback := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
+	pathmodel.Shared(pathKey(loopback, loopback)).Report(99, path.LossRate, 5000, 0, 0)
+	// Warm the shared transport independently of the path measurement.
 	warm := dialWithRetries(t, socks, destination, 3)
 	request := make([]byte, 16)
 	reply := make([]byte, replyBytes)
