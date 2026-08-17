@@ -144,6 +144,9 @@ type Client struct {
 	// openFlowForTest stands in for one flow-open attempt, so the retry policy
 	// can be tested without a network that loses things on demand.
 	openFlowForTest func() (*openedFlow, error)
+	// dialPipelinedFlowForTest isolates the cold-flow transport race from the
+	// network in state-machine tests.
+	dialPipelinedFlowForTest func(context.Context, TransportKind, []byte) (*openedFlow, error)
 
 	quicPoolFast bool
 	// quicPoolFastProven records that a fast open on this connection has been
@@ -517,25 +520,26 @@ func (c *Client) openInitialFlow(ctx context.Context, destination string) (*open
 		return nil, err
 	}
 	if c.cfg.Transport == TransportTCP {
-		return c.dialPipelinedFlow(ctx, TransportTCP, payload)
+		return c.dialPipelinedCandidate(ctx, TransportTCP, payload)
 	}
 	if c.cfg.Transport == TransportQUIC {
-		flow, err := c.dialPipelinedFlow(ctx, TransportQUIC, payload)
-		if err != nil {
-			c.udpHealth.failure(time.Now())
-			return nil, err
-		}
-		c.udpHealth.success()
-		return flow, nil
+		return c.dialPipelinedCandidate(ctx, TransportQUIC, payload)
 	}
 	if c.cfg.Transport != TransportAuto {
 		return nil, fmt.Errorf("unsupported transport %q", c.cfg.Transport)
 	}
 	if !c.udpHealth.allow(time.Now()) {
 		c.metrics.Fallback()
-		return c.dialPipelinedFlow(ctx, TransportTCP, payload)
+		return c.dialPipelinedCandidate(ctx, TransportTCP, payload)
 	}
 	return c.racePipelinedFlow(ctx, payload)
+}
+
+func (c *Client) dialPipelinedCandidate(ctx context.Context, kind TransportKind, payload []byte) (*openedFlow, error) {
+	if c.dialPipelinedFlowForTest != nil {
+		return c.dialPipelinedFlowForTest(ctx, kind, payload)
+	}
+	return c.dialPipelinedFlow(ctx, kind, payload)
 }
 
 func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payload []byte) (*openedFlow, error) {
@@ -580,14 +584,14 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 		return fail(fmt.Errorf("read pipelined hello acknowledgement: %w", err))
 	}
 	if helloAck.Header.Type == protocol.TypeReset {
-		return fail(errors.New("server rejected session authentication"))
+		return fail(peerResponse(errors.New("server rejected session authentication")))
 	}
 	if helloAck.Header.Type != protocol.TypeHelloOK || helloAck.Header.SessionID != sessionID || helloAck.Header.FlowID != 0 {
-		return fail(errors.New("invalid pipelined session acknowledgement"))
+		return fail(peerResponse(errors.New("invalid pipelined session acknowledgement")))
 	}
 	var helloOK session.HelloOK
 	if err := helloOK.UnmarshalBinary(helloAck.Payload); err != nil {
-		return fail(fmt.Errorf("decode pipelined session acknowledgement: %w", err))
+		return fail(peerResponse(fmt.Errorf("decode pipelined session acknowledgement: %w", err)))
 	}
 	c.peerAckRanges.Store(helloOK.Capabilities&session.CapabilityAckRanges != 0)
 	c.peerUDPResume.Store(helloOK.Capabilities&session.CapabilityUDPResume != 0)
@@ -596,13 +600,13 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 		return fail(fmt.Errorf("read pipelined flow acknowledgement: %w", err))
 	}
 	if openAck.Header.SessionID != sessionID || openAck.Header.FlowID != flowID {
-		return fail(errors.New("pipelined flow acknowledgement identity mismatch"))
+		return fail(peerResponse(errors.New("pipelined flow acknowledgement identity mismatch")))
 	}
 	if openAck.Header.Type == protocol.TypeReset {
-		return fail(errDestinationUnavailable)
+		return fail(peerResponse(errDestinationUnavailable))
 	}
 	if openAck.Header.Type != protocol.TypeOpenOK || len(openAck.Payload) != 0 {
-		return fail(errors.New("invalid pipelined flow acknowledgement"))
+		return fail(peerResponse(errors.New("invalid pipelined flow acknowledgement")))
 	}
 	_ = lane.outer.SetDeadline(time.Time{})
 	return &openedFlow{fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID, laneID: lane.laneID, kind: lane.kind}, nil
@@ -613,20 +617,28 @@ func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*opened
 	defer cancel()
 	quicResult := make(chan openedFlowResult, 1)
 	go func() {
-		flow, err := c.dialPipelinedFlow(raceCtx, TransportQUIC, payload)
+		flow, err := c.dialPipelinedCandidate(raceCtx, TransportQUIC, payload)
 		quicResult <- openedFlowResult{flow: flow, err: err}
 	}()
 	timer := time.NewTimer(c.cfg.FallbackDelay)
 	defer timer.Stop()
 	select {
 	case result := <-quicResult:
-		if result.err == nil {
-			c.udpHealth.success()
-			return result.flow, nil
+		quicEvidence := classifyQUICPathEvidence(result.err)
+		if quicEvidence == quicPathAvailable {
+			// A peer response proves the QUIC path worked even when the
+			// destination or protocol operation itself was refused.
+			c.udpHealth.observe(quicEvidence, time.Now())
+			return result.flow, result.err
 		}
-		c.udpHealth.failure(time.Now())
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		tcpFlow, tcpErr := c.dialPipelinedCandidate(ctx, TransportTCP, payload)
+		tcpEvidence := classifyQUICPathEvidence(tcpErr)
+		c.udpHealth.observe(differentialQUICPathEvidence(false, quicEvidence, tcpEvidence), time.Now())
 		c.metrics.Fallback()
-		return c.dialPipelinedFlow(ctx, TransportTCP, payload)
+		return tcpFlow, tcpErr
 	case <-timer.C:
 	case <-ctx.Done():
 		closeLateFlow(quicResult)
@@ -634,29 +646,32 @@ func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*opened
 	}
 	tcpResult := make(chan openedFlowResult, 1)
 	go func() {
-		flow, err := c.dialPipelinedFlow(raceCtx, TransportTCP, payload)
+		flow, err := c.dialPipelinedCandidate(raceCtx, TransportTCP, payload)
 		tcpResult <- openedFlowResult{flow: flow, err: err}
 	}()
 	var quicErr, tcpErr error
+	quicEvidence := quicPathNeutral
 	for quicResult != nil || tcpResult != nil {
 		select {
 		case result := <-quicResult:
 			quicResult = nil
-			if result.err == nil {
-				c.udpHealth.success()
+			quicEvidence = classifyQUICPathEvidence(result.err)
+			if quicEvidence == quicPathAvailable {
+				c.udpHealth.observe(quicEvidence, time.Now())
 				cancel()
 				closeLateFlow(tcpResult)
-				return result.flow, nil
+				return result.flow, result.err
 			}
 			quicErr = result.err
-			c.udpHealth.failure(time.Now())
 		case result := <-tcpResult:
 			tcpResult = nil
-			if result.err == nil {
+			tcpEvidence := classifyQUICPathEvidence(result.err)
+			if tcpEvidence == quicPathAvailable {
+				c.udpHealth.observe(differentialQUICPathEvidence(quicResult != nil, quicEvidence, tcpEvidence), time.Now())
 				c.metrics.Fallback()
 				cancel()
 				closeLateFlow(quicResult)
-				return result.flow, nil
+				return result.flow, result.err
 			}
 			tcpErr = result.err
 		case <-ctx.Done():
@@ -717,7 +732,7 @@ func (c *Client) openFlowWithRetries(ctx context.Context, destination string) (*
 			}
 			return flow, nil
 		}
-		if errors.Is(err, errDestinationUnavailable) || ctx.Err() != nil {
+		if peerResponded(err) || ctx.Err() != nil {
 			return nil, err
 		}
 		c.cfg.Logger.Debug("flow open attempt failed", "attempt", attempt, "error", err)
@@ -795,11 +810,11 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 	// other trades certainty for latency -- and they were the same flag.
 	if lane.helloPending && response.Header.Type == protocol.TypeHelloOK && response.Header.FlowID == 0 {
 		if response.Header.SessionID != lane.sessionID {
-			return fail(errors.New("session acknowledgement identity mismatch"))
+			return fail(peerResponse(errors.New("session acknowledgement identity mismatch")))
 		}
 		var acknowledged session.HelloOK
 		if err := acknowledged.UnmarshalBinary(response.Payload); err != nil {
-			return fail(fmt.Errorf("decode session acknowledgement: %w", err))
+			return fail(peerResponse(fmt.Errorf("decode session acknowledgement: %w", err)))
 		}
 		if lane.onHelloOK != nil {
 			lane.onHelloOK(acknowledged)
@@ -810,7 +825,7 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 		}
 	}
 	if response.Header.SessionID != lane.sessionID || response.Header.FlowID != flowID {
-		return fail(errors.New("flow open acknowledgement identity mismatch"))
+		return fail(peerResponse(errors.New("flow open acknowledgement identity mismatch")))
 	}
 	if response.Header.Type == protocol.TypeReset {
 		if !fastRetry && lane.fastOpen && resetCode(response.Payload) == session.ResetProtocol {
@@ -818,10 +833,10 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, fastRetry
 			_ = lane.fc.Close()
 			return c.openFlowMode(ctx, destination, true)
 		}
-		return fail(errDestinationUnavailable)
+		return fail(peerResponse(errDestinationUnavailable))
 	}
 	if response.Header.Type != protocol.TypeOpenOK || len(response.Payload) != 0 {
-		return fail(errors.New("invalid flow open acknowledgement"))
+		return fail(peerResponse(errors.New("invalid flow open acknowledgement")))
 	}
 	if lane.fastOpen {
 		c.markFastOpenProven()
@@ -1482,7 +1497,6 @@ func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID
 							c.cfg.Logger.Debug("peer refused lane join; flow stays on the shared connection", "lane", result.id, "error", result.err)
 							break
 						}
-						c.udpHealth.failure(time.Now())
 						c.cfg.Logger.Warn("bulk isolation lane unavailable", "lane", result.id, "error", result.err)
 						if isolationBackoff == 0 {
 							isolationBackoff = minLaneProbeBackoff
@@ -1678,11 +1692,11 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 	}
 	kind := TransportQUIC
 	if c.cfg.Transport == TransportAuto {
-		// Losing every QUIC lane is a stronger signal than a failed probe.
-		// Install TCP immediately so recovery fits inside the bounded grace
-		// period; later new flows may probe UDP again through the health race.
+		// Install TCP immediately so recovery fits inside the bounded grace.
+		// The connection ending is not global path evidence: the peer may have
+		// restarted or closed it, so later new flows still perform the normal
+		// comparative transport race.
 		kind = TransportTCP
-		c.udpHealth.failure(time.Now())
 	}
 	lane, err := c.openJoinLane(recoveryCtx, kind, sessionID, flowID, laneID)
 	if err != nil {
@@ -1690,9 +1704,6 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 			return context.Canceled
 		}
 		return err
-	}
-	if kind == TransportQUIC {
-		c.udpHealth.success()
 	}
 	if err := flow.addLane(lane); err != nil {
 		_ = lane.fc.Close()
@@ -1707,13 +1718,7 @@ func (c *Client) chooseAuthenticatedLane(ctx context.Context) (*authenticatedLan
 	case TransportTCP:
 		return c.dialAuthenticatedLane(ctx, TransportTCP)
 	case TransportQUIC:
-		lane, err := c.dialAuthenticatedLane(ctx, TransportQUIC)
-		if err != nil {
-			c.udpHealth.failure(time.Now())
-			return nil, err
-		}
-		c.udpHealth.success()
-		return lane, nil
+		return c.dialAuthenticatedLane(ctx, TransportQUIC)
 	case TransportAuto:
 		if !c.udpHealth.allow(time.Now()) {
 			c.metrics.Fallback()
@@ -1743,12 +1748,20 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 	select {
 	case result := <-quicResult:
 		if result.err == nil {
-			c.udpHealth.success()
+			c.udpHealth.observe(quicPathAvailable, time.Now())
 			return result.lane, nil
 		}
-		c.udpHealth.failure(time.Now())
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		tcpLane, tcpErr := c.dialAuthenticatedLane(ctx, TransportTCP)
+		tcpEvidence := quicPathNeutral
+		if tcpErr == nil {
+			tcpEvidence = quicPathAvailable
+		}
+		c.udpHealth.observe(differentialQUICPathEvidence(false, classifyQUICPathEvidence(result.err), tcpEvidence), time.Now())
 		c.metrics.Fallback()
-		return c.dialAuthenticatedLane(ctx, TransportTCP)
+		return tcpLane, tcpErr
 	case <-timer.C:
 	case <-ctx.Done():
 		closeLateLane(quicResult)
@@ -1761,21 +1774,23 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 		tcpResult <- laneResult{lane: lane, err: err}
 	}()
 	var quicErr, tcpErr error
+	quicEvidence := quicPathNeutral
 	for quicResult != nil || tcpResult != nil {
 		select {
 		case result := <-quicResult:
 			quicResult = nil
 			if result.err == nil {
-				c.udpHealth.success()
+				c.udpHealth.observe(quicPathAvailable, time.Now())
 				cancel()
 				closeLateLane(tcpResult)
 				return result.lane, nil
 			}
 			quicErr = result.err
-			c.udpHealth.failure(time.Now())
+			quicEvidence = classifyQUICPathEvidence(result.err)
 		case result := <-tcpResult:
 			tcpResult = nil
 			if result.err == nil {
+				c.udpHealth.observe(differentialQUICPathEvidence(quicResult != nil, quicEvidence, quicPathAvailable), time.Now())
 				c.metrics.Fallback()
 				cancel()
 				closeLateLane(quicResult)

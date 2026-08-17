@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/apernet/quic-go"
@@ -79,6 +80,100 @@ type udpHealth struct {
 	blockedTo time.Time
 }
 
+// quicPathEvidence is deliberately narrower than "a QUIC operation ended".
+// Only observations about network reachability belong in the global cooldown;
+// peer shutdown, stream cancellation, authentication, protocol, destination,
+// and caller-lifecycle outcomes are endpoint state and remain neutral.
+type quicPathEvidence uint8
+
+const (
+	quicPathNeutral quicPathEvidence = iota
+	quicPathAvailable
+	quicPathUnavailable
+)
+
+// peerResponseError marks an error decided from a syntactically complete peer
+// frame. The application operation failed, but the QUIC path demonstrably
+// carried a round trip.
+type peerResponseError struct{ err error }
+
+func (e *peerResponseError) Error() string { return e.err.Error() }
+func (e *peerResponseError) Unwrap() error { return e.err }
+
+func peerResponse(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &peerResponseError{err: err}
+}
+
+func peerResponded(err error) bool {
+	if errors.Is(err, errDestinationUnavailable) {
+		return true
+	}
+	var response *peerResponseError
+	return errors.As(err, &response)
+}
+
+// classifyQUICPathEvidence converts typed transport outcomes into path
+// evidence. Unknown errors stay neutral: a false negative costs one future
+// race, while a false positive forces every new flow onto TCP for a cooldown.
+func classifyQUICPathEvidence(err error) quicPathEvidence {
+	if err == nil || peerResponded(err) {
+		return quicPathAvailable
+	}
+	if errors.Is(err, context.Canceled) {
+		return quicPathNeutral
+	}
+
+	// Explicit peer/implementation outcomes are not reachability evidence.
+	var applicationError *quic.ApplicationError
+	var streamError *quic.StreamError
+	var statelessReset *quic.StatelessResetError
+	var versionError *quic.VersionNegotiationError
+	if errors.As(err, &applicationError) || errors.As(err, &streamError) ||
+		errors.As(err, &statelessReset) || errors.As(err, &versionError) {
+		return quicPathNeutral
+	}
+	var transportError *quic.TransportError
+	if errors.As(err, &transportError) {
+		if !transportError.Remote && transportError.ErrorCode == quic.NoViablePathError {
+			return quicPathUnavailable
+		}
+		return quicPathNeutral
+	}
+
+	var handshakeTimeout *quic.HandshakeTimeoutError
+	var idleTimeout *quic.IdleTimeoutError
+	if errors.As(err, &handshakeTimeout) || errors.As(err, &idleTimeout) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return quicPathUnavailable
+	}
+	if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETDOWN) || errors.Is(err, syscall.EHOSTDOWN) {
+		return quicPathUnavailable
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return quicPathUnavailable
+	}
+	return quicPathNeutral
+}
+
+// differentialQUICPathEvidence requires the TCP control to reach the same
+// endpoint before a negative QUIC observation becomes global. A pending QUIC
+// attempt that loses the delayed race is a comparative timeout. If TCP also
+// failed, the endpoint or whole uplink may be down and QUIC is not singled out.
+func differentialQUICPathEvidence(quicPending bool, quicEvidence, tcpEvidence quicPathEvidence) quicPathEvidence {
+	if tcpEvidence != quicPathAvailable {
+		return quicPathNeutral
+	}
+	if quicPending || quicEvidence == quicPathUnavailable {
+		return quicPathUnavailable
+	}
+	return quicPathNeutral
+}
+
 func newUDPHealth(threshold int, cooldown time.Duration) *udpHealth {
 	if threshold <= 0 {
 		threshold = 3
@@ -95,7 +190,7 @@ func (h *udpHealth) allow(now time.Time) bool {
 	return !now.Before(h.blockedTo)
 }
 
-func (h *udpHealth) success() {
+func (h *udpHealth) reset() {
 	h.mu.Lock()
 	h.failures = 0
 	h.blockedTo = time.Time{}
@@ -112,9 +207,27 @@ func (h *udpHealth) failure(now time.Time) {
 	h.mu.Unlock()
 }
 
+func (h *udpHealth) observe(evidence quicPathEvidence, now time.Time) {
+	switch evidence {
+	case quicPathAvailable:
+		h.reset()
+	case quicPathUnavailable:
+		h.failure(now)
+	}
+}
+
 type streamConn interface {
 	io.ReadWriteCloser
 	SetDeadline(time.Time) error
+}
+
+// quicBidiStream is the part of quic.Stream used by a lane. Keeping this
+// narrow makes the two-direction close contract independently testable.
+type quicBidiStream interface {
+	io.ReadWriteCloser
+	SetDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+	CancelRead(quic.StreamErrorCode)
 }
 
 // laneTransportStats is intentionally a small internal projection of QUIC's
@@ -165,7 +278,7 @@ func handshakeBound(conn streamConn, configured time.Duration) time.Duration {
 }
 
 type quicStreamConn struct {
-	stream     *quic.Stream
+	stream     quicBidiStream
 	conn       *quic.Conn
 	packet     net.PacketConn
 	controller wancongestion.TelemetryProvider
@@ -216,11 +329,18 @@ func (c *quicStreamConn) SetWriteDeadline(t time.Time) error {
 func (c *quicStreamConn) Close() error {
 	var err error
 	c.once.Do(func() {
-		_ = c.stream.Close()
+		// quic.Stream.Close closes only the send direction. CancelRead releases
+		// a blocked reader and its flow-control credit; omitting it retained
+		// aborted pooled streams indefinitely even though the logical lane was
+		// already gone.
+		c.stream.CancelRead(0)
+		err = c.stream.Close()
 		if c.closeConn {
 			// Dedicated lanes own their QUIC connection and socket. Pooled
 			// streams deliberately leave both alive for other flows.
-			err = c.conn.CloseWithError(0, "queqiao lane closed")
+			if closeErr := c.conn.CloseWithError(0, "queqiao lane closed"); closeErr != nil {
+				err = closeErr
+			}
 			if c.packet != nil {
 				_ = c.packet.Close()
 			}

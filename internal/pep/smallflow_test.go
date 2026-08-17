@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apernet/quic-go"
 	"github.com/bojieli/queqiao/internal/classifier"
+	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/multipath"
 	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/pathsim"
@@ -199,6 +201,18 @@ func TestOnlyALostAttemptIsRetried(t *testing.T) {
 	attempts = 0
 	client.openFlowForTest = func() (*openedFlow, error) {
 		attempts++
+		return nil, peerResponse(errors.New("server rejected protocol operation"))
+	}
+	if _, err := client.openFlowWithRetries(context.Background(), "example.test:80"); err == nil {
+		t.Fatal("a protocol rejection was reported as success")
+	}
+	if attempts != 1 {
+		t.Fatalf("a protocol rejection was asked %d times, want 1", attempts)
+	}
+
+	attempts = 0
+	client.openFlowForTest = func() (*openedFlow, error) {
+		attempts++
 		return nil, errors.New("quic lane: context deadline exceeded")
 	}
 	if _, err := client.openFlowWithRetries(context.Background(), "example.test:80"); err == nil {
@@ -219,6 +233,78 @@ func TestOnlyALostAttemptIsRetried(t *testing.T) {
 	}
 	if _, err := client.openFlowWithRetries(context.Background(), "example.test:80"); err != nil {
 		t.Fatalf("a path that lost one attempt failed the flow: %v", err)
+	}
+}
+
+func TestColdQUICDestinationRefusalDoesNotFallBackOrRetry(t *testing.T) {
+	client := &Client{
+		cfg: ClientConfig{
+			Transport: TransportAuto, FallbackDelay: time.Second,
+		},
+		udpHealth: newUDPHealth(1, time.Minute),
+		metrics:   metrics.New(),
+	}
+	var quicCalls, tcpCalls int
+	client.dialPipelinedFlowForTest = func(_ context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
+		if kind == TransportQUIC {
+			quicCalls++
+			return nil, errDestinationUnavailable
+		}
+		tcpCalls++
+		return nil, errors.New("unexpected TCP fallback")
+	}
+	_, err := client.openInitialFlow(context.Background(), "example.test:443")
+	if !errors.Is(err, errDestinationUnavailable) {
+		t.Fatalf("cold-flow result = %v, want destination unavailable", err)
+	}
+	if quicCalls != 1 || tcpCalls != 0 {
+		t.Fatalf("cold-flow candidates: QUIC=%d TCP=%d, want one QUIC and no TCP", quicCalls, tcpCalls)
+	}
+	if !client.udpHealth.allow(time.Now()) {
+		t.Fatal("the destination response poisoned QUIC health")
+	}
+	if got := client.metrics.Snapshot().Fallbacks; got != 0 {
+		t.Fatalf("destination response recorded %d fallbacks", got)
+	}
+}
+
+func TestServerQUICShutdownDoesNotPoisonGlobalPathHealth(t *testing.T) {
+	client := &Client{
+		cfg:       ClientConfig{Transport: TransportAuto, FallbackDelay: time.Second},
+		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),
+	}
+	client.dialPipelinedFlowForTest = func(_ context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
+		if kind == TransportQUIC {
+			return nil, &quic.ApplicationError{Remote: true, ErrorMessage: "server restarting"}
+		}
+		return &openedFlow{kind: TransportTCP}, nil
+	}
+	flow, err := client.openInitialFlow(context.Background(), "example.test:443")
+	if err != nil || flow == nil || flow.kind != TransportTCP {
+		t.Fatalf("fallback flow = %+v, error = %v", flow, err)
+	}
+	if !client.udpHealth.allow(time.Now()) {
+		t.Fatal("a peer-terminated QUIC connection blocked future QUIC attempts")
+	}
+}
+
+func TestQUICReachabilityTimeoutWithWorkingTCPEntersCooldown(t *testing.T) {
+	client := &Client{
+		cfg:       ClientConfig{Transport: TransportAuto, FallbackDelay: time.Second},
+		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),
+	}
+	client.dialPipelinedFlowForTest = func(_ context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
+		if kind == TransportQUIC {
+			return nil, &quic.HandshakeTimeoutError{}
+		}
+		return &openedFlow{kind: TransportTCP}, nil
+	}
+	flow, err := client.openInitialFlow(context.Background(), "example.test:443")
+	if err != nil || flow == nil || flow.kind != TransportTCP {
+		t.Fatalf("fallback flow = %+v, error = %v", flow, err)
+	}
+	if client.udpHealth.allow(time.Now()) {
+		t.Fatal("a QUIC reachability timeout against a working TCP control did not enter cooldown")
 	}
 }
 

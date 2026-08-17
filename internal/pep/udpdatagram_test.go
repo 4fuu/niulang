@@ -81,6 +81,41 @@ func TestThePacketWindowAdmitsReorderingOnceAndDuplicatesNever(t *testing.T) {
 	}
 }
 
+func TestUDPFinalACKTakesPrecedenceOverFollowingEOF(t *testing.T) {
+	local, peer := net.Pipe()
+	defer local.Close()
+	defer peer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	frames, errs := udpFrames(ctx, newFrameConn(local, protocol.DefaultMaxPayload), 7)
+	finalACK := protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeAck, Flags: protocol.FlagAckFinal,
+		SessionID: [16]byte{1}, FlowID: 7,
+	}}
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- protocol.WriteFrame(peer, finalACK)
+		_ = peer.Close()
+	}()
+
+	select {
+	case got := <-frames:
+		if got.Header.Type != protocol.TypeAck || got.Header.Flags != protocol.FlagAckFinal {
+			t.Fatalf("terminal frame = type %d flags %x", got.Header.Type, got.Header.Flags)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for final ACK")
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errs:
+		t.Fatalf("EOF raced ahead of the queued final ACK: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 // pipeCarrier is a datagram carrier that delivers to itself, so a frameConn
 // can be given a coded substrate without a QUIC connection behind it.
 type pipeCarrier struct {

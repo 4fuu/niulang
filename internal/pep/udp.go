@@ -268,9 +268,10 @@ done:
 // the local SOCKS UDP socket alive. A new server-side UDP relay is intentional
 // for this first rescue implementation: it bounds protocol state and works
 // over both transports without a resumable UDP-session wire extension. At
-// most three attempts are made, with bounded exponential backoff. AUTO mode's
-// health machine is updated before each attempt, so a repeatedly dead QUIC
-// path causes the next attempt to select TLS/TCP rather than spinning on UDP.
+// most three attempts are made, with bounded exponential backoff. The active
+// lane ending is not treated as global path evidence: a peer restart or
+// application close looks identical there. Each replacement's comparative
+// QUIC/TCP race provides the path observation instead.
 // rescueUDPAssociation opens a replacement association, offering the token of
 // the relay the failed one was using. Every attempt offers the same token: the
 // server consumes it on the first attempt that reaches it, so a later attempt
@@ -282,7 +283,6 @@ func (c *Client) rescueUDPAssociation(ctx context.Context, controlClosed <-chan 
 			return nil, err
 		}
 		c.metrics.UDPAssociationReconnect()
-		c.udpHealth.failure(time.Now())
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, c.cfg.DialTimeout+c.cfg.HandshakeTimeout)
 		association, err := c.openUDPAssociation(attemptCtx, resume)
 		attemptCancel()
@@ -561,6 +561,13 @@ func udpFrames(ctx context.Context, fc *frameConn, flowID uint64) (<-chan protoc
 			select {
 			case frames <- frame:
 			case <-ctx.Done():
+				return
+			}
+			// A final ACK is the peer's terminal association event. Stop after
+			// publishing it so a following stream EOF cannot win the independent
+			// error-channel select and turn a clean close into lane failure. RESET
+			// is terminal too; its frame carries the useful failure reason.
+			if (frame.Header.Type == protocol.TypeAck && frame.Header.Flags == protocol.FlagAckFinal) || frame.Header.Type == protocol.TypeReset {
 				return
 			}
 		}

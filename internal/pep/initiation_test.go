@@ -127,6 +127,20 @@ func TestTheUplinkIsWhicheverAddressReachesTheServer(t *testing.T) {
 	}
 }
 
+// An explicit binding is the route the transport actually takes. A VPN may
+// own the default route to the server while the outer connection is pinned to
+// a physical interface; the watcher must observe the pinned address or it
+// will invent uplink changes and repeatedly destroy a healthy QUIC pool.
+func TestTheConfiguredUplinkMatchesTheBoundOuterAddress(t *testing.T) {
+	client := &Client{cfg: ClientConfig{
+		RemoteAddr:   "127.0.0.1:not-a-port",
+		LocalAddress: "192.0.2.10",
+	}}
+	if got := client.currentUplink(); got != "192.0.2.10" {
+		t.Fatalf("configured uplink = %q, want 192.0.2.10", got)
+	}
+}
+
 // The prewarm exists to measure, so it has to leave a measurement behind.
 //
 // A path that erases is only coded around once something has noticed it does,

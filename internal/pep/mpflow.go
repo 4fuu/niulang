@@ -698,14 +698,16 @@ func (f *multipathFlow) allocateJoinID() (uint64, error) {
 // killed the reader for good.
 func (f *multipathFlow) readLane(lane *mpLane) {
 	go f.readLaneBulk(lane)
-	sawRemoteClose := false
+	sawRemoteTerminal := false
 	for {
 		frame, err := lane.fc.Read()
 		if err != nil {
-			// A protocol CLOSE ends the peer's sending direction. The stream EOF
-			// that follows it is an expected half-close, while this lane's write
-			// direction remains available for the final ACK and response bytes.
-			if !sawRemoteClose {
+			// A protocol CLOSE ends the peer's sending direction, and RESET ends
+			// the whole logical flow. The stream EOF that follows either terminal
+			// frame is protocol teardown, not evidence that the path failed. For a
+			// CLOSE, this lane's write direction remains available for the final
+			// ACK and response bytes.
+			if !sawRemoteTerminal {
 				f.failLane(lane, fmt.Errorf("lane %d: %w", lane.id, err))
 			}
 			return
@@ -713,8 +715,8 @@ func (f *multipathFlow) readLane(lane *mpLane) {
 		if !f.deliverInbound(lane, frame) {
 			return
 		}
-		if frame.Header.Type == protocol.TypeClose {
-			sawRemoteClose = true
+		if frame.Header.Type == protocol.TypeClose || frame.Header.Type == protocol.TypeReset {
+			sawRemoteTerminal = true
 		}
 	}
 }

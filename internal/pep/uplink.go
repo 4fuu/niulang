@@ -35,12 +35,27 @@ const (
 	uplinkPollInterval = 2 * time.Second
 )
 
-// currentUplink is the local address the kernel would use to reach the server.
+// currentUplink is the local address an outer connection will use to reach
+// the server.
 //
-// Dialling a UDP socket sends no packets: it binds the socket and asks the
-// routing table which source address this destination gets. That is exactly
-// the question being asked, and it costs nothing on the wire.
+// When an address or interface was configured, every TCP and QUIC dial is
+// explicitly bound to it. Asking the unbound routing table in that case can
+// produce a different answer (notably while a VPN owns the default route),
+// causing the watcher to repeatedly discard a healthy pool. Re-resolving the
+// configured spec preserves DHCP and interface-change detection while asking
+// the same question as the real dial path.
+//
+// Without an explicit binding, dialling a UDP socket sends no packets: it
+// binds the socket and asks the routing table which source address this
+// destination gets.
 func (c *Client) currentUplink() string {
+	if c.cfg.LocalAddress != "" {
+		ip, err := resolveLocalAddress(c.cfg.LocalAddress)
+		if err != nil {
+			return ""
+		}
+		return ip.String()
+	}
 	conn, err := net.Dial("udp", c.cfg.RemoteAddr)
 	if err != nil {
 		return ""
@@ -81,6 +96,12 @@ func (c *Client) watchUplink(ctx context.Context) {
 // onUplinkChanged abandons what belonged to the old path and measures the new
 // one before anything needs it.
 func (c *Client) onUplinkChanged(ctx context.Context) {
+	// Reachability evidence belongs to the old uplink just as completely as
+	// its congestion and erasure measurements do. Carrying a UDP cooldown onto
+	// the new interface would suppress the very probe that can measure it.
+	if c.udpHealth != nil {
+		c.udpHealth.reset()
+	}
 	// The pooled connection is bound to the address that is gone. Even where
 	// it survives by migrating, its congestion state, its erasure floor and
 	// its bottleneck all describe the old path.
