@@ -43,14 +43,17 @@ func TestTheShareDividesTheBottleneck(t *testing.T) {
 	if m.Members() != 4 {
 		t.Fatalf("model counts %d lanes, want 4", m.Members())
 	}
-	// The aggregate is 4 MB/s, so each lane's share is 1 MB/s.
-	if math.Abs(share-perLane) > perLane*0.05 {
-		t.Fatalf("share %.0f of a 4 MB/s aggregate over 4 lanes, want about %.0f", share, perLane)
+	// The aggregate is 4 MB/s over four lanes, and each share carries the
+	// probe gain, because a cap with no headroom is a cap computed from its
+	// own effect.
+	want := shareProbeGain * perLane
+	if math.Abs(share-want) > want*0.05 {
+		t.Fatalf("share %.0f of a 4 MB/s aggregate over 4 lanes, want about %.0f", share, want)
 	}
-	// Four lanes each capped at their share put the same total on the wire as
-	// one lane would have.
-	if total := share * 4; math.Abs(total-4*perLane) > perLane*0.2 {
-		t.Fatalf("four shares total %.0f, want the aggregate %.0f", total, 4*perLane)
+	// Four lanes each capped at their share put on the wire what one BBR
+	// sender probing on its own would have.
+	if total := share * 4; math.Abs(total-shareProbeGain*4*perLane) > perLane*0.2 {
+		t.Fatalf("four shares total %.0f, want %.0f", total, shareProbeGain*4*perLane)
 	}
 }
 
@@ -77,13 +80,17 @@ func TestAnIdleLaneStopsCounting(t *testing.T) {
 	m.members[1].at = time.Now().Add(-2 * memberIdle)
 	m.mu.Unlock()
 
-	share := m.Report(2, 0.42, 5000, 1e6, 0).Share
+	state := m.Report(2, 0.42, 5000, 1e6, 0)
 	if m.Members() != 1 {
 		t.Fatalf("members = %d after one went idle, want 1", m.Members())
 	}
-	// The remaining lane now has the whole bottleneck rather than half.
-	if share < 1.5e6 {
-		t.Fatalf("share %.0f for the only live lane, want the whole aggregate", share)
+	// The remaining lane has the whole bottleneck rather than half, and being
+	// alone it is no longer capped at all.
+	if state.Seed < 1.5e6 {
+		t.Fatalf("seed %.0f for the only live lane, want the whole aggregate", state.Seed)
+	}
+	if state.Share != 0 {
+		t.Fatalf("share %.0f for a lane that is now alone, want no cap", state.Share)
 	}
 }
 
@@ -104,8 +111,70 @@ func TestSharedPathIsPerPeer(t *testing.T) {
 func TestASingleSharedLaneIsNotPenalised(t *testing.T) {
 	m := NewPathModel()
 	const rate = 2e6
-	share := m.Report(1, 0.42, 5000, rate, 0).Share
-	if share < rate*0.95 {
-		t.Fatalf("a lone lane was capped at %.0f of its own %.0f", share, rate)
+	state := m.Report(1, 0.42, 5000, rate, 0)
+	// Not capped at its own rate: not capped at all. A lone lane has nothing
+	// to compound with, and a ceiling equal to what it has already delivered
+	// is one it can never probe past.
+	if state.Share != 0 {
+		t.Fatalf("a lone lane was capped at %.0f, want no cap", state.Share)
+	}
+	// It still learns the path, so a lane replacing it can start from what it
+	// measured rather than from the initial window.
+	if state.Seed < rate*0.95 {
+		t.Fatalf("seed %.0f from a lane delivering %.0f, want about the same", state.Seed, rate)
+	}
+}
+
+// The share is measured from what the members deliver, and the members deliver
+// what the share allows. Without headroom that is a loop whose only stable
+// point is the rate it started at, and whose every disturbance moves it down:
+// one application-limited interval lowers the windowed maximum, which lowers
+// the share, which lowers what can be delivered, and nothing ever measures the
+// path upward again.
+//
+// Live, that was a transport that ran at 143 Mbit/s for six 20-second windows
+// and then moved no bytes at all until its process was restarted
+// (docs/MEASUREMENTS-20260816.md). On the emulator it is one trial at 37
+// Mbit/s followed by four at 0.8.
+func TestTheShareDoesNotRatchetDown(t *testing.T) {
+	const capacity = 8e6 // what the path would actually carry, bytes/second
+	for _, lanes := range []int{1, 2, 4} {
+		t.Run("", func(t *testing.T) {
+			m := NewPathModel()
+			// Each lane delivers what its own cap allows, which is the loop
+			// the real controller runs: bandwidth() takes the smaller of its
+			// estimate and its share.
+			delivered := make([]float64, lanes)
+			for i := range delivered {
+				delivered[i] = capacity / float64(lanes)
+			}
+			// One application-limited interval: every lane briefly delivers a
+			// tenth of what it could. This is a gap between requests, not a
+			// property of the path.
+			for i := range delivered {
+				delivered[i] /= 10
+			}
+			var share float64
+			for round := 0; round < 40; round++ {
+				for i := 0; i < lanes; i++ {
+					share = m.Report(Member(i+1), 0.1, 5000, delivered[i], 0).Share
+					// The next round delivers what this one is allowed to,
+					// bounded by the path itself.
+					next := capacity / float64(lanes)
+					if share > 0 && share < next {
+						next = share
+					}
+					delivered[i] = next
+				}
+			}
+			total := 0.0
+			for _, d := range delivered {
+				total += d
+			}
+			if total < capacity*0.9 {
+				t.Fatalf("%d lane(s) settled at %.0f B/s after one idle interval, want the path's %.0f",
+					lanes, total, capacity)
+			}
+		})
 	}
 }
