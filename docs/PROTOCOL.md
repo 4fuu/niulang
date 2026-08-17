@@ -115,10 +115,19 @@ negotiate the capability.
 `CLOSE` with `FlagFin` is a directional half-close. A sender may later send
 the same final sequence with `FlagCloseAbort` when its application socket has
 fully closed and the peer should release an otherwise idle keep-alive
-destination. The receiver acknowledges the abort sequence before closing its
-inner connection. This escalation is deliberately delayed after the normal
-final ACK so legitimate half-closed uploads and interactive sessions can
-continue to receive response bytes.
+destination. `FlagCloseAbort` is cancellation rather than an ordered FIN: the
+receiver stops its sender and closes its inner connection immediately, even if
+the abort sequence is beyond a reassembly gap, then makes a bounded best effort
+to acknowledge that sequence. Waiting for the gap would retain response chunks
+that the vanished application can never acknowledge.
+
+A local EOF alone does not trigger this escalation because TCP exposes
+`CloseWrite` and `Close` the same way. The abort grace begins once response
+data is present but cannot make application progress, or after the peer has
+acknowledged the normal FIN. Successful application writes renew it; a failed
+write proves the full close and escalates immediately. After sending the abort,
+the sender drains its final ACK for a bounded interval and then terminates the
+flow regardless.
 
 ## Backpressure
 

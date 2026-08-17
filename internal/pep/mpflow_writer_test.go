@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +29,13 @@ type ackCaptureConn struct {
 	closed   chan struct{}
 	closeOne sync.Once
 }
+
+type writeFailConn struct {
+	net.Conn
+	err error
+}
+
+func (c *writeFailConn) Write([]byte) (int, error) { return 0, c.err }
 
 func newAckCaptureConn(delay time.Duration, fail error) *ackCaptureConn {
 	return &ackCaptureConn{frames: make(chan protocol.Frame, 16), delay: delay, fail: fail, closed: make(chan struct{})}
@@ -202,6 +210,268 @@ func TestFlowIdleTimeoutReleasesResources(t *testing.T) {
 	}
 	if got := registry.Snapshot(); got.FlowTimeouts != 1 || got.ActiveFlows != 0 {
 		t.Fatalf("timeout metrics = %+v, want one timeout and no active flows", got)
+	}
+}
+
+// A TCP EOF does not distinguish CloseWrite from Close: both tell the proxy
+// only that the application's send half is finished. A quiet peer therefore
+// must not be aborted merely because the local reader reached EOF. The abort
+// grace starts only once response traffic is stalled or the peer has
+// acknowledged the local FIN.
+func TestQuietLocalHalfCloseDoesNotArmAbort(t *testing.T) {
+	inner, peer := net.Pipe()
+	defer peer.Close()
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
+	flow.abortGrace = 10 * time.Millisecond
+	flow.noteLocalClose(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	err := flow.receiveInner(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("quiet half-close ended receive loop with %v, want context deadline", err)
+	}
+	if flow.localAbortSent.Load() {
+		t.Fatal("quiet half-close was escalated to a full-close abort")
+	}
+}
+
+func TestResponseProgressRenewsLocalHalfCloseGrace(t *testing.T) {
+	inner, application := net.Pipe()
+	defer application.Close()
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
+	flow.abortGrace = 60 * time.Millisecond
+	flow.noteLocalClose(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 140*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- flow.receiveInner(ctx) }()
+	for sequence := uint64(0); sequence < 4; sequence++ {
+		if sequence > 0 {
+			time.Sleep(35 * time.Millisecond)
+		}
+		flow.events <- inboundEvent{frame: protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeData,
+			SessionID: [16]byte{1}, FlowID: 7, Sequence: sequence,
+		}, Payload: []byte{'x'}}}
+		var got [1]byte
+		if _, err := io.ReadFull(application, got[:]); err != nil {
+			t.Fatalf("read response byte %d: %v", sequence, err)
+		}
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("progressing response ended receive loop with %v, want context deadline", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("receive loop did not honor its context")
+	}
+	if flow.localAbortSent.Load() {
+		t.Fatal("response progress was escalated to a full-close abort")
+	}
+}
+
+func TestFailedApplicationWriteSendsAbortImmediately(t *testing.T) {
+	pipe, peer := net.Pipe()
+	defer peer.Close()
+	outer := newAckCaptureConn(0, nil)
+	flow := newMultipathFlow(context.Background(), &writeFailConn{Conn: pipe, err: syscall.EPIPE},
+		[16]byte{1}, 7, 1024, protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
+	flow.abortDrainGrace = 20 * time.Millisecond
+	flow.lanes[0] = &mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}
+
+	result := make(chan error, 1)
+	go func() { result <- flow.receiveInner(context.Background()) }()
+	flow.events <- inboundEvent{frame: protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeData,
+		SessionID: [16]byte{1}, FlowID: 7, Sequence: 0,
+	}, Payload: []byte("response")}}
+	frame := waitAckFrame(t, outer)
+	if frame.Header.Type != protocol.TypeClose || frame.Header.Flags != protocol.FlagFin|protocol.FlagCloseAbort {
+		t.Fatalf("failed local write produced type=%d flags=%#x, want CLOSE FIN|CLOSE_ABORT",
+			frame.Header.Type, frame.Header.Flags)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, errLocalApplicationClose) {
+			t.Fatalf("failed local write ended receive loop with %v, want local close", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed local write did not end after the abort drain")
+	}
+}
+
+// This is the live leak reduced to one deterministic flow. The application
+// closes after the peer has delivered only an out-of-order response segment.
+// The local sender is deliberately left with an unacknowledged request, so
+// neither the scheduler nor the remote-FIN path can end the flow for us.
+func TestLocalCloseAbortsStalledReceiveAndReleasesRun(t *testing.T) {
+	inner, application := net.Pipe()
+	outer, peer := net.Pipe()
+	defer application.Close()
+	defer peer.Close()
+
+	sessionID := [16]byte{1}
+	const flowID = uint64(7)
+	flow := newMultipathFlow(context.Background(), inner, sessionID, flowID, 1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
+	flow.abortGrace = 20 * time.Millisecond
+	flow.abortDrainGrace = 100 * time.Millisecond
+	if err := flow.addLane(&mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}); err != nil {
+		t.Fatal(err)
+	}
+
+	responseBuffered := make(chan struct{})
+	abortSeen := make(chan protocol.Frame, 1)
+	peerErr := make(chan error, 1)
+	go func() {
+		buffered := false
+		for {
+			frame, err := protocol.ReadFrame(peer, protocol.DefaultMaxPayload)
+			if err != nil {
+				peerErr <- err
+				return
+			}
+			switch frame.Header.Type {
+			case protocol.TypeData:
+				if buffered {
+					continue
+				}
+				buffered = true
+				// Sequence zero is intentionally absent. receiveInner holds
+				// this byte in its reassembler and cannot discover the closed
+				// application by attempting a write.
+				if err := protocol.WriteFrame(peer, protocol.Frame{Header: protocol.Header{
+					Version: protocol.Version, Type: protocol.TypeData,
+					SessionID: sessionID, FlowID: flowID, Sequence: 1,
+				}, Payload: []byte("stalled")}); err != nil {
+					peerErr <- err
+					return
+				}
+				close(responseBuffered)
+			case protocol.TypeClose:
+				if frame.Header.Flags&protocol.FlagCloseAbort == 0 {
+					peerErr <- errors.New("received ordinary FIN instead of abort")
+					return
+				}
+				if frame.Header.Sequence != uint64(len("request")) {
+					peerErr <- errors.New("abort did not carry the complete source sequence")
+					return
+				}
+				abortSeen <- frame
+				// Deliberately withhold the final ACK. The regression was a
+				// flow whose scheduler and receive loop both waited forever;
+				// cleanup must therefore be bounded even when the abort's
+				// completion signal is also absent.
+				return
+			}
+		}
+	}()
+
+	type runResult struct {
+		stats FlowStats
+		err   error
+	}
+	result := make(chan runResult, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() {
+		stats, err := flow.run(ctx)
+		result <- runResult{stats: stats, err: err}
+	}()
+	if _, err := application.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-responseBuffered:
+	case err := <-peerErr:
+		t.Fatalf("peer failed before buffering response: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("peer did not send the stalled response segment")
+	}
+	_ = application.Close()
+
+	select {
+	case frame := <-abortSeen:
+		if frame.Header.Flags != protocol.FlagFin|protocol.FlagCloseAbort {
+			t.Fatalf("abort flags = %#x, want FIN|CLOSE_ABORT", frame.Header.Flags)
+		}
+	case err := <-peerErr:
+		t.Fatalf("peer failed before receiving abort: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("local close did not produce a bounded abort")
+	}
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("locally aborted flow returned error: %v", got.err)
+		}
+		if got.stats.BytesSent != uint64(len("request")) {
+			t.Fatalf("sent bytes = %d, want %d", got.stats.BytesSent, len("request"))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("flow remained stuck after the bounded abort drain")
+	}
+}
+
+// A full-close abort is cancellation, not an ordered half-close. In
+// particular, the peer's sender may have response chunks outstanding that the
+// vanished application will never acknowledge. Receiving the abort must stop
+// that scheduler and close the peer-side endpoint immediately.
+func TestRemoteAbortStopsUnacknowledgedSenderAndClosesInner(t *testing.T) {
+	inner, destination := net.Pipe()
+	defer destination.Close()
+	outer := newAckCaptureConn(0, nil)
+	sessionID := [16]byte{2}
+	const flowID = uint64(9)
+	flow := newMultipathFlow(context.Background(), inner, sessionID, flowID, 1024,
+		protocol.FlagAckDown, protocol.FlagAckUp, nil, nil)
+	if err := flow.addLane(&mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := flow.run(ctx)
+		result <- err
+	}()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := destination.Write(bytes.Repeat([]byte("response"), 256))
+		writeDone <- err
+	}()
+	frame := waitAckFrame(t, outer)
+	if frame.Header.Type != protocol.TypeData {
+		t.Fatalf("first outbound frame type = %d, want DATA", frame.Header.Type)
+	}
+
+	flow.events <- inboundEvent{frame: protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeClose,
+		Flags:     protocol.FlagFin | protocol.FlagCloseAbort,
+		SessionID: sessionID, FlowID: flowID, Sequence: 0,
+	}}}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("remote abort ended flow with error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote abort left the response scheduler outstanding")
+	}
+	select {
+	case <-writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("remote abort did not release the destination writer")
+	}
+	_ = destination.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := destination.Write([]byte("still open?")); err == nil {
+		t.Fatal("destination connection remained writable after remote abort")
 	}
 }
 

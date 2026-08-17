@@ -234,7 +234,10 @@ func (s *flowSource) Read(p []byte) (int, error) {
 			err = io.EOF
 		}
 		if errors.Is(err, io.EOF) {
-			s.flow.localClosed.Store(true)
+			// Publish the final source sequence at EOF, not later in
+			// sendFinal. A full application close may need to abort while
+			// unacknowledged source chunks still keep the scheduler alive.
+			s.flow.noteLocalClose(s.flow.bytesUp.Load())
 		}
 	}
 	return n, err
@@ -286,6 +289,11 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 
 	select {
 	case <-sched.Done():
+	case <-f.remoteAbortCh:
+		// A full-close marker says the peer no longer has an application
+		// reader. Outstanding response chunks can never be acknowledged and
+		// are no longer useful, so cancellation is the successful outcome.
+		return nil
 	case <-sendCtx.Done():
 		return sendCtx.Err()
 	case <-f.done:
@@ -300,6 +308,11 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 	if f.remoteAbort.Load() {
 		// The peer closed its full application socket; a local read error is a
 		// consequence of that, not a transport failure.
+		return nil
+	}
+	if f.localAbortSent.Load() {
+		// receiveInner already sent the stronger FIN|CLOSE_ABORT marker. Do
+		// not follow it with an ordinary FIN for the same sequence.
 		return nil
 	}
 	return f.sendFinal(ctx, sched.Stats().SourceBytes)
@@ -496,8 +509,7 @@ func (f *multipathFlow) sendChunk(ctx context.Context, lane *mpLane, chunk *stri
 // sendFinal closes the outbound direction once every byte has been
 // acknowledged, and waits for the peer's final acknowledgement.
 func (f *multipathFlow) sendFinal(ctx context.Context, sequence uint64) error {
-	f.localClosed.Store(true)
-	f.sendSequence(sequence)
+	f.noteLocalClose(sequence)
 	fin := protocol.Frame{Header: protocol.Header{
 		Version: protocol.Version, Type: protocol.TypeClose, Flags: protocol.FlagFin,
 		SessionID: f.sessionID, FlowID: f.flowID, Sequence: sequence, Class: protocol.Class(f.class.Load()),

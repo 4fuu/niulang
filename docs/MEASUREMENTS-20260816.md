@@ -176,9 +176,10 @@ under a 50 MiB transfer) does not reproduce here.
 > unrelated defects, and the byte count was not the trigger. One -- a seeded
 > round trip becoming a permanent `min_rtt` -- is fixed, and it was also
 > depressing every throughput number in this document by about 30%. The
-> other is triggered by *aborted* transfers, which this campaign's
-> fixed-duration windows performed on every single trial; transfers that run
-> to completion do not stall.
+> other was triggered by *aborted* transfers, which this campaign's
+> fixed-duration windows performed on every single trial. It is fixed by the
+> bounded local-close lifecycle described there; transfers that run to
+> completion never exhibited it.
 
 Found by accident: the first throughput campaign recorded 176, 156, 175, 167,
 136 Mbit/s, then 5.3, then zero for every remaining round, while still
