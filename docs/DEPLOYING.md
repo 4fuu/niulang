@@ -4,12 +4,13 @@ This is the practical guide: how to build it, how to run the two ends, and how
 to point Clash Verge or any mihomo-based client at it.
 
 Read [the limits](#what-you-are-signing-up-for) before deploying this anywhere
-you care about. The project has not met the release gates in
-[`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md). The two tunnel-stall defects
-measured on 2026-08-16 are fixed and have deterministic regressions. A live
-UDP blackhole recovered over TCP in 9.51 seconds, and release packaging is now
-reproducible; broader intermittent-loss, soak, resource, and security gates
-remain open.
+you care about. The repository-actionable release gates in
+[`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md) now have implementation and
+evidence. The tunnel-stall defects have deterministic regressions; real UDP
+blackholes recovered over TCP; restored UDP was re-preferred; packaging,
+resource bounds, vulnerability scanning, and rollback are reproducible; and a
+mixed production soak passed. Broader path/middlebox diversity and independent
+review remain external qualifications.
 
 The deployment trust boundaries and resource ceilings are enumerated in
 [`SECURITY-REVIEW.md`](SECURITY-REVIEW.md). In particular, the local SOCKS and
@@ -270,13 +271,13 @@ serving the alternatives:
   regression coverage are in
   [`STALL-20260817.md`](STALL-20260817.md).
 
-Also unfinished, and relevant to a daily driver: interactive latency still
-moves under queqiao's own bulk load, although the corrected live A/B is now in
-the range of the measured QUIC alternatives. Clash's TUN-to-SOCKS hand-off is
-the supported transparent integration; direct TUN/VLESS ingress is not part of
-the current architecture. A real-path UDP blackhole recovered over TCP in
-9.51 seconds, but intermittent blocking, restart, and long-soak behaviour still
-need broader campaigns.
+Interactive latency still moves under queqiao's own bulk load, although the
+corrected live A/B is in the range of the measured QUIC alternatives. Clash's
+TUN-to-SOCKS hand-off is the supported transparent integration; direct
+TUN/VLESS ingress is not part of the current architecture. Intermittent UDP
+blocking, recovery, restart, and a bounded mixed production soak are recorded
+in [`RELEASE-HARDENING-20260817.md`](RELEASE-HARDENING-20260817.md). Longer
+operation across other NATs and middleboxes still needs field evidence.
 
 ## Troubleshooting
 

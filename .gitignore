@@ -3,6 +3,8 @@
 /dist/
 /coverage.out
 /coverage.html
+__pycache__/
+*.py[cod]
 
 # Local configuration and secrets
 *.local.yaml

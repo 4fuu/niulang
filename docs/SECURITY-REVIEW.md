@@ -67,8 +67,9 @@ local command before compiling release binaries.
   default, but enabling `--allow-private-destinations` intentionally removes
   that boundary and must be confined to a benchmark environment.
 - This is a manual code/configuration review, not an independent cryptographic
-  assessment. Broader interoperability, long-soak, intermittent-blocking, and
-  live fault campaigns remain release gates.
+  assessment. The real intermittent-block and bounded mixed soak are recorded
+  in `RELEASE-HARDENING-20260817.md`; broader path/middlebox diversity and
+  third-party review remain external qualifications.
 
 ## Release verification
 
