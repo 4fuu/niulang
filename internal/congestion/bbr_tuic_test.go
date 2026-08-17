@@ -635,3 +635,38 @@ func TestTUICAppLimitedCountsAnyUnusedWindowOutsideDrain(t *testing.T) {
 		t.Fatal("large DRAIN headroom was not classified as application-limited")
 	}
 }
+
+// A seed is another lane's measurement. It may raise this sender's bandwidth
+// estimate, which is a windowed maximum and expires on its own, and it must
+// never touch min_rtt, which is a floor that only moves down and which
+// seedBandwidth has no way to stamp for expiry.
+//
+// Live, a 4 ms round trip seeded onto a 200 ms path sized BBR's target window
+// fifty times too small and held the connection near 1 Mbit/s for the rest of
+// the process's life -- every connection made afterwards inherited it through
+// the shared path model. See docs/MEASUREMENTS-20260816.md.
+func TestSeedBandwidthNeverAdoptsAForeignRoundTrip(t *testing.T) {
+	b := NewTUICBBRSender(1200)
+	measured := 200 * time.Millisecond
+	b.refreshRTTSample(monotime.Now(), measured)
+
+	b.seedBandwidth(12_000_000, 4*time.Millisecond)
+
+	if got := b.minRoundTrip(); got != measured {
+		t.Fatalf("min_rtt is %v after a 4ms seed, want the measured %v", got, measured)
+	}
+	// The seed is still useful: it raises the estimate the pacer works from.
+	if b.estimator.maxFilter.get() < 12_000_000 {
+		t.Fatalf("bandwidth estimate %d, want the seeded 12000000", b.estimator.maxFilter.get())
+	}
+}
+
+// A sender with no measurement of its own must not have one invented for it
+// either: it should still be measuring, not holding a number a sibling passed.
+func TestSeedBandwidthLeavesAnUnmeasuredRoundTripUnset(t *testing.T) {
+	b := NewTUICBBRSender(1200)
+	b.seedBandwidth(12_000_000, 4*time.Millisecond)
+	if got := b.minRoundTrip(); got != 0 {
+		t.Fatalf("min_rtt is %v from a seed alone, want 0 so the sender measures it", got)
+	}
+}

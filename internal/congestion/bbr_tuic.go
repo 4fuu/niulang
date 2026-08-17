@@ -232,7 +232,23 @@ func (b *TUICBBRSender) bandwidth() quiccongestion.ByteCount {
 // measured round trip the estimate still seeds the pacing rate, and the window
 // follows one round trip later when the first acknowledgement supplies it.
 //
-// Both are only ever raised, so a seed below what this sender has already
+// What it must not do is adopt that round trip as this sender's own minimum.
+// A minimum is a floor that only ever moves down, and `minRTTAt` is what lets
+// ProbeRTT expire one and measure again -- a seed that writes `minRTT` without
+// stamping `minRTTAt` is therefore permanent, which is exactly what the note
+// on refreshRTTSample says must never happen.
+//
+// It is also wrong on the merits. The seed arrives from a shared model, so it
+// is some other lane's minimum, and one bad sample anywhere poisons every
+// connection made afterwards: BBR's target window is bandwidth times min_rtt,
+// so a lane seeded with 4 ms on a 200 ms path sizes its window fifty times too
+// small and holds around 1 Mbit/s forever. Measured on the emulator, that was
+// one trial at 37 Mbit/s followed by every later trial in the same process at
+// 0.7 to 1.5, and it is the shape of the live stall in
+// docs/MEASUREMENTS-20260816.md. This sender measures its own round trip
+// within one round; the seeded window carries it until then.
+//
+// The rate is only ever raised, so a seed below what this sender has already
 // found costs nothing.
 func (b *TUICBBRSender) seedBandwidth(rate uint64, roundTrip time.Duration) {
 	if rate == 0 {
@@ -247,9 +263,6 @@ func (b *TUICBBRSender) seedBandwidth(rate uint64, roundTrip time.Duration) {
 	}
 	if roundTrip <= 0 {
 		return
-	}
-	if b.minRTT <= 0 || roundTrip < b.minRTT {
-		b.minRTT = roundTrip
 	}
 	window := quiccongestion.ByteCount(float64(rate) * roundTrip.Seconds())
 	if window > b.maxCwnd {

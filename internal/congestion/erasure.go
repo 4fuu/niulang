@@ -120,10 +120,17 @@ func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmo
 		// both its pacing and its window from that one number, so seeding it
 		// moves both; seeding a pacing rate alone leaves the window at the
 		// initial one and the pacer waiting on it.
-		if state := path.Current(); state.Share > 0 {
+		//
+		// The seed and the cap are separate: a lane joining a path that is
+		// already occupied takes both, and a lane that is alone takes the
+		// seed only. Sharing one number for the two used to mean that the
+		// only lane on a path capped itself at whatever the last one managed.
+		if state := path.Current(); state.Seed > 0 {
 			e.arrival.Store(uint64((1 - state.Floor) * partsPerMillion))
-			e.share.Store(uint64(state.Share))
-			e.inner.seedBandwidth(uint64(state.Share/e.arrivalRate()), state.RoundTrip)
+			if state.Share > 0 {
+				e.share.Store(uint64(state.Share))
+			}
+			e.inner.seedBandwidth(uint64(state.Seed/e.arrivalRate()), state.RoundTrip)
 		}
 	}
 	return e

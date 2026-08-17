@@ -81,9 +81,21 @@ type State struct {
 	// pooled across every lane's samples.
 	Floor float64
 	// Share is this contributor's allowance of the bottleneck in bytes per
-	// second. Zero means the bottleneck is not yet known and the contributor
-	// should not cap itself.
+	// second. Zero means the contributor must not cap itself -- either because
+	// the bottleneck is not yet known, or because it is the only one here and
+	// so has nothing to compound with.
+	//
+	// A share is deliberately larger than an even split. The bottleneck is
+	// measured from what the contributors deliver, and they deliver what this
+	// number lets them, so a share with no headroom is a cap computed from its
+	// own effect: it can be held, never exceeded, and any dip in delivery
+	// lowers it permanently. See shareProbeGain.
 	Share float64
+	// Seed is the rate a contributor joining now should start from, which is
+	// its expected portion of the bottleneck. Unlike Share it is never a
+	// ceiling -- it exists so a replacement lane does not rediscover a path
+	// its siblings already measured.
+	Seed float64
 	// RoundTrip is the path's minimum round trip, which is the smallest any
 	// lane has seen: a larger one is that lane's queueing, not the path.
 	RoundTrip time.Duration
@@ -103,6 +115,22 @@ const (
 	// to survive a probe cycle, short enough that a path which genuinely
 	// narrowed is believed within a few seconds.
 	bottleneckWindow = 10 * time.Second
+	// shareProbeGain is the headroom a share leaves above an even split.
+	//
+	// It is BBR's own probe gain, and it is here for the same reason BBR has
+	// it: an estimate of a bottleneck can only grow if something is allowed to
+	// send above it. The bottleneck here is measured from what the members
+	// deliver, so without this factor the cap is derived from the traffic the
+	// cap itself limits -- a loop with one stable point and a downward
+	// ratchet. Any interval where a member is application-limited lowers the
+	// windowed maximum, which lowers every share, which lowers what can be
+	// delivered next, and the path is never re-measured upward.
+	//
+	// With the gain, the members together may put 1.25x the measured
+	// bottleneck on the wire, which is what one BBR sender would have done
+	// probing on its own -- which is exactly the property the share exists to
+	// preserve.
+	shareProbeGain = 1.25
 )
 
 // NewPathModel returns an empty model. Callers normally want SharedPath.
@@ -168,7 +196,17 @@ func (m *PathModel) Report(member Member, floor, samples, delivered float64, rou
 	m.aggregate = kept
 
 	if live > 0 && bottleneck > 0 {
-		state.Share = bottleneck / float64(live)
+		state.Seed = bottleneck / float64(live)
+		// A lone member has nothing to compound with, so there is nothing for
+		// a cap to protect and everything for it to break: its share would be
+		// the whole bottleneck, the bottleneck is the maximum of what it has
+		// recently delivered, and a sender held at its own recent maximum can
+		// never probe past it. Measured, that is a transport that runs at line
+		// rate and then collapses to a fiftieth of it for the rest of the
+		// process's life.
+		if live > 1 {
+			state.Share = shareProbeGain * state.Seed
+		}
 	}
 	return state
 }
@@ -211,7 +249,14 @@ func (m *PathModel) Current() State {
 	if bottleneck > 0 {
 		// The joining lane counts too, or the first thing it does is take a
 		// share sized for a path with one fewer lane on it.
-		state.Share = bottleneck / float64(live+1)
+		state.Seed = bottleneck / float64(live+1)
+		// Only a lane that will actually share the path takes a ceiling with
+		// it. A lane joining an empty model is alone, and capping it at what
+		// the last occupant delivered is how a fresh connection inherits a
+		// dead one's collapse.
+		if live > 0 {
+			state.Share = shareProbeGain * state.Seed
+		}
 	}
 	return state
 }

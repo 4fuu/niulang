@@ -237,11 +237,17 @@ serving the alternatives:
 
 - **It is fast.** 143 Mbit/s median where Hysteria2 got 90 and TUIC v5 got 77,
   ahead in all six rounds, and roughly 100x the two TCP-based VLESS
-  configurations.
-- **It stalls.** After a median of **2.35 GiB** of sustained transfer the local
-  client stops moving data entirely, keeps accepting connections, and does not
-  recover on its own. Three reproductions out of three. Nothing is corrupted —
-  it returns zero bytes, never wrong ones — and the server is unaffected.
+  configurations. Since the `min_rtt` fix in
+  [`STALL-20260817.md`](STALL-20260817.md) the same windows measure about
+  200 Mbit/s.
+- **Cancelled downloads can stall it.** A transfer aborted part-way through can
+  leave a flow hung, holding a connection the server keeps sending into.
+  Several of those saturate the link with data nobody reads, and the client
+  stops passing traffic until it is restarted. Transfers that run to completion
+  do not do this — 30 consecutive 16 MiB downloads left one connection open and
+  no residue. Nothing is corrupted either way: a stalled client returns zero
+  bytes, never wrong ones, and the server is unaffected. Diagnosis and
+  reproduction in [`STALL-20260817.md`](STALL-20260817.md).
 
 Until that is fixed, treat a queqiao node as something you switch to
 deliberately rather than something you leave carrying a laptop's day. When
