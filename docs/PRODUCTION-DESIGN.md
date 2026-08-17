@@ -8,13 +8,13 @@ Clash profile.
 
 ## What the measurements imply
 
-The prototype is functionally useful, but it is not yet a production
-transport. The latest five-block campaign is summarized in
+The fixed-egress transport is deployed experimentally, but it is not presented
+as a general-purpose VPN. An early five-block campaign is summarized in
 [`MEASUREMENTS-20260810.md`](MEASUREMENTS-20260810.md): adaptive reached a
 101.8 Mbps median for eight concurrent 10 MiB HTTP flows with 40/40 complete,
 while the stock control had 33/40 complete and Brutal had 39/40. The same
-campaign still found OpenAI timeouts and long tails, so goodput alone is not a
-release criterion.
+campaign found OpenAI timeouts and long tails that later regression work had
+to resolve, demonstrating why goodput alone is not a release criterion.
 
 The packet trace also found an effective path MTU problem. Starting QUIC at
 1200-byte packets avoids the 1441-byte probe packets that stalled the first
@@ -28,7 +28,7 @@ opening more CUBIC lanes is sufficient.
 ```text
 Clash Verge
     |
-local SOCKS5/TUN ingress -- classifier -- scheduler -- session controller
+local SOCKS5 ingress ------- classifier -- scheduler -- session controller
     |                         |                  |
     +-------------------------+------------------+-- encrypted lanes
                                                      |
@@ -43,21 +43,21 @@ HTTPS URLs or plaintext and does not perform MITM.
 
 ### Session and lane model
 
-One logical flow has a random `session_id` and `flow_id`. The first lane is a
-control/interactive lane. Additional lanes are independent authenticated
-QUIC connections, each carrying a reliable stream of bounded frames. Every
-DATA frame carries a byte sequence number. The receiver uses a bounded
-reassembly window and emits cumulative acknowledgements. Selective ACK ranges
-remain future protocol work for TCP flows; the current replay mechanism relies
-on duplicate-safe sequence reassembly. UDP associations do have a resume
+One logical flow has a random `session_id` and `flow_id`. Its data plane uses
+exactly one authenticated connection at a time; connections are replacement
+and workload-isolation boundaries, not stripes for aggregating one flow's
+capacity. Every DATA frame carries a byte sequence number. The receiver uses a
+bounded reassembly window and emits cumulative acknowledgements plus negotiated,
+bounded selective ACK ranges. Duplicate-safe sequence reassembly and replay
+make TCP-flow replacement safe. UDP associations use a separate relay-resume
 token, described under UDP preference and TCP fallback below.
 
-The implementation also has an explicit, opt-in QUIC stream pool. When
-`--quic-pool` is enabled, initial/control streams for concurrent flows share
-one bounded QUIC connection and one congestion controller, while bulk lane
-joins remain independent connections. This improves the short-flow handshake
-amortization characteristic of TUIC, but it is not the default: the measured
-path still needs a controller and queue policy that preserve bulk goodput.
+The QUIC stream pool is enabled by default. Initial/control streams for
+concurrent flows share one bounded QUIC connection and one congestion
+controller. When a classified bulk flow would otherwise share that connection
+with interactive work, it is moved to one lazily created, bounded secondary
+connection; the flow is never striped across both. This improves short-flow
+handshake amortization while isolating bulk queueing.
 The first pooled stream performs the PSK `HELLO`; later streams on a capable
 peer use one `OPEN_FAST` frame, saving one China-US request/response exchange.
 Authentication is scoped to the TLS/QUIC connection, and each fast stream
@@ -67,16 +67,10 @@ admission checks. Capability negotiation keeps the original 24-byte
 all learned authentication/capability state, and capability-free peers retain
 the per-stream legacy handshake.
 
-The scheduler must never wait for eight handshakes before acknowledging a
-short request. The unattended-safe default starts one lane and grows only
-after the classifier and a measured lane probe justify it; operators can
-explicitly pre-warm spare lanes after a path-specific campaign.
-Lane joins must be bounded-time and failure-tolerant; a failed join leaves
-the original flow usable. The adaptive manager opens at most one speculative
-join per scheduler tick and stops joining as soon as both FIN directions are
-observable. This is an important resource invariant: a session that is
-already completing must not turn a rejected join into an unbounded stream of
-zero-byte lanes.
+Lane joins are bounded-time and failure-tolerant; a failed isolation or
+replacement join leaves the original flow usable. An already completing
+session must not turn a rejected join into an unbounded stream of zero-byte
+lanes.
 
 The server’s stream-pool accept loop has a separate lifecycle invariant: the
 per-stream handshake deadline must never be applied while waiting for another
@@ -104,7 +98,7 @@ downloads remained 10/10 successful (median 1.18 s, p95 2.19 s). These are
 path-specific development measurements, not a universal claim about Brutal or
 QUIC.
 
-Before release, compare:
+The retained controller comparison set is:
 
 1. the opt-in independently implemented BBRv1-shaped controller with
    explicit loss and queue-delay limits;
@@ -129,21 +123,19 @@ available. It does not import Hysteria's `internal/` packages or fork
 cryptography. Both BBR modes are opt-in: the original queqiao mode is an
 independent implementation of the public BBR model, while `bbr-tuic` is a
 separate Go implementation aligned with TUIC's public behavior. Neither is a
-claim that apNet quic-go itself provides BBR. A per-lane controller alone is unsafe: eight controllers can
-overrun the path and starve SSH. The aggregate token bucket is now implemented
+claim that apNet quic-go itself provides BBR. A per-connection controller alone
+is unsafe: concurrent controllers can overrun the path and starve SSH. The
+aggregate token bucket is implemented
 above all lanes, with a reserved interactive share; an 8 MiB/s budget plus a
 512 KiB/s reserve preserved 10/10 Google requests during eight bulk downloads.
-It remains opt-in until queue-delay and retransmission guardrails are exposed
-as telemetry.
+It remains operator-configured because a safe rate budget is path-specific;
+queue-delay and retransmission state are exposed as telemetry.
 
-The endpoint exposes aggregate active-QUIC lane count, latest/worst smoothed
+The endpoint exposes aggregate active-QUIC connection count, latest/worst smoothed
 RTT, bytes sent/received, QUIC loss counters, and (for the optional controllers)
 bytes in flight, pacing rate, congestion window, minimum RTT, recovery state,
 and delivery-rate estimates through the loopback-only metrics listener. These
-signals are now available for validation, but they remain a release gate for
-automatic lane-growth decisions: telemetry must be retained across lane
-replacement and tied to statistically valid marginal-gain samples before a
-non-default policy is enabled.
+signals are available for validation and are retained across replacement.
 
 ## PIAS-inspired workload policy
 
@@ -155,7 +147,8 @@ Classification is intentionally behavioral, not semantic:
   long-lived traffic such as SSH and remote desktop; one lane plus reserved
   queueing capacity.
 - `BULK`: sustained one-way transfer after a byte/age budget, with hysteresis;
-  eligible for additional lanes and larger aggregate pacing budget.
+  eligible for isolation on its own connection and a larger aggregate pacing
+  budget.
 
 The byte threshold must not be tied to an absolute Mbps floor. Otherwise a
 large transfer on a throttled path never reaches `BULK`, exactly the failure
@@ -164,15 +157,10 @@ large one-way SSH output. Use recent payload-size distribution, direction,
 idle gaps, and an operator-tunable hysteresis window. Classification is a
 policy hint, not a security boundary, and it must be visible in metrics.
 
-The scheduler should grow one lane at a time. A candidate lane is retained
-only if its marginal goodput is positive and the interactive RTT budget is
-not exceeded. It should retire the worst lane after a sustained negative
-contribution, with a minimum dwell time to prevent oscillation. The current
-implementation now feeds the measured worst smoothed RTT into this guard and
-retires the least productive non-control lane when the budget is exceeded or a
-negative marginal-gain probe is observed;
-controller-specific bytes-in-flight and delivery-rate signals are still needed
-to make that decision fully loss-aware.
+The scheduler keeps one data connection per flow. Demand-driven isolation is
+attempted only when classified bulk work and competing work share the pooled
+control connection. The secondary pool is bounded to one connection and
+expires when idle; it is an isolation mechanism, not adaptive multipath.
 
 ## UDP preference and TCP fallback
 
@@ -221,9 +209,9 @@ since packets ride QUIC datagrams. The duplicate policy the earlier note asked
 for is the receiver's anti-replay window.
 
 The controlled UDP-blackhole test transferred a complete 100 MiB response over
-a TCP rescue lane. This is development evidence, not a guarantee under all
-loss patterns: selective ACK ranges, path-independent resume tokens,
-intermittent blocking, and a broader fault matrix remain release gates.
+a TCP rescue lane. Selective ACK ranges, scoped resume tokens, and deterministic
+intermittent-block coverage are implemented. This is still not a guarantee
+under every loss pattern or middlebox.
 
 A second real-path blackhole test covered SOCKS5 UDP ASSOCIATE itself. After a
 valid DNS reply on QUIC, the server dropped only inbound UDP/12443. The same
@@ -234,6 +222,13 @@ firewall rule was removed and verified absent afterward. This establishes the
 bounded fallback behavior but not lossless UDP resume; in-flight datagrams may
 still be lost during the transition.
 
+A later intermittent real-path run kept the same UDP association open while
+UDP was blocked. Queries 27--37 timed out and queries 38--50 received valid DNS
+replies through TCP while the rule was still present, for a measured
+27.7-second first-loss-to-recovered-reply bound. After rule removal, a fresh
+association returned to QUIC. The exact procedure and metrics are recorded in
+[`RELEASE-HARDENING-20260817.md`](RELEASE-HARDENING-20260817.md).
+
 ## Clash Verge integration
 
 The safe first integration is a local SOCKS5 node, for example
@@ -241,17 +236,18 @@ The safe first integration is a local SOCKS5 node, for example
 to that node. The live profile remains untouched and can be restored by
 removing that one node/rule.
 
-The current client accepts TCP CONNECT and bounded UDP ASSOCIATE. A production
-Clash integration still needs a TUN/VLESS ingress for transparent capture and
-full HTTP/3 behavior; a SOCKS profile can use UDP ASSOCIATE for applications
-that support SOCKS5 UDP. Packets now ride the connection's QUIC datagrams
+The current client accepts TCP CONNECT and bounded UDP ASSOCIATE. Clash/mihomo
+owns transparent TUN capture and hands selected TCP and UDP traffic to this
+SOCKS endpoint. Direct in-process TUN or VLESS ingress is deliberately outside
+the two-process architecture. Packets ride the connection's QUIC datagrams
 where QUIC negotiated them, with the control stream as the fallback for a
 TLS/TCP lane or a peer without datagram support, so the release gate for
 loss-sensitive UDP is met in shape: a lost packet is no longer retransmitted
 and no longer holds up the one behind it. Emulated at 15% loss and a 200 ms
 round trip the worst delivered packet takes 202 ms against the stream's 448 to
-658. What remains for that gate is the live path and a fault matrix, not the
-mechanism. No HTTPS MITM is needed for either mode.
+658. Real blocked/restored-path behavior is recorded in
+[`RELEASE-HARDENING-20260817.md`](RELEASE-HARDENING-20260817.md). No HTTPS MITM
+is needed.
 
 On a host where Clash TUN installs a default route through `198.18.0.1`, the
 outer dev endpoint must be explicitly excluded from that route or the client
@@ -298,15 +294,23 @@ trust-boundary review and residual risks are in `SECURITY-REVIEW.md`.
 
 ## Release gates
 
-Do not call the project production-ready until all of the following are
-measured on the real China-US path:
+The repository-actionable gates and their evidence are:
 
-1. complete single-flow downloads and uploads at 1/2/4/8 lanes, with at least
-   five randomized repetitions and confidence intervals;
-2. API/web fresh and reused latency, including p95/p99 and timeout rates;
-3. interactive RTT under a simultaneous bulk transfer;
-4. controlled loss, delay, reordering, and MTU tests;
-5. UDP blocked, intermittently blocked, and recovered cases;
-6. mid-session lane replacement without duplicate or missing bytes;
-7. resource-limit, fuzz, race, and interoperability tests; and
-8. a documented rollback that leaves the existing tunnel unchanged.
+1. real-path downloads, uploads, and alternating deployed-proxy comparisons in
+   [`MEASUREMENTS-20260816.md`](MEASUREMENTS-20260816.md);
+2. fresh/reused API latency and interactive behavior under bulk load in
+   [`STALL-20260817.md`](STALL-20260817.md);
+3. seeded loss, delay, reordering, queueing, and MTU campaigns described in
+   [`BENCHMARKING.md`](BENCHMARKING.md), with versioned report provenance;
+4. blocked, intermittently blocked, TCP-rescued, and restored-QUIC cases in
+   [`RELEASE-HARDENING-20260817.md`](RELEASE-HARDENING-20260817.md);
+5. replacement without duplicate TCP bytes or a changed UDP relay source,
+   covered by deterministic/race tests and the same live fault campaign;
+6. connection/session/frame/buffer limits, fuzz/race coverage, and a clean
+   pinned vulnerability scan in [`SECURITY-REVIEW.md`](SECURITY-REVIEW.md); and
+7. deterministic multi-platform archives, checksums, atomic installation, and
+   rollback in [`RELEASING.md`](RELEASING.md).
+
+Independent third-party review and operation across a wider variety of NATs,
+paths, and middleboxes remain external deployment qualifications. They are not
+claims that repository code or one China-US route can close by itself.

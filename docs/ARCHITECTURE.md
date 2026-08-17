@@ -2,91 +2,103 @@
 
 ## Problem statement
 
-The measured China-to-US path has a large difference between one and several
-independent flows. Direct outer TCP transports show severe retransmission and
-tail behavior. QUIC-based TUIC and Hysteria 2 are substantially more robust,
-but ordinary Clash proxying still maps one application connection to one
-logical proxy flow.
-
-`queqiao` is a paired performance-enhancing proxy (PEP): the local agent
-terminates the application-side socket, and the US agent creates the
-destination-side socket. Bytes in between are carried as numbered frames over
-one or more authenticated lanes.
+The measured China-to-US path has high RTT, rapidly changing erasure, and
+severe tails for direct outer TCP transports. `queqiao` is a paired
+performance-enhancing proxy (PEP): the local agent terminates the
+application-side socket, and the fixed-egress agent creates the
+destination-side socket. Bytes in between are numbered and framed so transport
+recovery does not expose duplicate application bytes.
 
 ## Components
 
 ```text
-         local machine                         icourses-dev
-  +--------------------------+          +--------------------------+
-  | SOCKS5/TUN ingress       |          | authenticated listener   |
-  | flow classifier           |          | session manager          |
-  | PIAS scheduler            |  lanes   | reassembly / ordering    |
-  | lane manager              | <------> | destination dialer       |
-  | UDP/TCP transport probes |          | metrics / limits         |
-  +--------------------------+          +--------------------------+
+application -> Clash/mihomo TUN or system proxy
+                    |
+                    v
+              SOCKS5 TCP/UDP ingress
+              classifier / scheduler
+              pooled control connection ---- QUIC/UDP or TLS/TCP ----+-- egress agent
+              isolated bulk connection  ---- QUIC/UDP ---------------+       |
+                                                                              v
+                                                                         destination
 ```
 
-The first usable integration surface is a local SOCKS5 listener. TUN support
-comes after the flow/session semantics are stable. Clash Verge can route its
-final `MATCH` rule to the local SOCKS5 endpoint without knowing the custom
-wire protocol.
+Clash/mihomo owns transparent TUN capture and routes selected traffic to the
+local SOCKS5 endpoint. Queqiao installs no TUN device or host routes. Direct
+in-process TUN or VLESS ingress is outside the two-process architecture.
 
-## Data path
+## TCP data path
 
-1. Ingress accepts a TCP connection and assigns a random `flow_id` within an
-   authenticated `session_id`.
-2. The destination address is sent in a bounded `OPEN` frame.
-3. The US agent dials the destination and returns `OPEN_OK` or a typed error.
-4. Each direction is split into bounded frames with monotonically increasing
-   byte sequence numbers.
-5. The scheduler selects lanes according to class, lane health, and global
-   pacing. The receiver reorders frames before writing to the socket.
-6. `CLOSE`, `RESET`, and `WINDOW` frames provide lifecycle and backpressure.
+1. Ingress accepts a SOCKS5 TCP connection and assigns random session and flow
+   identifiers.
+2. The bounded destination address is authenticated and sent in `OPEN` or
+   negotiated `OPEN_FAST` framing.
+3. The egress agent applies destination policy, dials it, and reports success
+   or a typed error. By default the client pipelines this open; operators can
+   choose `--wait-for-open-ack` for precise early failure at the cost of a
+   round trip.
+4. Each direction is split into bounded DATA frames with monotonically
+   increasing byte sequence numbers.
+5. Bounded reassembly, cumulative ACKs, negotiated selective ACK ranges, and
+   duplicate suppression preserve application byte order across replacement.
+6. `CLOSE`, `RESET`, and completion tombstones provide bounded lifecycle and
+   final-state replay. Protocol version 2 removed the unused WINDOW/PING/PONG
+   frame types.
 
-The application TLS session remains end-to-end between the application and
-its destination. The optimizer sees byte counts, destination metadata, and
-timing, but does not need HTTPS MITM.
+The application TLS session remains end-to-end between the application and its
+destination. The PEP sees the SOCKS destination, byte counts, packet sizes, and
+timing, but does not decrypt application traffic.
 
-## Workload classes
+## Workload isolation
 
-`NEW` receives a small byte/time budget and one lane. `INTERACTIVE` is selected
-by bidirectionality, packet-size distribution, idle gaps, and a bounded
-sustained rate. `BULK` requires a larger byte count plus sustained one-way
-delivery. Transitions use hysteresis and a minimum dwell time.
+`NEW`, `INTERACTIVE`, and `BULK` classification is behavioral and uses byte
+count, direction, recent payload distribution, idle gaps, age, and hysteresis.
+It is a scheduling hint, not a security boundary.
 
-Byte count alone is deliberately insufficient: SSH and remote desktop flows
-can be long-lived, while Git can transition from interactive negotiation to a
-large packfile transfer.
+The QUIC pool is enabled by default. Short and interactive flows share one
+bounded control connection, amortizing authentication and keeping its
+congestion window free from avoidable bulk queueing. If classified bulk work
+and competing work would share that connection, the bulk flow is moved to one
+lazily created secondary connection. One flow has exactly one data connection
+at a time: secondary connections isolate workloads and replace failed paths;
+they never aggregate one flow's capacity. The deleted multipath experiment and
+its measurements are retained in
+[`DESIGN-MULTIPATH.md`](DESIGN-MULTIPATH.md).
 
-## Lane policy
+An optional aggregate token bucket and interactive reserve apply above all
+connections. Each QUIC connection retains its own selected congestion
+controller.
 
-New and interactive flows normally use one QUIC lane. Bulk flows start with
-two lanes and may grow to a configured maximum if marginal goodput improves
-without exceeding an interactive RTT budget. The scheduler uses a global
-aggregate token bucket in addition to per-lane QUIC congestion control; this
-prevents N independent congestion controllers from blindly taking the whole
-path.
+## UDP and transport fallback
 
-## Fallback
+SOCKS5 UDP ASSOCIATE preserves datagram boundaries. Where QUIC negotiates
+DATAGRAM support, packets use it; TLS/TCP and capability-free peers use the
+lane control stream. The receiver applies a bounded anti-replay window.
 
-Each endpoint has an authenticated UDP probe. A new session may race a UDP
-handshake and a TCP/TLS handshake. The first authenticated path wins. Health
-states are `healthy`, `degraded`, and `blocked`; lane creation and replacement
-respect the state. Seamless replacement of a failed lane requires session
-resume tokens and sequence-aware replay, which is a later milestone.
+Each remote endpoint has `healthy`, `degraded`, and `blocked` UDP health. New
+work in `auto` mode races QUIC against delayed TLS/TCP; repeated UDP failures
+enter a cooldown, and later probes allow QUIC to become preferred again.
 
-TCP fallback normally uses one lane. Multiple reliable outer TCP lanes are
-not the default because nested TCP head-of-line blocking can amplify loss.
+Failed TCP flows use bounded sequence-aware replay over an authenticated
+replacement without duplicating bytes. Failed UDP associations retain the
+local SOCKS endpoint and reclaim the same remote relay socket using a scoped,
+single-use, expiring resume token. Datagrams in flight at failure can be lost;
+UDP recovery is not presented as lossless.
 
-## Threat model and limits
+## Trust and resource boundaries
 
-The server is trusted with destination metadata and with forwarding encrypted
-application bytes. It must not be trusted with application plaintext. The
-protocol must authenticate every session and reject unauthenticated lane
-joins, oversized frames, flow-id reuse, replayed opens, and unbounded buffer
-growth.
+TLS 1.3 protects both outer transports. Timestamped HMAC handshakes and nonce
+tracking authenticate sessions and joins; connection-scoped capabilities gate
+fast opens, selective ACKs, control reservation, and UDP resume. The egress
+rejects private destinations unless explicitly configured otherwise.
 
-No scheduler can exceed a hard aggregate bottleneck. Multiple lanes are useful
-only when the path's policy or congestion behavior is materially per-flow, or
-when independent retransmission windows reduce loss interaction.
+Connections, sessions, flows, frame payloads, reassembly, replay, UDP relays,
+anti-replay windows, handshakes, idle periods, and total lifetimes are bounded.
+The loopback-only metrics endpoint reports flow, lane, controller, fallback,
+replacement, timeout, and replay state. The detailed review and residual risks
+are in [`SECURITY-REVIEW.md`](SECURITY-REVIEW.md).
 
+No scheduler can exceed a hard aggregate bottleneck. The transport is designed
+for one measured fixed-egress path and is not evidence of universal advantage;
+see [`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md) for release evidence and
+external qualifications.

@@ -1,5 +1,9 @@
 # Implementation roadmap
 
+Stages 0--2 and 4 are implemented, Stage 3 was retired after measurement, and
+the repository-actionable Stage 5 gates are complete. Wider NAT/middlebox
+operation and independent third-party review remain external qualifications.
+
 ## Stage 0 — repository and measurement foundation
 
 - Dedicated repository and reproducible Go toolchain.
@@ -82,8 +86,9 @@ the same SOCKS5 UDP association over a fresh authenticated TCP lane in 9.51 s,
 preserving its local endpoint and remote relay source address. Deterministic
 tests cover TCP stream replay without duplicate bytes, relay-source
 preservation, single-use resume tokens, and repeated rescue under the race
-detector. Intermittent blocking and long-soak coverage remain Stage 5 release
-hardening rather than an unimplemented fallback mechanism.
+detector. A later real-path intermittent run measured a 27.7-second
+first-loss-to-recovered-reply bound, then proved that fresh post-cooldown
+associations returned to QUIC.
 
 ## Stage 5 — integration and release hardening
 
@@ -93,8 +98,8 @@ hardening rather than an unimplemented fallback mechanism.
   outside the current two-process architecture.
 - ~~Native QUIC DATAGRAM mode for UDP, retaining stream/TCP fallback.~~ Done:
   chosen by QUIC's own capability exchange rather than configured, with the
-  control stream retained for lanes that have no datagrams. Measured emulated,
-  not live.
+  control stream retained for lanes that have no datagrams. Measured under
+  seeded impairment and exercised on the live blocked/restored QUIC path.
 - ~~Cross-platform packaging.~~ Done: deterministic Linux, macOS, and Windows
   archives for amd64 and arm64, embedded provenance, SHA-256 checksums, and a
   tag-driven release workflow.
@@ -104,7 +109,8 @@ hardening rather than an unimplemented fallback mechanism.
   documented trust boundaries and residual risk, bounded unauthenticated QUIC
   connections, sessions, frames, flow buffers, replay state, relay sockets,
   lanes, and lifetimes, plus pinned vulnerability scanning and an enforced
-  patched Go toolchain. Independent audit and live soak remain release gates.
+  patched Go toolchain. Independent third-party audit remains external release
+  qualification rather than repository implementation work.
 - ~~Reproducible benchmark reports.~~ Done: versioned JSON records include the
   exact invocation, seeded path, VCS state, toolchain, module graph, latency,
   and contention results; matrix bundles add the source patch and checksums.
@@ -112,6 +118,11 @@ hardening rather than an unimplemented fallback mechanism.
   associations fall back to TCP without changing their relay source, UDP is
   restored on the same endpoint, and post-cooldown probes return to QUIC. The
   normal/race soak runs weekly with checksummed provenance.
-- Real-path intermittent firewall/NAT and long-duration soak campaigns.
+- ~~Real-path intermittent firewall and bounded production soak.~~ Done: an
+  unchanged UDP association recovered valid replies over TCP while UDP stayed
+  blocked, a fresh association returned to QUIC after rule removal, and the
+  upgraded production pair completed 114/115 persistent UDP probes plus 40/40
+  HTTPS flows over ten minutes with stable descriptors and no failed flows.
+  NAT/middlebox diversity remains an external deployment qualification.
 - ~~Documented rollback instructions.~~ Done: checksum verification, atomic
   binary installation, retained prior builds, and explicit service rollback.

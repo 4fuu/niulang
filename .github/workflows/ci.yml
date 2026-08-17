@@ -70,6 +70,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -short -timeout 20m ./...
+      - name: live probe helper tests
+        run: python3 -m unittest scripts/test_udp_association_check.py
 
   # Exercise the actual release path, including embedded version metadata and
   # deterministic archive creation. One target is enough here; release.yml

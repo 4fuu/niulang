@@ -56,7 +56,7 @@ same guide is fixed; its diagnosis and regression proof remain in
 
 ## Current status
 
-The repository now contains an authenticated SOCKS-to-PEP prototype with
+The repository now contains an authenticated fixed-egress SOCKS-to-PEP with
 TLS/TCP, QUIC, lane joins, cross-lane reassembly, PIAS-inspired
 classification, SOCKS5 TCP CONNECT and bounded UDP ASSOCIATE, new-flow
 UDP/TCP racing, bounded lane recovery, completion tombstones, aggregate
@@ -64,10 +64,13 @@ pacing, and opt-in QUIC controllers. The stock apNet
 QUIC controller is retained as the control; an independently implemented
 BBRv1-shaped controller, an adaptive controller, and a Hysteria-style
 fixed-rate (Brutal) controller can be selected for measurement.
-An isolated development service is deployed without replacing the existing
-tunnels. The latest five-block real-link evidence is recorded in
+The hardened pair is deployed with retained rollback binaries. The early
+five-block real-link evidence is recorded in
 [`docs/MEASUREMENTS-20260810.md`](docs/MEASUREMENTS-20260810.md); the earlier
 pilot remains in [`docs/MEASUREMENTS-20260809.md`](docs/MEASUREMENTS-20260809.md).
+The release build, security, live fallback, upgrade, and mixed-soak evidence is
+in
+[`docs/RELEASE-HARDENING-20260817.md`](docs/RELEASE-HARDENING-20260817.md).
 
 ### Measuring against a reference
 
@@ -194,11 +197,11 @@ shared control connection exists at all.
 
 ### Recommended configuration
 
-The measured configuration is `--quic-pool --optimistic-open`. There is nothing
-to size: a flow's data goes over one connection, and what it may commit ahead
-of its transport is a fraction of that transport's own congestion window, so it
-follows the path rather than a constant. Both flags remain opt-in because this
-project's release gates are not met, not because they measured badly.
+The measured behavior is now the default: `--quic-pool=true` shares the control
+connection and `--wait-for-open-ack=false` pipelines the destination open.
+There is nothing to size: a flow's data goes over one connection, and what it
+may commit ahead of its transport is a fraction of that transport's own
+congestion window, so it follows the path rather than a constant.
 
 Outside the standard matrix, queqiao is ahead at 20 ms / 1 Gbit/s (708 against
 685 Mbit/s), at parity at 30 ms / 200 Mbit/s, ahead under 25% upstream loss
@@ -206,25 +209,30 @@ Outside the standard matrix, queqiao is ahead at 20 ms / 1 Gbit/s (708 against
 jitter it measures 8.4 Mbit/s against 2.9, because reassembling by byte offset
 does not stall a stream on an out-of-order packet the way relaying one does.
 
-The prototype is still not safe to use as a general-purpose production tunnel.
-Broader loss/soak campaigns remain outstanding, and under extreme correlated
-loss (35% in 10-packet bursts) queqiao's behavior still differs from the
-reference's: it completes more transfers but is slower on the ones both
+This is a fixed-egress experimental transport, not a general-purpose production
+VPN. Under extreme correlated loss (35% in 10-packet bursts), queqiao's
+behavior still differs from the reference's: it completes more transfers but
+is slower on the ones both
 finish. That case is now diagnosed -- lanes die of QUIC's idle timeout mid-burst
 and the rejoin is refused because the server's session went with its own
-connection. The former TCP-rescue acknowledgement-loop failure is fixed, and
-the UDP association rescue test now passes 50 consecutive focused runs and 20
-under `-race`. TUN/VLESS ingress is not yet implemented. A mid-session UDP
-rescue now reclaims the same remote relay socket by token, so the destination
-keeps seeing one source address, but
-datagrams in flight when the lane died are still lost rather than replayed. The project has not passed all controlled-loss/resource release
-gates in [`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
+connection. TCP and UDP rescue now have deterministic/race coverage; a live
+intermittent UDP block recovered the unchanged association over TCP and fresh
+traffic returned to QUIC after restoration. A mid-session UDP rescue reclaims
+the same remote relay socket by token, so the destination keeps seeing one
+source address; datagrams in flight when a lane dies remain lost, as allowed by
+UDP semantics. Clash/mihomo supplies transparent TUN capture and hands traffic
+to the SOCKS endpoint; direct TUN/VLESS ingress is outside this architecture.
+Repository-controlled loss, resource, packaging, vulnerability, rollback, and
+bounded-soak gates are complete. Independent review and broader NAT/middlebox
+operation remain external qualifications; see
+[`docs/PRODUCTION-DESIGN.md`](docs/PRODUCTION-DESIGN.md).
 
 ## Design goals
 
-- One local SOCKS5/TUN-facing agent and one fixed-egress US agent.
-- One application TCP flow can be framed, reordered, and striped over
-  one QUIC connection, framed so that arrival order does not gate delivery.
+- One local SOCKS5-facing agent, fed by Clash/mihomo's TUN integration, and one
+  fixed-egress US agent.
+- One application TCP flow is framed and reordered over exactly one data
+  connection at a time, so transport arrival order does not gate delivery.
   Striping a flow across several connections was tried, measured, and deleted:
   the path has one bottleneck per endpoint pair, and an open-loop probe
   delivers the same total however many connections carry it.
@@ -270,14 +278,13 @@ recorded in [`docs/DESIGN-MULTIPATH.md`](docs/DESIGN-MULTIPATH.md); it does not
 describe the path this targets. See [`docs/DESIGN.md`](docs/DESIGN.md) for why
 that regime is not this one.
 
-`--quic-pool` is an explicit opt-in that keeps one bounded QUIC connection for
+`--quic-pool` is enabled by default and keeps one bounded QUIC connection for
 initial/control streams and lets multiple short flows share its congestion
 controller. On a capable peer, bulk promotion also lazily creates one
 separately authenticated secondary QUIC pool and attaches the lane with a
 capability-gated `OPEN_JOIN_FAST`; peers without that capability use the
-legacy independent join. These modes must
-be validated with the supplied single-flow and concurrent-flow harnesses
-before being enabled in a live Clash profile. The first pooled stream performs
+legacy independent join. These modes are covered by the supplied single-flow,
+concurrent-flow, and live-path harnesses. The first pooled stream performs
 the authenticated `HELLO`; subsequent streams on a capable peer use a
 connection-scoped fast open while retaining independent flow identities and
 US-side destination-policy checks. Capability-free peers automatically keep
@@ -290,7 +297,8 @@ correctness or TCP fallback.
 - Circumventing a hard aggregate capacity limit on the China-US path.
 - Automatically decrypting or classifying HTTPS URLs or payloads.
 - Claiming that multiple lanes are always fair or faster.
-- Replacing the existing tunnel before a measured rollback path exists.
+- Automatically replacing or reconfiguring unrelated Xray, sing-box, or Clash
+  services.
 
 ## Development
 

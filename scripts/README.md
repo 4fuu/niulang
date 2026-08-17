@@ -82,25 +82,23 @@ QUEQIAO_TRIALS=5 QUEQIAO_FLOWS='1 2 4 8' \
 
 The script intentionally measures concurrent independent application flows.
 It does not claim that eight application connections are equivalent to one
-logical striped flow; the latter is covered by the PEP integration tests and
-the real-path campaign reports. Run the client with a physical source binding
-when Clash TUN/fake DNS would otherwise capture the outer endpoint, and keep
-the existing tunnel as the rollback path.
+logical striped flow; single-flow striping was measured and then deleted. Run
+the client with a physical source binding when Clash TUN/fake DNS would
+otherwise capture the outer endpoint, and keep the previous binary as the
+rollback path.
 
 `bench_single_flow.sh` measures exactly one HTTP application connection per
-trial. Run it once for each separately configured client lane topology, and
-keep the label in the output so the rows cannot be mistaken for independent
-application flows:
+trial. Run it once for each separately configured transport/controller, and
+keep the label in the output so configurations cannot be mixed:
 
 ```sh
-QUEQIAO_SOCKS5=127.0.0.1:12080 QUEQIAO_LABEL=lanes-1 \
+QUEQIAO_SOCKS5=127.0.0.1:12080 QUEQIAO_LABEL=erasure-default \
   QUEQIAO_TRIALS=5 ./scripts/bench_single_flow.sh --output /tmp/one.tsv
 ```
 
 There is no lane count to set: a flow's data goes over one connection. See
-`docs/DESIGN.md` for why striping was deleted. `--quic-pool` remains an
-explicit opt-in for a persistent multiplexed QUIC control connection and
-should be enabled only after path-specific latency/throughput validation.
+`docs/DESIGN.md` for why striping was deleted. `--quic-pool` is enabled by
+default and provides the bounded multiplexed QUIC control connection.
 
 ## Dedicated upload sink
 
@@ -135,5 +133,16 @@ checksummed provenance bundle:
 ```
 
 This is the deterministic release soak and runs weekly at a smaller count. It
-does not replace intermittent firewall and NAT tests on the real China-US
-path.
+does not replace broader live NAT and middlebox campaigns.
+
+`udp_association_check.py` is the live-path companion. It sends DNS queries
+through one unchanged SOCKS5 UDP association, records every loss and latency as
+TSV, and can require both an overall success count and a successful tail. The
+tail condition matters in a blackhole test: successful queries before the
+fault must not hide a failure to recover afterward.
+
+```sh
+./scripts/udp_association_check.py --socks 127.0.0.1:12080 \
+  --count 50 --interval 0.5 --timeout 2 --min-success 10 \
+  --require-final-successes 5 --output /tmp/udp-rescue.tsv
+```
