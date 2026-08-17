@@ -95,8 +95,9 @@ rejects private destinations unless explicitly configured otherwise.
 Connections, sessions, flows, frame payloads, reassembly, replay, UDP relays,
 anti-replay windows, handshakes, idle periods, and total lifetimes are bounded.
 The loopback-only metrics endpoint reports flow, lane, controller, fallback,
-replacement, timeout, and replay state. The detailed review and residual risks
-are in [`SECURITY-REVIEW.md`](SECURITY-REVIEW.md).
+UDP-path unavailability, dual-transport endpoint failure, replacement, timeout,
+and replay state. The detailed review and residual risks are in
+[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md).
 
 No scheduler can exceed a hard aggregate bottleneck. The transport is designed
 for one measured fixed-egress path and is not evidence of universal advantage;

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -289,8 +290,12 @@ func TestServerQUICShutdownDoesNotPoisonGlobalPathHealth(t *testing.T) {
 }
 
 func TestQUICReachabilityTimeoutWithWorkingTCPEntersCooldown(t *testing.T) {
+	var logs bytes.Buffer
 	client := &Client{
-		cfg:       ClientConfig{Transport: TransportAuto, FallbackDelay: time.Second},
+		cfg: ClientConfig{
+			RemoteAddr: "egress.example:443", Transport: TransportAuto, FallbackDelay: time.Second,
+			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		},
 		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),
 	}
 	client.dialPipelinedFlowForTest = func(_ context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
@@ -305,6 +310,116 @@ func TestQUICReachabilityTimeoutWithWorkingTCPEntersCooldown(t *testing.T) {
 	}
 	if client.udpHealth.allow(time.Now()) {
 		t.Fatal("a QUIC reachability timeout against a working TCP control did not enter cooldown")
+	}
+	got := client.metrics.Snapshot()
+	if got.UDPPathUnavailable != 1 || got.EndpointTransportRaceFailures != 0 {
+		t.Fatalf("unexpected endpoint transport metrics: %+v", got)
+	}
+	for _, want := range []string{
+		"UDP path unavailable or too slow",
+		"endpoint=egress.example:443",
+		"fallback=tcp",
+		"quic_error",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("UDP failure log is missing %q: %s", want, logs.String())
+		}
+	}
+}
+
+func TestSlowUDPPathIsReportedWhenTCPWinsTheDelayedRace(t *testing.T) {
+	var logs bytes.Buffer
+	client := &Client{
+		cfg: ClientConfig{
+			RemoteAddr: "egress.example:443", Transport: TransportAuto, FallbackDelay: time.Millisecond,
+			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		},
+		udpHealth: newUDPHealth(3, time.Minute), metrics: metrics.New(),
+	}
+	quicStopped := make(chan struct{})
+	client.dialPipelinedFlowForTest = func(ctx context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
+		if kind == TransportQUIC {
+			<-ctx.Done()
+			close(quicStopped)
+			return nil, ctx.Err()
+		}
+		return &openedFlow{kind: TransportTCP}, nil
+	}
+
+	flow, err := client.openInitialFlow(context.Background(), "example.test:443")
+	if err != nil || flow == nil || flow.kind != TransportTCP {
+		t.Fatalf("delayed-race fallback flow = %+v, error = %v", flow, err)
+	}
+	select {
+	case <-quicStopped:
+	case <-time.After(time.Second):
+		t.Fatal("losing QUIC candidate was not canceled")
+	}
+	got := client.metrics.Snapshot()
+	if got.UDPPathUnavailable != 1 || got.EndpointTransportRaceFailures != 0 {
+		t.Fatalf("unexpected endpoint transport metrics: %+v", got)
+	}
+	if text := logs.String(); !strings.Contains(text, "UDP path unavailable or too slow") ||
+		!strings.Contains(text, "quic_pending=true") {
+		t.Fatalf("slow UDP path was not logged as the degraded condition: %s", text)
+	}
+}
+
+func TestColdFlowReportsBothEndpointTransportsFailing(t *testing.T) {
+	var logs bytes.Buffer
+	client := &Client{
+		cfg: ClientConfig{
+			RemoteAddr: "egress.example:443", Transport: TransportAuto, FallbackDelay: time.Second,
+			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		},
+		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),
+	}
+	client.dialPipelinedFlowForTest = func(_ context.Context, kind TransportKind, _ []byte) (*openedFlow, error) {
+		return nil, fmt.Errorf("%s path unavailable", kind)
+	}
+
+	if _, err := client.openInitialFlow(context.Background(), "example.test:443"); err == nil {
+		t.Fatal("a cold flow with neither transport was reported as successful")
+	}
+	got := client.metrics.Snapshot()
+	if got.EndpointTransportRaceFailures != 1 || got.UDPPathUnavailable != 0 {
+		t.Fatalf("unexpected endpoint transport metrics: %+v", got)
+	}
+	for _, want := range []string{
+		"configured endpoint failed on both transports",
+		"endpoint=egress.example:443",
+		"quic_error",
+		"tcp_error",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("dual-transport failure log is missing %q: %s", want, logs.String())
+		}
+	}
+}
+
+func TestPooledFlowReportsBothEndpointTransportsFailing(t *testing.T) {
+	var logs bytes.Buffer
+	client := &Client{
+		cfg: ClientConfig{
+			RemoteAddr: "127.0.0.1:not-a-port", ServerName: "queqiao.test",
+			Transport: TransportAuto, EnableQUICPool: true, FallbackDelay: time.Second,
+			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		},
+		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := client.raceUDPAndTCP(ctx); err == nil {
+		t.Fatal("a pooled flow with neither transport was reported as successful")
+	}
+	got := client.metrics.Snapshot()
+	if got.EndpointTransportRaceFailures != 1 || got.UDPPathUnavailable != 0 {
+		t.Fatalf("unexpected endpoint transport metrics: %+v", got)
+	}
+	if text := logs.String(); !strings.Contains(text, "configured endpoint failed on both transports") ||
+		!strings.Contains(text, "endpoint=127.0.0.1:not-a-port") {
+		t.Fatalf("pooled dual-transport failure was not logged: %s", text)
 	}
 }
 

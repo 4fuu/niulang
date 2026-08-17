@@ -54,7 +54,9 @@ outside v0.1.
   normal UDP semantics permit.
 - Automatic fallback addresses UDP blocking or path failure. It does not make
   every restrictive network usable: a network may block the chosen port,
-  server name, certificate path, or both transports.
+  server name, certificate path, or both transports. Because TCP is a degraded
+  path on the target long-haul link, UDP unavailability and failure of both
+  endpoint transports have separate metrics and structured warnings.
 - Resource use is bounded per flow, but the host-wide ceiling is the configured
   session limit multiplied by per-flow bounds. The default is not a sizing
   guarantee.

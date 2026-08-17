@@ -278,7 +278,8 @@ operation remain external qualifications; see
   capability-negotiated `OPEN_FAST`.
 - One aggregate token bucket with an interactive reserve above all lanes.
 - Optional localhost `/metrics` counters for flow completion, bytes, fallback,
-  lane failure/replacement, PIAS class transitions, active QUIC RTT/loss,
+  UDP-path unavailability, failure of both endpoint transports, lane
+  failure/replacement, PIAS class transitions, active QUIC RTT/loss,
   controller mode/max bandwidth/pacing/cwnd/bytes-in-flight/min-RTT/recovery
   telemetry, rescue-window evictions and unreplayable flows, bulk isolations,
   plus explicit flow-idle/lifetime timeouts. The endpoint is

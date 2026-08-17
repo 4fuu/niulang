@@ -18,6 +18,8 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   and GitHub build-provenance attestations when the repository is public.
 - Private-root/server-leaf/session-secret generation, coordinated rotation
   guidance, and a checksummed real-path TCP/UDP soak harness.
+- Separate metrics and structured warnings for UDP-path unavailability and
+  configured endpoints that fail over both QUIC/UDP and TLS/TCP.
 
 ### Changed
 

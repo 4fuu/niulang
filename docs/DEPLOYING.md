@@ -420,6 +420,24 @@ they do not, Clash is not routing to the node: confirm that queqiao is selected
 in the group named by the matching rule. Finally, verify the observed egress
 address is the Queqiao server's address, not the old proxy's address.
 
+TCP fallback preserves connectivity, but it is the degraded path on the
+high-latency, high-loss link queqiao targets. Monitor transport health
+separately from aggregate flow success:
+
+```sh
+curl -fsS 127.0.0.1:12090/metrics \
+  | grep -E 'fallbacks_total|udp_path_unavailable_total|endpoint_transport_races_failed_total'
+```
+
+`queqiao_udp_path_unavailable_total` increases when QUIC fails or does not
+authenticate before TCP reaches the same configured endpoint. The client also
+logs `UDP path unavailable or too slow; TCP fallback is degraded` with the
+endpoint and QUIC outcome. `queqiao_endpoint_transport_races_failed_total`
+instead increases when an `auto` race exhausts both QUIC/UDP and TLS/TCP; its
+warning includes both transport errors. These are attempt counters: one SOCKS
+request may contribute more than once because a lost flow open is retried up to
+the configured bound.
+
 ### Other mihomo clients
 
 Nothing above is Verge-specific. Any client that reads a mihomo configuration —

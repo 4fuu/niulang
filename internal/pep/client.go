@@ -636,8 +636,14 @@ func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*opened
 		}
 		tcpFlow, tcpErr := c.dialPipelinedCandidate(ctx, TransportTCP, payload)
 		tcpEvidence := classifyQUICPathEvidence(tcpErr)
-		c.udpHealth.observe(differentialQUICPathEvidence(false, quicEvidence, tcpEvidence), time.Now())
+		c.observeUDPPath(
+			differentialQUICPathEvidence(false, quicEvidence, tcpEvidence),
+			false, result.err,
+		)
 		c.metrics.Fallback()
+		if tcpEvidence != quicPathAvailable {
+			c.reportEndpointTransportRaceFailure(result.err, tcpErr)
+		}
 		return tcpFlow, tcpErr
 	case <-timer.C:
 	case <-ctx.Done():
@@ -667,7 +673,10 @@ func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*opened
 			tcpResult = nil
 			tcpEvidence := classifyQUICPathEvidence(result.err)
 			if tcpEvidence == quicPathAvailable {
-				c.udpHealth.observe(differentialQUICPathEvidence(quicResult != nil, quicEvidence, tcpEvidence), time.Now())
+				c.observeUDPPath(
+					differentialQUICPathEvidence(quicResult != nil, quicEvidence, tcpEvidence),
+					quicResult != nil, quicErr,
+				)
 				c.metrics.Fallback()
 				cancel()
 				closeLateFlow(quicResult)
@@ -680,12 +689,59 @@ func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*opened
 			return nil, ctx.Err()
 		}
 	}
+	c.reportEndpointTransportRaceFailure(quicErr, tcpErr)
 	return nil, fmt.Errorf("QUIC failed (%v); TCP fallback failed (%v)", quicErr, tcpErr)
 }
 
 type openedFlowResult struct {
 	flow *openedFlow
 	err  error
+}
+
+// observeUDPPath keeps the existing health state and makes its operational
+// meaning explicit. A negative observation is only produced in AUTO after TCP
+// reaches the same endpoint, so the warning distinguishes a blocked or
+// unacceptably slow UDP path from a generally unreachable server. TCP preserves
+// correctness, but it is a degraded path on the high-RTT links this transport
+// targets and must not be silent.
+func (c *Client) observeUDPPath(evidence quicPathEvidence, quicPending bool, quicErr error) {
+	if c.udpHealth != nil {
+		c.udpHealth.observe(evidence, time.Now())
+	}
+	if evidence != quicPathUnavailable {
+		return
+	}
+	if c.metrics != nil {
+		c.metrics.UDPPathUnavailable()
+	}
+	if c.cfg.Logger == nil {
+		return
+	}
+	fields := []any{
+		"endpoint", c.cfg.RemoteAddr,
+		"quic_pending", quicPending,
+		"fallback", TransportTCP,
+	}
+	if quicErr != nil {
+		fields = append(fields, "quic_error", quicErr)
+	}
+	c.cfg.Logger.Warn("UDP path unavailable or too slow; TCP fallback is degraded", fields...)
+}
+
+// reportEndpointTransportRaceFailure is the complement of observeUDPPath: TCP
+// did not establish a usable control path either, so this is an endpoint-wide
+// failure rather than evidence against UDP alone.
+func (c *Client) reportEndpointTransportRaceFailure(quicErr, tcpErr error) {
+	if c.metrics != nil {
+		c.metrics.EndpointTransportRaceFailure()
+	}
+	if c.cfg.Logger != nil {
+		c.cfg.Logger.Warn("configured endpoint failed on both transports",
+			"endpoint", c.cfg.RemoteAddr,
+			"quic_error", quicErr,
+			"tcp_error", tcpErr,
+		)
+	}
 }
 
 func closeLateFlow(ch <-chan openedFlowResult) {
@@ -1759,8 +1815,14 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 		if tcpErr == nil {
 			tcpEvidence = quicPathAvailable
 		}
-		c.udpHealth.observe(differentialQUICPathEvidence(false, classifyQUICPathEvidence(result.err), tcpEvidence), time.Now())
+		c.observeUDPPath(
+			differentialQUICPathEvidence(false, classifyQUICPathEvidence(result.err), tcpEvidence),
+			false, result.err,
+		)
 		c.metrics.Fallback()
+		if tcpErr != nil {
+			c.reportEndpointTransportRaceFailure(result.err, tcpErr)
+		}
 		return tcpLane, tcpErr
 	case <-timer.C:
 	case <-ctx.Done():
@@ -1790,7 +1852,10 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 		case result := <-tcpResult:
 			tcpResult = nil
 			if result.err == nil {
-				c.udpHealth.observe(differentialQUICPathEvidence(quicResult != nil, quicEvidence, quicPathAvailable), time.Now())
+				c.observeUDPPath(
+					differentialQUICPathEvidence(quicResult != nil, quicEvidence, quicPathAvailable),
+					quicResult != nil, quicErr,
+				)
 				c.metrics.Fallback()
 				cancel()
 				closeLateLane(quicResult)
@@ -1803,6 +1868,7 @@ func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) 
 			return nil, ctx.Err()
 		}
 	}
+	c.reportEndpointTransportRaceFailure(quicErr, tcpErr)
 	return nil, fmt.Errorf("QUIC failed (%v); TCP fallback failed (%v)", quicErr, tcpErr)
 }
 

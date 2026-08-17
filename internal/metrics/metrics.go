@@ -12,20 +12,30 @@ import (
 )
 
 type Registry struct {
-	activeFlows        atomic.Int64
-	flowsStarted       atomic.Uint64
-	flowsCompleted     atomic.Uint64
-	flowsFailed        atomic.Uint64
-	bytesUp            atomic.Uint64
-	bytesDown          atomic.Uint64
-	laneFailures       atomic.Uint64
-	laneReplacements   atomic.Uint64
-	fallbacks          atomic.Uint64
-	udpReconnects      atomic.Uint64
-	udpRescueFailures  atomic.Uint64
-	completionTimeouts atomic.Uint64
-	flowTimeouts       atomic.Uint64
-	classTransitions   [3]atomic.Uint64
+	activeFlows      atomic.Int64
+	flowsStarted     atomic.Uint64
+	flowsCompleted   atomic.Uint64
+	flowsFailed      atomic.Uint64
+	bytesUp          atomic.Uint64
+	bytesDown        atomic.Uint64
+	laneFailures     atomic.Uint64
+	laneReplacements atomic.Uint64
+	fallbacks        atomic.Uint64
+	// udpPathUnavailable counts comparative failures: QUIC either failed or
+	// did not authenticate before TLS/TCP reached the same configured endpoint.
+	// It is deliberately separate from fallbacks, which also includes flows
+	// sent directly to TCP while UDP is in cooldown.
+	udpPathUnavailable atomic.Uint64
+	// endpointRaceFailures counts AUTO transport races in which neither QUIC
+	// nor TLS/TCP reached the configured endpoint. Keeping this separate from
+	// UDP failures tells an operator whether TCP was a usable (but degraded)
+	// escape path or whether the endpoint was unreachable on both transports.
+	endpointRaceFailures atomic.Uint64
+	udpReconnects        atomic.Uint64
+	udpRescueFailures    atomic.Uint64
+	completionTimeouts   atomic.Uint64
+	flowTimeouts         atomic.Uint64
+	classTransitions     [3]atomic.Uint64
 	// The rescue window is dropped rather than allowed to throttle the
 	// application. That trade has to be visible: a flow that has evicted part
 	// of its window will fail rather than recover if its lane dies, so a
@@ -46,6 +56,7 @@ type Registry struct {
 type Snapshot struct {
 	ActiveFlows, FlowsStarted, FlowsCompleted, FlowsFailed           int64
 	BytesUp, BytesDown, LaneFailures, LaneReplacements, Fallbacks    uint64
+	UDPPathUnavailable, EndpointTransportRaceFailures                uint64
 	UDPAssociationReconnects, UDPAssociationRescueFailures           uint64
 	CompletionTimeouts                                               uint64
 	FlowTimeouts                                                     uint64
@@ -129,6 +140,12 @@ func (r *Registry) FlowFinished(bytesUp, bytesDown uint64, failed bool) {
 func (r *Registry) LaneFailure()     { r.laneFailures.Add(1) }
 func (r *Registry) LaneReplacement() { r.laneReplacements.Add(1) }
 func (r *Registry) Fallback()        { r.fallbacks.Add(1) }
+func (r *Registry) UDPPathUnavailable() {
+	r.udpPathUnavailable.Add(1)
+}
+func (r *Registry) EndpointTransportRaceFailure() {
+	r.endpointRaceFailures.Add(1)
+}
 func (r *Registry) UDPAssociationReconnect() {
 	r.udpReconnects.Add(1)
 }
@@ -206,13 +223,15 @@ func (r *Registry) Snapshot() Snapshot {
 		FlowsCompleted: int64(r.flowsCompleted.Load()), FlowsFailed: int64(r.flowsFailed.Load()),
 		BytesUp: r.bytesUp.Load(), BytesDown: r.bytesDown.Load(), LaneFailures: r.laneFailures.Load(),
 		LaneReplacements: r.laneReplacements.Load(), Fallbacks: r.fallbacks.Load(),
-		UDPAssociationReconnects:     r.udpReconnects.Load(),
-		UDPAssociationRescueFailures: r.udpRescueFailures.Load(),
-		CompletionTimeouts:           r.completionTimeouts.Load(),
-		FlowTimeouts:                 r.flowTimeouts.Load(),
-		BulkIsolations:               r.bulkIsolations.Load(),
-		Reinjections:                 r.reinjections.Load(),
-		ReplayBytesInUse:             r.replayBytesInUse.Load(),
+		UDPPathUnavailable:            r.udpPathUnavailable.Load(),
+		EndpointTransportRaceFailures: r.endpointRaceFailures.Load(),
+		UDPAssociationReconnects:      r.udpReconnects.Load(),
+		UDPAssociationRescueFailures:  r.udpRescueFailures.Load(),
+		CompletionTimeouts:            r.completionTimeouts.Load(),
+		FlowTimeouts:                  r.flowTimeouts.Load(),
+		BulkIsolations:                r.bulkIsolations.Load(),
+		Reinjections:                  r.reinjections.Load(),
+		ReplayBytesInUse:              r.replayBytesInUse.Load(),
 	}
 	for i := range s.ClassTransitions {
 		s.ClassTransitions[i] = r.classTransitions[i].Load()
@@ -337,6 +356,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_lane_failures_total %d\n", s.LaneFailures)
 	fmt.Fprintf(w, "queqiao_lane_replacements_total %d\n", s.LaneReplacements)
 	fmt.Fprintf(w, "queqiao_fallbacks_total %d\n", s.Fallbacks)
+	fmt.Fprintf(w, "queqiao_udp_path_unavailable_total %d\n", s.UDPPathUnavailable)
+	fmt.Fprintf(w, "queqiao_endpoint_transport_races_failed_total %d\n", s.EndpointTransportRaceFailures)
 	fmt.Fprintf(w, "queqiao_udp_association_reconnects_total %d\n", s.UDPAssociationReconnects)
 	fmt.Fprintf(w, "queqiao_udp_association_rescue_failures_total %d\n", s.UDPAssociationRescueFailures)
 	fmt.Fprintf(w, "queqiao_completion_timeouts_total %d\n", s.CompletionTimeouts)
