@@ -59,8 +59,9 @@ const (
 	// retention when the peer closes its last lane at exactly that point.
 	flowCompletionGrace = 5 * time.Second
 	// A local EOF is ambiguous between TCP half-close and full application
-	// close. Wait for the final ACK, then escalate only after an idle grace;
-	// interactive sessions get more time for legitimate quiet periods.
+	// close. Escalate only after response traffic stops making progress, or
+	// after the peer has acknowledged the local FIN; interactive sessions get
+	// more time for legitimate quiet periods.
 	flowAbortGrace        = 5 * time.Second
 	interactiveAbortGrace = 30 * time.Second
 	remoteFinDrainGrace   = 500 * time.Millisecond
@@ -77,8 +78,9 @@ const (
 )
 
 var (
-	errFlowIdleTimeout = errors.New("flow idle timeout")
-	errFlowLifetime    = errors.New("flow lifetime exceeded")
+	errFlowIdleTimeout       = errors.New("flow idle timeout")
+	errFlowLifetime          = errors.New("flow lifetime exceeded")
+	errLocalApplicationClose = errors.New("local application closed")
 )
 
 type mpLane struct {
@@ -238,9 +240,14 @@ type multipathFlow struct {
 	controlLaneShared func() bool
 	started           time.Time
 	completionGrace   time.Duration
-	bytesUp           atomic.Uint64
-	bytesDown         atomic.Uint64
-	class             atomic.Uint32
+	// abortGrace and abortDrainGrace are zero in production. Tests shorten
+	// the two independently so the inactivity and bounded-drain state machine
+	// can be exercised without sleeping for seconds.
+	abortGrace      time.Duration
+	abortDrainGrace time.Duration
+	bytesUp         atomic.Uint64
+	bytesDown       atomic.Uint64
+	class           atomic.Uint32
 	// ackTrack answers "has this range arrived?", which is what clocks every
 	// lane. scheduler and sendCtx let a lane joined mid-flow start carrying
 	// data as soon as it is admitted.
@@ -263,7 +270,11 @@ type multipathFlow struct {
 	finSent           atomic.Bool
 	remoteFinSeen     atomic.Bool
 	localClosed       atomic.Bool
+	localClosedOnce   sync.Once
+	localClosedCh     chan struct{}
 	remoteAbort       atomic.Bool
+	remoteAbortOnce   sync.Once
+	remoteAbortCh     chan struct{}
 	localAbortSent    atomic.Bool
 	laneFailures      atomic.Uint64
 	// onProtocolReset is called when the peer rejects this flow's open on
@@ -332,7 +343,8 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 		sendAckFlag: sendAckFlag, recvAckFlag: recvAckFlag,
 		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, maxLaneEvents), laneErr: make(chan laneFailure, maxLaneEvents),
 		finalAck: make(chan struct{}, 1), sendDone: make(chan struct{}),
-		done: make(chan struct{}), ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1),
+		done: make(chan struct{}), localClosedCh: make(chan struct{}), remoteAbortCh: make(chan struct{}),
+		ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1),
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
 	}
 	if len(loggers) > 0 && loggers[0] != nil {
@@ -505,10 +517,42 @@ func (f *multipathFlow) snapshot() flowSnapshot {
 }
 
 func (f *multipathFlow) localAbortGrace() time.Duration {
+	if f.abortGrace > 0 {
+		return f.abortGrace
+	}
 	if classifier.Class(f.class.Load()) == classifier.ClassInteractive {
 		return interactiveAbortGrace
 	}
 	return flowAbortGrace
+}
+
+func (f *multipathFlow) localAbortDrainGrace() time.Duration {
+	if f.abortDrainGrace > 0 {
+		return f.abortDrainGrace
+	}
+	return finalAckWriteGrace
+}
+
+// noteLocalClose publishes the source sequence before announcing EOF. The
+// receive side may have to send a full-close marker before the scheduler has
+// delivered every source chunk, so sendFinal is too late to be the first place
+// that records this sequence.
+func (f *multipathFlow) noteLocalClose(sequence uint64) {
+	f.sendSequence(sequence)
+	f.localClosed.Store(true)
+	if f.localClosedCh != nil {
+		f.localClosedOnce.Do(func() { close(f.localClosedCh) })
+	}
+}
+
+// noteRemoteAbort makes an explicit full close an out-of-band cancellation
+// source for the sender. Waiting for its outstanding chunks to be acknowledged
+// cannot work: the peer has just said that its application will not read them.
+func (f *multipathFlow) noteRemoteAbort() {
+	f.remoteAbort.Store(true)
+	if f.remoteAbortCh != nil {
+		f.remoteAbortOnce.Do(func() { close(f.remoteAbortCh) })
+	}
 }
 
 func (f *multipathFlow) observeTransport(lanes []*mpLane) {
@@ -994,6 +1038,21 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 		select {
 		case err := <-results:
 			completed++
+			if errors.Is(err, errLocalApplicationClose) ||
+				(f.localAbortSent.Load() && f.doneChanClosed()) {
+				// The full-close marker has had a bounded opportunity to reach
+				// the peer. It is now safe to stop the sibling sender even when
+				// its scheduler still holds chunks the vanished application can
+				// never acknowledge. A local cancellation is a clean flow end,
+				// not a transport failure.
+				cancelRun()
+				f.closeAll()
+				stats.Ended = time.Now()
+				stats.BytesSent = f.bytesUp.Load()
+				stats.BytesRead = f.bytesDown.Load()
+				stats.LaneBytes = f.laneStats()
+				return stats, nil
+			}
 			if err != nil {
 				// A destination can reset immediately after the client has
 				// sent its FIN. Give the receive worker a short bounded window
@@ -1751,6 +1810,13 @@ func (f *multipathFlow) acknowledgeRemoteFIN(ctx context.Context, sequence uint6
 	f.remoteFinSequence.Store(sequence)
 	f.remoteFinSeen.Store(true)
 	f.ackClosing.Store(true)
+	if abort {
+		// Publish cancellation before any best-effort close or ACK. The send
+		// scheduler may hold response chunks forever once the peer has removed
+		// its reader, and must not depend on those operations succeeding.
+		f.noteRemoteAbort()
+		_ = f.inner.Close()
+	}
 	if cw, ok := f.inner.(closeWriter); ok {
 		if err := cw.CloseWrite(); err != nil && !expectedHalfCloseError(err) {
 			return err
@@ -1769,11 +1835,6 @@ func (f *multipathFlow) acknowledgeRemoteFIN(ctx context.Context, sequence uint6
 		}
 		return err
 	}
-	if abort {
-		f.remoteAbort.Store(true)
-		// No response bytes remain useful after an explicit full-close.
-		_ = f.inner.Close()
-	}
 	return nil
 }
 
@@ -1783,9 +1844,9 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 	var lastAckSequence uint64
 	var abortTimer *time.Timer
 	var abortTimerC <-chan time.Time
-	resetAbortTimer := func() {
+	resetAbortTimer := func(delay time.Duration) {
 		if abortTimer == nil {
-			abortTimer = time.NewTimer(f.localAbortGrace())
+			abortTimer = time.NewTimer(delay)
 		} else {
 			if !abortTimer.Stop() {
 				select {
@@ -1793,17 +1854,76 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				default:
 				}
 			}
-			abortTimer.Reset(f.localAbortGrace())
+			abortTimer.Reset(delay)
 		}
 		abortTimerC = abortTimer.C
+	}
+	startLocalAbort := func() error {
+		if !f.localAbortSent.CompareAndSwap(false, true) {
+			return nil
+		}
+		if len(f.healthyLanes()) == 0 {
+			return errors.New("no healthy lane for local abort")
+		}
+		writeCtx, cancel := context.WithTimeout(ctx, f.localAbortDrainGrace())
+		err := f.writeControl(writeCtx, protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeClose,
+			Flags:     protocol.FlagFin | protocol.FlagCloseAbort,
+			SessionID: f.sessionID, FlowID: f.flowID, Sequence: f.finSequence.Load(),
+			Class: protocol.Class(f.class.Load()),
+		}}, nil)
+		cancel()
+		return err
+	}
+	deliverToInner := func(out []byte) error {
+		if len(out) == 0 || f.localAbortSent.Load() {
+			return nil
+		}
+		if err := writeFull(f.inner, out); err != nil {
+			if !expectedHalfCloseError(err) && !expectedDestinationCloseError(err) {
+				return err
+			}
+			// A failed response write is direct proof that this was a full
+			// close, not merely a send-side half-close. Escalate immediately;
+			// waiting for the inactivity grace would retain the peer's sender
+			// and endpoint for no benefit.
+			f.noteLocalClose(f.bytesUp.Load())
+			if err := startLocalAbort(); err != nil {
+				f.closeAll()
+				return errLocalApplicationClose
+			}
+			resetAbortTimer(f.localAbortDrainGrace())
+			return nil
+		}
+		f.observe(len(out), false)
+		f.bytesDown.Add(uint64(len(out)))
+		if f.localClosed.Load() {
+			// A successful write proves that the application kept its receive
+			// half open. Measure the grace from the last such proof, not from
+			// the original EOF.
+			resetAbortTimer(f.localAbortGrace())
+		}
+		return nil
 	}
 	defer func() {
 		if abortTimer != nil {
 			abortTimer.Stop()
 		}
 	}()
+	// EOF is published by flowSource. It cannot by itself arm the timer: TCP
+	// presents CloseWrite and Close identically, so a quiet local EOF may be a
+	// legitimate half-close. Buffered response data, a successful response
+	// write, or the peer's final ACK supplies the additional evidence that
+	// makes a bounded response-side grace appropriate.
+	localClosedC := f.localClosedCh
+	sendDoneC := f.sendDone
 	for {
 		select {
+		case <-localClosedC:
+			localClosedC = nil
+			if reassembler.BufferedBytes() > 0 && abortTimer == nil {
+				resetAbortTimer(f.localAbortGrace())
+			}
 		case event := <-f.events:
 			frame := event.frame
 			// A pipelined HELLO_OK is session-scoped and carries flow 0, so it
@@ -1845,11 +1965,14 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					return err
 				}
 				if len(out) > 0 {
-					if err := writeFull(f.inner, out); err != nil {
+					if err := deliverToInner(out); err != nil {
 						return err
 					}
-					f.observe(len(out), false)
-					f.bytesDown.Add(uint64(len(out)))
+				} else if f.localClosed.Load() && reassembler.BufferedBytes() > 0 && abortTimer == nil {
+					// Transport data is arriving but an earlier gap prevents any
+					// write to the application. This was the live leak: without a
+					// timer no operation remained that could discover its close.
+					resetAbortTimer(f.localAbortGrace())
 				}
 				lastAckSequence = f.acknowledgeArrival(reassembler, lastAckSequence)
 				if closed {
@@ -1877,37 +2000,24 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				}
 				abort := frame.Header.Flags&protocol.FlagCloseAbort != 0
 				if abort {
-					// Preserve the abort intent if the FIN is buffered behind
-					// out-of-order data; the contiguous data path above will
-					// perform the actual final ACK and close.
-					f.remoteAbort.Store(true)
+					// A full close is cancellation, not an ordered half-close. The
+					// peer no longer wants bytes in either direction, so waiting
+					// for a missing request segment before stopping the response
+					// sender only preserves work that can never be consumed.
+					return f.acknowledgeRemoteFIN(ctx, frame.Header.Sequence, true)
 				}
 				out, closed, err := reassembler.Insert(multipath.Segment{Sequence: frame.Header.Sequence, Final: true})
 				if err != nil {
 					return err
 				}
 				if len(out) > 0 {
-					if err := writeFull(f.inner, out); err != nil {
+					if err := deliverToInner(out); err != nil {
 						return err
-					}
-					f.observe(len(out), false)
-					f.bytesDown.Add(uint64(len(out)))
-					if abortTimer != nil {
-						resetAbortTimer()
 					}
 				}
 				if closed {
 					if err := f.acknowledgeRemoteFIN(ctx, reassembler.NextSequence(), abort); err != nil {
 						return err
-					}
-					if abort {
-						f.remoteAbort.Store(true)
-						// The application has explicitly closed its full socket;
-						// no response bytes are still useful. Closing the inner
-						// connection releases a keep-alive destination and unblocks
-						// sendInner, which observes remoteAbort and exits cleanly.
-						_ = f.inner.Close()
-						return nil
 					}
 					remoteFin = true
 					select {
@@ -1942,11 +2052,18 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					case f.finalAck <- struct{}{}:
 					default:
 					}
+					if f.localAbortSent.Load() {
+						// This acknowledgement covers the abort sequence and every
+						// source chunk before it. Tell run to retire the sender rather
+						// than waiting for a remote FIN that an aborted flow will not
+						// send.
+						return errLocalApplicationClose
+					}
 					if remoteFin {
 						return nil
 					}
 					if f.localClosed.Load() {
-						resetAbortTimer()
+						resetAbortTimer(f.localAbortGrace())
 					}
 				} else {
 					return errors.New("final acknowledgement sequence mismatch")
@@ -1981,29 +2098,30 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				return nil
 			}
 			return errors.New("flow closed")
-		case <-abortTimerC:
-			if f.localAbortSent.CompareAndSwap(false, true) {
-				if len(f.healthyLanes()) == 0 {
-					// The peer has already closed its transport after ACKing our
-					// FIN. There is no lane on which to carry the escalation, and
-					// the application has no remaining reader; release locally.
-					f.closeAll()
-					return nil
-				}
-				if err := f.writeControl(ctx, protocol.Frame{Header: protocol.Header{
-					Version: protocol.Version, Type: protocol.TypeClose,
-					Flags:     protocol.FlagFin | protocol.FlagCloseAbort,
-					SessionID: f.sessionID, FlowID: f.flowID, Sequence: f.finSequence.Load(),
-					Class: protocol.Class(f.class.Load()),
-				}}, nil); err != nil {
-					if f.localClosed.Load() {
-						f.closeAll()
-						return nil
-					}
-					return err
-				}
+		case <-sendDoneC:
+			sendDoneC = nil
+			if f.localAbortSent.Load() {
+				return errLocalApplicationClose
 			}
-			return nil
+		case <-abortTimerC:
+			if f.localAbortSent.Load() {
+				// The abort write received a bounded drain window. Do not let a
+				// missing final ACK recreate the permanent flow leak.
+				f.closeAll()
+				return errLocalApplicationClose
+			}
+			if err := startLocalAbort(); err != nil {
+				// run may currently be inside a bounded lane-replacement wait
+				// rather than selecting worker results. Closing done is the
+				// wake-up that makes this a real termination source.
+				f.closeAll()
+				return errLocalApplicationClose
+			}
+			drainGrace := f.localAbortDrainGrace()
+			// Keep consuming acknowledgements briefly. A final ACK lets the
+			// scheduler release retained chunks cleanly; expiry is still a clean
+			// local cancellation and run will stop the sibling explicitly.
+			resetAbortTimer(drainGrace)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
