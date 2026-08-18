@@ -60,6 +60,8 @@ exact commit. Production-ready language has additional gates below.
   embedded in both applications.
 - [x] Android release lint, R8, APK/AAB assembly, test-APK assembly, iOS strict
   lint, simulator build, and app/core boundary tests pass locally.
+- [x] The dependency-free Android instrumentation suite passes all five
+  storage, catalog, and routing checks on isolated API 33 and API 35 emulators.
 - [ ] Android API 30, 33, and current physical devices pass the Keystore suite
   and the complete TCP/UDP, IPv4/IPv6, DNS, permission, revoke, and lifecycle
   matrix on Wi-Fi and cellular.

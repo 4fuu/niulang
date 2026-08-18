@@ -103,6 +103,149 @@ jobs:
         if: matrix.os == 'linux' && matrix.arch == 'amd64'
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
+  mobile-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: mobile/core/go.mod
+          cache-dependency-path: |
+            go.sum
+            mobile/core/go.sum
+      - run: mobile/scripts/audit-dependencies.sh
+      - run: go test ./mobile/tools/notices
+      - run: go test -race ./...
+        working-directory: mobile/core
+      - run: go vet ./...
+        working-directory: mobile/core
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -checks=all,-U1000 ./...
+        working-directory: mobile/core
+      - run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
+        working-directory: mobile/core
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+        working-directory: mobile/core
+      - name: notices are reproducible
+        run: |
+          go run ./mobile/tools/notices \
+            -core mobile/core \
+            -lock mobile/runtime-dependencies.lock \
+            -output mobile/legal/THIRD_PARTY_NOTICES.txt
+          git diff --exit-code -- mobile/legal/THIRD_PARTY_NOTICES.txt
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: mobile/core/go.mod
+          cache-dependency-path: |
+            go.sum
+            mobile/core/go.sum
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: install pinned Android SDK components
+        run: sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;28.0.12433566"
+      - run: mobile/scripts/build-android-core.sh
+      - name: lint, shrink, and package
+        working-directory: mobile/android
+        run: >-
+          ./gradlew --no-daemon --dependency-verification strict
+          lintDebug lintRelease
+          assembleDebug assembleDebugAndroidTest
+          assembleRelease bundleRelease
+
+  android-instrumentation:
+    name: Android Keystore API ${{ matrix.api }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [30, 33, 35]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: mobile/core/go.mod
+          cache-dependency-path: |
+            go.sum
+            mobile/core/go.sum
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: install official Android emulator image
+        run: >-
+          sdkmanager
+          "platforms;android-37" "build-tools;36.0.0" "ndk;28.0.12433566"
+          "emulator" "platform-tools"
+          "system-images;android-${{ matrix.api }};google_apis;x86_64"
+      - run: mobile/scripts/build-android-core.sh
+      - name: assemble app and instrumentation APKs
+        working-directory: mobile/android
+        run: >-
+          ./gradlew --no-daemon --dependency-verification strict
+          assembleDebug assembleDebugAndroidTest
+      - name: start isolated emulator
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
+          printf 'no\n' | avdmanager create avd --force \
+            --name queqiao_ci \
+            --package "system-images;android-${{ matrix.api }};google_apis;x86_64" \
+            --device pixel_6
+          nohup emulator @queqiao_ci -no-window -no-audio -no-boot-anim \
+            -no-snapshot -wipe-data -gpu swiftshader_indirect \
+            >"$RUNNER_TEMP/queqiao-emulator.log" 2>&1 &
+          adb wait-for-device
+          for _ in {1..90}; do
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/queqiao-emulator.log"
+          exit 1
+      - name: run mobile storage and routing checks
+        working-directory: mobile/android
+        run: >-
+          ./gradlew --no-daemon --dependency-verification strict
+          connectedDebugAndroidTest
+
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: mobile/core/go.mod
+          cache-dependency-path: |
+            go.sum
+            mobile/core/go.sum
+      - run: mobile/scripts/build-ios-core.sh
+      - run: swiftlint lint --strict --config .swiftlint.yml .
+        working-directory: mobile/ios
+      - name: simulator build and boundary tests
+        working-directory: mobile/ios
+        run: >-
+          xcodebuild
+          -project Queqiao.xcodeproj
+          -scheme Queqiao
+          -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest'
+          -derivedDataPath DerivedData
+          CODE_SIGNING_ALLOWED=NO
+          test
+
   # Exercise the actual release path, including embedded version metadata and
   # deterministic archive creation. One target is enough here; release.yml
   # packages the complete six-target matrix.

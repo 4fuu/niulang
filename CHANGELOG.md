@@ -8,6 +8,10 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
 ### Added
 
+- Native iOS and Android VPN applications with connection-first home screens,
+  live aggregate session counters, secure multi-profile invitation imports,
+  explicit active-profile selection, profile management, deep-link imports,
+  and per-profile all-traffic or local-network-bypass routing policies.
 - Explicit wire-protocol version reporting and diagnosable version mismatch
   errors.
 - Public security reporting, supported-topology, known-limitations, field

@@ -1,0 +1,756 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		023D7297DD3F3AFABD7CE460 /* Mobilecore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; };
+		07F155EAF1B380CBE528972D /* MobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23BCEED68000E8B4E9606949 /* MobileCore.swift */; };
+		213AB07A0761E96E13B136F5 /* MobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23BCEED68000E8B4E9606949 /* MobileCore.swift */; };
+		27247D17AC0E9890E79CF88A /* Mobilecore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; };
+		375FB5454F776236A3760973 /* DiagnosticStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */; };
+		39B82F8BA95382602E0538A5 /* LicenseNoticeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 430D58D7442C39B4BD9C12FB /* LicenseNoticeView.swift */; };
+		3C0FE36DB580D47F17DBA03E /* Mobilecore.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		3E1B7B05A3F97BA727C9DB48 /* PacketTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 93EEE451E856BB5D399404F3 /* PacketTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		4216F96A859623582815FACD /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3358D1947A2D5AFE5A1F91 /* SettingsView.swift */; };
+		4630D0D2241B638803DE2E3B /* DiagnosticStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */; };
+		51125FF28D198FBB7F511E8F /* DiagnosticStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */; };
+		561A1D630D5475AB89BF6AD7 /* ProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED8D203B061F8250C3A766D1 /* ProfileStore.swift */; };
+		5E0CBFE215332DDE2B40736C /* ProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED8D203B061F8250C3A766D1 /* ProfileStore.swift */; };
+		64BA13C478741DD024C181E1 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0722AD3C50275E1BCDD5351 /* ContentView.swift */; };
+		692E560862F4F48C92492BAA /* THIRD_PARTY_NOTICES.txt in Resources */ = {isa = PBXBuildFile; fileRef = 4FD6CEDE24F430E9529E3A3A /* THIRD_PARTY_NOTICES.txt */; };
+		69FFFBD3ED98658422EF2DBD /* MobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23BCEED68000E8B4E9606949 /* MobileCore.swift */; };
+		720FF27CD51D92E9E7E88FE2 /* Mobilecore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; };
+		8DBBCFCF8A142E6312DB5D8D /* TunnelModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 127965658AAA8DBADE524652 /* TunnelModel.swift */; };
+		9BBA0ED88485C8759A3A0E22 /* TunnelMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2BFAFFC99FD54DA31825F59 /* TunnelMetrics.swift */; };
+		9BC4679BC45EE81E4AB245CA /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A22BC502BF533F3ED9712923 /* PacketTunnelProvider.swift */; };
+		A0BCA89C5A9D0B359153F78E /* ProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED8D203B061F8250C3A766D1 /* ProfileStore.swift */; };
+		A4FF59213F04CA667D9A03F7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6A81458E1BA2925F1D22C8FF /* Assets.xcassets */; };
+		A743BC52689F79CFA0B2F330 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */; };
+		A90475B33DB098B5DC21F192 /* CoreBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F638CF570C7A5852DE2269B7 /* CoreBoundaryTests.swift */; };
+		AE0C9D533965F2EBEE29BBF2 /* DiagnosticExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1188477F059F8F42E5A2B2E1 /* DiagnosticExporter.swift */; };
+		B5E6AFBE8082FE6958A4F4C0 /* Mobilecore.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		B61D6221C49C32C886381815 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */; };
+		C62CC189B8350A3DE082BF48 /* ProviderEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */; };
+		CEF53BD49453638B9109EE4C /* ProviderEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */; };
+		D1C9767A5DCD82738C6B8657 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */; };
+		DE54466A0E0650A28E0BA434 /* ImportProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E98CA8AD9C512DCF535E5EA1 /* ImportProfileView.swift */; };
+		DFBB0B47801FA97CBCF246AD /* PacketFlowBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64EB9E99A5F2F55C5635AE87 /* PacketFlowBridge.swift */; };
+		EFAAE976107F9765D9616D73 /* ProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06E70DE072DD84C6BF2E8288 /* ProfilesView.swift */; };
+		F32A620B9067799E2F23A320 /* TunnelSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4802E6E5533792D16DDFA25B /* TunnelSupport.swift */; };
+		F5EEBA8451B659266152FB2B /* ProviderEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */; };
+		FD333468E8B953F05D6E981E /* QueqiaoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85EB3D7717BB422AD61D738D /* QueqiaoApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		24157811493FFC3BC3195672 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A131CCFF91BC20B5C4657D57 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B05ABE50305E5F533BD00D07;
+			remoteInfo = PacketTunnel;
+		};
+		A9D71E74EF9A45B25D70E9AF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A131CCFF91BC20B5C4657D57 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2635BDE16323F2DABC094E2D;
+			remoteInfo = Queqiao;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		BA68E5EE3B29400E967C0DCC /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				3E1B7B05A3F97BA727C9DB48 /* PacketTunnel.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9173BD7281CFE49CC38A3CD /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				3C0FE36DB580D47F17DBA03E /* Mobilecore.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CE884E8812C9319C36A2E512 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				B5E6AFBE8082FE6958A4F4C0 /* Mobilecore.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		06E70DE072DD84C6BF2E8288 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
+		1188477F059F8F42E5A2B2E1 /* DiagnosticExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticExporter.swift; sourceTree = "<group>"; };
+		127965658AAA8DBADE524652 /* TunnelModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelModel.swift; sourceTree = "<group>"; };
+		16E68341436832BEA5B936E4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		219A9C59F3F189F39004E980 /* Mobilecore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Mobilecore.xcframework; path = Frameworks/Mobilecore.xcframework; sourceTree = "<group>"; };
+		23BCEED68000E8B4E9606949 /* MobileCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileCore.swift; sourceTree = "<group>"; };
+		2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		430D58D7442C39B4BD9C12FB /* LicenseNoticeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicenseNoticeView.swift; sourceTree = "<group>"; };
+		4802E6E5533792D16DDFA25B /* TunnelSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelSupport.swift; sourceTree = "<group>"; };
+		4FD6CEDE24F430E9529E3A3A /* THIRD_PARTY_NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = THIRD_PARTY_NOTICES.txt; sourceTree = "<group>"; };
+		64EB9E99A5F2F55C5635AE87 /* PacketFlowBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridge.swift; sourceTree = "<group>"; };
+		6A81458E1BA2925F1D22C8FF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		6B3358D1947A2D5AFE5A1F91 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		85EB3D7717BB422AD61D738D /* QueqiaoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueqiaoApp.swift; sourceTree = "<group>"; };
+		8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticStore.swift; sourceTree = "<group>"; };
+		93EEE451E856BB5D399404F3 /* PacketTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A22BC502BF533F3ED9712923 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		BCDA99C2486E8ABD530118BE /* QueqiaoTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = QueqiaoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C0722AD3C50275E1BCDD5351 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		C68809144D3F97622B923A85 /* Queqiao.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Queqiao.entitlements; sourceTree = "<group>"; };
+		D2BFAFFC99FD54DA31825F59 /* TunnelMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelMetrics.swift; sourceTree = "<group>"; };
+		DBF55AD691B9BED3EE19D353 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderEndpoint.swift; sourceTree = "<group>"; };
+		E8768C80D8DD43873AA594DA /* Queqiao.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Queqiao.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E98CA8AD9C512DCF535E5EA1 /* ImportProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportProfileView.swift; sourceTree = "<group>"; };
+		ED8D203B061F8250C3A766D1 /* ProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStore.swift; sourceTree = "<group>"; };
+		EDBCAF651997059D82D31A20 /* PacketTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PacketTunnel.entitlements; sourceTree = "<group>"; };
+		F638CF570C7A5852DE2269B7 /* CoreBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreBoundaryTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4B42A50A25C46E1D4A064A0D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				023D7297DD3F3AFABD7CE460 /* Mobilecore.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7557412BC374C9829D088B88 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				720FF27CD51D92E9E7E88FE2 /* Mobilecore.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D59FFFBB62449FABD99BD2C7 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				27247D17AC0E9890E79CF88A /* Mobilecore.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		10F8B6BF58C383EF4B25ED25 /* Queqiao */ = {
+			isa = PBXGroup;
+			children = (
+				6A81458E1BA2925F1D22C8FF /* Assets.xcassets */,
+				C0722AD3C50275E1BCDD5351 /* ContentView.swift */,
+				1188477F059F8F42E5A2B2E1 /* DiagnosticExporter.swift */,
+				E98CA8AD9C512DCF535E5EA1 /* ImportProfileView.swift */,
+				DBF55AD691B9BED3EE19D353 /* Info.plist */,
+				430D58D7442C39B4BD9C12FB /* LicenseNoticeView.swift */,
+				06E70DE072DD84C6BF2E8288 /* ProfilesView.swift */,
+				C68809144D3F97622B923A85 /* Queqiao.entitlements */,
+				85EB3D7717BB422AD61D738D /* QueqiaoApp.swift */,
+				6B3358D1947A2D5AFE5A1F91 /* SettingsView.swift */,
+				D2BFAFFC99FD54DA31825F59 /* TunnelMetrics.swift */,
+				127965658AAA8DBADE524652 /* TunnelModel.swift */,
+				4802E6E5533792D16DDFA25B /* TunnelSupport.swift */,
+			);
+			path = Queqiao;
+			sourceTree = "<group>";
+		};
+		252104A8FEB273ABDD00265A /* QueqiaoTests */ = {
+			isa = PBXGroup;
+			children = (
+				F638CF570C7A5852DE2269B7 /* CoreBoundaryTests.swift */,
+			);
+			path = QueqiaoTests;
+			sourceTree = "<group>";
+		};
+		26D43D6F1B2C4B85E49B86AC /* mobile */ = {
+			isa = PBXGroup;
+			children = (
+				AABCAB941C56E411AD71C357 /* legal */,
+			);
+			name = mobile;
+			path = ..;
+			sourceTree = "<group>";
+		};
+		AABCAB941C56E411AD71C357 /* legal */ = {
+			isa = PBXGroup;
+			children = (
+				4FD6CEDE24F430E9529E3A3A /* THIRD_PARTY_NOTICES.txt */,
+			);
+			path = legal;
+			sourceTree = "<group>";
+		};
+		E43F67408F91CA147C858552 /* PacketTunnel */ = {
+			isa = PBXGroup;
+			children = (
+				16E68341436832BEA5B936E4 /* Info.plist */,
+				64EB9E99A5F2F55C5635AE87 /* PacketFlowBridge.swift */,
+				EDBCAF651997059D82D31A20 /* PacketTunnel.entitlements */,
+				A22BC502BF533F3ED9712923 /* PacketTunnelProvider.swift */,
+			);
+			path = PacketTunnel;
+			sourceTree = "<group>";
+		};
+		EFE6304EC46AB88C4BBA0C5D = {
+			isa = PBXGroup;
+			children = (
+				26D43D6F1B2C4B85E49B86AC /* mobile */,
+				E43F67408F91CA147C858552 /* PacketTunnel */,
+				10F8B6BF58C383EF4B25ED25 /* Queqiao */,
+				252104A8FEB273ABDD00265A /* QueqiaoTests */,
+				F9B36F66ACADA85B07FBDDFD /* Shared */,
+				F51DB14FF375FA6D702BCFB9 /* Frameworks */,
+				FD441FFEBB6967B538239292 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		F51DB14FF375FA6D702BCFB9 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				219A9C59F3F189F39004E980 /* Mobilecore.xcframework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		F9B36F66ACADA85B07FBDDFD /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */,
+				2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */,
+				23BCEED68000E8B4E9606949 /* MobileCore.swift */,
+				ED8D203B061F8250C3A766D1 /* ProfileStore.swift */,
+				E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		FD441FFEBB6967B538239292 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				93EEE451E856BB5D399404F3 /* PacketTunnel.appex */,
+				E8768C80D8DD43873AA594DA /* Queqiao.app */,
+				BCDA99C2486E8ABD530118BE /* QueqiaoTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2635BDE16323F2DABC094E2D /* Queqiao */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DE9F3E48939A10C17B9663EC /* Build configuration list for PBXNativeTarget "Queqiao" */;
+			buildPhases = (
+				64E2F315A151C861DFD3CA7A /* Sources */,
+				26E8E47D3E2EC31642D4E7AE /* Resources */,
+				4B42A50A25C46E1D4A064A0D /* Frameworks */,
+				BA68E5EE3B29400E967C0DCC /* Embed Foundation Extensions */,
+				CE884E8812C9319C36A2E512 /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E0883D74AEFAB38FE344BCFC /* PBXTargetDependency */,
+			);
+			name = Queqiao;
+			packageProductDependencies = (
+			);
+			productName = Queqiao;
+			productReference = E8768C80D8DD43873AA594DA /* Queqiao.app */;
+			productType = "com.apple.product-type.application";
+		};
+		6FB531E5293FC65035787985 /* QueqiaoTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 58238DFB59916AD7C0D9E4AE /* Build configuration list for PBXNativeTarget "QueqiaoTests" */;
+			buildPhases = (
+				BF376E600E94358CF934B225 /* Sources */,
+				7557412BC374C9829D088B88 /* Frameworks */,
+				C9173BD7281CFE49CC38A3CD /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6B16A8A93857696C5FF3B1DC /* PBXTargetDependency */,
+			);
+			name = QueqiaoTests;
+			packageProductDependencies = (
+			);
+			productName = QueqiaoTests;
+			productReference = BCDA99C2486E8ABD530118BE /* QueqiaoTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		B05ABE50305E5F533BD00D07 /* PacketTunnel */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 965E89EDBB2E019C959166FA /* Build configuration list for PBXNativeTarget "PacketTunnel" */;
+			buildPhases = (
+				CBE4116B2DD519CCEBD4F0FF /* Sources */,
+				D59FFFBB62449FABD99BD2C7 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PacketTunnel;
+			packageProductDependencies = (
+			);
+			productName = PacketTunnel;
+			productReference = 93EEE451E856BB5D399404F3 /* PacketTunnel.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A131CCFF91BC20B5C4657D57 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					2635BDE16323F2DABC094E2D = {
+						ProvisioningStyle = Automatic;
+					};
+					6FB531E5293FC65035787985 = {
+						ProvisioningStyle = Automatic;
+					};
+					B05ABE50305E5F533BD00D07 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 4402F947C498B642DD83C77F /* Build configuration list for PBXProject "Queqiao" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = EFE6304EC46AB88C4BBA0C5D;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = FD441FFEBB6967B538239292 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B05ABE50305E5F533BD00D07 /* PacketTunnel */,
+				2635BDE16323F2DABC094E2D /* Queqiao */,
+				6FB531E5293FC65035787985 /* QueqiaoTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		26E8E47D3E2EC31642D4E7AE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A4FF59213F04CA667D9A03F7 /* Assets.xcassets in Resources */,
+				692E560862F4F48C92492BAA /* THIRD_PARTY_NOTICES.txt in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		64E2F315A151C861DFD3CA7A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				64BA13C478741DD024C181E1 /* ContentView.swift in Sources */,
+				AE0C9D533965F2EBEE29BBF2 /* DiagnosticExporter.swift in Sources */,
+				51125FF28D198FBB7F511E8F /* DiagnosticStore.swift in Sources */,
+				DE54466A0E0650A28E0BA434 /* ImportProfileView.swift in Sources */,
+				D1C9767A5DCD82738C6B8657 /* KeychainStore.swift in Sources */,
+				39B82F8BA95382602E0538A5 /* LicenseNoticeView.swift in Sources */,
+				07F155EAF1B380CBE528972D /* MobileCore.swift in Sources */,
+				5E0CBFE215332DDE2B40736C /* ProfileStore.swift in Sources */,
+				EFAAE976107F9765D9616D73 /* ProfilesView.swift in Sources */,
+				CEF53BD49453638B9109EE4C /* ProviderEndpoint.swift in Sources */,
+				FD333468E8B953F05D6E981E /* QueqiaoApp.swift in Sources */,
+				4216F96A859623582815FACD /* SettingsView.swift in Sources */,
+				9BBA0ED88485C8759A3A0E22 /* TunnelMetrics.swift in Sources */,
+				8DBBCFCF8A142E6312DB5D8D /* TunnelModel.swift in Sources */,
+				F32A620B9067799E2F23A320 /* TunnelSupport.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BF376E600E94358CF934B225 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A90475B33DB098B5DC21F192 /* CoreBoundaryTests.swift in Sources */,
+				375FB5454F776236A3760973 /* DiagnosticStore.swift in Sources */,
+				B61D6221C49C32C886381815 /* KeychainStore.swift in Sources */,
+				213AB07A0761E96E13B136F5 /* MobileCore.swift in Sources */,
+				561A1D630D5475AB89BF6AD7 /* ProfileStore.swift in Sources */,
+				C62CC189B8350A3DE082BF48 /* ProviderEndpoint.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CBE4116B2DD519CCEBD4F0FF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4630D0D2241B638803DE2E3B /* DiagnosticStore.swift in Sources */,
+				A743BC52689F79CFA0B2F330 /* KeychainStore.swift in Sources */,
+				69FFFBD3ED98658422EF2DBD /* MobileCore.swift in Sources */,
+				DFBB0B47801FA97CBCF246AD /* PacketFlowBridge.swift in Sources */,
+				9BC4679BC45EE81E4AB245CA /* PacketTunnelProvider.swift in Sources */,
+				A0BCA89C5A9D0B359153F78E /* ProfileStore.swift in Sources */,
+				F5EEBA8451B659266152FB2B /* ProviderEndpoint.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		6B16A8A93857696C5FF3B1DC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2635BDE16323F2DABC094E2D /* Queqiao */;
+			targetProxy = A9D71E74EF9A45B25D70E9AF /* PBXContainerItemProxy */;
+		};
+		E0883D74AEFAB38FE344BCFC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B05ABE50305E5F533BD00D07 /* PacketTunnel */;
+			targetProxy = 24157811493FFC3BC3195672 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		128407625B705B0A84C43301 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Queqiao/Queqiao.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Queqiao/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = "0.1.0-dev";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QUEQIAO_APP_BUNDLE_ID)";
+				PRODUCT_NAME = Queqiao;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		3D61F3BBC48BA4B113AFB198 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QUEQIAO_APP_BUNDLE_ID).tests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Queqiao.app/Queqiao";
+			};
+			name = Release;
+		};
+		4ADCFC53B282A54939AA6C22 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				QUEQIAO_APP_BUNDLE_ID = io.github.bojieli.queqiao;
+				QUEQIAO_EXTENSION_BUNDLE_ID = io.github.bojieli.queqiao.PacketTunnel;
+				QUEQIAO_KEYCHAIN_SUFFIX = io.github.bojieli.queqiao.shared;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		7461BD26A5CC5F99A0AFD002 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PacketTunnel/PacketTunnel.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PacketTunnel/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "0.1.0-dev";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QUEQIAO_EXTENSION_BUNDLE_ID)";
+				PRODUCT_NAME = PacketTunnel;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A4C24DB64589BED8DA4C5947 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QUEQIAO_APP_BUNDLE_ID).tests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Queqiao.app/Queqiao";
+			};
+			name = Debug;
+		};
+		DAD68892C6DD1B23D67B93E7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Queqiao/Queqiao.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Queqiao/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = "0.1.0-dev";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QUEQIAO_APP_BUNDLE_ID)";
+				PRODUCT_NAME = Queqiao;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		FC27162648EF57C3422D7A49 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = PacketTunnel/PacketTunnel.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PacketTunnel/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "0.1.0-dev";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QUEQIAO_EXTENSION_BUNDLE_ID)";
+				PRODUCT_NAME = PacketTunnel;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		FC90EC736487AD2FE8E2F9EE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				QUEQIAO_APP_BUNDLE_ID = io.github.bojieli.queqiao;
+				QUEQIAO_EXTENSION_BUNDLE_ID = io.github.bojieli.queqiao.PacketTunnel;
+				QUEQIAO_KEYCHAIN_SUFFIX = io.github.bojieli.queqiao.shared;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		4402F947C498B642DD83C77F /* Build configuration list for PBXProject "Queqiao" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4ADCFC53B282A54939AA6C22 /* Debug */,
+				FC90EC736487AD2FE8E2F9EE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		58238DFB59916AD7C0D9E4AE /* Build configuration list for PBXNativeTarget "QueqiaoTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A4C24DB64589BED8DA4C5947 /* Debug */,
+				3D61F3BBC48BA4B113AFB198 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		965E89EDBB2E019C959166FA /* Build configuration list for PBXNativeTarget "PacketTunnel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7461BD26A5CC5F99A0AFD002 /* Debug */,
+				FC27162648EF57C3422D7A49 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		DE9F3E48939A10C17B9663EC /* Build configuration list for PBXNativeTarget "Queqiao" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				128407625B705B0A84C43301 /* Debug */,
+				DAD68892C6DD1B23D67B93E7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A131CCFF91BC20B5C4657D57 /* Project object */;
+}

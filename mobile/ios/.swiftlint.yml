@@ -1,0 +1,6 @@
+strict: true
+excluded:
+  - DerivedData
+  - DerivedDataDevice
+  - Frameworks
+reporter: emoji

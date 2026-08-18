@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Queqiao</string>
+    <string name="vpn_channel_name">Queqiao VPN</string>
+    <string name="vpn_channel_description">Queqiao tunnel state</string>
+    <string name="import_profile_intro">Import a profile to get started</string>
+    <string name="connection_profile_summary">%1$s · %2$s</string>
+    <string name="downloaded_metric">Downloaded\n%1$s</string>
+    <string name="uploaded_metric">Uploaded\n%1$s</string>
+    <string name="active_flows_metric">Active flows\n%1$d</string>
+</resources>

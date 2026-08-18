@@ -1,0 +1,87 @@
+plugins {
+    id "com.android.application"
+}
+
+def releaseSigning = [
+        storeFile    : System.getenv("QUEQIAO_ANDROID_STORE_FILE"),
+        storePassword: System.getenv("QUEQIAO_ANDROID_STORE_PASSWORD"),
+        keyAlias     : System.getenv("QUEQIAO_ANDROID_KEY_ALIAS"),
+        keyPassword  : System.getenv("QUEQIAO_ANDROID_KEY_PASSWORD")
+]
+def suppliedSigningValues = releaseSigning.values().count { value -> value != null && !value.isBlank() }
+if (suppliedSigningValues != 0 && suppliedSigningValues != releaseSigning.size()) {
+    throw new GradleException("Set all four QUEQIAO_ANDROID_* signing variables or none of them")
+}
+def releaseSigningConfigured = suppliedSigningValues == releaseSigning.size()
+
+android {
+    namespace = "io.github.bojieli.queqiao"
+    compileSdk = 37
+
+    defaultConfig {
+        applicationId = "io.github.bojieli.queqiao"
+        minSdk = 30
+        targetSdk = 36
+        versionCode = providers.gradleProperty("queqiaoVersionCode").getOrElse("1").toInteger()
+        versionName = providers.gradleProperty("queqiaoVersionName").getOrElse("0.1.0-dev")
+        testInstrumentationRunner = "io.github.bojieli.queqiao.SecureStoreTestRunner"
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile = file(releaseSigning.storeFile)
+                storePassword = releaseSigning.storePassword
+                keyAlias = releaseSigning.keyAlias
+                keyPassword = releaseSigning.keyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+        release {
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDir("../../legal")
+        }
+    }
+
+    lint {
+        abortOnError = true
+        checkReleaseBuilds = true
+        warningsAsErrors = true
+        disable += ["OldTargetApi"]
+    }
+}
+
+dependencies {
+    implementation files("libs/mobilecore.aar")
+}
