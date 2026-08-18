@@ -395,7 +395,7 @@ func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
 		}
 	}
 	go serveOne()
-	profile, err := Enroll(context.Background(), invitation, "laptop", 3*time.Second)
+	profile, err := EnrollWithOptions(context.Background(), invitation, "laptop", DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,6 +405,55 @@ func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
 	go serveOne()
 	if _, err := Enroll(context.Background(), invitation, "other device", 3*time.Second); err == nil {
 		t.Fatal("invitation replay enrolled another device")
+	}
+}
+
+func TestEnrollmentRejectsInvalidLocalAddressBeforeDial(t *testing.T) {
+	provider := testProvider(t, "127.0.0.1:443", time.Now())
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, time.Now())
+	_, invitation, err := provider.CreateInvitation(account.ID, time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := NewEnrollmentDraft(invitation, "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = draft.EnrollWithOptions(context.Background(), DialOptions{Timeout: time.Second, LocalAddress: "if:"})
+	if err == nil || !strings.Contains(err.Error(), "--local-address") || !strings.Contains(err.Error(), "interface name") {
+		t.Fatalf("invalid source produced unhelpful error: %v", err)
+	}
+}
+
+func TestEnrollmentExplainsProtocolALPNMismatch(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	provider := testProvider(t, listener.Addr().String(), time.Now())
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, time.Now())
+	_, invitation, err := provider.CreateInvitation(account.ID, time.Hour, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverConfig := &tls.Config{
+		Certificates: []tls.Certificate{provider.GatewayCert},
+		MinVersion:   tls.VersionTLS13,
+		MaxVersion:   tls.VersionTLS13,
+		NextProtos:   []string{"not-queqiao"},
+	}
+	go func() {
+		raw, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer raw.Close()
+		_ = tls.Server(raw, serverConfig).Handshake()
+	}()
+	_, err = EnrollWithOptions(context.Background(), invitation, "laptop", DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
+	if err == nil || !strings.Contains(err.Error(), "does not support Queqiao enrollment") || !strings.Contains(err.Error(), "protocol 4") {
+		t.Fatalf("ALPN mismatch produced unhelpful error: %v", err)
 	}
 }
 
@@ -439,7 +488,7 @@ func TestRenewalPreservesDeviceAndRejectsRevocation(t *testing.T) {
 		}
 	}
 	go serveRenewal()
-	renewed, err := RenewProfile(context.Background(), profile, 3*time.Second)
+	renewed, err := RenewProfileWithOptions(context.Background(), profile, DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}

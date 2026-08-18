@@ -19,11 +19,23 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/bojieli/queqiao/internal/netbind"
 )
 
 const maxEnrollmentMessage = 64 * 1024
 
 const EnrollmentDraftVersion = 1
+
+// DialOptions controls the outer TCP connection used for enrollment and
+// renewal. LocalAddress accepts "auto", "if:NAME", or a literal IP. An empty
+// value preserves the operating system's normal route for API callers; the
+// CLI deliberately defaults it to "auto" so a host TUN cannot capture the
+// connection needed to bootstrap or renew that same tunnel.
+type DialOptions struct {
+	Timeout      time.Duration
+	LocalAddress string
+}
 
 // EnrollmentDraft persists the client-generated key before the one-time token
 // is sent. If the response or final profile write is lost, retrying the same
@@ -230,26 +242,30 @@ func (s EnrollmentService) Renew(conn io.ReadWriter, principal Principal) error 
 // device's private key. A revoked or expired certificate cannot renew and
 // requires a fresh one-time invitation from the provider.
 func RenewProfile(ctx context.Context, profile ClientProfile, timeout time.Duration) (ClientProfile, error) {
+	return RenewProfileWithOptions(ctx, profile, DialOptions{Timeout: timeout})
+}
+
+// RenewProfileWithOptions renews a device identity over the selected physical
+// source address. It is the route-safe form used by the command-line client.
+func RenewProfileWithOptions(ctx context.Context, profile ClientProfile, options DialOptions) (ClientProfile, error) {
 	credentials, err := profile.Credentials()
 	if err != nil {
 		return ClientProfile{}, err
 	}
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
+	options = resolvedDialOptions(options)
 	tlsConfig, err := RenewalTLSConfig(credentials)
 	if err != nil {
 		return ClientProfile{}, err
 	}
-	raw, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", profile.Endpoint)
+	raw, err := dialIdentityEndpoint(ctx, profile.Endpoint, "renewal", options)
 	if err != nil {
-		return ClientProfile{}, fmt.Errorf("connect to renewal service: %w", err)
+		return ClientProfile{}, err
 	}
 	defer raw.Close()
 	conn := tls.Client(raw, tlsConfig)
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	_ = conn.SetDeadline(time.Now().Add(options.Timeout))
 	if err := conn.HandshakeContext(ctx); err != nil {
-		return ClientProfile{}, fmt.Errorf("authenticate renewal service: %w", err)
+		return ClientProfile{}, explainIdentityHandshakeError(profile.Endpoint, "renewal", err)
 	}
 	if conn.ConnectionState().NegotiatedProtocol != RenewalALPN {
 		return ClientProfile{}, errors.New("server did not negotiate Queqiao renewal")
@@ -308,34 +324,43 @@ func (p ClientProfile) NeedsRenewal(now time.Time, renewalWindow time.Duration) 
 // Enroll imports one invitation. The permanent device key is generated on the
 // client and never appears in the invitation or provider state.
 func Enroll(ctx context.Context, invitation Invitation, deviceName string, timeout time.Duration) (ClientProfile, error) {
+	return EnrollWithOptions(ctx, invitation, deviceName, DialOptions{Timeout: timeout})
+}
+
+// EnrollWithOptions imports an invitation using an explicitly selected outer
+// route when requested.
+func EnrollWithOptions(ctx context.Context, invitation Invitation, deviceName string, options DialOptions) (ClientProfile, error) {
 	draft, err := NewEnrollmentDraft(invitation, deviceName)
 	if err != nil {
 		return ClientProfile{}, err
 	}
-	return draft.Enroll(ctx, timeout)
+	return draft.EnrollWithOptions(ctx, options)
 }
 
 func (d EnrollmentDraft) Enroll(ctx context.Context, timeout time.Duration) (ClientProfile, error) {
+	return d.EnrollWithOptions(ctx, DialOptions{Timeout: timeout})
+}
+
+// EnrollWithOptions completes a recoverable enrollment draft over the
+// requested physical source address.
+func (d EnrollmentDraft) EnrollWithOptions(ctx context.Context, options DialOptions) (ClientProfile, error) {
 	privateKey, err := d.privateKey()
 	if err != nil {
 		return ClientProfile{}, err
 	}
 	invitation, deviceName := d.Invitation, d.DeviceName
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
+	options = resolvedDialOptions(options)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
-	dialer := &net.Dialer{Timeout: timeout}
-	raw, err := dialer.DialContext(ctx, "tcp", invitation.Endpoint)
+	raw, err := dialIdentityEndpoint(ctx, invitation.Endpoint, "enrollment", options)
 	if err != nil {
-		return ClientProfile{}, fmt.Errorf("connect to enrollment service: %w", err)
+		return ClientProfile{}, err
 	}
 	defer raw.Close()
 	tlsConn := tls.Client(raw, EnrollmentTLSConfig(invitation.RootPin, invitation.ProviderID, invitation.GatewayID))
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(options.Timeout)
 	_ = tlsConn.SetDeadline(deadline)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		return ClientProfile{}, fmt.Errorf("verify enrollment service: %w", err)
+		return ClientProfile{}, explainIdentityHandshakeError(invitation.Endpoint, "enrollment", err)
 	}
 	if tlsConn.ConnectionState().NegotiatedProtocol != EnrollmentALPN {
 		return ClientProfile{}, errors.New("server did not negotiate Queqiao enrollment")
@@ -386,6 +411,39 @@ func (d EnrollmentDraft) Enroll(ctx context.Context, timeout time.Duration) (Cli
 	}
 	_ = tlsConn.SetDeadline(time.Time{})
 	return profile, nil
+}
+
+func resolvedDialOptions(options DialOptions) DialOptions {
+	if options.Timeout <= 0 {
+		options.Timeout = 15 * time.Second
+	}
+	return options
+}
+
+func dialIdentityEndpoint(ctx context.Context, endpoint, purpose string, options DialOptions) (net.Conn, error) {
+	var localAddress net.Addr
+	if options.LocalAddress != "" {
+		ip, err := netbind.Resolve(options.LocalAddress)
+		if err != nil {
+			return nil, fmt.Errorf("select --local-address %q for %s: %w", options.LocalAddress, purpose, err)
+		}
+		localAddress = &net.TCPAddr{IP: ip.AsSlice()}
+	}
+	raw, err := (&net.Dialer{Timeout: options.Timeout, LocalAddr: localAddress}).DialContext(ctx, "tcp", endpoint)
+	if err != nil {
+		if options.LocalAddress == "" {
+			return nil, fmt.Errorf("connect to gateway %q for %s: %w", endpoint, purpose, err)
+		}
+		return nil, fmt.Errorf("connect to gateway %q for %s using --local-address %q: %w", endpoint, purpose, options.LocalAddress, err)
+	}
+	return raw, nil
+}
+
+func explainIdentityHandshakeError(endpoint, purpose string, err error) error {
+	if strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
+		return fmt.Errorf("gateway %q does not support Queqiao %s; confirm that this endpoint runs protocol 4 with %s enabled: %w", endpoint, purpose, purpose, err)
+	}
+	return fmt.Errorf("verify the pinned provider identity at gateway %q for %s: %w", endpoint, purpose, err)
 }
 
 func writeEnrollmentJSON(w io.Writer, value any) error {

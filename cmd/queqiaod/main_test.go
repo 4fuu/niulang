@@ -43,6 +43,7 @@ func TestRuntimeBoundsRejectUnsafeValues(t *testing.T) {
 		{"--max-sessions", "0"},
 		{"--fallback-grace", "0s"},
 		{"--flow-idle-timeout", "2h", "--flow-max-lifetime", "1h"},
+		{"--local-address", "if:"},
 	} {
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -74,5 +75,12 @@ func TestEnrollmentURIAllowsFollowingFlags(t *testing.T) {
 	err := runEnroll([]string{"queqiao://invalid", "--profile", "profile.json"})
 	if err == nil || strings.Contains(err.Error(), "at most one") || strings.Contains(err.Error(), "unexpected arguments") {
 		t.Fatalf("share URI prevented following flags from being parsed: %v", err)
+	}
+}
+
+func TestClientMissingProfileExplainsEnrollment(t *testing.T) {
+	err := runClient(nil)
+	if err == nil || !strings.Contains(err.Error(), "queqiaod enroll") {
+		t.Fatalf("missing profile produced unhelpful error: %v", err)
 	}
 }

@@ -9,7 +9,7 @@ Type=simple
 User=queqiao
 Group=queqiao
 # Put whitespace-separated server flags in /etc/queqiao/queqiaod.env as:
-# QUEQIAOD_ARGS=--state /var/lib/queqiao --listen :12540 ...
+# QUEQIAOD_ARGS=--state /var/lib/queqiao/provider --listen :12540 ...
 EnvironmentFile=/etc/queqiao/queqiaod.env
 ExecStart=/usr/local/bin/queqiaod server $QUEQIAOD_ARGS
 Restart=on-failure

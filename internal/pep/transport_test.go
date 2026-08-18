@@ -125,3 +125,15 @@ func TestResolveLocalAddressAutoOrInterfaceReportsOperationalState(t *testing.T)
 		t.Fatalf("auto selected non-IPv4 address %s", got)
 	}
 }
+
+func TestALPNFailureExplainsEndpointOrVersionMismatch(t *testing.T) {
+	err := explainDataHandshakeError("gateway.example:443", "TCP", errors.New("remote error: tls: no application protocol"))
+	message := err.Error()
+	if !strings.Contains(message, "protocol 4") || !strings.Contains(message, "gateway.example:443") || !strings.Contains(message, "incompatible") {
+		t.Fatalf("unhelpful ALPN error: %v", err)
+	}
+	original := errors.New("connection refused")
+	if got := explainDataHandshakeError("gateway.example:443", "TCP", original); got != original {
+		t.Fatalf("non-ALPN error was replaced: %v", got)
+	}
+}

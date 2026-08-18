@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bojieli/queqiao/internal/identity"
+	"github.com/bojieli/queqiao/internal/netbind"
 	"github.com/bojieli/queqiao/internal/pep"
 	"github.com/bojieli/queqiao/internal/protocol"
 )
@@ -308,6 +309,7 @@ func runEnroll(args []string) error {
 	profilePath := fs.String("profile", "", "output client profile (default: user config directory)")
 	deviceName := fs.String("device-name", "", "device label shown to the provider")
 	timeout := fs.Duration("timeout", 15*time.Second, "enrollment timeout")
+	localAddress := fs.String("local-address", "auto", "outer source: auto, IP, or if:NAME (bypasses host TUN routes)")
 	// The share URI is the natural first argument users paste. The standard Go
 	// flag parser stops at that positional value, so lift it out first to allow
 	// the equally natural `enroll URI --profile PATH` spelling as well as flags
@@ -339,6 +341,9 @@ func runEnroll(args []string) error {
 	}
 	if invitationText == "" {
 		return errors.New("an invitation URI is required")
+	}
+	if err := netbind.Validate(*localAddress); err != nil {
+		return fmt.Errorf("invalid --local-address: %w", err)
 	}
 	invitation, err := identity.ParseInvitation(invitationText, time.Now())
 	if err != nil {
@@ -388,7 +393,7 @@ func runEnroll(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	profile, err := draft.Enroll(ctx, *timeout)
+	profile, err := draft.EnrollWithOptions(ctx, identity.DialOptions{Timeout: *timeout, LocalAddress: *localAddress})
 	if err != nil {
 		return err
 	}
@@ -488,6 +493,11 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	if client && (opts.fallbackDelay < 0 || opts.fallbackGrace <= 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0) {
 		return errors.New("invalid fallback settings")
 	}
+	if client {
+		if err := netbind.Validate(opts.localAddress); err != nil {
+			return fmt.Errorf("invalid --local-address: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -504,7 +514,7 @@ func runClient(args []string) error {
 		return err
 	}
 	if *profilePath == "" {
-		return errors.New("--profile is required")
+		return errors.New("--profile is required; import an invitation first with `queqiaod enroll INVITATION`")
 	}
 	if err := validateRuntime(opts, true); err != nil {
 		return err
@@ -515,7 +525,7 @@ func runClient(args []string) error {
 	}
 	profile, err := identity.LoadClientProfile(*profilePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("load client profile %q: %w", *profilePath, err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -525,7 +535,7 @@ func runClient(args []string) error {
 			return err
 		}
 		if needs {
-			renewed, renewErr := identity.RenewProfile(ctx, profile, opts.handshakeTimeout)
+			renewed, renewErr := identity.RenewProfileWithOptions(ctx, profile, identity.DialOptions{Timeout: opts.handshakeTimeout, LocalAddress: opts.localAddress})
 			if renewErr != nil {
 				logger.Warn("automatic certificate renewal failed; continuing with current valid identity", "error", renewErr)
 			} else if err := renewed.Save(*profilePath); err != nil {
@@ -558,7 +568,7 @@ func runClient(args []string) error {
 		return err
 	}
 	if !*noAutoRenew {
-		go maintainClientIdentity(ctx, *profilePath, profile, client, opts.handshakeTimeout, logger)
+		go maintainClientIdentity(ctx, *profilePath, profile, client, opts.handshakeTimeout, opts.localAddress, logger)
 	}
 	stopMetrics, err := serveMetrics(opts.metricsListen, client.Metrics(), logger)
 	if err != nil {
@@ -621,7 +631,7 @@ func runServer(args []string) error {
 
 const identityMaintenanceInterval = time.Hour
 
-func maintainClientIdentity(ctx context.Context, profilePath string, profile identity.ClientProfile, client *pep.Client, timeout time.Duration, logger *slog.Logger) {
+func maintainClientIdentity(ctx context.Context, profilePath string, profile identity.ClientProfile, client *pep.Client, timeout time.Duration, localAddress string, logger *slog.Logger) {
 	ticker := time.NewTicker(identityMaintenanceInterval)
 	defer ticker.Stop()
 	for {
@@ -635,7 +645,7 @@ func maintainClientIdentity(ctx context.Context, profilePath string, profile ide
 			if !needs {
 				continue
 			}
-			renewed, err := identity.RenewProfile(ctx, profile, timeout)
+			renewed, err := identity.RenewProfileWithOptions(ctx, profile, identity.DialOptions{Timeout: timeout, LocalAddress: localAddress})
 			if err != nil {
 				logger.Warn("automatic certificate renewal failed; will retry", "error", err)
 				continue
