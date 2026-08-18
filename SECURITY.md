@@ -37,6 +37,12 @@ the provider reissues only for the exact already-registered device name and
 public key. A changed key remains a replay failure, including after the
 invitation's original expiry.
 
+Enrollment, renewal, and normal client connections can bind their outer TCP or
+UDP socket to `auto`, `if:NAME`, or a literal local IP. The CLI defaults to
+`auto`, which excludes loopback and point-to-point TUN interfaces. This is a
+route-isolation property rather than an authentication exception: the same
+provider pin and TLS policy apply regardless of the selected source address.
+
 ## Authorization and isolation
 
 Every data connection is authorized during the TLS handshake. Long-lived QUIC
@@ -58,7 +64,8 @@ identity. It intentionally does not use DNS names.
 
 Device certificates last 30 days. A running client checks hourly and renews
 automatically in the final seven days. Renewal uses mutual TLS, preserves the
-device key and identity, and rechecks server-side authorization. Gateway leaf
+device key and identity, reuses the client data path's physical source
+selection, and rechecks server-side authorization. Gateway leaf
 identities are reloaded and renewed hourly without stopping established
 tunnels. Revoked or expired devices must use a fresh invitation.
 

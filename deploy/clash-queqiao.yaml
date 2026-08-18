@@ -19,11 +19,12 @@
 #       --socks5-hostname 127.0.0.1:12080 https://api.ipify.org
 # The second command must print the egress host's address.
 #
-# The client MUST be started with --local-address if:en0 (or a literal physical
-# IP). Clash's TUN mode installs a default route through 198.18.0.1, so without
-# that binding queqiao's own outer connection is captured by Clash and carried
-# through whatever proxy Clash is using — the tunnel it was meant to replace,
-# or a loop.
+# Enrollment and the client default to --local-address auto, which excludes
+# point-to-point TUN interfaces. On a host with more than one physical uplink,
+# use --local-address if:en0 (or a literal IP) for both commands. Clash's TUN
+# mode installs a default route through 198.18.0.1; explicit physical binding
+# prevents Queqiao's own outer connection from being carried through the
+# tunnel it was meant to replace, or through a loop.
 #
 # See docs/DEPLOYING.md.
 

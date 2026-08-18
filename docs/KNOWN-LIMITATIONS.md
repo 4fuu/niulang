@@ -12,6 +12,10 @@
 - The default topology is one provider gateway endpoint. Multi-gateway
   discovery, load balancing, and seamless trust-domain migration are not yet
   implemented.
+- Automatic physical-source selection currently considers IPv4 addresses.
+  Hosts with several active physical IPv4 interfaces must choose one with
+  `--local-address if:NAME`; an IPv6-only uplink needs an explicit local IPv6
+  address.
 - Revocation is enforced at new TLS/stream authorization and by a one-second
   active-flow poll; it is deliberately not instantaneous packet revocation.
 - Device renewal requires a still-valid, non-revoked identity. After expiry or

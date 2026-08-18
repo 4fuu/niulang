@@ -33,24 +33,24 @@ in invitations and profiles; `--listen` below is the local bind address.
 
 ```sh
 sudo queqiaod provider init \
-  --state /var/lib/queqiao \
+  --state /var/lib/queqiao/provider \
   --name "Example Network" \
   --endpoint gateway.example.net:443
 
 sudo queqiaod provider add-user \
-  --state /var/lib/queqiao \
+  --state /var/lib/queqiao/provider \
   --name alice \
   --max-sessions 8
 
 sudo queqiaod server \
-  --state /var/lib/queqiao \
+  --state /var/lib/queqiao/provider \
   --listen :443
 ```
 
 Create a single-use invitation, valid for 24 hours by default:
 
 ```sh
-sudo queqiaod provider invite --state /var/lib/queqiao --user alice
+sudo queqiaod provider invite --state /var/lib/queqiao/provider --user alice
 ```
 
 The command prints only the importable URI, so a portal can capture it or turn
@@ -60,12 +60,12 @@ stores only a SHA-256 digest of the random 256-bit enrollment token.
 Useful provider operations:
 
 ```sh
-sudo queqiaod provider list-users --state /var/lib/queqiao
-sudo queqiaod provider list-invites --state /var/lib/queqiao --user alice
-sudo queqiaod provider revoke-invite --state /var/lib/queqiao --invite INVITE_ID
-sudo queqiaod provider list-devices --state /var/lib/queqiao --user alice
-sudo queqiaod provider revoke-device --state /var/lib/queqiao --device DEVICE_ID
-sudo queqiaod provider disable-user --state /var/lib/queqiao --user alice
+sudo queqiaod provider list-users --state /var/lib/queqiao/provider
+sudo queqiaod provider list-invites --state /var/lib/queqiao/provider --user alice
+sudo queqiaod provider revoke-invite --state /var/lib/queqiao/provider --invite INVITE_ID
+sudo queqiaod provider list-devices --state /var/lib/queqiao/provider --user alice
+sudo queqiaod provider revoke-device --state /var/lib/queqiao/provider --device DEVICE_ID
+sudo queqiaod provider disable-user --state /var/lib/queqiao/provider --user alice
 ```
 
 Authorization changes are atomically persisted and a running gateway reloads
@@ -82,6 +82,13 @@ path defaults to the operating system's user configuration directory.
 queqiaod enroll 'queqiao://enroll/…'
 ```
 
+Enrollment and later certificate renewal default to `--local-address auto`.
+That selects one active physical IPv4 interface and excludes point-to-point
+TUN devices, preventing Clash from trying to bootstrap Queqiao through the
+tunnel being configured. If more than one physical interface is active,
+Queqiao stops with the candidate names instead of guessing; select one, for
+example `--local-address if:en0`.
+
 The result is a single mode-0600 JSON profile. Start the SOCKS5 client with it:
 
 ```sh
@@ -91,6 +98,9 @@ queqiaod client --profile ~/.config/queqiao/PROVIDER_ID.json
 The default listener is `127.0.0.1:1080`. Applications, Clash/mihomo, or a
 system proxy can use it as an ordinary SOCKS5 proxy. SOCKS5 UDP ASSOCIATE is
 supported. See [the Clash starter profile](deploy/clash-queqiao.yaml).
+For a complete first installation, multi-user provider workflow, development
+tunnel replacement, verification, and rollback runbook, see
+[docs/DEPLOYING.md](docs/DEPLOYING.md).
 
 Device certificates are short-lived. The running client checks hourly and
 automatically renews them in the final seven days using the same device key;
