@@ -217,6 +217,9 @@ func packageRelease(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
+	if err := downloadModuleSources(ctx, repoRoot); err != nil {
+		return err
+	}
 	moduleDirs, err := listModuleDirs(ctx, repoRoot)
 	if err != nil {
 		return err
@@ -355,6 +358,19 @@ func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 		files = append(files, archiveFile{name: name, mode: 0o644, data: data})
 	}
 	return files, nil
+}
+
+// downloadModuleSources makes packaging independent of the state of Go's
+// build cache. A cached compiled package is enough for go build, but licenses
+// are read from dependency source trees, which the module cache may not have
+// extracted yet.
+func downloadModuleSources(ctx context.Context, repoRoot string) error {
+	cmd := exec.CommandContext(ctx, "go", "mod", "download")
+	cmd.Dir = repoRoot
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("download module sources: %w\n%s", err, output)
+	}
+	return nil
 }
 
 func listModuleDirs(ctx context.Context, repoRoot string) (map[string]string, error) {
