@@ -19,6 +19,11 @@ import (
 	"time"
 )
 
+// Keep host UDP buffers comfortably above the short packet bursts used by the
+// emulator. Otherwise a default Linux receive buffer can drop packets before
+// the relay observes them, bypassing the configured deterministic loss model.
+const relaySocketBuffer = 4 * 1024 * 1024
+
 // Config describes one emulated path. Zero values disable the corresponding
 // impairment, so a Config{} relay is a plain forwarder.
 type Config struct {
@@ -476,6 +481,10 @@ func newRelay(listen, target string, cfg Config, shared *Bottleneck) (*Relay, er
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
+	if err := configureUDPBuffers(local); err != nil {
+		_ = local.Close()
+		return nil, fmt.Errorf("configure listener buffers: %w", err)
+	}
 	r := &Relay{
 		cfg: cfg, target: targetAddr, local: local,
 		peers: make(map[string]*peer), done: make(chan struct{}),
@@ -587,6 +596,10 @@ func (r *Relay) peerFor(addr net.Addr) (*peer, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := configureUDPBuffers(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("configure peer buffers: %w", err)
+	}
 	p := &peer{client: addr, conn: conn}
 	p.up.rng = rand.New(rand.NewSource(r.cfg.Seed))
 	p.down.rng = rand.New(rand.NewSource(r.cfg.Seed))
@@ -595,6 +608,13 @@ func (r *Relay) peerFor(addr net.Addr) (*peer, error) {
 	r.wg.Add(1)
 	go r.readServer(p)
 	return p, nil
+}
+
+func configureUDPBuffers(conn *net.UDPConn) error {
+	if err := conn.SetReadBuffer(relaySocketBuffer); err != nil {
+		return err
+	}
+	return conn.SetWriteBuffer(relaySocketBuffer)
 }
 
 func (r *Relay) readServer(p *peer) {
