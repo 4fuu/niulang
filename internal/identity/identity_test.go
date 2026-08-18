@@ -86,6 +86,23 @@ func TestProviderStateIsPinnedPrivateAndCannotBeReinitialized(t *testing.T) {
 	}
 }
 
+func TestProviderRejectsPublicStateDirectoryOnUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows privacy is enforced through DACLs, not FileMode permission bits")
+	}
+	provider := testProvider(t, "127.0.0.1:443", time.Now())
+	if err := os.Chmod(provider.Directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadProvider(provider.Directory)
+	if err == nil {
+		t.Fatal("provider accepted a state directory readable by other users")
+	}
+	if !strings.Contains(err.Error(), "chmod 700") {
+		t.Fatalf("permission error is not actionable: %v", err)
+	}
+}
+
 func TestProviderRejectsMismatchedIssuerPrivateKey(t *testing.T) {
 	provider := testProvider(t, "127.0.0.1:443", time.Now())
 	wrongKey, err := os.ReadFile(filepath.Join(provider.Directory, gatewayCAKeyFile))

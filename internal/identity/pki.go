@@ -184,8 +184,8 @@ func LoadProvider(directory string) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect provider state directory: %w", err)
 	}
-	if !directoryInfo.IsDir() || directoryInfo.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("provider state directory permissions are %s; want mode 700 or stricter", directoryInfo.Mode())
+	if err := checkPrivateDirectoryPermissions(directoryInfo); err != nil {
+		return nil, fmt.Errorf("provider state directory %s is not private: %w", directory, err)
 	}
 	for _, name := range []string{providerFile, rootKeyFile, gatewayCAKeyFile, deviceCAKeyFile, gatewayCertFile, authorizationFile} {
 		info, err := os.Lstat(filepath.Join(directory, name))

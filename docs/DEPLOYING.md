@@ -56,6 +56,13 @@ Refusing an existing path is intentional: silently replacing this root would
 strand every enrolled device. Back up the resulting directory encrypted. It
 contains issuer keys and is the provider's highest-value secret.
 
+On Unix, the gateway refuses to load a provider directory accessible to the
+group or other users and reports the exact `chmod 700` repair. On Windows,
+POSIX mode bits do not describe access: place state under the dedicated service
+account, remove inherited access with the directory's DACL (for example with
+`icacls`), and grant full control only to that account and `SYSTEM`. Do not keep
+provider state on a shared or synchronizing folder on either platform.
+
 ### systemd
 
 Install [`deploy/queqiaod.service`](../deploy/queqiaod.service), then create
@@ -286,7 +293,7 @@ without redaction.
 | `interface … has no active IPv4 address` | Correct the interface name or connect it before retrying. The saved enrollment draft remains reusable. |
 | Enrollment reports a pinned-identity error | The URI belongs to another provider, the provider state was replaced, or traffic is intercepted. Never bypass pin verification. |
 | Invitation is expired or already used | Retry the matching `.enrolling` draft first. Otherwise revoke/audit the old invite and issue a new one. |
-| Profile is rejected | Check that it is complete strict JSON and mode `0600`; do not hand-edit identity fields. |
+| Profile is rejected | Check that it is complete strict JSON; on Unix it must be mode `0600`, and on Windows it must have a private user DACL. Do not hand-edit identity fields. |
 | SOCKS test shows the wrong egress and counters stay at zero | Force proxy use with `curl --noproxy '' --proxy socks5h://…`; inspect `NO_PROXY` and the selected Clash group. |
 | Client repeatedly connects through itself | Bind enrollment, renewal, and data traffic to a physical source with `--local-address auto`, `if:NAME`, or an IP. |
 | QUIC fails but TCP works | Permit UDP on the gateway port; `--transport auto` retains TCP fallback. |
