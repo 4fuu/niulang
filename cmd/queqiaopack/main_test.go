@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 func TestArchivesAreDeterministicAndKeepModes(t *testing.T) {
@@ -140,8 +143,8 @@ func TestCycloneDXIsDeterministicAndNamesTheLinkedBinary(t *testing.T) {
 	if !reflect.DeepEqual(bom.Metadata.Component.Licenses, []cdxLicenseChoice{{License: cdxLicense{ID: "MIT"}}}) {
 		t.Fatalf("root SBOM license = %+v, want MIT", bom.Metadata.Component.Licenses)
 	}
-	if got := bom.Metadata.Component.Properties[2].Value; got != "3" {
-		t.Fatalf("wire protocol property = %q, want 3", got)
+	if got := bom.Metadata.Component.Properties[2].Value; got != fmt.Sprint(protocol.Version) {
+		t.Fatalf("wire protocol property = %q, want %d", got, protocol.Version)
 	}
 	if len(bom.Components) != 1 || bom.Components[0].Name != modules[0].Path || len(bom.Dependencies) != 1 {
 		t.Fatalf("linked dependency was not represented: %+v", bom)

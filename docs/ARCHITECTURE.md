@@ -1,116 +1,87 @@
-# queqiao architecture
-
-## Problem statement
-
-The measured China-to-US path has high RTT, rapidly changing erasure, and
-severe tails for direct outer TCP transports. `queqiao` is a paired
-performance-enhancing proxy (PEP): the local agent terminates the
-application-side socket, and the fixed-egress agent creates the
-destination-side socket. Bytes in between are numbered and framed so transport
-recovery does not expose duplicate application bytes.
+# Queqiao architecture
 
 ## Components
 
 ```text
-application -> Clash/mihomo TUN or system proxy
-                    |
-                    v
-              SOCKS5 TCP/UDP ingress
-              classifier / scheduler
-              pooled control connection ---- QUIC/UDP or TLS/TCP ----+-- egress agent
-              isolated bulk connection  ---- QUIC/UDP ---------------+       |
-                                                                              v
-                                                                         destination
+provider admin CLI ── atomic authorization state ──┐
+                                                  v
+application → SOCKS5 client → TLS 1.3/QUIC or TCP → gateway → destination
+                    │                              │
+                    └─ private device profile      └─ provider identity state
 ```
 
-Clash/mihomo owns transparent TUN capture and routes selected traffic to the
-local SOCKS5 endpoint. Queqiao installs no TUN device or host routes. Direct
-in-process TUN or VLESS ingress is outside the two-process architecture.
+The provider creates users and one-time invitations. Enrollment generates a
+device key on the client and returns one self-contained profile. The gateway
+uses the same public TCP/UDP endpoint for enrollment, renewal, and data, with
+isolated ALPNs and TLS policies.
 
-## TCP data path
+## Trust boundaries
 
-1. Ingress accepts a SOCKS5 TCP connection and assigns random session and flow
-   identifiers.
-2. The bounded destination address is authenticated and sent in `OPEN` or
-   negotiated `OPEN_FAST` framing.
-3. The egress agent applies destination policy, dials it, and reports success
-   or a typed error. By default the client pipelines this open; operators can
-   choose `--wait-for-open-ack` for precise early failure at the cost of a
-   round trip.
-4. Each direction is split into bounded DATA frames with monotonically
-   increasing byte sequence numbers.
-5. Bounded reassembly, cumulative ACKs, negotiated selective ACK ranges, and
-   duplicate suppression preserve application byte order across replacement.
-6. `CLOSE`, `RESET`, and completion tombstones provide bounded lifecycle and
-   final-state replay. Protocol version 2 removed the unused WINDOW/PING/PONG
-   frame types.
+The pinned provider root identifies a trust domain, not a DNS name. Constrained
+gateway and device issuers separate server and client roles. Normal TLS
+handshakes authenticate both sides and map the client leaf to an immutable
+provider/account/device principal. Mutable policy remains in the authorization
+store and is checked at handshake, at every stream open, and periodically for
+active flows.
 
-The application TLS session remains end-to-end between the application and its
-destination. The PEP sees the SOCKS destination, byte counts, packet sizes, and
-timing, but does not decrypt application traffic.
+The invitation is a short-lived bearer credential only for enrollment. Session,
+flow, lane, and UDP-resume IDs route already-authenticated state; none grants
+authority. A secondary lane must have the exact principal of the original flow.
 
-## Workload isolation
+## TCP stream data path
 
-`NEW`, `INTERACTIVE`, and `BULK` classification is behavioral and uses byte
-count, direction, recent payload distribution, idle gaps, age, and hysteresis.
-It is a scheduling hint, not a security boundary.
+1. The client assigns random session/flow IDs and sends `OPEN` with a bounded
+   canonical destination.
+2. The gateway applies destination policy and dials it, returning `OPEN_OK` or
+   a coarse `RESET`.
+3. Each direction is split into bounded `DATA` frames at logical byte offsets.
+4. Cumulative and bounded range acknowledgements permit safe retransmission
+   across lane failure without exposing duplicates to the application.
+5. `CLOSE`, final ACKs, and metadata-only tombstones finish half-close and
+   recover a lost final acknowledgement.
 
-The QUIC pool is enabled by default. Short and interactive flows share one
-bounded control connection, amortizing authentication and keeping its
-congestion window free from avoidable bulk queueing. If classified bulk work
-and competing work would share that connection, the bulk flow is moved to one
-lazily created secondary connection. A QUIC flow has exactly one data
-connection at a time: secondary QUIC connections isolate workloads and replace
-failed paths; they never aggregate one flow's capacity. The deleted QUIC
-multipath experiment and
-its measurements are retained in
-[`DESIGN-MULTIPATH.md`](DESIGN-MULTIPATH.md).
+The application protocol remains end-to-end through the SOCKS proxy. Queqiao
+can see the destination, byte sizes, and timing, but does not terminate an
+application's own TLS.
 
-An optional aggregate token bucket and interactive reserve apply above all
-connections. Each QUIC connection retains its own selected congestion
-controller.
+## Pooling, isolation, and fallback
 
-## UDP and transport fallback
+Short/control flows share a persistent QUIC connection, avoiding a new
+connection handshake per flow. Behavioral classification (`NEW`, `INTERACTIVE`,
+`BULK`) is a scheduling hint, not an authorization boundary. When useful, a
+bulk flow moves to a separately authenticated connection so it does not fill
+the pooled control congestion window.
 
-SOCKS5 UDP ASSOCIATE preserves datagram boundaries. Where QUIC negotiates
-DATAGRAM support, packets use it; TLS/TCP and capability-free peers use the
-lane control stream. The receiver applies a bounded anti-replay window.
+`auto` prefers QUIC and prepares delayed TLS/TCP fallback. Only differential
+evidence—QUIC failure while TCP reaches the same endpoint—penalizes UDP. A
+cooldown avoids repeatedly delaying applications on a blocked path.
 
-Each remote endpoint has `healthy`, `degraded`, and `blocked` UDP health. New
-work in `auto` mode starts QUIC first and prepares delayed TLS/TCP as a warm
-standby. TCP becoming ready first is neutral; only an explicit QUIC
-reachability failure confirmed by working TCP advances the conservative
-failure detector. Repeated differential failures enter a cooldown, and later
-probes allow QUIC to become preferred again.
+TCP fallback can use multiple independent lanes for a bulk flow. Logical byte
+offsets and range acknowledgements preserve order. Lane counts, replay state,
+and recovery attempts are bounded.
 
-Failed TCP flows use bounded sequence-aware replay over an authenticated
-replacement without duplicating bytes. Failed UDP associations retain the
-local SOCKS endpoint and reclaim the same remote relay socket using a scoped,
-single-use, expiring resume token. Datagrams in flight at failure can be lost;
-UDP recovery is not presented as lossless.
+## UDP
 
-When the authenticated TCP peer advertises `CapabilityTCPStriping`, a
-configured bulk fallback may instead maintain 2-16 independent TLS/TCP lanes.
-Byte offsets preserve ordering, the receiver reports selective ranges, and a
-failed lane's unacknowledged chunks are immediately eligible elsewhere. The
-mode is TCP-only, disabled at the client by its one-lane default, and does not
-change the QUIC state machine.
+SOCKS5 UDP ASSOCIATE preserves packet boundaries. QUIC datagrams are preferred;
+TLS/TCP uses the control stream. A bounded replay window rejects duplicate or
+stale packets.
 
-## Trust and resource boundaries
+After lane failure, the gateway briefly retains the remote UDP socket under a
+random single-use token. A replacement with both that token and the same
+authenticated principal can reclaim it, preserving the source address seen by
+the destination. In-flight datagrams may still be lost, as UDP permits.
 
-TLS 1.3 protects both outer transports. Timestamped HMAC handshakes and nonce
-tracking authenticate sessions and joins; connection-scoped capabilities gate
-fast opens, selective ACKs, control reservation, and UDP resume. The egress
-rejects private destinations unless explicitly configured otherwise.
+## Uplink measurement
 
-Connections, sessions, flows, frame payloads, reassembly, replay, UDP relays,
-anti-replay windows, handshakes, idle periods, and total lifetimes are bounded.
-The loopback-only metrics endpoint reports flow, lane, controller, fallback,
-UDP-path unavailability, dual-transport endpoint failure, replacement, timeout,
-and replay state. The detailed review and residual risks are in
-[`SECURITY-REVIEW.md`](SECURITY-REVIEW.md).
+An uplink change invalidates pooled congestion state. The client can establish
+a fresh authenticated QUIC connection and send bounded `PROBE` padding. The
+gateway discards at most 128 KiB without opening a destination or reflecting
+data; QUIC acknowledgements update the loss model used by the first real flow.
 
-No scheduler can exceed a hard aggregate bottleneck. The transport is designed
-for one measured fixed-egress path and is not evidence of universal advantage;
-see [`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md) for release evidence and
-external qualifications.
+## Bounds and persistence
+
+Global and per-user sessions, connections, frames, reassembly, acknowledgement
+ranges, lanes, retained relays, enrollment messages, handshakes, idle periods,
+and flow lifetimes are bounded. Provider JSON state is written by temporary
+file, fsync, atomic rename, and directory sync. The server reloads complete
+snapshots and retains the last known-good state if a replacement is malformed.

@@ -8,7 +8,7 @@ exact commit. Production-ready language has additional gates below.
 ## Public-preview blockers
 
 - [x] Supported topology and known limitations are documented.
-- [x] Wire protocol 3 is documented, emitted in build metadata, and rejects
+- [x] Wire protocol 4 is documented, emitted in build metadata, and rejects
   every other version with a diagnosable error.
 - [x] Security reporting instructions and residual risks are documented.
 - [x] A pinned full-history secret scan reports zero unresolved findings for
@@ -45,10 +45,39 @@ exact commit. Production-ready language has additional gates below.
   minimum independent access networks and two egress providers.
 - [ ] At least two representative paths complete the required 24-72-hour soak
   without correctness failures or unbounded resource growth.
-- [ ] An independent reviewer completes `SECURITY-ASSESSMENT.md`; all critical
+- [ ] An independent reviewer assesses the design in `SECURITY.md`; all critical
   and high findings are fixed, and accepted lower-severity findings are public.
 - [ ] Operational monitoring, incident response, supported-version lifetime,
   and credential-rotation ownership have named maintainers.
+
+## Mobile release blockers
+
+- [x] Android and iOS use the protocol-4 core with full IPv4/IPv6 TCP and UDP,
+  crash-safe enrollment, platform secure storage, automatic renewal, bounded
+  packet/session queues, and no third-party proxy application.
+- [x] The exact linked runtime and isolated build-tool graphs are pinned,
+  license-allowlisted, reproducibly audited, and their full notices are
+  embedded in both applications.
+- [x] Android release lint, R8, APK/AAB assembly, test-APK assembly, iOS strict
+  lint, simulator build, and app/core boundary tests pass locally.
+- [ ] Android API 30, 33, and current physical devices pass the Keystore suite
+  and the complete TCP/UDP, IPv4/IPv6, DNS, permission, revoke, and lifecycle
+  matrix on Wi-Fi and cellular.
+- [ ] Current physical iPhones pass signing, install, packet-tunnel TCP/UDP,
+  IPv4/IPv6, DNS, permission, revoke, sleep/wake, Wi-Fi/cellular transition,
+  and reconnect tests.
+- [ ] Both platforms pass 24-hour mixed interactive/bulk soak with bounded
+  memory, goroutines/threads, descriptors, packet queues, and energy use.
+- [ ] Near-expiry certificate renewal is demonstrated during an active tunnel,
+  and revocation closes active traffic within the documented bound.
+- [ ] Clean install, signed upgrade, failed-upgrade recovery, profile deletion,
+  and signing-key recovery procedures are exercised on release artifacts.
+- [ ] An independent mobile security/privacy review closes all critical and
+  high findings and records accepted lower-severity findings publicly.
+- [ ] Android Developer Console/package registration and, if applicable,
+  Google Play Organization/VpnService declarations are complete. iOS remains
+  source-build only unless an Organization team completes App Store review and
+  jurisdiction-specific VPN obligations.
 
 Completing the preview section permits a v0.1 experimental release; it does
 not complete or waive the production-ready section.

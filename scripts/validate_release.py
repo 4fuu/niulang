@@ -27,12 +27,10 @@ REQUIRED_ARCHIVE_FILES = {
     "deploy/me.01.queqiao.client.plist",
     "deploy/queqiaod.service",
     "docs/ARCHITECTURE.md",
-    "docs/CREDENTIAL-ROTATION.md",
     "docs/DEPLOYING.md",
     "docs/KNOWN-LIMITATIONS.md",
     "docs/PROTOCOL.md",
     "docs/RELEASING.md",
-    "docs/SECURITY-REVIEW.md",
     "internal/congestion/NOTICE",
 }
 CHECKSUM = re.compile(r"[0-9a-f]{64}")
@@ -134,8 +132,8 @@ def validate_sbom(data: bytes, archive_name: str, archive: dict[str, tuple[bytes
     if component.get("licenses") != [{"license": {"id": "MIT"}}]:
         raise ValueError(f"{archive_name}: invalid root SBOM license")
     component_properties = properties(component)
-    if component_properties.get("queqiao:wire-protocol") != "3":
-        raise ValueError(f"{archive_name}: SBOM does not declare wire protocol 3")
+    if component_properties.get("queqiao:wire-protocol") != "4":
+        raise ValueError(f"{archive_name}: SBOM does not declare wire protocol 4")
     buildinfo = parse_buildinfo(archive["BUILDINFO"][0])
     for sbom_key, build_key in (
         ("queqiao:commit", "commit"),

@@ -1,5 +1,8 @@
 # Live-path comparison against deployed proxies — 2026-08-16
 
+> Historical protocol-3 record. Its shared-secret commands are not valid for
+> the clean-slate protocol-4 implementation.
+
 This is a real-path campaign. Every number comes from a client in China and a
 fixed egress in the United States, with no emulator anywhere in the path, and
 every peer is the implementation people actually deploy rather than an in-tree

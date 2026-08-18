@@ -9,7 +9,7 @@
 # directly into the application's profiles directory; files placed there are
 # not automatically registered and do not appear on the Profiles page.
 #
-# queqiao is not a protocol Clash speaks. The client (`queqiaod --mode local`)
+# queqiao is not a protocol Clash speaks. The client (`queqiaod client`)
 # runs as a separate process beside Clash and exposes a plain SOCKS5 ingress on
 # loopback; Clash forwards to it like any other SOCKS5 node.
 #

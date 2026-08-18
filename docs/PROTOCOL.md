@@ -1,210 +1,121 @@
-# queqiao wire protocol 3
+# Queqiao protocol version 4
 
-This document defines the wire contract shipped by the v0.1 release line.
-Version 3 is the only wire version those builds accept. A peer with any other
-version is rejected on its first frame with an explicit local/peer version
-error. Optional features that do not change existing frame semantics are
-negotiated through authenticated capability bits.
+Protocol version 4 is the only supported wire protocol. It deliberately has no
+shared-secret HELLO, capability negotiation, or downgrade path.
 
-There is deliberately no downgrade to version 2: its bulk datagrams use a
-different code and accepting identical-looking version-2 frames would make
-data disappear silently. Patch releases may be upgraded one endpoint at a
-time only while they retain wire version 3. A future release that changes the
-wire version requires a coordinated client/server upgrade unless it explicitly
-implements and documents a multi-version transition.
+## Transport and identity
 
-## Session transport
+TCP uses TLS 1.3 and QUIC uses TLS 1.3 through QUIC. Both negotiate
+`queqiao/4`. A normal connection requires a provider-issued device certificate
+and is rejected during TLS if the account/device is unknown, disabled, expired,
+revoked, or registered under another public key.
 
-A session is established over an authenticated TLS/QUIC or TLS/TCP transport.
-The client sends a random 128-bit `session_id` and a protocol version. The
-server authenticates the configured credential before accepting any `OPEN` or
-data frame. A reconnect may present a short-lived resume token bound to the
-session and client identity.
+The server certificate chain terminates at the provider root pinned in the
+client profile. The client verifies the exact root fingerprint and the URI
+identity `queqiao://PROVIDER/gateway/GATEWAY`; DNS names are not identities.
+Device leaves use
+`queqiao://PROVIDER/account/ACCOUNT/device/DEVICE` and client-auth EKU.
+
+Two isolated control protocols share the listener:
+
+- `queqiao-enroll/1`: no client certificate, exact ALPN offer only, one bounded
+  invitation exchange.
+- `queqiao-renew/1`: mutual TLS, one bounded certificate-renewal exchange.
+
+Offering either ALPN together with another protocol does not select the weaker
+enrollment configuration.
+
+The client persists its generated key before first use of the one-time token.
+An exact retry after a lost response is idempotent, even just after invitation
+expiry; it can only recover the already registered device and cannot select a
+different key or name.
 
 ## Frame envelope
 
-Every frame has a fixed, bounded header followed by payload:
+All integers are big-endian. The fixed 46-byte header is:
 
-```text
-magic(2) version(1) type(1) flags(2)
-session_id(16) flow_id(8) sequence(8) payload_len(4)
-class(1) reserved(3) payload(payload_len)
-```
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 2 | magic `WO` |
+| 2 | 1 | version (`4`) |
+| 3 | 1 | frame type |
+| 4 | 2 | flags |
+| 6 | 16 | session ID |
+| 22 | 8 | flow ID |
+| 30 | 8 | sequence |
+| 38 | 4 | payload length |
+| 42 | 1 | traffic class |
+| 43 | 3 | zero reserved bytes |
 
-The first implementation must reject `payload_len` above the configured
-maximum before allocating memory. Sequence numbers count bytes within a flow,
-not frames. A receiver acknowledges contiguous bytes plus selective ranges.
+Payloads are bounded before allocation. Unknown versions, types, flags, classes,
+or non-zero reserved bytes fail closed.
 
-Frame types are `HELLO`, `HELLO_OK`, `OPEN`, `OPEN_OK`, `DATA`, `ACK`,
-`CLOSE`, `RESET`, `PACKET`, `OPEN_FAST`, and `OPEN_JOIN_FAST`.
+Frame types are `OPEN`, `OPEN_OK`, `JOIN`, `DATA`, `ACK`, `CLOSE`, `RESET`,
+`PACKET`, and `PROBE`.
 
-Version 2 removed three: `WINDOW`, `PING` and `PONG`. All three were specified
-and none was ever sent. A frame type that exists only in this document is worse
-than no frame type, because it reads as a property the implementation has. What
-each was for, and what actually provides it, is in "Backpressure" and
-"Liveness" below. Version 3 retains that frame envelope but changes bulk
-datagrams from the version-2 block code to the sliding-window code. The version
-byte is therefore 3 even though the frame fields are otherwise unchanged.
+## Flow open
 
-### Pooled QUIC authentication
+TLS authenticates before application data, so the first stream frame is
+`OPEN`. A non-zero random session and flow ID identify the logical flow. The
+payload is a bounded canonical destination, the UDP association marker, or the
+UDP-resume marker. The server applies destination policy and responds with
+`OPEN_OK` or a coarse `RESET`.
 
-The first stream on a pooled QUIC connection performs the normal PSK/HMAC
-`HELLO` exchange and opens its flow with `OPEN`. A capable server advertises
-`CapabilityFastStreams` inside the otherwise opaque 16-byte `HELLO_OK` nonce:
-the first eight bytes are `WOCAP001` and the remaining eight bytes are the
-big-endian capability bitmap. The payload remains the original 24 bytes, so
-old clients accept a new server and new clients treat an old server's random
-nonce as a zero capability set.
+`FlagReserveControl` is valid only on `OPEN`. It retains lane zero for
+interactive/control traffic if classified bulk data moves to an independent
+lane.
 
-After that acknowledgement, a new stream on the same TLS/QUIC connection may
-start with `OPEN_FAST`. It still carries a fresh random `session_id`, non-zero
-`flow_id`, destination or UDP-association marker, and the normal class. The
-server performs all destination decoding, policy, admission, and resource
-checks exactly as for `OPEN`; only the repeated `HELLO` round trip is removed.
-`OPEN_FAST` is rejected on an unauthenticated connection, on TLS/TCP, and on
-independent join/recovery lanes. A reconnected QUIC pool must authenticate and
-negotiate capabilities again. If the capability is absent, every stream keeps
-the legacy `HELLO` plus `OPEN` sequence.
+Clients may optimistically send application data before `OPEN_OK`; the flow
+reader still requires and validates the acknowledgement. Until it arrives,
+clean-path bytes remain behind `OPEN` on the reliable control stream. A coded
+path may send immediately, but places one bounded duplicate of its first data
+frame behind `OPEN`; early datagram loss or reordering therefore cannot leave
+the remote byte stream permanently missing offset zero.
+Operators can require destination confirmation before SOCKS success with
+`--wait-for-open-ack`.
 
-`PACKET` is used only by a SOCKS5 UDP-associate session. The `OPEN` payload
-for that session is the versioned `WOUD1` association marker rather than a
-TCP `host:port`. Each packet payload is bounded and contains:
+## Lane joins
 
-```text
-destination_length(2) canonical_destination(destination_length)
-udp_payload(remaining bytes)
-```
+An additional mutually authenticated stream begins with `JOIN`, whose payload
+is exactly one non-zero 64-bit lane ID. The session/flow IDs select an existing
+flow. The server attaches it only if its authenticated provider/account/device
+principal exactly equals the creator's principal. Therefore intercepted IDs
+are not bearer credentials and cannot cross users or devices.
 
-The frame sequence is a packet sequence (starting at zero) and must increase
-by one in each direction. The server resolves and validates the destination
-at the fixed US egress using the same public/private-address policy as TCP;
-the local client never performs the destination DNS lookup. SOCKS5 UDP
-fragmentation is rejected, malformed datagrams are dropped locally, and an
-association is bounded by the configured idle timeout and maximum lifetime.
-The current implementation carries packets over reliable QUIC streams or
-TLS/TCP, preserving packet boundaries while allowing automatic TCP rescue for
-new and failed in-session associations. An in-session rescue for UDP opens a replacement
-authenticated association, retaining the local SOCKS UDP socket. Where the
-server advertised `CapabilityUDPResume`, the association's open carries the
-16-byte token its OPEN_OK granted, and the server hands back the same remote
-relay socket rather than binding a new one, so the destination keeps seeing one
-source address. The token is single-use and reissued on every open, expires in
-30 seconds, and buys nothing else: datagrams in flight when the lane died are
-not replayed. TCP flows do resume: a replacement lane attaches to the
-existing session and the flow continues on it.
-`TypePacket` frames are carried on the connection's QUIC datagrams where
-DATAGRAM was negotiated in both directions, and on the lane's control stream
-otherwise. There is no capability of its own for this: both endpoints read the
-same QUIC connection state, so a sender never routes a packet to a substrate
-its peer is not draining, and a TLS/TCP lane is unchanged. Because a datagram
-is neither retransmitted nor ordered, a receiver no longer requires the next
-sequence number: it admits each once through a bounded anti-replay window and
-drops duplicates and packets too far behind to place. A gap is loss, which is
-what the application asked for by choosing UDP.
+## Ordered data and recovery
 
-If the server also advertises `CapabilityReserveControl`, a pooled client may
-set `FlagReserveControl` on its `OPEN` or `OPEN_FAST` frame. This marks lane 0
-as the authenticated control/rescue lane for that logical flow, and is what
-separates the flow's two planes.
+`DATA` sequence numbers are logical byte offsets. `ACK` carries a cumulative
+offset and may include a bounded list of received byte ranges. `CLOSE` and final
+ACKs implement half-close/final-close semantics. Lane replacement can re-send
+unacknowledged chunks without changing the application's byte stream.
 
-Once one joined lane is established and another flow is actually sharing the
-pooled connection, that flow's `DATA` moves to the joined lane -- exactly one,
-never several -- and `ACK`, `FIN`, `OPEN`, `RESET` and interactive frames
-continue to use lane 0. The reasons are two, and both are about what a bulk
-transfer does to traffic beside it: the joined lane's congestion window stays
-off the connection short flows share, and the flow's own acknowledgements stay
-off the stream carrying its own bulk, where a single lost `DATA` frame would
-head-of-line block them.
+A completed flow retains a bounded metadata-only tombstone so a replacement
+lane can recover a lost final ACK. It retains no destination socket or payload.
 
-If no joined lane is healthy, both planes use lane 0. Availability is worth
-more than isolation, and the reservation is a preference rather than a
-correctness dependency. If no joined lane is healthy, bulk traffic falls back
-to lane 0, so the capability is an isolation preference rather than a
-correctness dependency. The flag is never sent to a peer that did not
-negotiate the capability.
+## UDP
 
-For a flow established or rescued over TLS/TCP, a server may advertise
-`CapabilityTCPStriping`. A configured client can then authenticate additional
-`HELLO_JOIN` connections, up to the negotiated local and server ceiling of 16,
-and stripe the flow's offset-addressed `DATA` across them. Selective ACK ranges
-bound outstanding data and make unacknowledged chunks eligible for another
-lane after a hard failure. The first TCP rescue retires every QUIC lane and the
-server rejects later QUIC joins, so the scheduler never mixes transport
-semantics within one flow. Without the capability, or with the client's
-one-lane default, TLS/TCP retains the legacy single-connection behavior.
+`PACKET` preserves datagram boundaries and carries a canonical destination.
+QUIC datagrams are preferred; an explicit measurement option can keep packets
+on streams.
 
-`CLOSE` with `FlagFin` is a directional half-close. A sender may later send
-the same final sequence with `FlagCloseAbort` when its application socket has
-fully closed and the peer should release an otherwise idle keep-alive
-destination. `FlagCloseAbort` is cancellation rather than an ordered FIN: the
-receiver stops its sender and closes its inner connection immediately, even if
-the abort sequence is beyond a reassembly gap, then makes a bounded best effort
-to acknowledge that sequence. Waiting for the gap would retain response chunks
-that the vanished application can never acknowledge.
+A failed association's relay socket can be retained briefly under a random
+single-use token. Reclamation requires both the token and the same authenticated
+device principal. Relays, grace time, and token width are bounded.
 
-A local EOF alone does not trigger this escalation because TCP exposes
-`CloseWrite` and `Close` the same way. The abort grace begins once response
-data is present but cannot make application progress, or after the peer has
-acknowledged the normal FIN. Successful application writes renew it; a failed
-write proves the full close and escalates immediately. After sending the abort,
-the sender drains its final ACK for a bounded interval and then terminates the
-flow regardless.
+## Path probe
 
-## Backpressure
+`PROBE` is authenticated, destination-free discard padding. It uses flow ID
+zero and permits no flags. The server accepts at most 128 frames and 128 KiB per
+probe stream and reflects no application response; QUIC transport
+acknowledgements provide the loss measurement without an amplification or SSRF
+surface.
 
-There is no application-level window frame, and there is no place for one.
-Three bounds already apply, each at the layer that owns the memory:
+## Security invariants
 
-- QUIC's own stream and connection flow control, which is what stops a lane's
-  peer being made to buffer.
-- The sender's write-ahead bound per lane: a lane may hold only what its
-  transport has not yet taken, so a stream write that blocks stops the producer.
-- The sender's retention bound per flow, which is what it may hold unacknowledged
-  in case a lane dies and its chunks must be re-issued elsewhere.
-
-The receiver's reassembly bound is sized from the last of these, so a peer
-running this code cannot overflow it and a hostile peer is bounded by the same
-per-flow figure.
-
-## Liveness
-
-There is no application-level ping. QUIC's keepalive refreshes an idle
-connection and its idle timeout declares a dead one; a second mechanism above
-that would only be a slower copy with no independent evidence.
-
-## Lane identity
-
-Each lane has a random `lane_id` and is bound to the authenticated session.
-The server rejects a lane that is not explicitly joined to an existing
-session. Lane joins are idempotent and expire unless refreshed.
-
-## Reliability
-
-QUIC streams carry frames reliably, but cross-lane ordering is the session
-layer's responsibility. Frames may be delivered out of order; the receiver
-buffers within a bounded reassembly window and delivers contiguously.
-
-What a sender retains for a lane that dies is exactly two things: the chunks the
-scheduler is holding, which are unacknowledged application bytes and may be
-re-offered to any lane, and this flow's own half-close. There is no second,
-frame-level retention window: it held the same bytes under a second limit, and
-the budget, eviction path and "unreplayable" state that bounded it were all
-mechanism for a copy that did not need to exist.
-
-A lane join that names a session the peer does not hold is answered with a
-`RESET` carrying `unknown session`. That answer is permanent -- a session
-identifier is random and is never reissued -- so a client must treat it as
-final rather than retrying.
-
-TCP fallback uses the same frame protocol so higher layers do not depend on the
-transport.
-
-## Compatibility and security requirements
-
-- TLS certificate verification is mandatory by default.
-- No custom cryptography is permitted.
-- Credentials are never logged.
-- Error messages do not disclose whether arbitrary destinations are reachable.
-- Handshake, frame, flow, buffer, and reconnect limits are configurable.
-- Version checks must fail closed, before authentication or allocation, for
-  every unsupported version and must report the peer and local versions.
+- TLS 1.3 is mandatory; there is no plaintext mode.
+- Provider root pin + URI identity replaces DNS/WebPKI identity.
+- Every normal connection has an authorized device certificate.
+- Mutable authorization is checked independently of certificate validity.
+- Routing identifiers never grant authority.
+- Enrollment and renewal messages are length-bounded and versioned.
+- Unknown protocol input fails closed; no legacy parsing branch exists.

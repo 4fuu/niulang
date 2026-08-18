@@ -25,19 +25,6 @@ QUEQIAO_SECRET_SCAN_REPORT=history-secret-scan.json \
   ./scripts/scan_history_secrets.sh .
 ```
 
-## Credential generation
-
-`generate_credentials.sh` creates a private P-256 root, bounded server leaf,
-and printable high-entropy session secret in a new mode-0700 directory. It
-verifies the chain and DNS identity and never writes into the repository.
-
-```sh
-./scripts/generate_credentials.sh --output /secure/new-credentials \
-  --server-name queqiao.node
-```
-
-See `docs/CREDENTIAL-ROTATION.md` before replacing a live set.
-
 ## Release artifact validation
 
 `validate_release.py` verifies checksum coverage, safe archive paths, required
@@ -101,11 +88,12 @@ only medians.
 ```sh
 # US host: the reference server and an isolated queqiao server.
 ./queqiaoref --mode server --listen :12531 --tls-cert c.pem --tls-key k.pem --token-file t
-./queqiaod  --mode server --listen :12540 ...
+./queqiaod server --state /var/lib/queqiao/provider --listen :12540
 
 # Local: one client each, both bound to the physical interface so a TUN-mode
 # proxy does not capture the outer UDP socket and silently tunnel the test.
-./queqiaod  --mode local --listen 127.0.0.1:12140 --remote IP:12540 --local-address 192.0.2.10 ...
+./queqiaod client --profile ~/.config/queqiao/PROFILE.json \
+  --listen 127.0.0.1:12140 --local-address 192.0.2.10
 ./queqiaoref --mode client --listen 127.0.0.1:12141 --remote IP:12531 --local-address 192.0.2.10 ...
 
 ./scripts/bench_live_matched.sh --url http://127.0.0.1:28095/10mb.bin --rounds 16

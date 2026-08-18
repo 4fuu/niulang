@@ -1,5 +1,8 @@
 # Transport performance recovery — 2026-08-12
 
+> Historical protocol-3 record. HELLO/OPEN_FAST was removed; current
+> connections authenticate once with mutual TLS.
+
 This document records why `queqiao` was materially slower than TUIC, what was
 changed, and what the change is worth. Every number below comes from a named,
 repeatable harness; the commands are given so the results can be contested.

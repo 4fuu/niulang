@@ -1,5 +1,9 @@
 # Primary-path high-port validation — 2026-08-17
 
+> Historical protocol-3 measurement record. Its wire version and operational
+> commands are not valid for the clean-slate protocol-4 release described in
+> the current README and deployment guide.
+
 ## Cell identity and limits
 
 | Field | Value |

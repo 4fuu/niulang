@@ -49,10 +49,9 @@ commit requires its own complete candidate run.
 
 ## Compatibility, field, and security evidence
 
-[`COMPATIBILITY-20260817.md`](COMPATIBILITY-20260817.md) records both rolling
-wire-3 upgrade directions, candidate-to-candidate operation, explicit refusal
-of a same-ALPN wire-2 peer, and an isolated atomic install/rollback exercise.
-No production binary was changed.
+This record predates the clean-slate protocol-4 identity design. Its wire-3
+compatibility evidence is historical and is not a release claim for the
+current tree; protocol 4 intentionally has no legacy negotiation.
 
 The exact candidate completed a strict 60-second run over the existing field
 path: 27/27 persistent SOCKS5 UDP probes, 3/3 verified HTTPS flows, and all five
@@ -83,8 +82,8 @@ the implementation author alone:
 - A production-ready claim additionally requires the independent access-network,
   egress-provider, port, OS, and impairment matrix plus two 24–72-hour soaks
   defined in [`FIELD-VALIDATION.md`](FIELD-VALIDATION.md).
-- An independent human or third-party reviewer must complete
-  [`SECURITY-ASSESSMENT.md`](SECURITY-ASSESSMENT.md), with all critical/high
+- An independent human or third-party reviewer must assess the current
+  [`SECURITY.md`](../SECURITY.md) design, with all critical/high
   findings remediated and lower-severity dispositions published.
 - Production monitoring, incident response, supported-version lifetime, and
   credential-rotation ownership still need named maintainers.

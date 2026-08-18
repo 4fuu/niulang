@@ -20,7 +20,10 @@ go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -checks=all,-U1000 ./...
 
 Changes to framing, authentication, resource admission, recovery, concurrency,
 or packaging should also run the relevant full/race/fuzz/fallback checks from
-`.github/workflows/deep.yml`. A wire change must increment
+`.github/workflows/deep.yml`. Normal CI runs the short Go suite natively on
+Linux, macOS, and Windows for amd64 and arm64; deep and release-candidate runs
+exercise the full suite on all six targets and the race suite on every target
+supported by Go (all except Windows/arm64). A wire change must increment
 `internal/protocol.Version`, update `docs/PROTOCOL.md`, document its upgrade
 path, and add fail-closed compatibility tests.
 

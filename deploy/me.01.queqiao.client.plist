@@ -21,26 +21,16 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/YOU/.queqiao/bin/queqiaod</string>
-    <string>--mode</string>
-    <string>local</string>
+    <string>client</string>
+
+    <!-- The single profile imported from the provider invitation contains the
+         endpoint, pinned provider identity, and this device's private key. -->
+    <string>--profile</string>
+    <string>/Users/YOU/.config/queqiao/PROVIDER-ID.json</string>
 
     <!-- The SOCKS5 ingress Clash forwards to. Loopback only. -->
     <string>--listen</string>
     <string>127.0.0.1:12080</string>
-
-    <!-- A literal IP, never a hostname: with fake-IP DNS a hostname resolves
-         to an address inside the tunnel. -->
-    <string>--remote</string>
-    <string>EGRESS-IP:12540</string>
-
-    <!-- Must equal the server certificate's CN/SAN. This is a verified TLS
-         name presented as SNI, not a DNS lookup. -->
-    <string>--server-name</string>
-    <string>queqiao.node</string>
-    <string>--root-ca</string>
-    <string>/Users/YOU/.queqiao/cert.pem</string>
-    <string>--secret-file</string>
-    <string>/Users/YOU/.queqiao/secret</string>
 
     <!-- Not optional when Clash runs in TUN mode. Clash installs a default
          route through 198.18.0.1, so without this binding queqiao's own outer

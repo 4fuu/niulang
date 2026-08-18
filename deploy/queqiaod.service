@@ -8,10 +8,10 @@ Wants=network-online.target
 Type=simple
 User=queqiao
 Group=queqiao
-# Put whitespace-separated queqiaod flags in /etc/queqiao/queqiaod.env as:
-# QUEQIAOD_ARGS=--mode server --listen :12540 ...
+# Put whitespace-separated server flags in /etc/queqiao/queqiaod.env as:
+# QUEQIAOD_ARGS=--state /var/lib/queqiao --listen :12540 ...
 EnvironmentFile=/etc/queqiao/queqiaod.env
-ExecStart=/usr/local/bin/queqiaod $QUEQIAOD_ARGS
+ExecStart=/usr/local/bin/queqiaod server $QUEQIAOD_ARGS
 Restart=on-failure
 RestartSec=2s
 NoNewPrivileges=true

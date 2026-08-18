@@ -2,8 +2,8 @@
 
 This is the maintainer's pre-release static-analysis record for exact candidate
 commit `c24fa15937f081e699016c6b482752c4c621f2ba`. It is not an
-independent security assessment; the independent review described in
-[`SECURITY-ASSESSMENT.md`](SECURITY-ASSESSMENT.md) remains a release gate.
+independent security assessment; independent review of the current
+[`SECURITY.md`](../SECURITY.md) design remains a release gate.
 
 ## Scope and results
 

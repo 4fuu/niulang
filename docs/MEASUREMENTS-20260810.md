@@ -1,5 +1,8 @@
 # Real-path measurements — 2026-08-10
 
+> Historical protocol-3 record. HELLO/OPEN_FAST and its CLI configuration were
+> removed by the clean-slate protocol-4 identity design.
+
 These measurements were run from the China client host to the fixed egress
 `<EGRESS-HOST>` (`<EGRESS-IP>:12443`, TLS SNI `<EGRESS-SNI>`). This
 document contains results from more than one measurement window. The earlier

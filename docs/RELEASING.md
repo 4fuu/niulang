@@ -39,12 +39,9 @@ Then confirm that the embedded metadata matches the tag:
 cat BUILDINFO
 ```
 
-Both outputs must report `wire=3` / `wire_protocol=3`. Queqiao v0.1 accepts
-only wire protocol 3. Patch releases that retain that wire version support a
-one-endpoint-at-a-time rolling upgrade. A release that changes it requires a
-coordinated upgrade unless that release documents an explicit transition.
-The pre-release mixed-version and fail-closed evidence format is recorded in
-[`COMPATIBILITY-20260817.md`](COMPATIBILITY-20260817.md).
+Both outputs must report `wire=4` / `wire_protocol=4`. This pre-release design
+accepts only protocol 4 and intentionally provides no compatibility or
+downgrade path for the removed shared-secret protocol.
 
 Validate the complete directory before executing an archive:
 
@@ -74,9 +71,8 @@ sudo systemctl is-active --quiet queqiaod
 "$installed" --version
 ```
 
-Keep configuration, certificates, and the session secret outside the release
-directory. Upgrading the binary then cannot replace credentials or the known
-working configuration.
+Keep provider state and client profiles outside the release directory.
+Upgrading the binary then cannot replace identities or known working state.
 
 For a macOS LaunchAgent, use the same `install`/`mv` sequence for
 `~/.queqiao/bin/queqiaod`, then run:
@@ -108,9 +104,12 @@ node and rule.
 
 Run `.github/workflows/release-candidate.yml` manually on the exact commit under
 review with a version such as `v0.1.0-rc.1`. It runs the full, race, fuzz,
-vulnerability, fallback, history-secret, reproducibility, and six-native-runner
-archive gates. It uploads candidate archives and evidence but cannot create a
-tag or GitHub Release.
+vulnerability, fallback, history-secret, and reproducibility gates. The full
+Go suite runs natively on Linux, macOS, and Windows for amd64 and arm64; the
+race suite runs on every one of those targets supported by Go (all except
+Windows/arm64). A separate six-native-runner gate executes each packaged
+archive. The workflow uploads candidate archives and evidence but cannot create
+a tag or GitHub Release.
 
 GitHub artifact attestations on Free/Pro/Team require a public repository. The
 candidate workflow therefore records them when the repository is public and

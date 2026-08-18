@@ -27,6 +27,13 @@ class GosecBaselineTests(unittest.TestCase):
         result = self.run_report([issue, issue])
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_accepts_only_the_two_reviewed_client_conversions(self):
+        issue = {"rule_id": "G115", "file": "internal/pep/client.go"}
+        accepted = self.run_report([issue, issue])
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        excess = self.run_report([issue, issue, issue])
+        self.assertEqual(excess.returncode, 1)
+
     def test_rejects_new_rule_or_excess_count(self):
         new_rule = self.run_report([{"rule_id": "G999", "file": "new.go"}])
         self.assertEqual(new_rule.returncode, 1)
