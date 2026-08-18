@@ -99,6 +99,32 @@ final class CoreBoundaryTests: XCTestCase {
         XCTAssertFalse(completion.call())
         XCTAssertEqual(deliveryCount, 1)
     }
+
+    func testProfileProbeResultDecodesValidatedWireFormat() throws {
+        let result = try ProfileProbeResult.decode(
+            "{\"version\":1,\"transport\":\"quic\",\"latency_ms\":87}"
+        )
+
+        XCTAssertEqual(
+            result,
+            ProfileProbeResult(version: 1, transport: "quic", latencyMilliseconds: 87)
+        )
+        XCTAssertThrowsError(
+            try ProfileProbeResult.decode(
+                "{\"version\":2,\"transport\":\"quic\",\"latency_ms\":87}"
+            )
+        )
+        XCTAssertThrowsError(
+            try ProfileProbeResult.decode(
+                "{\"version\":1,\"transport\":\"unknown\",\"latency_ms\":87}"
+            )
+        )
+        XCTAssertThrowsError(
+            try ProfileProbeResult.decode(
+                "{\"version\":1,\"transport\":\"tcp\",\"latency_ms\":0}"
+            )
+        )
+    }
 }
 
 private enum TestError: Error {

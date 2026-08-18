@@ -486,6 +486,72 @@ func ProfileSummaryJSON(profileJSON string) (string, error) {
 	})
 }
 
+const (
+	defaultProfileProbeTimeout = 10 * time.Second
+	minimumProfileProbeTimeout = time.Second
+	maximumProfileProbeTimeout = 30 * time.Second
+)
+
+// ProbeProfileJSON performs a destination-free, mutually authenticated
+// provider test and returns its selected transport and end-to-end setup
+// latency. Callers should run it only while their platform VPN is inactive so
+// the probe measures the device's ordinary uplink rather than another tunnel.
+func ProbeProfileJSON(profileJSON string, timeoutMillis int64) (string, error) {
+	timeout, err := profileProbeTimeout(timeoutMillis)
+	if err != nil {
+		return "", err
+	}
+	profile, err := decodeProfile(profileJSON)
+	if err != nil {
+		return "", err
+	}
+	credentials, err := profile.Credentials()
+	if err != nil {
+		return "", err
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client, err := pep.NewClient(pep.ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: profile.Endpoint,
+		Credentials: credentials, Transport: pep.TransportAuto,
+		DialTimeout: timeout, HandshakeTimeout: timeout,
+		FallbackDelay: 300 * time.Millisecond, FallbackGrace: 2 * time.Second,
+		EnableQUICPool: false, Congestion: pep.CongestionErasure,
+		Logger: logger,
+	})
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	result, err := client.Probe(ctx)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("provider connection test timed out after %s", timeout)
+		}
+		return "", fmt.Errorf("provider connection test failed: %w", err)
+	}
+	latencyMillis := result.Latency.Milliseconds()
+	if latencyMillis < 1 {
+		latencyMillis = 1
+	}
+	return encodeJSON(struct {
+		Version   int    `json:"version"`
+		Transport string `json:"transport"`
+		LatencyMS int64  `json:"latency_ms"`
+	}{Version: 1, Transport: string(result.Transport), LatencyMS: latencyMillis})
+}
+
+func profileProbeTimeout(milliseconds int64) (time.Duration, error) {
+	if milliseconds == 0 {
+		return defaultProfileProbeTimeout, nil
+	}
+	if milliseconds < minimumProfileProbeTimeout.Milliseconds() ||
+		milliseconds > maximumProfileProbeTimeout.Milliseconds() {
+		return 0, fmt.Errorf("profile probe timeout must be between %s and %s", minimumProfileProbeTimeout, maximumProfileProbeTimeout)
+	}
+	return time.Duration(milliseconds) * time.Millisecond, nil
+}
+
 // ProfileNeedsRenewal returns 1 when renewal is due and 0 otherwise. An integer
 // avoids Objective-C's collision between a Go boolean result and the BOOL used
 // by gomobile to report NSError success.

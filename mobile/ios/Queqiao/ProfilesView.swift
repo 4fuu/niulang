@@ -15,12 +15,28 @@ struct ProfilesView: View {
                         )
                     )
                 } else {
-                    List(model.profiles) { profile in
-                        NavigationLink(value: profile.id) {
-                            ProfileRow(
-                                profile: profile,
-                                isSelected: profile.id == model.selectedProfileID
-                            )
+                    List {
+                        Section {
+                            Button {
+                                Task { await model.testAllProfiles() }
+                            } label: {
+                                Label("Test all connections", systemImage: "gauge.with.dots.needle.67percent")
+                            }
+                            .disabled(!model.canTestProfiles)
+                        } footer: {
+                            Text("Tests provider reachability and device authorization without opening a destination.")
+                        }
+
+                        Section("Connections") {
+                            ForEach(model.profiles) { profile in
+                                NavigationLink(value: profile.id) {
+                                    ProfileRow(
+                                        profile: profile,
+                                        isSelected: profile.id == model.selectedProfileID,
+                                        probeState: model.profileProbeStates[profile.id]
+                                    )
+                                }
+                            }
                         }
                     }
                     .listStyle(.insetGrouped)
@@ -56,6 +72,7 @@ struct ProfilesView: View {
 private struct ProfileRow: View {
     let profile: StoredProfile
     let isSelected: Bool
+    let probeState: ProfileProbeState?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -68,7 +85,7 @@ private struct ProfileRow: View {
                     Text(profile.displayName)
                         .font(.headline)
                     if isSelected {
-                        Text("ACTIVE")
+                        Text("SELECTED")
                             .font(.caption2.bold())
                             .foregroundStyle(.teal)
                     }
@@ -80,9 +97,22 @@ private struct ProfileRow: View {
                 Text("Device: \(profile.summary.deviceName)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let probeState {
+                    Label(probeState.summary, systemImage: probeState.symbol)
+                        .font(.caption.bold())
+                        .foregroundStyle(probeColor(probeState))
+                }
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func probeColor(_ state: ProfileProbeState) -> Color {
+        switch state {
+        case .testing: return .secondary
+        case .available: return .green
+        case .unavailable: return .red
+        }
     }
 }
 
@@ -99,6 +129,7 @@ private struct ProfileDetailView: View {
             if let profile = model.profile(id: profileID) {
                 Form {
                     summarySection(profile)
+                    connectionTestSection(profile)
                     trafficPolicySection(profile)
                     actionsSection(profile)
                     identitySection(profile)
@@ -141,11 +172,39 @@ private struct ProfileDetailView: View {
         }
     }
 
+    private func connectionTestSection(_ profile: StoredProfile) -> some View {
+        let probeState = model.profileProbeStates[profile.id]
+        return Section {
+            if let probeState {
+                LabeledContent("Result", value: probeState.summary)
+            }
+            Button {
+                Task { await model.testProfile(id: profile.id) }
+            } label: {
+                Label(
+                    probeState == .testing ? "Testing connection…" : "Test connection",
+                    systemImage: "gauge.with.dots.needle.67percent"
+                )
+            }
+            .disabled(!model.canTestProfiles)
+            if let detail = probeState?.detail {
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+        } header: {
+            Text("Connection test")
+        } footer: {
+            Text("Measures an authenticated provider control round trip. No destination is contacted.")
+        }
+    }
+
     private func summarySection(_ profile: StoredProfile) -> some View {
         Section {
             LabeledContent(
                 "Status",
-                value: profile.id == model.selectedProfileID ? "Active profile" : "Available"
+                value: profile.id == model.selectedProfileID ? "Selected profile" : "Available"
             )
             LabeledContent("Provider", value: profile.summary.name)
             LabeledContent("Endpoint", value: profile.summary.endpoint)

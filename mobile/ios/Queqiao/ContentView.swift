@@ -114,7 +114,7 @@ private struct ConnectionView: View {
     private func profileCard(_ profile: StoredProfile) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Current connection")
+                Text(model.isTunnelActive ? "Current connection" : "Selected profile")
                     .font(.headline)
                 Spacer()
                 Button("Profiles") { selectedTab = .profiles }

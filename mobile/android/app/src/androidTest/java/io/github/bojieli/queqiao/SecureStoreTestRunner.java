@@ -5,7 +5,7 @@ import android.app.Instrumentation;
 import android.os.Bundle;
 import android.util.Log;
 
-/** Dependency-free on-device checks for the Android Keystore envelope. */
+/** Dependency-free on-device mobile boundary checks. */
 public final class SecureStoreTestRunner extends Instrumentation {
     private static final int STATUS_START = 1;
     private static final int STATUS_OK = 0;
@@ -24,7 +24,8 @@ public final class SecureStoreTestRunner extends Instrumentation {
                 new NamedCheck("emptySecretIsRejected", this::testEmptySecretIsRejected),
                 new NamedCheck("ciphertextCannotMoveBetweenAccounts", this::testCiphertextCannotBeMovedBetweenAccounts),
                 new NamedCheck("profileCatalogRoundTripAndNormalization", this::testProfileCatalogRoundTripAndNormalization),
-                new NamedCheck("localNetworkRoutePolicy", this::testLocalNetworkRoutePolicy)
+                new NamedCheck("localNetworkRoutePolicy", this::testLocalNetworkRoutePolicy),
+                new NamedCheck("connectionProbeWireFormat", this::testConnectionProbeWireFormat)
         };
         for (int index = 0; index < checks.length; index++) {
             NamedCheck check = checks[index];
@@ -43,7 +44,7 @@ public final class SecureStoreTestRunner extends Instrumentation {
             }
         }
         Bundle result = new Bundle();
-        result.putString("stream", "\nOK (5 mobile storage and routing checks)\n");
+        result.putString("stream", "\nOK (6 mobile storage, routing, and protocol-boundary checks)\n");
         finish(Activity.RESULT_OK, result);
     }
 
@@ -134,6 +135,28 @@ public final class SecureStoreTestRunner extends Instrumentation {
         require(!isRouted(routes, "fd00::1"), "unique-local IPv6 address is routed");
         require(!isRouted(routes, "fe80::1"), "link-local IPv6 address is routed");
         require(!isRouted(routes, "::1"), "loopback IPv6 address is routed");
+    }
+
+    private void testConnectionProbeWireFormat() throws Exception {
+        ConnectionProbe result = ConnectionProbe.available(
+                "{\"version\":1,\"transport\":\"quic\",\"latency_ms\":87}");
+        require(result.status == ConnectionProbe.Status.AVAILABLE, "valid probe is unavailable");
+        require("quic".equals(result.transport), "probe transport changed");
+        require(result.latencyMilliseconds == 87, "probe latency changed");
+        require("87 ms · QUIC".equals(result.summary()), "probe summary changed");
+
+        requireInvalidProbe("{\"version\":2,\"transport\":\"quic\",\"latency_ms\":87}");
+        requireInvalidProbe("{\"version\":1,\"transport\":\"unknown\",\"latency_ms\":87}");
+        requireInvalidProbe("{\"version\":1,\"transport\":\"tcp\",\"latency_ms\":0}");
+    }
+
+    private void requireInvalidProbe(String encoded) throws Exception {
+        try {
+            ConnectionProbe.available(encoded);
+            throw new AssertionError("invalid connection-probe result was accepted: " + encoded);
+        } catch (org.json.JSONException expected) {
+            // Expected.
+        }
     }
 
     private boolean isRouted(java.util.List<RoutePolicy.RouteSpec> routes, String address) throws Exception {

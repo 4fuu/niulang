@@ -48,7 +48,8 @@ are authoritative.
 | Bounded sessions and packet queues | Yes | Yes | Yes |
 | Aggregate in-memory metrics | Yes | Yes | Yes |
 | Multiple device-bound provider profiles | N/A (one profile per process) | Yes | Yes |
-| Explicit active-profile selection | N/A (CLI profile argument) | Yes | Yes |
+| Explicit selected-profile choice | N/A (CLI profile argument) | Yes | Yes |
+| Authenticated per-profile reachability and latency test | No | Yes | Yes |
 | Full-tunnel and local-network bypass policies | External TUN policy | Native | Native |
 
 ## Mobile product model
@@ -58,13 +59,19 @@ forms:
 
 - **Home** owns the connection state and the single Connect/Disconnect action.
   It shows the selected provider profile, traffic policy, enrolled device name,
-  and aggregate per-connection transfer and flow counters. "Active device" is
-  status information; it is not an action.
+  and aggregate per-connection transfer and flow counters. “Selected” means the
+  profile that the next Connect action will use; it never means the VPN tunnel
+  is connected. “Active device” is status information; it is not an action.
 - **Profiles** is a multi-profile library. Importing another invitation adds a
   profile instead of overwriting the current one. Users can select, rename,
-  inspect, change the route policy for, and delete profiles. Selection and
-  routing changes require the tunnel to be disconnected so displayed state
-  cannot diverge from the running extension or service.
+  inspect, test, change the route policy for, and delete profiles. “Test all
+  connections” runs at most four iOS probes concurrently and runs Android
+  probes serially on its bounded application worker. Each probe measures DNS,
+  transport setup, mutual TLS, current device authorization, Queqiao protocol
+  negotiation, and one authenticated control round trip. It opens no remote
+  destination. Selection, testing, and routing changes require the tunnel to
+  be disconnected so displayed state cannot diverge from the running
+  extension or service or be measured through another active VPN.
 - **Settings** contains stable privacy, key-storage, version, system VPN, and
   license information rather than connection controls.
 

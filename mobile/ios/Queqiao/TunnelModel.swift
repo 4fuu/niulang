@@ -15,6 +15,7 @@ final class TunnelModel: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var metrics = TunnelMetrics.empty
     @Published private(set) var diagnosticEntries: [DiagnosticEntry] = []
+    @Published var profileProbeStates: [String: ProfileProbeState] = [:]
     @Published var presentedError: PresentedError?
 
     private var manager: NETunnelProviderManager?
@@ -204,6 +205,9 @@ final class TunnelModel: ObservableObject {
             }
             selectedProfileID = values.1
             hasDraft = values.2
+            profileProbeStates = profileProbeStates.filter { entry in
+                values.0.contains(where: { $0.id == entry.key })
+            }
         } catch {
             present(error, title: "Stored profiles are unavailable")
         }
@@ -302,8 +306,8 @@ private extension TunnelModel {
             Task {
                 await recordDiagnostic(
                     level: .info,
-                    message: "VPN status changed from \(Self.name(for: priorStatus)) " +
-                        "to \(Self.name(for: connectionStatus))"
+                    message: "VPN status changed from \(priorStatus.diagnosticName) " +
+                        "to \(connectionStatus.diagnosticName)"
                 )
                 if endedUnexpectedly {
                     await recordDiagnostic(
@@ -337,17 +341,6 @@ private extension TunnelModel {
         @unknown default:
             status = "Unavailable"
             stopMetricsUpdates(reset: true)
-        }
-    }
-    static func name(for status: NEVPNStatus) -> String {
-        switch status {
-        case .invalid: return "invalid"
-        case .disconnected: return "disconnected"
-        case .connecting: return "connecting"
-        case .connected: return "connected"
-        case .reasserting: return "reasserting"
-        case .disconnecting: return "disconnecting"
-        @unknown default: return "unknown"
         }
     }
     func startMetricsUpdates() {

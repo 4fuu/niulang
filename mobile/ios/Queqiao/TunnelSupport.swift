@@ -1,4 +1,19 @@
 import Foundation
+import NetworkExtension
+
+extension NEVPNStatus {
+    var diagnosticName: String {
+        switch self {
+        case .invalid: return "invalid"
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .reasserting: return "reasserting"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "unknown"
+        }
+    }
+}
 
 final class NotificationToken: @unchecked Sendable {
     private let token: NSObjectProtocol
@@ -40,6 +55,7 @@ enum ModelError: LocalizedError {
     case invalidPacketTunnelIdentifier
     case invalidInvitationLink
     case disconnectBeforeEditing
+    case disconnectBeforeTesting
     case emptyMetrics
 
     var errorDescription: String? {
@@ -53,7 +69,9 @@ enum ModelError: LocalizedError {
         case .invalidInvitationLink:
             return "Only queqiao:// enrollment invitations can be imported."
         case .disconnectBeforeEditing:
-            return "Disconnect the VPN before changing its active profile or routing policy."
+            return "Disconnect the VPN before changing its selected profile or routing policy."
+        case .disconnectBeforeTesting:
+            return "Disconnect the VPN before testing provider connections."
         case .emptyMetrics:
             return "The packet-tunnel extension returned no metrics."
         }

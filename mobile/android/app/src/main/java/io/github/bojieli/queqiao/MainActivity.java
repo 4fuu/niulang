@@ -41,7 +41,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.text.DateFormat;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -83,6 +86,8 @@ public final class MainActivity extends Activity {
     private long bytesUp;
     private long bytesDown;
     private long activeFlows;
+    private final Map<String, ConnectionProbe> profileProbes = new HashMap<>();
+    private boolean testingProfiles;
 
     private final BroadcastReceiver stateReceiver = new BroadcastReceiver() {
         @Override
@@ -236,7 +241,9 @@ public final class MainActivity extends Activity {
             content.addView(empty, spacedCard());
         } else {
             LinearLayout current = card();
-            current.addView(sectionTitle("Current connection"), matchWrap());
+            current.addView(
+                    sectionTitle(isTunnelActive() ? "Current connection" : "Selected profile"),
+                    matchWrap());
             addLabelValue(current, "Profile", selected.displayName);
             addLabelValue(current, "Provider", selected.summary.endpoint);
             addLabelValue(current, "Traffic policy", selected.trafficPolicy.title);
@@ -278,6 +285,17 @@ public final class MainActivity extends Activity {
         add.setOnClickListener(view -> showImportDialog(null));
         content.addView(add, spacedCard());
 
+        Button testAll = secondaryButton(testingProfiles ? "Testing connections…" : "Test all connections");
+        testAll.setEnabled(canTestProfiles() && !catalog.profiles.isEmpty());
+        testAll.setOnClickListener(view -> testAllProfiles());
+        content.addView(testAll, spacedCard());
+        TextView testExplanation = text(
+                "Tests provider reachability and device authorization without opening a destination.",
+                12,
+                Typeface.NORMAL);
+        testExplanation.setPadding(dp(8), 0, dp(8), dp(8));
+        content.addView(testExplanation, matchWrap());
+
         if (repository.hasEnrollmentDraft()) {
             LinearLayout pending = card();
             pending.addView(text("Pending enrollment", 17, Typeface.BOLD), matchWrap());
@@ -300,16 +318,19 @@ public final class MainActivity extends Activity {
             for (ProfileRepository.ProfileRecord profile : catalog.profiles) {
                 Button row = new Button(this);
                 boolean selected = profile.id.equals(catalog.selectedProfileId);
-                String marker = selected ? "ACTIVE  ·  " : "";
+                String marker = selected ? "SELECTED  ·  " : "";
+                ConnectionProbe probe = profileProbes.get(profile.id);
+                String probeLine = probe == null ? "" : "\nTest: " + probe.summary();
                 row.setText(marker + profile.displayName + "\n"
-                        + profile.summary.endpoint + "\nDevice: " + profile.summary.deviceName);
+                        + profile.summary.endpoint + "\nDevice: " + profile.summary.deviceName
+                        + probeLine);
                 row.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
                 row.setAllCaps(false);
                 row.setTextSize(15);
                 row.setPadding(dp(16), dp(13), dp(16), dp(13));
                 row.setOnClickListener(view -> showProfileDialog(profile.id));
                 row.setContentDescription(
-                        profile.displayName + (selected ? ", active profile" : ", available profile"));
+                        profile.displayName + (selected ? ", selected profile" : ", available profile"));
                 content.addView(row, spacedCard());
             }
         }
@@ -588,17 +609,32 @@ public final class MainActivity extends Activity {
             refreshCatalog();
             return;
         }
-        boolean active = profile.id.equals(catalog.selectedProfileId);
-        boolean editable = !isTunnelActive() && !busy;
+        boolean selected = profile.id.equals(catalog.selectedProfileId);
+        boolean editable = !isTunnelActive() && !busy && !testingProfiles;
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(20), dp(4), dp(20), 0);
-        addLabelValue(content, "Status", active ? "Active profile" : "Available");
+        addLabelValue(content, "Status", selected ? "Selected profile" : "Available");
         addLabelValue(content, "Provider", profile.summary.name);
         addLabelValue(content, "Endpoint", profile.summary.endpoint);
         addLabelValue(content, "Active device", profile.summary.deviceName);
         addLabelValue(content, "Certificate expires", formatExpiry(profile.summary.certificateExpiry));
+
+        ConnectionProbe probe = profileProbes.get(profile.id);
+        addLabelValue(content, "Connection test", probe == null ? "Not tested" : probe.summary());
+        if (probe != null && probe.detail != null) {
+            TextView detail = text(probe.detail, 12, Typeface.NORMAL);
+            detail.setTextColor(Color.RED);
+            detail.setTextIsSelectable(true);
+            content.addView(detail, matchWrap());
+        }
+        Button testConnection = secondaryButton(
+                probe != null && probe.status == ConnectionProbe.Status.TESTING
+                        ? "Testing connection…"
+                        : "Test connection");
+        testConnection.setEnabled(canTestProfiles());
+        content.addView(testConnection, topSpaced());
 
         TextView policyTitle = sectionTitle("Traffic policy");
         policyTitle.setPadding(0, dp(18), 0, dp(2));
@@ -627,15 +663,19 @@ public final class MainActivity extends Activity {
                 .setView(scroll(content))
                 .setNegativeButton("Close", null)
                 .setNeutralButton("Delete", null)
-                .setPositiveButton(active ? "Rename" : "Use profile", null)
+                .setPositiveButton(selected ? "Rename" : "Use profile", null)
                 .create();
         dialog.setOnShowListener(ignored -> {
+            testConnection.setOnClickListener(view -> {
+                dialog.dismiss();
+                testProfiles(java.util.Collections.singletonList(profile.id));
+            });
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(Color.RED);
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(editable);
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view ->
                     confirmDeleteProfile(profile, dialog));
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
-                if (active) {
+                if (selected) {
                     showRenameDialog(profile, dialog);
                 } else if (editable) {
                     selectProfile(profile.id, dialog);
@@ -732,12 +772,68 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    private void testAllProfiles() {
+        java.util.List<String> profileIds = new ArrayList<>();
+        for (ProfileRepository.ProfileRecord profile : catalog.profiles) {
+            profileIds.add(profile.id);
+        }
+        testProfiles(profileIds);
+    }
+
+    private void testProfiles(java.util.List<String> profileIds) {
+        if (isTunnelActive()) {
+            showFailure(
+                    "Disconnect first",
+                    new IllegalStateException("Disconnect the VPN before testing provider connections"));
+            return;
+        }
+        if (!canTestProfiles() || profileIds.isEmpty()) {
+            return;
+        }
+        testingProfiles = true;
+        for (String profileId : profileIds) {
+            profileProbes.put(profileId, ConnectionProbe.testing());
+        }
+        showPage(currentPage);
+        renderConnectionState();
+        worker.execute(() -> {
+            for (String profileId : profileIds) {
+                ConnectionProbe outcome;
+                try {
+                    ProfileRepository.ActiveProfile active = repository.profile(profileId);
+                    if (active == null) {
+                        throw new GeneralSecurityException("The Queqiao profile no longer exists");
+                    }
+                    outcome = ConnectionProbe.available(
+                            Mobilecore.probeProfileJSON(active.profileJson, 10_000));
+                } catch (Exception exception) {
+                    outcome = ConnectionProbe.unavailable(exception);
+                }
+                ConnectionProbe completed = outcome;
+                runOnUiThread(() -> {
+                    profileProbes.put(profileId, completed);
+                    if (currentPage == Page.PROFILES) {
+                        showPage(Page.PROFILES);
+                    }
+                });
+            }
+            runOnUiThread(() -> {
+                testingProfiles = false;
+                if (currentPage == Page.PROFILES) {
+                    showPage(Page.PROFILES);
+                }
+                renderConnectionState();
+            });
+        });
+    }
+
     private void refreshCatalog() {
         worker.execute(() -> {
             try {
                 ProfileRepository.Catalog refreshed = repository.catalog();
                 runOnUiThread(() -> {
                     catalog = refreshed;
+                    profileProbes.keySet().removeIf(id -> catalog.find(id) == null);
                     showPage(currentPage);
                 });
             } catch (Exception exception) {
@@ -763,7 +859,7 @@ public final class MainActivity extends Activity {
         }
         boolean active = isTunnelActive();
         connectionButton.setText(active ? "Disconnect" : "Connect");
-        boolean connectionEnabled = !busy && (active || selected != null);
+        boolean connectionEnabled = !busy && !testingProfiles && (active || selected != null);
         connectionButton.setEnabled(connectionEnabled);
         connectionButton.setBackgroundTintList(ColorStateList.valueOf(
                 !connectionEnabled
@@ -1003,6 +1099,10 @@ public final class MainActivity extends Activity {
         return Mobilecore.StateRunning.equals(tunnelState)
                 || Mobilecore.StateStarting.equals(tunnelState)
                 || Mobilecore.StateStopping.equals(tunnelState);
+    }
+
+    private boolean canTestProfiles() {
+        return !isTunnelActive() && !busy && !testingProfiles;
     }
 
     private boolean isTransitioning() {

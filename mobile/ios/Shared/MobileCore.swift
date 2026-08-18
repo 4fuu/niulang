@@ -70,6 +70,14 @@ enum MobileCore {
         guard !result.isEmpty else { throw MobileCoreError.emptyResult }
         return result
     }
+
+    static func probeProfile(_ profile: String, timeoutMilliseconds: Int64 = 10_000) throws -> String {
+        var error: NSError?
+        let result = MobilecoreProbeProfileJSON(profile, timeoutMilliseconds, &error)
+        if let error { throw error }
+        guard !result.isEmpty else { throw MobileCoreError.emptyResult }
+        return result
+    }
 }
 
 extension MobilecoreSession {
