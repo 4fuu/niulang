@@ -32,13 +32,14 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
-// expectedHalfCloseError handles the normal race where an HTTP client closes
+// expectedHalfCloseError handles the normal race where an application closes
 // its local socket immediately after consuming the complete response, before
-// the proxy's best-effort CloseWrite reaches the socket. These errors do not
-// imply missing payload or a failed transport; all read/write errors remain
-// fatal.
+// the proxy's read or best-effort CloseWrite observes an orderly EOF. Windows
+// reports a full local close as WSAECONNRESET or WSAECONNABORTED; that is an
+// application cancellation, not evidence that the outer tunnel failed.
 func expectedHalfCloseError(err error) bool {
-	return errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ENOTCONN) || errors.Is(err, syscall.EPIPE)
+	return errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ENOTCONN) || errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED)
 }
 
 // expectedDestinationCloseError covers the peer-side destination reset that

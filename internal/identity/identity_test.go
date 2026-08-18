@@ -287,7 +287,9 @@ func TestProfilesAreSelfContainedStrictAndPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, _ := os.Stat(path)
-	if info.Mode().Perm()&0o077 != 0 {
+	// Windows reports synthetic 0666 permission bits even when the inherited
+	// DACL is private; checkPrivatePermissions covers its meaningful checks.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("profile permissions = %03o", info.Mode().Perm())
 	}
 	loaded, err := LoadClientProfile(path)
