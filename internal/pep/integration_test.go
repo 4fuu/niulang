@@ -1274,9 +1274,12 @@ func holdResponseDestination(listener net.Listener, response []byte) {
 			if err := writeFull(conn, response); err != nil {
 				return
 			}
-			// Keep the destination socket alive until the proxy receives the
-			// application's full-close marker and closes this connection.
-			_, _ = conn.Read(make([]byte, 1))
+			// Drain the request and keep the destination socket alive until the
+			// proxy receives the application's full-close marker and closes this
+			// connection. Reading only one request byte leaves unread receive
+			// data; Windows correctly turns a close in that state into a reset,
+			// which tests destination failure instead of keep-alive teardown.
+			_, _ = io.Copy(io.Discard, conn)
 		}()
 	}
 }
