@@ -69,6 +69,9 @@ exact commit. Production-ready language has additional gates below.
 - [ ] Current physical iPhones pass signing, install, packet-tunnel TCP/UDP,
   IPv4/IPv6, DNS, per-profile probe, permission, revoke, sleep/wake,
   Wi-Fi/cellular transition, and reconnect tests.
+- [ ] iOS app-update, configuration removal, provider failure, and network-loss
+  stops produce a named provider reason plus `fetchLastDisconnectError` output
+  in the sanitized, shareable connection log.
 - [ ] Both platforms pass 24-hour mixed interactive/bulk soak with bounded
   memory, goroutines/threads, descriptors, packet queues, and energy use.
 - [ ] Near-expiry certificate renewal is demonstrated during an active tunnel,

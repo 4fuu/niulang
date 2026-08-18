@@ -73,7 +73,11 @@ forms:
   be disconnected so displayed state cannot diverge from the running
   extension or service or be measured through another active VPN.
 - **Settings** contains stable privacy, key-storage, version, system VPN, and
-  license information rather than connection controls.
+  license information rather than connection controls. Its encrypted
+  connection-log ring records named iOS stop reasons and the system's last
+  disconnect error, and users can share a sanitized text copy from production
+  builds. The app reloads its saved VPN manager after configuration changes;
+  an unloaded manager is shown as loading rather than as a false disconnect.
 
 Both apps accept a `queqiao://` invitation opened from another application.
 iOS also offers an explicit paste action; Android accepts both a link and a

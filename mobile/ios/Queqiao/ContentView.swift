@@ -29,6 +29,7 @@ struct ContentView: View {
             ImportProfileView()
         }
         .onOpenURL { model.receiveInvitation($0) }
+        .task { await model.start() }
         .alert(item: $model.presentedError) { error in
             Alert(
                 title: Text(error.title),
@@ -103,7 +104,10 @@ private struct ConnectionView: View {
             .buttonStyle(.borderedProminent)
             .tint(model.isTunnelActive ? .red : .teal)
             .controlSize(.large)
-            .disabled(model.isBusy || (!model.hasProfiles && !model.isTunnelActive))
+            .disabled(
+                model.isBusy || !model.isManagerLoaded ||
+                    (!model.hasProfiles && !model.isTunnelActive)
+            )
             .accessibilityHint(connectionAccessibilityHint)
         }
         .padding(22)
@@ -186,7 +190,7 @@ private struct ConnectionView: View {
 
     private var statusColor: Color {
         if model.status == "Connected" { return .green }
-        if model.isTunnelActive || model.isBusy { return .orange }
+        if model.isTunnelActive || model.isBusy || !model.isManagerLoaded { return .orange }
         return .teal
     }
 

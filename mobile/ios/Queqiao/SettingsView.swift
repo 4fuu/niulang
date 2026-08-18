@@ -104,6 +104,13 @@ private struct ConnectionLogsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if !model.diagnosticEntries.isEmpty {
+                ShareLink(
+                    item: DiagnosticExporter.render(model.diagnosticEntries),
+                    subject: Text("Queqiao connection logs"),
+                    message: Text("Sanitized Queqiao VPN lifecycle diagnostics")
+                ) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
                 Button("Clear", role: .destructive) {
                     isClearConfirmationPresented = true
                 }

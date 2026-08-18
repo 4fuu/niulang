@@ -1,14 +1,19 @@
 import Foundation
 
-#if DEBUG
 enum DiagnosticExporter {
     static let filename = "queqiao-connection-diagnostics.txt"
 
-    static func export(_ entries: [DiagnosticEntry]) {
-        let body = entries.map { entry in
+    static func render(_ entries: [DiagnosticEntry]) -> String {
+        entries.map { entry in
             "\(entry.timestamp.ISO8601Format()) " +
-                "\(entry.level.rawValue) \(entry.component): \(entry.message)"
+                "\(entry.level.rawValue) \(DiagnosticStore.sanitize(entry.component)): " +
+                DiagnosticStore.sanitize(entry.message)
         }.joined(separator: "\n")
+    }
+
+#if DEBUG
+    static func exportForDebug(_ entries: [DiagnosticEntry]) {
+        let body = render(entries)
         guard let caches = FileManager.default.urls(
             for: .cachesDirectory,
             in: .userDomainMask
@@ -19,5 +24,5 @@ enum DiagnosticExporter {
             print("QUEQIAO_DIAGNOSTIC \(line)")
         }
     }
-}
 #endif
+}

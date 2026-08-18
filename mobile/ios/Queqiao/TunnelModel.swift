@@ -8,38 +8,40 @@ final class TunnelModel: ObservableObject {
     @Published var invitation = ""
     @Published var deviceName = ""
     @Published var isImporterPresented = false
-    @Published private(set) var status = "Disconnected"
+    @Published private(set) var status = "Loading VPN configuration…"
     @Published private(set) var profiles: [StoredProfile] = []
     @Published private(set) var selectedProfileID: String?
     @Published private(set) var hasDraft = false
     @Published private(set) var isBusy = false
+    @Published private(set) var isManagerLoaded = false
     @Published private(set) var metrics = TunnelMetrics.empty
     @Published private(set) var diagnosticEntries: [DiagnosticEntry] = []
     @Published var profileProbeStates: [String: ProfileProbeState] = [:]
     @Published var presentedError: PresentedError?
 
-    private var manager: NETunnelProviderManager?
+    var manager: NETunnelProviderManager?
     private var statusObserver: NotificationToken?
-    private var metricsTimer: TimerToken?
-    private var previousConnectionStatus: NEVPNStatus = .invalid
-    private var disconnectRequested = false
+    private var configurationObserver: NotificationToken?
+    private var hasStarted = false
+    var metricsTimer: TimerToken?
+    var statusTracker = VPNStatusTracker()
+    let disconnectRecoveryMarker = VPNDisconnectRecoveryMarker()
+    var disconnectRequested = false
+    var managerReloadInProgress = false
+    var managerReloadPending = false
+    var invalidStatusReloadAttempted = false
 
-    var selectedProfile: StoredProfile? {
-        profiles.first(where: { $0.id == selectedProfileID })
+    func publishStatus(_ value: String) {
+        status = value
     }
 
-    var hasProfiles: Bool { !profiles.isEmpty }
-
-    var isTunnelActive: Bool {
-        switch manager?.connection.status {
-        case .connected, .connecting, .disconnecting, .reasserting:
-            return true
-        default:
-            return false
-        }
+    func publishManagerLoaded(_ value: Bool) {
+        isManagerLoaded = value
     }
 
-    var canChangeProfile: Bool { !isBusy && !isTunnelActive }
+    func publishMetrics(_ value: TunnelMetrics) {
+        metrics = value
+    }
 
     init() {
         deviceName = UIDevice.current.name
@@ -51,11 +53,25 @@ final class TunnelModel: ObservableObject {
             Task { @MainActor in self?.updateStatus() }
         }
         statusObserver = NotificationToken(token)
-        Task {
-            await loadManager()
-            await refreshProfiles()
-            await refreshDiagnostics()
+        let configurationToken = NotificationCenter.default.addObserver(
+            forName: .NEVPNConfigurationChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.loadManager(reason: "iOS reported a VPN configuration change")
+            }
         }
+        configurationObserver = NotificationToken(configurationToken)
+    }
+
+    func start() async {
+        guard !hasStarted else { return }
+        hasStarted = true
+        await loadManager()
+        await refreshProfiles()
+        await refreshDiagnostics()
     }
 
     func receiveInvitation(_ url: URL) {
@@ -102,7 +118,11 @@ final class TunnelModel: ObservableObject {
             present(error, title: "Profile import failed")
         }
         isBusy = false
-        updateStatus()
+        if managerReloadPending {
+            await loadManager(reason: "queued VPN configuration change")
+        } else {
+            updateStatus()
+        }
     }
 
     func discardEnrollmentDraft() async {
@@ -117,6 +137,10 @@ final class TunnelModel: ObservableObject {
 
     func connect() async {
         guard !isBusy else { return }
+        if !isManagerLoaded {
+            await loadManager(reason: "connect requested while the VPN manager was unavailable")
+            guard isManagerLoaded else { return }
+        }
         guard selectedProfile != nil else {
             isImporterPresented = true
             return
@@ -137,7 +161,11 @@ final class TunnelModel: ObservableObject {
             present(error, title: "Cannot connect")
         }
         isBusy = false
-        updateStatus()
+        if managerReloadPending {
+            await loadManager(reason: "app VPN configuration saved")
+        } else {
+            updateStatus()
+        }
     }
 
     func disconnect() {
@@ -224,7 +252,7 @@ final class TunnelModel: ObservableObject {
             }.value
             diagnosticEntries = entries
 #if DEBUG
-            DiagnosticExporter.export(entries)
+            DiagnosticExporter.exportForDebug(entries)
 #endif
         } catch {
             present(error, title: "Connection logs are unavailable")
@@ -238,155 +266,5 @@ final class TunnelModel: ObservableObject {
         } catch {
             present(error, title: "Could not clear connection logs")
         }
-    }
-}
-
-private extension TunnelModel {
-    private func renewSelectedProfileIfNeeded() async throws -> StoredProfile {
-        try await Task.detached(priority: .userInitiated) {
-            let store = try ProfileStore()
-            guard var (record, profile) = try store.selectedProfile() else {
-                throw ModelError.missingProfile
-            }
-            if try MobileCore.profileNeedsRenewal(profile) {
-                profile = try MobileCore.renewProfile(profile)
-                try store.replaceProfile(profile, id: record.id)
-                guard let refreshed = try store.profile(id: record.id)?.0 else {
-                    throw ModelError.missingProfile
-                }
-                record = refreshed
-            }
-            return record
-        }.value
-    }
-
-    func loadManager() async {
-        do {
-            let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-            manager = managers.first
-            updateStatus()
-        } catch {
-            present(error, title: "VPN configuration is unavailable")
-        }
-    }
-
-    func configuredManager(for record: StoredProfile) async throws -> NETunnelProviderManager {
-        let manager = manager ?? NETunnelProviderManager()
-        let configuration = NETunnelProviderProtocol()
-        guard let providerIdentifier = Bundle.main.object(
-            forInfoDictionaryKey: "QueqiaoPacketTunnelBundleIdentifier"
-        ) as? String,
-              !providerIdentifier.isEmpty,
-              !providerIdentifier.contains("$(") else {
-            throw ModelError.invalidPacketTunnelIdentifier
-        }
-        configuration.providerBundleIdentifier = providerIdentifier
-        configuration.serverAddress = record.summary.endpoint
-        configuration.disconnectOnSleep = false
-        configuration.providerConfiguration = [
-            "profileID": record.id,
-            "trafficPolicy": record.trafficPolicy.rawValue
-        ]
-        manager.protocolConfiguration = configuration
-        manager.localizedDescription = "Queqiao"
-        manager.isEnabled = true
-        manager.isOnDemandEnabled = false
-        try await manager.saveToPreferences()
-        try await manager.loadFromPreferences()
-        return manager
-    }
-
-    func updateStatus() {
-        let connectionStatus = manager?.connection.status ?? .invalid
-        let priorStatus = previousConnectionStatus
-        if connectionStatus != priorStatus {
-            let endedUnexpectedly = connectionStatus == .disconnected && !disconnectRequested && (
-                priorStatus == .connecting || priorStatus == .connected || priorStatus == .reasserting
-            )
-            Task {
-                await recordDiagnostic(
-                    level: .info,
-                    message: "VPN status changed from \(priorStatus.diagnosticName) " +
-                        "to \(connectionStatus.diagnosticName)"
-                )
-                if endedUnexpectedly {
-                    await recordDiagnostic(
-                        level: .error,
-                        message: "iOS ended the VPN without a disconnect request; " +
-                            "see the packet-tunnel entries above for the cause"
-                    )
-                }
-            }
-            if connectionStatus == .disconnected || connectionStatus == .invalid {
-                disconnectRequested = false
-            }
-        }
-        previousConnectionStatus = connectionStatus
-        switch connectionStatus {
-        case .connected:
-            status = "Connected"
-            startMetricsUpdates()
-        case .connecting:
-            status = "Connecting…"
-            stopMetricsUpdates(reset: false)
-        case .disconnecting:
-            status = "Disconnecting…"
-            stopMetricsUpdates(reset: false)
-        case .reasserting:
-            status = "Reconnecting…"
-            stopMetricsUpdates(reset: false)
-        case .disconnected, .invalid:
-            status = "Disconnected"
-            stopMetricsUpdates(reset: true)
-        @unknown default:
-            status = "Unavailable"
-            stopMetricsUpdates(reset: true)
-        }
-    }
-    func startMetricsUpdates() {
-        guard metricsTimer == nil else { return }
-        Task { await refreshMetrics() }
-        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refreshMetrics() }
-        }
-        metricsTimer = TimerToken(timer)
-    }
-    func stopMetricsUpdates(reset: Bool) {
-        metricsTimer?.invalidate()
-        metricsTimer = nil
-        if reset { metrics = .empty }
-    }
-
-    func refreshMetrics() async {
-        guard let session = manager?.connection as? NETunnelProviderSession,
-              session.status == .connected else { return }
-        do {
-            let response: Data = try await withCheckedThrowingContinuation { continuation in
-                do {
-                    try session.sendProviderMessage(Data("metrics".utf8)) { data in
-                        guard let data else {
-                            continuation.resume(throwing: ModelError.emptyMetrics)
-                            return
-                        }
-                        continuation.resume(returning: data)
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-            metrics = try TunnelMetrics.decode(response)
-        } catch {
-            // Metrics are operational decoration; a transient extension IPC failure must not alter tunnel state.
-        }
-    }
-
-    func present(_ error: Error, title: String) {
-        presentedError = PresentedError(title: title, message: error.localizedDescription)
-    }
-
-    func recordDiagnostic(level: DiagnosticLevel, message: String) async {
-        await Task.detached {
-            try? DiagnosticStore().append(level: level, component: "App", message: message)
-        }.value
     }
 }

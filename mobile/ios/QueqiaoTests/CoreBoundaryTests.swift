@@ -1,4 +1,5 @@
 import XCTest
+import NetworkExtension
 import Mobilecore
 @testable import Queqiao
 
@@ -124,6 +125,75 @@ final class CoreBoundaryTests: XCTestCase {
                 "{\"version\":1,\"transport\":\"tcp\",\"latency_ms\":0}"
             )
         )
+    }
+
+    func testInitialVPNStatusDoesNotCreateSyntheticInvalidTransition() {
+        var tracker = VPNStatusTracker()
+
+        let observation = tracker.observe(.disconnected)
+
+        XCTAssertNil(observation.previousStatus)
+        XCTAssertNil(observation.transitionDescription)
+        XCTAssertFalse(observation.endedActiveEpisode)
+    }
+
+    func testVPNStatusTrackerRecognizesDisconnectAfterIntermediateState() {
+        var tracker = VPNStatusTracker()
+        _ = tracker.observe(.connecting)
+        _ = tracker.observe(.connected)
+        let intermediate = tracker.observe(.disconnecting)
+        let terminal = tracker.observe(.disconnected)
+
+        XCTAssertFalse(intermediate.endedActiveEpisode)
+        XCTAssertTrue(terminal.endedActiveEpisode)
+        XCTAssertEqual(
+            terminal.transitionDescription,
+            "VPN status changed from disconnecting to disconnected"
+        )
+    }
+
+    func testVPNStatusTrackerTreatsInvalidConfigurationAsTerminal() {
+        var tracker = VPNStatusTracker()
+        _ = tracker.observe(.connected)
+
+        XCTAssertTrue(tracker.observe(.invalid).endedActiveEpisode)
+    }
+
+    func testDisconnectRecoveryMarkerSurvivesModelRecreation() throws {
+        let suiteName = "io.github.bojieli.queqiao.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        VPNDisconnectRecoveryMarker(defaults: defaults).markConnected()
+        XCTAssertTrue(VPNDisconnectRecoveryMarker(defaults: defaults).needsDisconnectRecovery)
+
+        VPNDisconnectRecoveryMarker(defaults: defaults).resolveDisconnect()
+        XCTAssertFalse(VPNDisconnectRecoveryMarker(defaults: defaults).needsDisconnectRecovery)
+    }
+
+    func testVPNDiagnosticNamesCoverAppUpdateAndPluginFailure() {
+        XCTAssertEqual(VPNDiagnostics.providerStopReasonName(rawValue: 16), "app update")
+        XCTAssertEqual(
+            VPNDiagnostics.disconnectErrorName(domain: NEVPNConnectionErrorDomain, code: 12),
+            "VPN extension failed"
+        )
+        XCTAssertNil(VPNDiagnostics.disconnectErrorName(domain: "example.error", code: 12))
+    }
+
+    func testDiagnosticExporterProducesShareableText() {
+        let entry = Queqiao.DiagnosticEntry(
+            id: UUID(),
+            timestamp: Date(timeIntervalSince1970: 0),
+            level: .warning,
+            component: "Packet tunnel",
+            message: "Tunnel stopped: app update (iOS reason 16) token=private-value"
+        )
+
+        let exported = DiagnosticExporter.render([entry])
+
+        XCTAssertTrue(exported.contains("warning Packet tunnel"))
+        XCTAssertTrue(exported.contains("app update (iOS reason 16)"))
+        XCTAssertFalse(exported.contains("private-value"))
     }
 }
 

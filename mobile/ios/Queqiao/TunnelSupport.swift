@@ -1,19 +1,4 @@
 import Foundation
-import NetworkExtension
-
-extension NEVPNStatus {
-    var diagnosticName: String {
-        switch self {
-        case .invalid: return "invalid"
-        case .disconnected: return "disconnected"
-        case .connecting: return "connecting"
-        case .connected: return "connected"
-        case .reasserting: return "reasserting"
-        case .disconnecting: return "disconnecting"
-        @unknown default: return "unknown"
-        }
-    }
-}
 
 final class NotificationToken: @unchecked Sendable {
     private let token: NSObjectProtocol

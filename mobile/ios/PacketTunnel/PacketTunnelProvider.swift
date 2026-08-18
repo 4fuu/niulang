@@ -58,7 +58,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         let completion = OneShotVoidCompletion(completionHandler)
         let resources = lifecycle.beginStop()
         resources.startCompletion?.call(TunnelError.startCancelled)
-        recordDiagnostic(level: .info, "Tunnel stopped (iOS reason \(reason.rawValue))")
+        recordDiagnostic(
+            level: .info,
+            "Tunnel stopped: \(reason.diagnosticName) (iOS reason \(reason.rawValue))"
+        )
         engineQueue.async { [self] in
             resources.bridge?.close()
             do {
@@ -68,6 +71,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
             }
             completion.call()
         }
+    }
+
+    override func sleep(completionHandler: @escaping () -> Void) {
+        recordDiagnostic(level: .info, "Device sleeping; tunnel remains configured")
+        completionHandler()
+    }
+
+    override func wake() {
+        recordDiagnostic(level: .info, "Device woke; tunnel provider resumed")
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {

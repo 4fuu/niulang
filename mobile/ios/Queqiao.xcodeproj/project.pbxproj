@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		023D7297DD3F3AFABD7CE460 /* Mobilecore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; };
+		03A75D5DEFBADD6966EA698C /* VPNDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D1A32A7D2EA758E64DF5615 /* VPNDiagnostics.swift */; };
+		06191DEC5E7AE0B89897BB64 /* VPNDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D1A32A7D2EA758E64DF5615 /* VPNDiagnostics.swift */; };
 		07F155EAF1B380CBE528972D /* MobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23BCEED68000E8B4E9606949 /* MobileCore.swift */; };
 		171DA48D7D57A037D5DE6A5C /* TunnelModel+Probing.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACE67DE2C949D4B7DC369AA5 /* TunnelModel+Probing.swift */; };
 		213AB07A0761E96E13B136F5 /* MobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23BCEED68000E8B4E9606949 /* MobileCore.swift */; };
@@ -38,6 +40,7 @@
 		A743BC52689F79CFA0B2F330 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */; };
 		A90475B33DB098B5DC21F192 /* CoreBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F638CF570C7A5852DE2269B7 /* CoreBoundaryTests.swift */; };
 		AE0C9D533965F2EBEE29BBF2 /* DiagnosticExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1188477F059F8F42E5A2B2E1 /* DiagnosticExporter.swift */; };
+		B25FEDFD51756D3F16858CF1 /* VPNDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D1A32A7D2EA758E64DF5615 /* VPNDiagnostics.swift */; };
 		B5E6AFBE8082FE6958A4F4C0 /* Mobilecore.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		B61D6221C49C32C886381815 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */; };
 		C62CC189B8350A3DE082BF48 /* ProviderEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */; };
@@ -48,6 +51,7 @@
 		EFAAE976107F9765D9616D73 /* ProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06E70DE072DD84C6BF2E8288 /* ProfilesView.swift */; };
 		F32A620B9067799E2F23A320 /* TunnelSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4802E6E5533792D16DDFA25B /* TunnelSupport.swift */; };
 		F5EEBA8451B659266152FB2B /* ProviderEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */; };
+		F8514BB5053E0BFE434E1EFA /* TunnelModel+VPN.swift in Sources */ = {isa = PBXBuildFile; fileRef = 996ABCB2304649D0527D7BA4 /* TunnelModel+VPN.swift */; };
 		FD333468E8B953F05D6E981E /* QueqiaoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85EB3D7717BB422AD61D738D /* QueqiaoApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -106,6 +110,7 @@
 
 /* Begin PBXFileReference section */
 		06E70DE072DD84C6BF2E8288 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
+		0D1A32A7D2EA758E64DF5615 /* VPNDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNDiagnostics.swift; sourceTree = "<group>"; };
 		1188477F059F8F42E5A2B2E1 /* DiagnosticExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticExporter.swift; sourceTree = "<group>"; };
 		127965658AAA8DBADE524652 /* TunnelModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelModel.swift; sourceTree = "<group>"; };
 		16E68341436832BEA5B936E4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -123,6 +128,7 @@
 		85EB3D7717BB422AD61D738D /* QueqiaoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueqiaoApp.swift; sourceTree = "<group>"; };
 		8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticStore.swift; sourceTree = "<group>"; };
 		93EEE451E856BB5D399404F3 /* PacketTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		996ABCB2304649D0527D7BA4 /* TunnelModel+VPN.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TunnelModel+VPN.swift"; sourceTree = "<group>"; };
 		A22BC502BF533F3ED9712923 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		ACE67DE2C949D4B7DC369AA5 /* TunnelModel+Probing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TunnelModel+Probing.swift"; sourceTree = "<group>"; };
 		B177679FBC7D995ACD2B8D5E /* ProfileProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileProbe.swift; sourceTree = "<group>"; };
@@ -184,6 +190,7 @@
 				D2BFAFFC99FD54DA31825F59 /* TunnelMetrics.swift */,
 				127965658AAA8DBADE524652 /* TunnelModel.swift */,
 				ACE67DE2C949D4B7DC369AA5 /* TunnelModel+Probing.swift */,
+				996ABCB2304649D0527D7BA4 /* TunnelModel+VPN.swift */,
 				4802E6E5533792D16DDFA25B /* TunnelSupport.swift */,
 			);
 			path = Queqiao;
@@ -256,6 +263,7 @@
 				6977BB55BDEB946A63AC7481 /* OneShotErrorCompletion.swift */,
 				ED8D203B061F8250C3A766D1 /* ProfileStore.swift */,
 				E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */,
+				0D1A32A7D2EA758E64DF5615 /* VPNDiagnostics.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -407,8 +415,10 @@
 				4216F96A859623582815FACD /* SettingsView.swift in Sources */,
 				9BBA0ED88485C8759A3A0E22 /* TunnelMetrics.swift in Sources */,
 				171DA48D7D57A037D5DE6A5C /* TunnelModel+Probing.swift in Sources */,
+				F8514BB5053E0BFE434E1EFA /* TunnelModel+VPN.swift in Sources */,
 				8DBBCFCF8A142E6312DB5D8D /* TunnelModel.swift in Sources */,
 				F32A620B9067799E2F23A320 /* TunnelSupport.swift in Sources */,
+				B25FEDFD51756D3F16858CF1 /* VPNDiagnostics.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -423,6 +433,7 @@
 				90AFDF85395F094D08853A21 /* OneShotErrorCompletion.swift in Sources */,
 				561A1D630D5475AB89BF6AD7 /* ProfileStore.swift in Sources */,
 				C62CC189B8350A3DE082BF48 /* ProviderEndpoint.swift in Sources */,
+				03A75D5DEFBADD6966EA698C /* VPNDiagnostics.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -439,6 +450,7 @@
 				9BC4679BC45EE81E4AB245CA /* PacketTunnelProvider.swift in Sources */,
 				A0BCA89C5A9D0B359153F78E /* ProfileStore.swift in Sources */,
 				F5EEBA8451B659266152FB2B /* ProviderEndpoint.swift in Sources */,
+				06191DEC5E7AE0B89897BB64 /* VPNDiagnostics.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
