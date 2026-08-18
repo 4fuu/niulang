@@ -33,13 +33,45 @@ jobs:
           test "$scanner_status" -eq 0 || test "$scanner_status" -eq 1
           ./scripts/check_gosec.py gosec.json .
 
+  # Exercise every test, including the long impairment cases, on every native
+  # platform shipped in release archives. This is intentionally separate from
+  # the Linux analysis job above so platform results stay independently visible.
+  native-test:
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: linux, arch: amd64}
+          - {runner: ubuntu-24.04-arm, os: linux, arch: arm64}
+          - {runner: macos-15-intel, os: darwin, arch: amd64}
+          - {runner: macos-15, os: darwin, arch: arm64}
+          - {runner: windows-2025, os: windows, arch: amd64}
+          - {runner: windows-11-arm, os: windows, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 -timeout 50m ./...
+
   # The race detector costs this tree roughly an order of magnitude in the
   # erasure code -- internal/fec alone takes seven minutes on a 32-core
   # machine -- so it gets its own job and a long timeout rather than sharing
-  # one with the suite above.
+  # one with the suite above. Go does not support -race on Windows/arm64.
   race:
-    runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: linux, arch: amd64}
+          - {runner: ubuntu-24.04-arm, os: linux, arch: arm64}
+          - {runner: macos-15-intel, os: darwin, arch: amd64}
+          - {runner: macos-15, os: darwin, arch: arm64}
+          - {runner: windows-2025, os: windows, arch: amd64}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7

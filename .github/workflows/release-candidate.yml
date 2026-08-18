@@ -43,10 +43,38 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - name: Python helper tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
+  native-test:
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: linux, arch: amd64}
+          - {runner: ubuntu-24.04-arm, os: linux, arch: arm64}
+          - {runner: macos-15-intel, os: darwin, arch: amd64}
+          - {runner: macos-15, os: darwin, arch: arm64}
+          - {runner: windows-2025, os: windows, arch: amd64}
+          - {runner: windows-11-arm, os: windows, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 -timeout 50m ./...
 
   race:
-    runs-on: ubuntu-24.04
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: linux, arch: amd64}
+          - {runner: ubuntu-24.04-arm, os: linux, arch: arm64}
+          - {runner: macos-15-intel, os: darwin, arch: amd64}
+          - {runner: macos-15, os: darwin, arch: arm64}
+          - {runner: windows-2025, os: windows, arch: amd64}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -210,7 +238,7 @@ jobs:
 
   provenance:
     if: github.event.repository.visibility == 'public'
-    needs: [full, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke]
+    needs: [full, native-test, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -228,12 +256,13 @@ jobs:
 
   candidate-summary:
     if: always()
-    needs: [full, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke, provenance]
+    needs: [full, native-test, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke, provenance]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every available gate
         env:
           FULL: ${{ needs.full.result }}
+          NATIVE_TEST: ${{ needs.native-test.result }}
           RACE: ${{ needs.race.result }}
           VULN: ${{ needs.vulnerability.result }}
           FUZZ: ${{ needs.fuzz.result }}
@@ -246,7 +275,7 @@ jobs:
           CANDIDATE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          for result in "$FULL" "$RACE" "$VULN" "$FUZZ" "$SOAK" "$HISTORY" "$PACKAGE" "$NATIVE"; do
+          for result in "$FULL" "$NATIVE_TEST" "$RACE" "$VULN" "$FUZZ" "$SOAK" "$HISTORY" "$PACKAGE" "$NATIVE"; do
             test "$result" = success
           done
           if test "$VISIBILITY" = public; then
