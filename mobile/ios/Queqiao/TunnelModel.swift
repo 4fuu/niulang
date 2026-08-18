@@ -21,6 +21,7 @@ final class TunnelModel: ObservableObject {
     private var statusObserver: NotificationToken?
     private var metricsTimer: TimerToken?
     private var previousConnectionStatus: NEVPNStatus = .invalid
+    private var disconnectRequested = false
 
     var selectedProfile: StoredProfile? {
         profiles.first(where: { $0.id == selectedProfileID })
@@ -120,6 +121,7 @@ final class TunnelModel: ObservableObject {
             return
         }
         isBusy = true
+        disconnectRequested = false
         status = "Validating profile…"
         do {
             let profileName = selectedProfile?.displayName ?? "selected profile"
@@ -138,6 +140,7 @@ final class TunnelModel: ObservableObject {
     }
 
     func disconnect() {
+        disconnectRequested = true
         manager?.connection.stopVPNTunnel()
         updateStatus()
     }
@@ -275,6 +278,7 @@ private extension TunnelModel {
         }
         configuration.providerBundleIdentifier = providerIdentifier
         configuration.serverAddress = record.summary.endpoint
+        configuration.disconnectOnSleep = false
         configuration.providerConfiguration = [
             "profileID": record.id,
             "trafficPolicy": record.trafficPolicy.rawValue
@@ -282,6 +286,7 @@ private extension TunnelModel {
         manager.protocolConfiguration = configuration
         manager.localizedDescription = "Queqiao"
         manager.isEnabled = true
+        manager.isOnDemandEnabled = false
         try await manager.saveToPreferences()
         try await manager.loadFromPreferences()
         return manager
@@ -289,14 +294,27 @@ private extension TunnelModel {
 
     func updateStatus() {
         let connectionStatus = manager?.connection.status ?? .invalid
-        if connectionStatus == .disconnected,
-           previousConnectionStatus == .connecting || previousConnectionStatus == .reasserting {
+        let priorStatus = previousConnectionStatus
+        if connectionStatus != priorStatus {
+            let endedUnexpectedly = connectionStatus == .disconnected && !disconnectRequested && (
+                priorStatus == .connecting || priorStatus == .connected || priorStatus == .reasserting
+            )
             Task {
                 await recordDiagnostic(
-                    level: .error,
-                    message: "iOS ended the VPN before startup completed; " +
-                        "see the packet-tunnel entries above for the cause"
+                    level: .info,
+                    message: "VPN status changed from \(Self.name(for: priorStatus)) " +
+                        "to \(Self.name(for: connectionStatus))"
                 )
+                if endedUnexpectedly {
+                    await recordDiagnostic(
+                        level: .error,
+                        message: "iOS ended the VPN without a disconnect request; " +
+                            "see the packet-tunnel entries above for the cause"
+                    )
+                }
+            }
+            if connectionStatus == .disconnected || connectionStatus == .invalid {
+                disconnectRequested = false
             }
         }
         previousConnectionStatus = connectionStatus
@@ -321,7 +339,17 @@ private extension TunnelModel {
             stopMetricsUpdates(reset: true)
         }
     }
-
+    static func name(for status: NEVPNStatus) -> String {
+        switch status {
+        case .invalid: return "invalid"
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .reasserting: return "reasserting"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "unknown"
+        }
+    }
     func startMetricsUpdates() {
         guard metricsTimer == nil else { return }
         Task { await refreshMetrics() }
@@ -330,7 +358,6 @@ private extension TunnelModel {
         }
         metricsTimer = TimerToken(timer)
     }
-
     func stopMetricsUpdates(reset: Bool) {
         metricsTimer?.invalidate()
         metricsTimer = nil

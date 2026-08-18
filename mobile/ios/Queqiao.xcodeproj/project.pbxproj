@@ -10,11 +10,14 @@
 		023D7297DD3F3AFABD7CE460 /* Mobilecore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; };
 		07F155EAF1B380CBE528972D /* MobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23BCEED68000E8B4E9606949 /* MobileCore.swift */; };
 		213AB07A0761E96E13B136F5 /* MobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23BCEED68000E8B4E9606949 /* MobileCore.swift */; };
+		245F5C0D5897F75A03B740CF /* OneShotErrorCompletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6977BB55BDEB946A63AC7481 /* OneShotErrorCompletion.swift */; };
 		27247D17AC0E9890E79CF88A /* Mobilecore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; };
 		375FB5454F776236A3760973 /* DiagnosticStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */; };
 		39B82F8BA95382602E0538A5 /* LicenseNoticeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 430D58D7442C39B4BD9C12FB /* LicenseNoticeView.swift */; };
+		3B4784A56CC451CBDF38DD7B /* PacketTunnelLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42AFB9F720602C013212C4BF /* PacketTunnelLifecycle.swift */; };
 		3C0FE36DB580D47F17DBA03E /* Mobilecore.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		3E1B7B05A3F97BA727C9DB48 /* PacketTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 93EEE451E856BB5D399404F3 /* PacketTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		4007FACE560270557CCC4796 /* OneShotErrorCompletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6977BB55BDEB946A63AC7481 /* OneShotErrorCompletion.swift */; };
 		4216F96A859623582815FACD /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3358D1947A2D5AFE5A1F91 /* SettingsView.swift */; };
 		4630D0D2241B638803DE2E3B /* DiagnosticStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */; };
 		51125FF28D198FBB7F511E8F /* DiagnosticStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */; };
@@ -25,6 +28,7 @@
 		69FFFBD3ED98658422EF2DBD /* MobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23BCEED68000E8B4E9606949 /* MobileCore.swift */; };
 		720FF27CD51D92E9E7E88FE2 /* Mobilecore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; };
 		8DBBCFCF8A142E6312DB5D8D /* TunnelModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 127965658AAA8DBADE524652 /* TunnelModel.swift */; };
+		90AFDF85395F094D08853A21 /* OneShotErrorCompletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6977BB55BDEB946A63AC7481 /* OneShotErrorCompletion.swift */; };
 		9BBA0ED88485C8759A3A0E22 /* TunnelMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2BFAFFC99FD54DA31825F59 /* TunnelMetrics.swift */; };
 		9BC4679BC45EE81E4AB245CA /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A22BC502BF533F3ED9712923 /* PacketTunnelProvider.swift */; };
 		A0BCA89C5A9D0B359153F78E /* ProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED8D203B061F8250C3A766D1 /* ProfileStore.swift */; };
@@ -106,10 +110,12 @@
 		219A9C59F3F189F39004E980 /* Mobilecore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Mobilecore.xcframework; path = Frameworks/Mobilecore.xcframework; sourceTree = "<group>"; };
 		23BCEED68000E8B4E9606949 /* MobileCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileCore.swift; sourceTree = "<group>"; };
 		2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		42AFB9F720602C013212C4BF /* PacketTunnelLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelLifecycle.swift; sourceTree = "<group>"; };
 		430D58D7442C39B4BD9C12FB /* LicenseNoticeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicenseNoticeView.swift; sourceTree = "<group>"; };
 		4802E6E5533792D16DDFA25B /* TunnelSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelSupport.swift; sourceTree = "<group>"; };
 		4FD6CEDE24F430E9529E3A3A /* THIRD_PARTY_NOTICES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = THIRD_PARTY_NOTICES.txt; sourceTree = "<group>"; };
 		64EB9E99A5F2F55C5635AE87 /* PacketFlowBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlowBridge.swift; sourceTree = "<group>"; };
+		6977BB55BDEB946A63AC7481 /* OneShotErrorCompletion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneShotErrorCompletion.swift; sourceTree = "<group>"; };
 		6A81458E1BA2925F1D22C8FF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		6B3358D1947A2D5AFE5A1F91 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		85EB3D7717BB422AD61D738D /* QueqiaoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueqiaoApp.swift; sourceTree = "<group>"; };
@@ -208,6 +214,7 @@
 				16E68341436832BEA5B936E4 /* Info.plist */,
 				64EB9E99A5F2F55C5635AE87 /* PacketFlowBridge.swift */,
 				EDBCAF651997059D82D31A20 /* PacketTunnel.entitlements */,
+				42AFB9F720602C013212C4BF /* PacketTunnelLifecycle.swift */,
 				A22BC502BF533F3ED9712923 /* PacketTunnelProvider.swift */,
 			);
 			path = PacketTunnel;
@@ -240,6 +247,7 @@
 				8D7CBC899821EF6BE68E27AA /* DiagnosticStore.swift */,
 				2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */,
 				23BCEED68000E8B4E9606949 /* MobileCore.swift */,
+				6977BB55BDEB946A63AC7481 /* OneShotErrorCompletion.swift */,
 				ED8D203B061F8250C3A766D1 /* ProfileStore.swift */,
 				E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */,
 			);
@@ -384,6 +392,7 @@
 				D1C9767A5DCD82738C6B8657 /* KeychainStore.swift in Sources */,
 				39B82F8BA95382602E0538A5 /* LicenseNoticeView.swift in Sources */,
 				07F155EAF1B380CBE528972D /* MobileCore.swift in Sources */,
+				245F5C0D5897F75A03B740CF /* OneShotErrorCompletion.swift in Sources */,
 				5E0CBFE215332DDE2B40736C /* ProfileStore.swift in Sources */,
 				EFAAE976107F9765D9616D73 /* ProfilesView.swift in Sources */,
 				CEF53BD49453638B9109EE4C /* ProviderEndpoint.swift in Sources */,
@@ -403,6 +412,7 @@
 				375FB5454F776236A3760973 /* DiagnosticStore.swift in Sources */,
 				B61D6221C49C32C886381815 /* KeychainStore.swift in Sources */,
 				213AB07A0761E96E13B136F5 /* MobileCore.swift in Sources */,
+				90AFDF85395F094D08853A21 /* OneShotErrorCompletion.swift in Sources */,
 				561A1D630D5475AB89BF6AD7 /* ProfileStore.swift in Sources */,
 				C62CC189B8350A3DE082BF48 /* ProviderEndpoint.swift in Sources */,
 			);
@@ -415,7 +425,9 @@
 				4630D0D2241B638803DE2E3B /* DiagnosticStore.swift in Sources */,
 				A743BC52689F79CFA0B2F330 /* KeychainStore.swift in Sources */,
 				69FFFBD3ED98658422EF2DBD /* MobileCore.swift in Sources */,
+				4007FACE560270557CCC4796 /* OneShotErrorCompletion.swift in Sources */,
 				DFBB0B47801FA97CBCF246AD /* PacketFlowBridge.swift in Sources */,
+				3B4784A56CC451CBDF38DD7B /* PacketTunnelLifecycle.swift in Sources */,
 				9BC4679BC45EE81E4AB245CA /* PacketTunnelProvider.swift in Sources */,
 				A0BCA89C5A9D0B359153F78E /* ProfileStore.swift in Sources */,
 				F5EEBA8451B659266152FB2B /* ProviderEndpoint.swift in Sources */,

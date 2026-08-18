@@ -5,20 +5,18 @@ import Mobilecore
 
 final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProtocol, @unchecked Sendable {
     private let logger = Logger(subsystem: "io.github.bojieli.queqiao", category: "packet-tunnel")
-    private let stateLock = NSLock()
-    private var session: MobilecoreSession?
-    private var bridge: PacketFlowBridge?
-    private var stopping = false
-    private var activeProfileID: String?
+    private let engineQueue = DispatchQueue(
+        label: "io.github.bojieli.queqiao.packet-engine",
+        qos: .userInitiated
+    )
+    private let lifecycle = PacketTunnelLifecycle()
 
     override func startTunnel(
         options: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
-        stateLock.lock()
-        stopping = false
-        stateLock.unlock()
-        let completion = StartCompletion(completionHandler)
+        let completion = OneShotErrorCompletion(completionHandler)
+        let startup = lifecycle.beginStartup(completion: completion)
         do {
             guard let configuration = protocolConfiguration as? NETunnelProviderProtocol,
                   let profileID = configuration.providerConfiguration?["profileID"] as? String,
@@ -32,7 +30,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
             try MobileCore.validateProfile(profile)
             let requestedPolicy = configuration.providerConfiguration?["trafficPolicy"] as? String
             let policy = TrafficPolicy(rawValue: requestedPolicy ?? "") ?? record.trafficPolicy
-            activeProfileID = profileID
+            guard lifecycle.selectProfile(profileID, for: startup) else {
+                throw TunnelError.startCancelled
+            }
             recordDiagnostic(
                 level: .info,
                 "Starting profile \(record.displayName) with \(policy.title.lowercased())"
@@ -41,11 +41,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
                 endpoint: record.summary.endpoint,
                 profile: profile,
                 policy: policy,
+                startup: startup,
                 completion: completion
             )
         } catch {
             recordDiagnostic(level: .error, "Tunnel startup failed: \(error.localizedDescription)")
             completion.call(error)
+            lifecycle.invalidate(startup)
         }
     }
 
@@ -53,34 +55,31 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void
     ) {
-        stateLock.lock()
-        stopping = true
-        stateLock.unlock()
+        let completion = OneShotVoidCompletion(completionHandler)
+        let resources = lifecycle.beginStop()
+        resources.startCompletion?.call(TunnelError.startCancelled)
         recordDiagnostic(level: .info, "Tunnel stopped (iOS reason \(reason.rawValue))")
-        bridge?.close()
-        do {
-            try session?.stopChecked()
-        } catch {
-            logger.error("Tunnel stop reported an error: \(error.localizedDescription, privacy: .public)")
+        engineQueue.async { [self] in
+            resources.bridge?.close()
+            do {
+                try resources.session?.stopChecked()
+            } catch {
+                logger.error("Tunnel stop reported an error: \(error.localizedDescription, privacy: .public)")
+            }
+            completion.call()
         }
-        session = nil
-        bridge = nil
-        activeProfileID = nil
-        completionHandler()
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
-        let metrics = session?.metricsJSON() ?? "{\"version\":1,\"state\":\"stopped\"}"
+        let metrics = lifecycle.currentSession?.metricsJSON() ?? "{\"version\":1,\"state\":\"stopped\"}"
         completionHandler?(metrics.data(using: .utf8))
     }
 
     func onStateChanged(_ state: String?) {
         guard let state else { return }
         logger.info("Tunnel state: \(state, privacy: .public)")
-        stateLock.lock()
-        let isStopping = stopping
-        stateLock.unlock()
-        if state == MobilecoreStateFailed && !isStopping {
+        recordDiagnostic(level: .info, "Packet engine state: \(state)")
+        if state == MobilecoreStateFailed && !lifecycle.isStopping {
             recordDiagnostic(level: .error, "Packet engine entered the failed state")
             cancelTunnelWithError(TunnelError.coreStopped)
         }
@@ -108,37 +107,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         profile: String,
         policy: TrafficPolicy,
         remoteAddress: String,
-        completion: StartCompletion
+        startup: StartupAttempt,
+        completion: OneShotErrorCompletion
     ) {
         setTunnelNetworkSettings(
             makeNetworkSettings(policy: policy, remoteAddress: remoteAddress)
-        ) { [weak self] error in
-            guard let self else { return }
+        ) { [self] error in
             if let error {
                 recordDiagnostic(
                     level: .error,
                     "Could not configure the iOS tunnel: \(error.localizedDescription)"
                 )
                 completion.call(error)
+                lifecycle.invalidate(startup)
                 return
             }
-            recordDiagnostic(level: .info, "iOS tunnel interface configured")
-            do {
-                let packetBridge = PacketFlowBridge(packetFlow: packetFlow)
-                guard let newSession = MobilecoreNewSession(self, nil) else {
-                    throw TunnelError.coreStopped
-                }
-                bridge = packetBridge
-                session = newSession
-                packetBridge.start()
-                try newSession.startChecked(profile: profile, packetIO: packetBridge, mtu: 1_280)
-                completion.call(nil)
-            } catch {
-                recordDiagnostic(level: .error, "Packet engine startup failed: \(error.localizedDescription)")
-                bridge?.close()
-                bridge = nil
-                session = nil
-                completion.call(error)
+            // Returning from Apple's settings callback promptly is important:
+            // cold initialization of the statically linked Go/gVisor runtime
+            // must not block NetworkExtension's internal callback queue.
+            engineQueue.async { [self] in
+                startPacketEngine(profile: profile, startup: startup, completion: completion)
             }
         }
     }
@@ -147,30 +135,80 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         endpoint: String,
         profile: String,
         policy: TrafficPolicy,
-        completion: StartCompletion
+        startup: StartupAttempt,
+        completion: OneShotErrorCompletion
     ) {
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
+        engineQueue.async { [self] in
             do {
+                guard lifecycle.isActive(startup) else {
+                    completion.call(TunnelError.startCancelled)
+                    return
+                }
                 let remoteAddress = try ProviderEndpoint.resolvedAddress(from: endpoint)
                 recordDiagnostic(level: .info, "Provider endpoint resolved to \(remoteAddress)")
                 configureTunnel(
                     profile: profile,
                     policy: policy,
                     remoteAddress: remoteAddress,
+                    startup: startup,
                     completion: completion
                 )
             } catch {
                 recordDiagnostic(level: .error, "Provider resolution failed: \(error.localizedDescription)")
                 completion.call(error)
+                lifecycle.invalidate(startup)
             }
         }
     }
 
+    private func startPacketEngine(
+        profile: String,
+        startup: StartupAttempt,
+        completion: OneShotErrorCompletion
+    ) {
+        guard lifecycle.isActive(startup) else {
+            completion.call(TunnelError.startCancelled)
+            return
+        }
+        recordDiagnostic(level: .info, "iOS tunnel interface configured; initializing packet engine")
+        let packetBridge = PacketFlowBridge(packetFlow: packetFlow)
+        do {
+            guard let newSession = MobilecoreNewSession(self, nil) else {
+                throw TunnelError.coreStopped
+            }
+            packetBridge.start()
+            try newSession.startChecked(profile: profile, packetIO: packetBridge, mtu: 1_280)
+            guard lifecycle.install(
+                session: newSession,
+                bridge: packetBridge,
+                for: startup
+            ) else {
+                packetBridge.close()
+                try? newSession.stopChecked()
+                completion.call(TunnelError.startCancelled)
+                return
+            }
+            if completion.call(nil) {
+                lifecycle.finish(startup)
+                recordDiagnostic(
+                    level: .info,
+                    "Tunnel ready in \(startup.elapsedMilliseconds) ms"
+                )
+            }
+        } catch {
+            packetBridge.close()
+            recordDiagnostic(level: .error, "Packet engine startup failed: \(error.localizedDescription)")
+            completion.call(error)
+            lifecycle.invalidate(startup)
+        }
+    }
+
     func onProfileUpdated(_ profileJSON: String?) -> Bool {
-        guard let profileJSON, let activeProfileID else { return false }
+        let profileID = lifecycle.activeProfileID
+        guard let profileJSON, let profileID else { return false }
         do {
             try MobileCore.validateProfile(profileJSON)
-            try ProfileStore().replaceProfile(profileJSON, id: activeProfileID)
+            try ProfileStore().replaceProfile(profileJSON, id: profileID)
             return true
         } catch {
             logger.error("Could not persist renewed device identity: \(error.localizedDescription, privacy: .public)")
@@ -217,22 +255,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
     }
 }
 
-private final class StartCompletion: @unchecked Sendable {
-    private let handler: (Error?) -> Void
-
-    init(_ handler: @escaping (Error?) -> Void) {
-        self.handler = handler
-    }
-
-    func call(_ error: Error?) {
-        handler(error)
-    }
-}
-
 private enum TunnelError: LocalizedError {
     case missingProfile
     case missingProfileSelection
     case coreStopped
+    case startCancelled
 
     var errorDescription: String? {
         switch self {
@@ -242,6 +269,8 @@ private enum TunnelError: LocalizedError {
             return "The VPN configuration does not identify a Queqiao profile. Open the app and connect again."
         case .coreStopped:
             return "The Queqiao packet engine stopped unexpectedly."
+        case .startCancelled:
+            return "Tunnel startup was cancelled."
         }
     }
 }

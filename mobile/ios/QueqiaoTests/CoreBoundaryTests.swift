@@ -80,4 +80,27 @@ final class CoreBoundaryTests: XCTestCase {
         XCTAssertThrowsError(try ProviderEndpoint.host(from: "example.com:0"))
         XCTAssertThrowsError(try ProviderEndpoint.host(from: "example.com:70000"))
     }
+
+    func testTunnelStartCompletionIsDeliveredOnlyOnce() {
+        var deliveredErrors: [Error?] = []
+        let completion = OneShotErrorCompletion { deliveredErrors.append($0) }
+
+        XCTAssertTrue(completion.call(nil))
+        XCTAssertFalse(completion.call(TestError.lateFailure))
+        XCTAssertEqual(deliveredErrors.count, 1)
+        XCTAssertNil(deliveredErrors[0])
+    }
+
+    func testTunnelStopCompletionIsDeliveredOnlyOnce() {
+        var deliveryCount = 0
+        let completion = OneShotVoidCompletion { deliveryCount += 1 }
+
+        XCTAssertTrue(completion.call())
+        XCTAssertFalse(completion.call())
+        XCTAssertEqual(deliveryCount, 1)
+    }
+}
+
+private enum TestError: Error {
+    case lateFailure
 }
