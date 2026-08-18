@@ -15,11 +15,12 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 	_, credentials := testCertificate(t)
 	base := ClientConfig{ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", Credentials: credentials}
 	for name, mutate := range map[string]func(*ClientConfig){
-		"too many sessions":     func(c *ClientConfig) { c.MaxSessions = maxConfiguredSessions + 1 },
-		"invalid local address": func(c *ClientConfig) { c.LocalAddress = "not-an-address" },
-		"empty local interface": func(c *ClientConfig) { c.LocalAddress = "if:" },
-		"too many TCP lanes":    func(c *ClientConfig) { c.TCPFallbackLanes = maxTCPFallbackLanes + 1 },
-		"adaptive bounds":       func(c *ClientConfig) { c.AdaptiveMinBytesSec = 2; c.AdaptiveMaxBytesSec = 1 },
+		"too many sessions":      func(c *ClientConfig) { c.MaxSessions = maxConfiguredSessions + 1 },
+		"too many pending opens": func(c *ClientConfig) { c.MaxPendingOpens = maxConfiguredSessions + 1 },
+		"invalid local address":  func(c *ClientConfig) { c.LocalAddress = "not-an-address" },
+		"empty local interface":  func(c *ClientConfig) { c.LocalAddress = "if:" },
+		"too many TCP lanes":     func(c *ClientConfig) { c.TCPFallbackLanes = maxTCPFallbackLanes + 1 },
+		"adaptive bounds":        func(c *ClientConfig) { c.AdaptiveMinBytesSec = 2; c.AdaptiveMaxBytesSec = 1 },
 		"reserve without budget": func(c *ClientConfig) {
 			c.InteractiveReserveBytesPerSec = 1
 		},
@@ -39,6 +40,34 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 				t.Fatal("invalid configuration was accepted")
 			}
 		})
+	}
+}
+
+func TestClientAdmissionDefaultsAndPendingOpenBound(t *testing.T) {
+	_, credentials := testCertificate(t)
+	client, err := NewClient(ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", Credentials: credentials,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.cfg.MaxSessions != defaultClientMaxSessions {
+		t.Fatalf("client default sessions = %d, want %d", client.cfg.MaxSessions, defaultClientMaxSessions)
+	}
+	if client.cfg.MaxPendingOpens != defaultMaxPendingOpens || cap(client.pendingOpens) != defaultMaxPendingOpens {
+		t.Fatalf("client default pending opens = %d/%d, want %d", client.cfg.MaxPendingOpens, cap(client.pendingOpens), defaultMaxPendingOpens)
+	}
+
+	client.pendingOpens = make(chan struct{}, 2)
+	if !client.admitPendingOpen() || !client.admitPendingOpen() {
+		t.Fatal("configured pending-open capacity was not admitted")
+	}
+	if client.admitPendingOpen() {
+		t.Fatal("pending-open capacity was exceeded")
+	}
+	client.releasePendingOpen()
+	if !client.admitPendingOpen() {
+		t.Fatal("released pending-open capacity was not reusable")
 	}
 }
 

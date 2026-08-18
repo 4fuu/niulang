@@ -30,7 +30,7 @@ import (
 const (
 	defaultMTU         = 1280
 	maximumMTU         = 9000
-	defaultMaxSessions = 1024
+	defaultMaxSessions = 2048
 	linkQueueLength    = 1024
 	copyBufferSize     = 32 * 1024
 	udpIdleTimeout     = 2 * time.Minute

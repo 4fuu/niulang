@@ -25,7 +25,7 @@ func parseRuntimeForTest(t *testing.T, client bool, args ...string) runtimeOptio
 
 func TestClientDefaultsNeedOnlyAnImportedProfile(t *testing.T) {
 	opts := parseRuntimeForTest(t, true)
-	if opts.listen != "127.0.0.1:1080" || !opts.quicPool || opts.transport != "auto" {
+	if opts.listen != "127.0.0.1:1080" || !opts.quicPool || opts.transport != "auto" || opts.maxSessions != 2048 || opts.maxPendingOpens != 256 {
 		t.Fatalf("unexpected client defaults: %+v", opts)
 	}
 }
@@ -41,6 +41,8 @@ func TestRuntimeBoundsRejectUnsafeValues(t *testing.T) {
 	for _, args := range [][]string{
 		{"--tcp-fallback-lanes", "17"},
 		{"--max-sessions", "0"},
+		{"--max-pending-opens", "0"},
+		{"--max-pending-opens", "65537"},
 		{"--fallback-grace", "0s"},
 		{"--flow-idle-timeout", "2h", "--flow-max-lifetime", "1h"},
 		{"--local-address", "if:"},
@@ -55,6 +57,13 @@ func TestRuntimeBoundsRejectUnsafeValues(t *testing.T) {
 		if err := validateRuntime(opts, true); err == nil {
 			t.Fatalf("unsafe options accepted: %v", args)
 		}
+	}
+}
+
+func TestPendingOpenLimitIsIndependentOfTotalSessionLimit(t *testing.T) {
+	opts := parseRuntimeForTest(t, true, "--max-sessions", "128", "--max-pending-opens", "256")
+	if opts.maxSessions != 128 || opts.maxPendingOpens != 256 {
+		t.Fatalf("admission limits = %d/%d, want 128/256", opts.maxSessions, opts.maxPendingOpens)
 	}
 }
 

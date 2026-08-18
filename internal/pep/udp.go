@@ -115,7 +115,13 @@ func (c *Client) handleUDPAssociate(ctx context.Context, control net.Conn) {
 
 	assocCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if !c.admitPendingOpen() {
+		_ = socks5.WriteReply(control, socks5.ReplyGeneralFailure, nil)
+		c.cfg.Logger.Warn("local pending-open limit reached")
+		return
+	}
 	association, err := c.openUDPAssociation(assocCtx, nil)
+	c.releasePendingOpen()
 	if err != nil {
 		_ = socks5.WriteReply(control, socks5.ReplyHostUnreachable, nil)
 		c.cfg.Logger.Warn("remote UDP association open failed", "error", err)

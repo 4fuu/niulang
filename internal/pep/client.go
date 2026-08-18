@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -29,7 +30,10 @@ import (
 // FIN. Recovery is deliberately finite; the logical flow then fails closed
 // and the caller can retry.
 const (
-	maxTCPFallbackLanes = 16
+	maxTCPFallbackLanes      = 16
+	defaultClientMaxSessions = 2048
+	defaultMaxPendingOpens   = 256
+	flowOpenRetryBaseDelay   = 500 * time.Millisecond
 
 	maxLaneRecoveryAttempts = 8
 	laneRecoveryResetAfter  = 5 * time.Minute
@@ -73,7 +77,11 @@ type ClientConfig struct {
 	FlowIdleTimeout  time.Duration
 	FlowMaxLifetime  time.Duration
 	MaxSessions      int
-	Transport        TransportKind
+	// MaxPendingOpens bounds flows that are still establishing their remote
+	// transport. Keeping this separate from MaxSessions prevents a failed
+	// endpoint and its retries from occupying every healthy-flow slot.
+	MaxPendingOpens int
+	Transport       TransportKind
 	// TCPFallbackLanes is the number of independent TLS/TCP connections used
 	// for a classified bulk flow. Values above one never affect QUIC.
 	TCPFallbackLanes int
@@ -162,6 +170,9 @@ type Client struct {
 	// openFlowForTest stands in for one flow-open attempt, so the retry policy
 	// can be tested without a network that loses things on demand.
 	openFlowForTest func() (*openedFlow, error)
+	// flowOpenRetryDelayForTest makes retry timing deterministic without
+	// weakening the production jitter shared by concurrent callers.
+	flowOpenRetryDelayForTest func(failedAttempt int) time.Duration
 	// dialPipelinedFlowForTest isolates the cold-flow transport race from the
 	// network in state-machine tests.
 	dialPipelinedFlowForTest func(context.Context, TransportKind, []byte) (*openedFlow, error)
@@ -188,6 +199,11 @@ type Client struct {
 	// handshake.
 	bulkMu    sync.Mutex
 	bulkConns []*bulkConn
+
+	// pendingOpens admits only bounded remote setup work. It is deliberately
+	// non-blocking: callers beyond the bound are rejected promptly, release
+	// their total-session slot, and leave capacity for established flows.
+	pendingOpens chan struct{}
 }
 
 // bulkConn is one pre-authenticated secondary QUIC connection reserved for
@@ -255,10 +271,16 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, errors.New("flow idle timeout cannot exceed maximum lifetime")
 	}
 	if cfg.MaxSessions <= 0 {
-		cfg.MaxSessions = 1024
+		cfg.MaxSessions = defaultClientMaxSessions
 	}
 	if cfg.MaxSessions > maxConfiguredSessions {
 		return nil, fmt.Errorf("maximum sessions must not exceed %d", maxConfiguredSessions)
+	}
+	if cfg.MaxPendingOpens <= 0 {
+		cfg.MaxPendingOpens = defaultMaxPendingOpens
+	}
+	if cfg.MaxPendingOpens > maxConfiguredSessions {
+		return nil, fmt.Errorf("maximum pending opens must not exceed %d", maxConfiguredSessions)
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -314,7 +336,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		budget: limiter.New(limiter.Config{
 			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
 		}),
-		metrics: cfg.Metrics,
+		metrics: cfg.Metrics, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 	}, nil
 }
 
@@ -385,6 +407,24 @@ func (c *Client) Serve(ctx context.Context) error {
 
 // Metrics exposes aggregate counters for an optional operator endpoint.
 func (c *Client) Metrics() *metrics.Registry { return c.metrics }
+
+func (c *Client) admitPendingOpen() bool {
+	if c.pendingOpens == nil {
+		return true
+	}
+	select {
+	case c.pendingOpens <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) releasePendingOpen() {
+	if c.pendingOpens != nil {
+		<-c.pendingOpens
+	}
+}
 
 // ServeListener is primarily useful for tests and service managers which
 // provide an already-bound socket. The listener is closed when the context is
@@ -479,8 +519,14 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		c.handleUDPAssociate(ctx, inner)
 		return
 	}
+	if !c.admitPendingOpen() {
+		_ = socks5.WriteReply(inner, socks5.ReplyGeneralFailure, nil)
+		c.cfg.Logger.Warn("local pending-open limit reached")
+		return
+	}
 	flowOpenStarted := time.Now()
 	flow, err := c.openFlowWithRetries(ctx, req.Destination)
+	c.releasePendingOpen()
 	if err != nil {
 		_ = socks5.WriteReply(inner, socks5.ReplyHostUnreachable, nil)
 		c.cfg.Logger.Warn("remote flow open failed", "error", err)
@@ -846,6 +892,36 @@ var errDestinationUnavailable = errors.New("remote destination unavailable")
 // tried again itself.
 const flowOpenAttempts = 3
 
+// flowOpenRetryDelay uses equal jitter: every retry waits at least half of an
+// exponentially growing window, while concurrent callers spread across the
+// other half instead of forming another synchronized connection wave.
+func flowOpenRetryDelay(failedAttempt int) time.Duration {
+	if failedAttempt < 1 {
+		failedAttempt = 1
+	}
+	window := flowOpenRetryBaseDelay << min(failedAttempt-1, 4)
+	half := window / 2
+	return half + time.Duration(rand.Int64N(int64(half)+1))
+}
+
+func (c *Client) waitBeforeFlowOpenRetry(ctx context.Context, failedAttempt int) error {
+	delay := flowOpenRetryDelay(failedAttempt)
+	if c.flowOpenRetryDelayForTest != nil {
+		delay = c.flowOpenRetryDelayForTest(failedAttempt)
+	}
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // openFlowWithRetries asks again when the path lost the asking.
 //
 // Only a transport failure is retried. A peer that answered -- with a reset,
@@ -866,6 +942,11 @@ func (c *Client) openFlowWithRetries(ctx context.Context, destination string) (*
 			return nil, err
 		}
 		c.cfg.Logger.Debug("flow open attempt failed", "attempt", attempt, "error", err)
+		if attempt < flowOpenAttempts {
+			if waitErr := c.waitBeforeFlowOpenRetry(ctx, attempt); waitErr != nil {
+				return nil, waitErr
+			}
+		}
 	}
 	return nil, err
 }

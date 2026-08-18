@@ -409,7 +409,7 @@ func runEnroll(args []string) error {
 
 type runtimeOptions struct {
 	listen, localAddress, transport, tcpCongestion                  string
-	maxSessions, tcpFallbackLanes                                   int
+	maxSessions, maxPendingOpens, tcpFallbackLanes                  int
 	maxPayload                                                      uint
 	chunkSize                                                       int
 	dialTimeout, handshakeTimeout, flowIdleTimeout, flowMaxLifetime time.Duration
@@ -429,7 +429,7 @@ func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
 	defaultListen := ":443"
 	defaultMaxSessions := 4096
 	if client {
-		defaultListen, defaultMaxSessions = "127.0.0.1:1080", 1024
+		defaultListen, defaultMaxSessions = "127.0.0.1:1080", 2048
 	}
 	fs.StringVar(&opts.listen, "listen", defaultListen, "listen address")
 	fs.IntVar(&opts.maxSessions, "max-sessions", defaultMaxSessions, "global concurrent-session limit")
@@ -453,6 +453,7 @@ func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
 	fs.StringVar(&opts.metricsListen, "metrics-listen", "", "optional metrics listen address")
 	if client {
 		fs.StringVar(&opts.localAddress, "local-address", "auto", "outer source: auto, IP, or if:NAME")
+		fs.IntVar(&opts.maxPendingOpens, "max-pending-opens", 256, "concurrent remote flow opens")
 		fs.BoolVar(&opts.quicPool, "quic-pool", true, "reuse a persistent QUIC connection")
 		fs.BoolVar(&opts.waitForOpenAck, "wait-for-open-ack", false, "wait for destination confirmation before answering SOCKS")
 		fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before preparing TCP fallback")
@@ -489,6 +490,9 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	}
 	if opts.congestion == string(pep.CongestionBrutal) && opts.brutalBytesPerSec == 0 {
 		return errors.New("--brutal-bytes-per-sec is required with brutal congestion")
+	}
+	if client && (opts.maxPendingOpens < 1 || opts.maxPendingOpens > 1<<16) {
+		return errors.New("--max-pending-opens must be between 1 and 65536")
 	}
 	if client && (opts.fallbackDelay < 0 || opts.fallbackGrace <= 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0) {
 		return errors.New("invalid fallback settings")
@@ -555,7 +559,7 @@ func runClient(args []string) error {
 		Credentials: credentials, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
 		DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
 		FlowIdleTimeout: opts.flowIdleTimeout, FlowMaxLifetime: opts.flowMaxLifetime,
-		MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
+		MaxSessions: opts.maxSessions, MaxPendingOpens: opts.maxPendingOpens, Transport: pep.TransportKind(opts.transport),
 		TCPFallbackLanes: opts.tcpFallbackLanes, EnableQUICPool: opts.quicPool,
 		WaitForOpenAcknowledgement: opts.waitForOpenAck, UDPOnStream: opts.udpOnStream,
 		Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,

@@ -186,6 +186,7 @@ func TestSmallExchangesAreRepairedOnceThePathIsKnown(t *testing.T) {
 // tried again itself.
 func TestOnlyALostAttemptIsRetried(t *testing.T) {
 	client := &Client{cfg: ClientConfig{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	client.flowOpenRetryDelayForTest = func(int) time.Duration { return 0 }
 
 	attempts := 0
 	client.openFlowForTest = func() (*openedFlow, error) {
@@ -234,6 +235,48 @@ func TestOnlyALostAttemptIsRetried(t *testing.T) {
 	}
 	if _, err := client.openFlowWithRetries(context.Background(), "example.test:80"); err != nil {
 		t.Fatalf("a path that lost one attempt failed the flow: %v", err)
+	}
+}
+
+func TestFlowOpenRetryUsesJitteredExponentialWindows(t *testing.T) {
+	for attempt, bounds := range map[int][2]time.Duration{
+		1: {250 * time.Millisecond, 500 * time.Millisecond},
+		2: {500 * time.Millisecond, time.Second},
+	} {
+		for range 100 {
+			delay := flowOpenRetryDelay(attempt)
+			if delay < bounds[0] || delay > bounds[1] {
+				t.Fatalf("attempt %d delay = %v, want %v..%v", attempt, delay, bounds[0], bounds[1])
+			}
+		}
+	}
+}
+
+func TestFlowOpenRetryBackoffHonorsCancellation(t *testing.T) {
+	client := &Client{cfg: ClientConfig{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	waiting := make(chan struct{})
+	client.flowOpenRetryDelayForTest = func(int) time.Duration {
+		close(waiting)
+		return time.Hour
+	}
+	attempts := 0
+	client.openFlowForTest = func() (*openedFlow, error) {
+		attempts++
+		return nil, errors.New("transport unavailable")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.openFlowWithRetries(ctx, "example.test:80")
+		result <- err
+	}()
+	<-waiting
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled retry = %v, want context cancellation", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("cancelled flow attempted %d opens, want 1", attempts)
 	}
 }
 
