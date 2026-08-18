@@ -1,10 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/pep"
 	"github.com/bojieli/queqiao/internal/protocol"
 )
@@ -28,46 +27,6 @@ var (
 	buildDate = "unknown"
 )
 
-type options struct {
-	mode                          string
-	listen                        string
-	remote                        string
-	localAddress                  string
-	serverName                    string
-	secretFile                    string
-	certFile                      string
-	keyFile                       string
-	rootCAFile                    string
-	maxSessions                   int
-	maxPayload                    uint
-	chunkSize                     int
-	dialTimeout                   time.Duration
-	handshakeTimeout              time.Duration
-	flowIdleTimeout               time.Duration
-	flowMaxLifetime               time.Duration
-	transport                     string
-	tcpFallbackLanes              int
-	tcpCongestion                 string
-	quicPool                      bool
-	waitForOpenAck                bool
-	udpOnStream                   bool
-	congestion                    string
-	brutalBytesPerSec             uint64
-	adaptiveMinBytesSec           uint64
-	adaptiveMaxBytesSec           uint64
-	aggregateBytesPerSec          uint64
-	interactiveReserveBytesPerSec uint64
-	fallbackDelay                 time.Duration
-	fallbackGrace                 time.Duration
-	udpFailureThreshold           int
-	udpCooldown                   time.Duration
-	allowPrivate                  bool
-	logLevel                      string
-	jsonLogs                      bool
-	metricsListen                 string
-	showVersion                   bool
-}
-
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "queqiaod: %v\n", err)
@@ -76,246 +35,648 @@ func main() {
 }
 
 func run(args []string) error {
-	opts, err := parseOptions(args)
+	if len(args) == 0 {
+		return errors.New("a command is required: provider, enroll, client, server, or version")
+	}
+	switch args[0] {
+	case "version", "--version", "-version":
+		if len(args) != 1 {
+			return errors.New("version takes no arguments")
+		}
+		fmt.Printf("queqiaod %s commit=%s built=%s go=%s wire=%d\n", version, commit, buildDate, goVersion(), protocol.Version)
+		return nil
+	case "provider":
+		return runProvider(args[1:])
+	case "enroll":
+		return runEnroll(args[1:])
+	case "client":
+		return runClient(args[1:])
+	case "server":
+		return runServer(args[1:])
+	default:
+		return fmt.Errorf("unknown command %q; want provider, enroll, client, server, or version", args[0])
+	}
+}
+
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	return fs
+}
+
+func requireNoArguments(fs *flag.FlagSet) error {
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	return nil
+}
+
+func runProvider(args []string) error {
+	if len(args) == 0 {
+		return errors.New("provider command is required: init, add-user, list-users, invite, list-invites, revoke-invite, list-devices, revoke-device, enable-user, or disable-user")
+	}
+	switch args[0] {
+	case "init":
+		fs := newFlagSet("provider init")
+		state := fs.String("state", "", "new provider state directory")
+		name := fs.String("name", "", "provider display name")
+		endpoint := fs.String("endpoint", "", "public gateway host:port")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		if *state == "" || *name == "" || *endpoint == "" {
+			return errors.New("--state, --name, and --endpoint are required")
+		}
+		provider, err := identity.InitProvider(*state, *name, *endpoint, time.Now())
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Provider %q initialized.\nID: %s\nGateway: %s\nState: %s\n", provider.Metadata.Name, provider.Metadata.ProviderID, provider.Metadata.Endpoint, provider.Directory)
+		return nil
+	case "add-user":
+		fs := newFlagSet("provider add-user")
+		state := fs.String("state", "", "provider state directory")
+		name := fs.String("name", "", "unique user name")
+		expiresIn := fs.Duration("expires-in", 0, "optional account lifetime (0 never expires)")
+		maxSessions := fs.Int("max-sessions", 0, "concurrent flows for this user (0 uses provider limit)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		var expires time.Time
+		if *expiresIn < 0 {
+			return errors.New("--expires-in cannot be negative")
+		}
+		if *expiresIn > 0 {
+			expires = time.Now().Add(*expiresIn)
+		}
+		account, err := provider.Store.AddAccount(*name, expires, *maxSessions, time.Now())
+		if err != nil {
+			return err
+		}
+		fmt.Printf("User %q created.\nID: %s\n", account.Name, account.ID)
+		return nil
+	case "list-users":
+		fs := newFlagSet("provider list-users")
+		state := fs.String("state", "", "provider state directory")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		fmt.Println("ID\tNAME\tENABLED\tEXPIRES\tMAX_SESSIONS")
+		for _, account := range provider.Store.Accounts() {
+			expires := account.ExpiresAt
+			if expires == "" {
+				expires = "never"
+			}
+			fmt.Printf("%s\t%s\t%t\t%s\t%d\n", account.ID, account.Name, account.Enabled, expires, account.MaxSessions)
+		}
+		return nil
+	case "invite":
+		fs := newFlagSet("provider invite")
+		state := fs.String("state", "", "provider state directory")
+		user := fs.String("user", "", "user name or ID")
+		expiresIn := fs.Duration("expires-in", 24*time.Hour, "one-time invitation lifetime (maximum 7d)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		uri, _, err := provider.CreateInvitation(*user, *expiresIn, time.Now())
+		if err != nil {
+			return err
+		}
+		// stdout is intentionally only the importable value, making it safe to
+		// pipe into a QR encoder or provider portal.
+		fmt.Println(uri)
+		return nil
+	case "list-invites":
+		fs := newFlagSet("provider list-invites")
+		state := fs.String("state", "", "provider state directory")
+		user := fs.String("user", "", "optional user name or ID")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		accountID := ""
+		if *user != "" {
+			account, ok := provider.Store.FindAccount(*user)
+			if !ok {
+				return errors.New("unknown user")
+			}
+			accountID = account.ID
+		}
+		fmt.Println("ID\tACCOUNT_ID\tCREATED\tEXPIRES")
+		for _, invitation := range provider.Store.Invites(accountID, time.Now()) {
+			fmt.Printf("%s\t%s\t%s\t%s\n", invitation.ID, invitation.AccountID, invitation.CreatedAt, invitation.ExpiresAt)
+		}
+		return nil
+	case "revoke-invite":
+		fs := newFlagSet("provider revoke-invite")
+		state := fs.String("state", "", "provider state directory")
+		invitation := fs.String("invite", "", "outstanding invitation ID")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		if err := provider.Store.RevokeInvite(*invitation); err != nil {
+			return err
+		}
+		fmt.Printf("Invitation %s revoked.\n", *invitation)
+		return nil
+	case "list-devices":
+		fs := newFlagSet("provider list-devices")
+		state := fs.String("state", "", "provider state directory")
+		user := fs.String("user", "", "optional user name or ID")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		accountID := ""
+		if *user != "" {
+			account, ok := provider.Store.FindAccount(*user)
+			if !ok {
+				return errors.New("unknown user")
+			}
+			accountID = account.ID
+		}
+		fmt.Println("ID\tACCOUNT_ID\tNAME\tENABLED\tCREATED\tREVOKED")
+		for _, device := range provider.Store.Devices(accountID) {
+			revoked := device.RevokedAt
+			if revoked == "" {
+				revoked = "-"
+			}
+			fmt.Printf("%s\t%s\t%s\t%t\t%s\t%s\n", device.ID, device.AccountID, device.Name, device.Enabled, device.CreatedAt, revoked)
+		}
+		return nil
+	case "revoke-device":
+		fs := newFlagSet("provider revoke-device")
+		state := fs.String("state", "", "provider state directory")
+		device := fs.String("device", "", "device ID")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		if err := provider.Store.RevokeDevice(*device, time.Now()); err != nil {
+			return err
+		}
+		fmt.Printf("Device %s revoked.\n", *device)
+		return nil
+	case "enable-user", "disable-user":
+		fs := newFlagSet("provider " + args[0])
+		state := fs.String("state", "", "provider state directory")
+		user := fs.String("user", "", "user name or ID")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		account, ok := provider.Store.FindAccount(*user)
+		if !ok {
+			return errors.New("unknown user")
+		}
+		enabled := args[0] == "enable-user"
+		if err := provider.Store.SetAccountEnabled(account.ID, enabled); err != nil {
+			return err
+		}
+		fmt.Printf("User %q enabled=%t.\n", account.Name, enabled)
+		return nil
+	default:
+		return fmt.Errorf("unknown provider command %q", args[0])
+	}
+}
+
+func loadProviderRequired(state string) (*identity.Provider, error) {
+	if strings.TrimSpace(state) == "" {
+		return nil, errors.New("--state is required")
+	}
+	return identity.LoadProvider(state)
+}
+
+func runEnroll(args []string) error {
+	fs := newFlagSet("enroll")
+	inviteFlag := fs.String("invite", "", "one-time queqiao:// invitation URI")
+	profilePath := fs.String("profile", "", "output client profile (default: user config directory)")
+	deviceName := fs.String("device-name", "", "device label shown to the provider")
+	timeout := fs.Duration("timeout", 15*time.Second, "enrollment timeout")
+	// The share URI is the natural first argument users paste. The standard Go
+	// flag parser stops at that positional value, so lift it out first to allow
+	// the equally natural `enroll URI --profile PATH` spelling as well as flags
+	// before the URI and the explicit --invite form.
+	positionalInvitation := ""
+	parseArgs := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		positionalInvitation = args[0]
+		parseArgs = args[1:]
+	}
+	if err := fs.Parse(parseArgs); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("enroll accepts at most one invitation URI")
+	}
+	invitationText := *inviteFlag
+	if positionalInvitation != "" {
+		if invitationText != "" {
+			return errors.New("provide the invitation as either --invite or one argument, not both")
+		}
+		invitationText = positionalInvitation
+	}
+	if fs.NArg() == 1 {
+		if invitationText != "" {
+			return errors.New("provide the invitation as either --invite or one argument, not both")
+		}
+		invitationText = fs.Arg(0)
+	}
+	if invitationText == "" {
+		return errors.New("an invitation URI is required")
+	}
+	invitation, err := identity.ParseInvitation(invitationText, time.Now())
 	if err != nil {
 		return err
 	}
-	if opts.showVersion {
-		fmt.Printf("queqiaod %s commit=%s built=%s go=%s wire=%d\n", version, commit, buildDate, goVersion(), protocol.Version)
-		return nil
+	if *deviceName == "" {
+		*deviceName, _ = os.Hostname()
+		if strings.TrimSpace(*deviceName) == "" {
+			*deviceName = "device"
+		}
+	}
+	if *profilePath == "" {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return fmt.Errorf("locate user configuration directory: %w", err)
+		}
+		*profilePath = filepath.Join(configDir, "queqiao", invitation.ProviderID+".json")
+	}
+	if _, err := os.Stat(*profilePath); err == nil {
+		return fmt.Errorf("profile already exists: %s", *profilePath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect profile path: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(*profilePath), 0o700); err != nil {
+		return fmt.Errorf("create profile directory: %w", err)
+	}
+	pendingPath := *profilePath + ".enrolling"
+	var draft identity.EnrollmentDraft
+	if _, err := os.Stat(pendingPath); err == nil {
+		draft, err = identity.LoadEnrollmentDraft(pendingPath)
+		if err != nil {
+			return fmt.Errorf("load interrupted enrollment %s: %w", pendingPath, err)
+		}
+		if draft.Invitation != invitation || draft.DeviceName != *deviceName {
+			return fmt.Errorf("%s belongs to another invitation or device name; finish or remove it explicitly", pendingPath)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect interrupted enrollment: %w", err)
+	} else {
+		draft, err = identity.NewEnrollmentDraft(invitation, *deviceName)
+		if err != nil {
+			return err
+		}
+		if err := draft.Save(pendingPath); err != nil {
+			return fmt.Errorf("save recoverable enrollment draft: %w", err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	profile, err := draft.Enroll(ctx, *timeout)
+	if err != nil {
+		return err
+	}
+	if err := profile.SaveNew(*profilePath); err != nil {
+		return fmt.Errorf("save enrolled profile: %w", err)
+	}
+	if err := os.Remove(pendingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("profile was saved successfully at %s, but the completed draft %s still contains private credentials and must be removed: %w", *profilePath, pendingPath, err)
+	}
+	fmt.Printf("Enrolled %q as device %q.\nProfile: %s\nSOCKS: queqiaod client --profile %q\n", profile.Name, profile.DeviceName, *profilePath, *profilePath)
+	return nil
+}
+
+type runtimeOptions struct {
+	listen, localAddress, transport, tcpCongestion                  string
+	maxSessions, tcpFallbackLanes                                   int
+	maxPayload                                                      uint
+	chunkSize                                                       int
+	dialTimeout, handshakeTimeout, flowIdleTimeout, flowMaxLifetime time.Duration
+	quicPool, waitForOpenAck, udpOnStream                           bool
+	congestion                                                      string
+	brutalBytesPerSec, adaptiveMinBytesSec, adaptiveMaxBytesSec     uint64
+	aggregateBytesPerSec, interactiveReserveBytesPerSec             uint64
+	fallbackDelay, fallbackGrace, udpCooldown                       time.Duration
+	udpFailureThreshold                                             int
+	allowPrivate                                                    bool
+	logLevel                                                        string
+	jsonLogs                                                        bool
+	metricsListen                                                   string
+}
+
+func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
+	defaultListen := ":443"
+	defaultMaxSessions := 4096
+	if client {
+		defaultListen, defaultMaxSessions = "127.0.0.1:1080", 1024
+	}
+	fs.StringVar(&opts.listen, "listen", defaultListen, "listen address")
+	fs.IntVar(&opts.maxSessions, "max-sessions", defaultMaxSessions, "global concurrent-session limit")
+	fs.UintVar(&opts.maxPayload, "max-payload", 256*1024, "maximum frame payload")
+	fs.IntVar(&opts.chunkSize, "chunk-size", 32*1024, "stream data frame size")
+	fs.DurationVar(&opts.dialTimeout, "dial-timeout", 10*time.Second, "dial timeout")
+	fs.DurationVar(&opts.handshakeTimeout, "handshake-timeout", 10*time.Second, "TLS, protocol, and SOCKS handshake timeout")
+	fs.DurationVar(&opts.flowIdleTimeout, "flow-idle-timeout", 30*time.Minute, "flow idle timeout")
+	fs.DurationVar(&opts.flowMaxLifetime, "flow-max-lifetime", 24*time.Hour, "maximum flow lifetime")
+	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "transport: auto, quic, or tcp")
+	fs.IntVar(&opts.tcpFallbackLanes, "tcp-fallback-lanes", 0, "TCP lanes per bulk flow (0 uses role default)")
+	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry UDP packets on streams instead of QUIC datagrams")
+	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionErasure), "QUIC congestion controller")
+	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "Brutal fixed byte rate")
+	fs.Uint64Var(&opts.adaptiveMinBytesSec, "adaptive-min-bytes-per-sec", 64*1024, "Adaptive minimum byte rate")
+	fs.Uint64Var(&opts.adaptiveMaxBytesSec, "adaptive-max-bytes-per-sec", 200*1024*1024, "Adaptive maximum byte rate")
+	fs.Uint64Var(&opts.aggregateBytesPerSec, "aggregate-bytes-per-sec", 0, "optional aggregate byte budget")
+	fs.Uint64Var(&opts.interactiveReserveBytesPerSec, "interactive-reserve-bytes-per-sec", 0, "interactive portion of aggregate budget")
+	fs.StringVar(&opts.logLevel, "log-level", "info", "debug, info, warn, or error")
+	fs.BoolVar(&opts.jsonLogs, "json-logs", false, "write JSON logs")
+	fs.StringVar(&opts.metricsListen, "metrics-listen", "", "optional metrics listen address")
+	if client {
+		fs.StringVar(&opts.localAddress, "local-address", "auto", "outer source: auto, IP, or if:NAME")
+		fs.BoolVar(&opts.quicPool, "quic-pool", true, "reuse a persistent QUIC connection")
+		fs.BoolVar(&opts.waitForOpenAck, "wait-for-open-ack", false, "wait for destination confirmation before answering SOCKS")
+		fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before preparing TCP fallback")
+		fs.DurationVar(&opts.fallbackGrace, "fallback-grace", 2*time.Second, "time a ready TCP fallback waits for QUIC")
+		fs.IntVar(&opts.udpFailureThreshold, "udp-failure-threshold", 3, "UDP failures before cooldown")
+		fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "UDP cooldown after repeated failure")
+	} else {
+		fs.StringVar(&opts.tcpCongestion, "tcp-congestion", "system", "server TCP congestion controller")
+		fs.BoolVar(&opts.allowPrivate, "allow-private-destinations", false, "allow private and link-local destinations")
+	}
+}
+
+func validateRuntime(opts runtimeOptions, client bool) error {
+	if opts.listen == "" || opts.maxSessions < 1 || opts.maxSessions > 1<<16 {
+		return errors.New("listen address and max-sessions (1-65536) are required")
+	}
+	if opts.maxPayload == 0 || opts.maxPayload > 1<<20 || opts.chunkSize <= 0 || uint(opts.chunkSize) > opts.maxPayload {
+		return errors.New("invalid frame payload or chunk size")
+	}
+	if opts.transport != string(pep.TransportAuto) && opts.transport != string(pep.TransportQUIC) && opts.transport != string(pep.TransportTCP) {
+		return errors.New("--transport must be auto, quic, or tcp")
+	}
+	if opts.tcpFallbackLanes < 0 || opts.tcpFallbackLanes > 16 {
+		return errors.New("--tcp-fallback-lanes must be between 0 and 16")
+	}
+	if opts.flowIdleTimeout <= 0 || opts.flowMaxLifetime <= 0 || opts.flowIdleTimeout > opts.flowMaxLifetime {
+		return errors.New("flow idle timeout must be positive and no longer than flow lifetime")
+	}
+	if opts.aggregateBytesPerSec == 0 && opts.interactiveReserveBytesPerSec != 0 || opts.interactiveReserveBytesPerSec > opts.aggregateBytesPerSec {
+		return errors.New("invalid aggregate/interactive byte budget")
+	}
+	if opts.adaptiveMinBytesSec == 0 || opts.adaptiveMaxBytesSec < opts.adaptiveMinBytesSec {
+		return errors.New("invalid adaptive byte-rate bounds")
+	}
+	if opts.congestion == string(pep.CongestionBrutal) && opts.brutalBytesPerSec == 0 {
+		return errors.New("--brutal-bytes-per-sec is required with brutal congestion")
+	}
+	if client && (opts.fallbackDelay < 0 || opts.fallbackGrace <= 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0) {
+		return errors.New("invalid fallback settings")
+	}
+	return nil
+}
+
+func runClient(args []string) error {
+	fs := newFlagSet("client")
+	profilePath := fs.String("profile", "", "imported client profile")
+	noAutoRenew := fs.Bool("no-auto-renew", false, "disable certificate renewal before expiry")
+	var opts runtimeOptions
+	bindRuntimeFlags(fs, &opts, true)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := requireNoArguments(fs); err != nil {
+		return err
+	}
+	if *profilePath == "" {
+		return errors.New("--profile is required")
+	}
+	if err := validateRuntime(opts, true); err != nil {
+		return err
 	}
 	logger, err := newLogger(opts.logLevel, opts.jsonLogs)
 	if err != nil {
 		return err
 	}
-	secret, err := loadSecret(opts.secretFile)
+	profile, err := identity.LoadClientProfile(*profilePath)
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	switch opts.mode {
-	case "local":
-		roots, err := loadRootCAs(opts.rootCAFile)
+	if !*noAutoRenew {
+		needs, err := profile.NeedsRenewal(time.Now(), 7*24*time.Hour)
 		if err != nil {
 			return err
 		}
-		client, err := pep.NewClient(pep.ClientConfig{
-			ListenAddr: opts.listen, RemoteAddr: opts.remote, ServerName: opts.serverName,
-			LocalAddress: opts.localAddress,
-			Secret:       secret, RootCAs: roots, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
-			DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
-			FlowIdleTimeout: opts.flowIdleTimeout, FlowMaxLifetime: opts.flowMaxLifetime,
-			MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
-			TCPFallbackLanes:           opts.tcpFallbackLanes,
-			EnableQUICPool:             opts.quicPool,
-			WaitForOpenAcknowledgement: opts.waitForOpenAck,
-			UDPOnStream:                opts.udpOnStream,
-			Congestion:                 pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
-			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
-			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
-			FallbackDelay: opts.fallbackDelay, FallbackGrace: opts.fallbackGrace,
-			UDPFailureThreshold: opts.udpFailureThreshold,
-			UDPCooldown:         opts.udpCooldown, Logger: logger,
-		})
-		if err != nil {
-			return err
+		if needs {
+			renewed, renewErr := identity.RenewProfile(ctx, profile, opts.handshakeTimeout)
+			if renewErr != nil {
+				logger.Warn("automatic certificate renewal failed; continuing with current valid identity", "error", renewErr)
+			} else if err := renewed.Save(*profilePath); err != nil {
+				return fmt.Errorf("save renewed profile: %w", err)
+			} else {
+				profile = renewed
+				logger.Info("device identity renewed")
+			}
 		}
-		stopMetrics, err := serveMetrics(opts.metricsListen, client.Metrics(), logger)
-		if err != nil {
-			return err
-		}
-		defer stopMetrics()
-		return client.Serve(ctx)
-	case "server":
-		certificate, err := tls.LoadX509KeyPair(opts.certFile, opts.keyFile)
-		if err != nil {
-			return fmt.Errorf("load server TLS certificate: %w", err)
-		}
-		server, err := pep.NewServer(pep.ServerConfig{
-			ListenAddr: opts.listen, Certificate: certificate, Secret: secret,
-			MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
-			HandshakeTimeout: opts.handshakeTimeout, FlowIdleTimeout: opts.flowIdleTimeout,
-			FlowMaxLifetime: opts.flowMaxLifetime, MaxSessions: opts.maxSessions,
-			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: opts.allowPrivate, DialTimeout: opts.dialTimeout},
-			EnableTCP:         opts.transport == string(pep.TransportTCP) || opts.transport == string(pep.TransportAuto),
-			EnableQUIC:        opts.transport == string(pep.TransportQUIC) || opts.transport == string(pep.TransportAuto),
-			TCPFallbackLanes:  opts.tcpFallbackLanes,
-			TCPCongestion:     opts.tcpCongestion,
-			Congestion:        pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
-			AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
-			AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
-			Logger:      logger,
-			UDPOnStream: opts.udpOnStream,
-		})
-		if err != nil {
-			return err
-		}
-		stopMetrics, err := serveMetrics(opts.metricsListen, server.Metrics(), logger)
-		if err != nil {
-			return err
-		}
-		defer stopMetrics()
-		return server.Serve(ctx)
-	default:
-		return errors.New("--mode must be local or server")
 	}
+	credentials, err := profile.Credentials()
+	if err != nil {
+		return err
+	}
+	client, err := pep.NewClient(pep.ClientConfig{
+		ListenAddr: opts.listen, RemoteAddr: profile.Endpoint, LocalAddress: opts.localAddress,
+		Credentials: credentials, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
+		DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
+		FlowIdleTimeout: opts.flowIdleTimeout, FlowMaxLifetime: opts.flowMaxLifetime,
+		MaxSessions: opts.maxSessions, Transport: pep.TransportKind(opts.transport),
+		TCPFallbackLanes: opts.tcpFallbackLanes, EnableQUICPool: opts.quicPool,
+		WaitForOpenAcknowledgement: opts.waitForOpenAck, UDPOnStream: opts.udpOnStream,
+		Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
+		AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
+		AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
+		FallbackDelay: opts.fallbackDelay, FallbackGrace: opts.fallbackGrace,
+		UDPFailureThreshold: opts.udpFailureThreshold, UDPCooldown: opts.udpCooldown, Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
+	if !*noAutoRenew {
+		go maintainClientIdentity(ctx, *profilePath, profile, client, opts.handshakeTimeout, logger)
+	}
+	stopMetrics, err := serveMetrics(opts.metricsListen, client.Metrics(), logger)
+	if err != nil {
+		return err
+	}
+	defer stopMetrics()
+	return client.Serve(ctx)
 }
 
-func parseOptions(args []string) (options, error) {
-	var opts options
-	fs := flag.NewFlagSet("queqiaod", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.StringVar(&opts.mode, "mode", "", "agent mode: local or server")
-	fs.StringVar(&opts.listen, "listen", "", "local SOCKS5 or remote agent listen address")
-	fs.StringVar(&opts.remote, "remote", "", "remote agent host:port in local mode")
-	fs.StringVar(&opts.localAddress, "local-address", "", "optional local source IP, auto, or if:NAME for outer lanes (bypasses a host TUN route)")
-	fs.StringVar(&opts.serverName, "server-name", "", "verified TLS DNS name in local mode")
-	fs.StringVar(&opts.secretFile, "secret-file", "", "path to pre-shared session secret")
-	fs.StringVar(&opts.certFile, "tls-cert", "", "server TLS certificate path")
-	fs.StringVar(&opts.keyFile, "tls-key", "", "server TLS private-key path")
-	fs.StringVar(&opts.rootCAFile, "root-ca", "", "optional PEM root CA path in local mode")
-	fs.IntVar(&opts.maxSessions, "max-sessions", 1024, "maximum concurrent sessions")
-	fs.UintVar(&opts.maxPayload, "max-payload", 256*1024, "maximum frame payload in bytes")
-	fs.IntVar(&opts.chunkSize, "chunk-size", 32*1024, "stream data frame size in bytes")
-	fs.DurationVar(&opts.dialTimeout, "dial-timeout", 10*time.Second, "destination or remote dial timeout")
-	fs.DurationVar(&opts.handshakeTimeout, "handshake-timeout", 10*time.Second, "SOCKS, TLS, and session handshake timeout")
-	fs.DurationVar(&opts.flowIdleTimeout, "flow-idle-timeout", 30*time.Minute, "maximum application-idle period before a flow is reset")
-	fs.DurationVar(&opts.flowMaxLifetime, "flow-max-lifetime", 24*time.Hour, "maximum lifetime of one logical flow")
-	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "outer transport: auto, quic, or tcp")
-	fs.IntVar(&opts.tcpFallbackLanes, "tcp-fallback-lanes", 0, "TCP-only lanes per bulk flow (1-16; 0 uses role default: client 1, server 16)")
-	fs.StringVar(&opts.tcpCongestion, "tcp-congestion", "system", "server TCP congestion controller: system or a Linux TCP_CONGESTION name such as bbr")
-	fs.BoolVar(&opts.quicPool, "quic-pool", true, "share one persistent QUIC connection for initial/control streams, and move classified bulk flows off it")
-	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry SOCKS UDP on the lane's control stream instead of the connection's datagrams; the measurement control for the datagram substrate, and it must be set the same way at both endpoints")
-	fs.BoolVar(&opts.waitForOpenAck, "wait-for-open-ack", false, "wait for OPEN_OK before answering SOCKS, costing one round trip per flow, in exchange for a precise failure when a destination is unreachable")
-	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionErasure), "QUIC congestion controller: erasure (default), reno, bbr, bbr-tuic, adaptive, or brutal")
-	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "fixed per-lane Brutal target in bytes/s (required with --congestion brutal)")
-	fs.Uint64Var(&opts.adaptiveMinBytesSec, "adaptive-min-bytes-per-sec", 64*1024, "Adaptive controller minimum rate in bytes/s")
-	fs.Uint64Var(&opts.adaptiveMaxBytesSec, "adaptive-max-bytes-per-sec", 200*1024*1024, "Adaptive controller maximum rate in bytes/s")
-	fs.Uint64Var(&opts.aggregateBytesPerSec, "aggregate-bytes-per-sec", 0, "optional aggregate byte budget shared by all lanes and flows (0 disables)")
-	fs.Uint64Var(&opts.interactiveReserveBytesPerSec, "interactive-reserve-bytes-per-sec", 0, "reserved aggregate budget for new/interactive traffic")
-	fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before preparing warm-standby TCP in auto mode; selection waits through --fallback-grace")
-	fs.DurationVar(&opts.fallbackGrace, "fallback-grace", 2*time.Second, "time a ready TCP standby waits for QUIC; expiry is not counted as UDP failure")
-	fs.IntVar(&opts.udpFailureThreshold, "udp-failure-threshold", 3, "consecutive UDP failures before temporary TCP-only mode")
-	fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "how long to suppress UDP after repeated failures")
-	fs.BoolVar(&opts.allowPrivate, "allow-private-destinations", false, "allow the server to reach private/link-local destinations")
-	fs.StringVar(&opts.logLevel, "log-level", "info", "debug, info, warn, or error")
-	fs.BoolVar(&opts.jsonLogs, "json-logs", false, "write structured JSON logs")
-	fs.StringVar(&opts.metricsListen, "metrics-listen", "", "optional local metrics HTTP listen address (serves /metrics)")
-	fs.BoolVar(&opts.showVersion, "version", false, "print build version")
+func runServer(args []string) error {
+	fs := newFlagSet("server")
+	state := fs.String("state", "", "provider state directory")
+	var opts runtimeOptions
+	bindRuntimeFlags(fs, &opts, false)
 	if err := fs.Parse(args); err != nil {
-		return opts, err
+		return err
 	}
-	// Which flags the operator actually gave, rather than which ones hold a
-	// non-zero value. The two are not the same, and treating them as the same
-	// means a flag can never be defaulted to anything but its zero value: when
-	// --quic-pool became the default, every server refused to start, because a
-	// default it had never been given looked exactly like one it had.
-	given := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-
-	if fs.NArg() != 0 {
-		return opts, fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
+	if err := requireNoArguments(fs); err != nil {
+		return err
 	}
-	if opts.showVersion {
-		return opts, nil
+	if err := validateRuntime(opts, false); err != nil {
+		return err
 	}
-	if opts.mode != "local" && opts.mode != "server" {
-		return opts, errors.New("--mode must be local or server")
+	provider, err := loadProviderRequired(*state)
+	if err != nil {
+		return err
 	}
-	if opts.listen == "" {
-		return opts, errors.New("--listen is required")
+	logger, err := newLogger(opts.logLevel, opts.jsonLogs)
+	if err != nil {
+		return err
 	}
-	if opts.secretFile == "" {
-		return opts, errors.New("--secret-file is required")
+	service := &identity.EnrollmentService{Provider: provider}
+	server, err := pep.NewServer(pep.ServerConfig{
+		ListenAddr: opts.listen, Credentials: provider.ServerCredentials(), Enrollment: service,
+		MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
+		HandshakeTimeout: opts.handshakeTimeout, FlowIdleTimeout: opts.flowIdleTimeout,
+		FlowMaxLifetime: opts.flowMaxLifetime, MaxSessions: opts.maxSessions,
+		DestinationPolicy: pep.DestinationPolicy{AllowPrivate: opts.allowPrivate, DialTimeout: opts.dialTimeout},
+		EnableTCP:         opts.transport == string(pep.TransportTCP) || opts.transport == string(pep.TransportAuto),
+		EnableQUIC:        opts.transport == string(pep.TransportQUIC) || opts.transport == string(pep.TransportAuto),
+		TCPFallbackLanes:  opts.tcpFallbackLanes, TCPCongestion: opts.tcpCongestion,
+		Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
+		AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
+		AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
+		Logger: logger, UDPOnStream: opts.udpOnStream,
+	})
+	if err != nil {
+		return err
 	}
-	if opts.maxPayload == 0 || opts.maxPayload > 1<<20 {
-		return opts, errors.New("--max-payload must be between 1 and 1048576")
+	stopMetrics, err := serveMetrics(opts.metricsListen, server.Metrics(), logger)
+	if err != nil {
+		return err
 	}
-	if opts.chunkSize <= 0 || uint(opts.chunkSize) > opts.maxPayload {
-		return opts, errors.New("--chunk-size must be positive and no larger than --max-payload")
-	}
-	if opts.maxSessions < 1 || opts.maxSessions > 1<<16 {
-		return opts, errors.New("--max-sessions must be between 1 and 65536")
-	}
-	if opts.transport != string(pep.TransportAuto) && opts.transport != string(pep.TransportQUIC) && opts.transport != string(pep.TransportTCP) {
-		return opts, errors.New("--transport must be auto, quic, or tcp")
-	}
-	if opts.tcpFallbackLanes < 0 || opts.tcpFallbackLanes > 16 {
-		return opts, errors.New("--tcp-fallback-lanes must be between 1 and 16, or 0 for the role default")
-	}
-	switch pep.CongestionControlKind(opts.congestion) {
-	case pep.CongestionReno, pep.CongestionBBR, pep.CongestionBBRTUIC,
-		pep.CongestionErasure, pep.CongestionAdaptive, pep.CongestionBrutal:
-	default:
-		return opts, errors.New("--congestion must be reno, bbr, bbr-tuic, erasure, adaptive, or brutal")
-	}
-	if opts.congestion == string(pep.CongestionBrutal) && opts.brutalBytesPerSec == 0 {
-		return opts, errors.New("--brutal-bytes-per-sec is required with --congestion brutal")
-	}
-	if opts.adaptiveMinBytesSec == 0 || opts.adaptiveMaxBytesSec < opts.adaptiveMinBytesSec {
-		return opts, errors.New("invalid adaptive byte-rate bounds")
-	}
-	if opts.aggregateBytesPerSec == 0 && opts.interactiveReserveBytesPerSec != 0 {
-		return opts, errors.New("interactive reserve requires an aggregate byte budget")
-	}
-	if opts.interactiveReserveBytesPerSec > opts.aggregateBytesPerSec {
-		return opts, errors.New("interactive reserve cannot exceed aggregate byte budget")
-	}
-	if opts.fallbackDelay < 0 || opts.fallbackGrace <= 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0 {
-		return opts, errors.New("invalid UDP fallback settings")
-	}
-	if opts.flowIdleTimeout <= 0 || opts.flowMaxLifetime <= 0 || opts.flowIdleTimeout > opts.flowMaxLifetime {
-		return opts, errors.New("flow idle timeout must be positive and no longer than flow max lifetime")
-	}
-	if opts.mode == "local" {
-		if opts.remote == "" || opts.serverName == "" {
-			return opts, errors.New("--remote and --server-name are required in local mode")
-		}
-		if given["tls-cert"] || given["tls-key"] || given["allow-private-destinations"] || given["tcp-congestion"] {
-			return opts, errors.New("server-only flags used in local mode")
-		}
-	} else {
-		if opts.certFile == "" || opts.keyFile == "" {
-			return opts, errors.New("--tls-cert and --tls-key are required in server mode")
-		}
-		if given["remote"] || given["server-name"] || given["root-ca"] ||
-			given["local-address"] || given["quic-pool"] || given["wait-for-open-ack"] {
-			return opts, errors.New("local-only flags used in server mode")
-		}
-	}
-	return opts, nil
+	defer stopMetrics()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go maintainGatewayIdentity(ctx, provider, logger)
+	return server.Serve(ctx)
 }
 
-func loadSecret(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read session secret: %w", err)
+const identityMaintenanceInterval = time.Hour
+
+func maintainClientIdentity(ctx context.Context, profilePath string, profile identity.ClientProfile, client *pep.Client, timeout time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(identityMaintenanceInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			needs, err := profile.NeedsRenewal(time.Now(), 7*24*time.Hour)
+			if err != nil {
+				logger.Error("check device identity lifetime", "error", err)
+				continue
+			}
+			if !needs {
+				continue
+			}
+			renewed, err := identity.RenewProfile(ctx, profile, timeout)
+			if err != nil {
+				logger.Warn("automatic certificate renewal failed; will retry", "error", err)
+				continue
+			}
+			if err := renewed.Save(profilePath); err != nil {
+				logger.Error("save renewed device identity; will retry", "error", err)
+				continue
+			}
+			credentials, err := renewed.Credentials()
+			if err != nil {
+				logger.Error("load renewed device identity", "error", err)
+				continue
+			}
+			if err := client.UpdateCredentials(credentials); err != nil {
+				logger.Error("activate renewed device identity", "error", err)
+				continue
+			}
+			profile = renewed
+			logger.Info("device identity renewed")
+		case <-ctx.Done():
+			return
+		}
 	}
-	secret := bytes.TrimSpace(data)
-	if len(secret) < 32 {
-		return nil, errors.New("session secret file must contain at least 32 non-whitespace bytes")
-	}
-	return append([]byte(nil), secret...), nil
 }
 
-func loadRootCAs(path string) (*x509.CertPool, error) {
-	if path == "" {
-		return nil, nil
+func maintainGatewayIdentity(ctx context.Context, provider *identity.Provider, logger *slog.Logger) {
+	ticker := time.NewTicker(identityMaintenanceInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			renewed, err := provider.RenewGatewayIdentity(time.Now(), 7*24*time.Hour)
+			if err != nil {
+				logger.Error("automatic gateway identity renewal failed; will retry", "error", err)
+			} else if renewed {
+				logger.Info("gateway identity renewed")
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read root CA: %w", err)
-	}
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
-	if !pool.AppendCertsFromPEM(data) {
-		return nil, errors.New("root CA file did not contain a valid PEM certificate")
-	}
-	return pool, nil
 }
 
 func newLogger(level string, json bool) (*slog.Logger, error) {
@@ -332,11 +693,11 @@ func newLogger(level string, json bool) (*slog.Logger, error) {
 	default:
 		return nil, fmt.Errorf("unsupported log level %q", level)
 	}
-	handlerOptions := &slog.HandlerOptions{Level: slogLevel}
+	options := &slog.HandlerOptions{Level: slogLevel}
 	if json {
-		return slog.New(slog.NewJSONHandler(os.Stderr, handlerOptions)), nil
+		return slog.New(slog.NewJSONHandler(os.Stderr, options)), nil
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, handlerOptions)), nil
+	return slog.New(slog.NewTextHandler(os.Stderr, options)), nil
 }
 
 func goVersion() string {
@@ -363,8 +724,8 @@ func serveMetrics(addr string, handler http.Handler, logger *slog.Logger) (func(
 		}
 	}()
 	return func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		_ = server.Shutdown(ctx)
 	}, nil
 }

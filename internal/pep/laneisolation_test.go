@@ -2,12 +2,14 @@ package pep
 
 import (
 	"context"
+	"crypto/x509"
 	"io"
 	"log/slog"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/protocol"
 )
 
@@ -26,7 +28,7 @@ func isolationLaneKind(t *testing.T, id uint64, kind TransportKind) *mpLane {
 
 func TestServerTCPHandoffRetiresQUICAndExpandsItsAdmissionCeiling(t *testing.T) {
 	flow := newIsolationTestFlow(t, false)
-	session := newServerFlow(flow, TransportQUIC, 8)
+	session := newServerFlow(flow, identity.Principal{}, TransportQUIC, 8)
 	if err := session.addLane(isolationLaneKind(t, 0, TransportQUIC)); err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +52,56 @@ func TestServerTCPHandoffRetiresQUICAndExpandsItsAdmissionCeiling(t *testing.T) 
 	}
 	if err := session.addLane(isolationLaneKind(t, 9, TransportQUIC)); err == nil {
 		t.Fatal("QUIC lane was admitted after TCP-only handoff")
+	}
+}
+
+func TestLaneJoinCannotCrossDevicePrincipal(t *testing.T) {
+	flow := newIsolationTestFlow(t, false)
+	owner := identity.Principal{ProviderID: "provider", AccountID: "account", DeviceID: "owner"}
+	existingFlow := newServerFlow(flow, owner, TransportTCP, 1)
+	server := &Server{cfg: ServerConfig{MaxPayload: protocol.DefaultMaxPayload, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, sessions: map[[16]byte]*serverFlow{flow.sessionID: existingFlow}}
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	other := owner
+	other.DeviceID = "other"
+	request := protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeJoin, SessionID: flow.sessionID,
+		FlowID: flow.flowID, Class: protocol.ClassBulk,
+	}}
+	go server.handleLaneJoinOpen(context.Background(), local, newFrameConn(local, protocol.DefaultMaxPayload), other, flow.sessionID, 1, request)
+	response, err := newFrameConn(remote, protocol.DefaultMaxPayload).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Header.Type != protocol.TypeReset {
+		t.Fatalf("cross-device lane join response = %d, want RESET", response.Header.Type)
+	}
+}
+
+func TestActiveFlowClosesAfterDeviceRevocation(t *testing.T) {
+	serverCredentials, clientCredentials := testCertificate(t)
+	leaf, err := x509.ParseCertificate(clientCredentials.Certificate.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := identity.PrincipalFromCertificate(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow := newIsolationTestFlow(t, false)
+	serverFlow := newServerFlow(flow, principal, TransportTCP, 1)
+	server := &Server{cfg: ServerConfig{Credentials: serverCredentials}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go server.watchAuthorization(ctx, serverFlow)
+	if err := serverCredentials.Store.RevokeDevice(principal.DeviceID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-flow.doneChan():
+	case <-time.After(2500 * time.Millisecond):
+		t.Fatal("active flow remained open after device revocation")
 	}
 }
 
@@ -136,14 +188,13 @@ func TestPooledFlowCountTracksOpenAndClose(t *testing.T) {
 	go discardDestination(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("lane-isolation-test-secret-32byt")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: packetConn.LocalAddr().String(), Certificate: certificate, Secret: secret,
+		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
 		HandshakeTimeout: time.Second,
 	})
@@ -151,8 +202,7 @@ func TestPooledFlowCountTracksOpenAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -204,8 +254,9 @@ func TestPooledFlowCountTracksOpenAndClose(t *testing.T) {
 	}
 }
 
-// A peer that never advertised the capability must never be sent ranges.
-func TestRangesAreNotSentToAPeerThatDidNotAdvertiseThem(t *testing.T) {
+// The internal off state remains safe for tests and partial flow setup even
+// though protocol v4 enables ranges on every established flow.
+func TestRangesAreNotSentBeforeRangeTrackingIsEnabled(t *testing.T) {
 	conn := newAckCaptureConn(0, nil)
 	flow := newAckTestFlow(conn)
 	flow.rangesMu.Lock()
@@ -217,7 +268,7 @@ func TestRangesAreNotSentToAPeerThatDidNotAdvertiseThem(t *testing.T) {
 	}
 	frame := waitAckFrame(t, conn)
 	if frame.Header.Flags&protocol.FlagAckRanges != 0 || len(frame.Payload) != 0 {
-		t.Fatalf("ranges were sent to a peer that did not advertise support: %+v", frame.Header)
+		t.Fatalf("ranges were sent before range tracking was enabled: %+v", frame.Header)
 	}
 
 	flow.ackRanges.Store(true)

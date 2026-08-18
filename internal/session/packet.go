@@ -76,18 +76,13 @@ func DestinationFromUDPAddr(addr *net.UDPAddr) (string, error) {
 }
 
 // UDPResumeMarker opens a UDP association whose remote relay may be retained
-// and reclaimed. It is a distinct marker rather than a flag inside the old one
-// because a server that predates it must not misread it: an older peer sees
-// neither UDPAssociationMarker nor a valid destination and refuses the flow,
-// which is the correct answer rather than a half-understood association. A
-// client only sends it where the server advertised CapabilityUDPResume, so
-// that refusal is not a path anyone reaches.
+// and reclaimed. Its distinct marker keeps the parser unambiguous with TCP
+// destinations and ordinary UDP association opens.
 var UDPResumeMarker = []byte{'W', 'O', 'U', 'D', 2}
 
 // UDPResumeTokenSize is the width of the token naming a retained relay. It is
-// the whole of the secret: a peer that authenticated on the same PSK is still
-// not entitled to another association's relay, so the token has to be
-// unguessable rather than merely unique.
+// an unguessable, single-use handle in addition to principal binding, so a
+// different association owned by the same device cannot claim it by accident.
 const UDPResumeTokenSize = 16
 
 // EncodeUDPResumeOpen builds the Open payload for a resumable association. A

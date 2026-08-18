@@ -48,14 +48,13 @@ func TestFlowLifecycleDoesNotLeakGoroutines(t *testing.T) {
 	go echoDestination(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("lifecycle-test-secret-32-bytes!!")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: packetConn.LocalAddr().String(), Certificate: certificate, Secret: secret,
+		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
 		HandshakeTimeout: 2 * time.Second,
 	})
@@ -63,8 +62,7 @@ func TestFlowLifecycleDoesNotLeakGoroutines(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger,
 		HandshakeTimeout: 2 * time.Second,
 	})
 	if err != nil {

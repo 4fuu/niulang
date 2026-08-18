@@ -3,12 +3,34 @@ package pep
 import (
 	"io"
 	"net"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/pathsim"
 )
+
+func TestCurrentUplinkAppliesSocketControl(t *testing.T) {
+	_, credentials := testCertificate(t)
+	var calls atomic.Int64
+	client, err := NewClient(ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:9", Credentials: credentials,
+		SocketControl: func(_, _ string, conn syscall.RawConn) error {
+			return conn.Control(func(uintptr) { calls.Add(1) })
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := client.currentUplink(); got == "" {
+		t.Fatal("protected uplink probe did not resolve a source address")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("socket control calls = %d, want 1", calls.Load())
+	}
+}
 
 // Flow initiation is what an application feels. The first connection to a
 // server may cost what it must -- a QUIC handshake and one authentication

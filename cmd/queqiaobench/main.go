@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
@@ -37,6 +38,7 @@ import (
 
 	"github.com/bojieli/queqiao/internal/baseline"
 	"github.com/bojieli/queqiao/internal/extproxy"
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/pathsim"
 	"github.com/bojieli/queqiao/internal/pep"
 )
@@ -534,9 +536,19 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		go func() { _ = client.ServeListener(ctx, socksListener) }()
 		h.closes = append(h.closes, client.Close)
 	case "queqiao":
-		secret := []byte("queqiaobench-shared-secret-32bytes!")
+		identityDir, err := os.MkdirTemp("", "queqiaobench-identity-")
+		if err != nil {
+			h.Close()
+			return nil, err
+		}
+		h.closes = append(h.closes, func() { _ = os.RemoveAll(identityDir) })
+		serverIdentity, clientIdentity, err := benchmarkCredentials(filepath.Join(identityDir, "provider"), relay.LocalAddr())
+		if err != nil {
+			h.Close()
+			return nil, err
+		}
 		server, err := pep.NewServer(pep.ServerConfig{
-			ListenAddr: serverPacket.LocalAddr().String(), Certificate: certificate, Secret: secret,
+			ListenAddr: serverPacket.LocalAddr().String(), Credentials: serverIdentity,
 			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: opts.chunkSize,
 			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
 			Logger: logger,
@@ -546,8 +558,8 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			return nil, err
 		}
 		client, err := pep.NewClient(pep.ClientConfig{
-			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), ServerName: "queqiao.test",
-			Secret: secret, RootCAs: roots, Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
+			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), Credentials: clientIdentity,
+			Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
 			EnableQUICPool:    opts.quicPool,
 			Congestion:        pep.CongestionControlKind(opts.congestion),
 			BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
@@ -603,6 +615,47 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		h.closes = append(h.closes, pair.Close, func() { _ = os.RemoveAll(workDir) })
 	}
 	return h, nil
+}
+
+func benchmarkCredentials(directory, endpoint string) (identity.ServerCredentials, identity.ClientCredentials, error) {
+	now := time.Now()
+	provider, err := identity.InitProvider(directory, "benchmark", endpoint, now)
+	if err != nil {
+		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
+	}
+	account, err := provider.Store.AddAccount("benchmark", time.Time{}, 0, now)
+	if err != nil {
+		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
+	}
+	_, invitation, err := provider.CreateInvitation(account.ID, time.Hour, now)
+	if err != nil {
+		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
+	}
+	_, device, err := provider.Store.ConsumeInvite(invitation.Token, "benchmark", publicKey, now)
+	if err != nil {
+		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
+	}
+	certificatePEM, err := provider.IssueDevice(account.ID, device.ID, publicKey, now)
+	if err != nil {
+		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	certificate, err := tls.X509KeyPair(certificatePEM, keyPEM)
+	if err != nil {
+		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
+	}
+	return provider.ServerCredentials(), identity.ClientCredentials{
+		ProviderID: provider.Metadata.ProviderID, GatewayID: provider.Metadata.GatewayID,
+		Certificate: certificate, Root: provider.RootCert, RootPin: provider.Metadata.RootPin,
+	}, nil
 }
 
 // externalCongestion maps this project's controller names onto the names the

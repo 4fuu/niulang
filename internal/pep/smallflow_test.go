@@ -574,8 +574,7 @@ func TestPooledFlowReportsBothEndpointTransportsFailing(t *testing.T) {
 	var logs bytes.Buffer
 	client := &Client{
 		cfg: ClientConfig{
-			RemoteAddr: "127.0.0.1:not-a-port", ServerName: "queqiao.test",
-			Transport: TransportAuto, EnableQUICPool: true, FallbackDelay: time.Second,
+			RemoteAddr: "127.0.0.1:not-a-port", Transport: TransportAuto, EnableQUICPool: true, FallbackDelay: time.Second,
 			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
 		},
 		udpHealth: newUDPHealth(1, time.Minute), metrics: metrics.New(),

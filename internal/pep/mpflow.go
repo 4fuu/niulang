@@ -17,7 +17,6 @@ import (
 	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/multipath"
 	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
 	"github.com/bojieli/queqiao/internal/stripe"
 )
 
@@ -262,25 +261,17 @@ type multipathFlow struct {
 	remoteAbortCh     chan struct{}
 	localAbortSent    atomic.Bool
 	laneFailures      atomic.Uint64
-	// onProtocolReset is called when the peer rejects this flow's open on
-	// protocol grounds. It exists because a flow that does not wait for its
-	// open acknowledgement never sees that rejection on the dial path, and the
-	// client would go on offering a fast open the server has refused.
-	onProtocolReset func()
 	// openAckPending is set only when the caller waited for nothing. The
 	// application may begin sending immediately, but the eventual OPEN_OK is
 	// still required on the authenticated stream and is consumed by the flow
 	// reader before ordinary data/control frames are accepted.
 	openAckPending bool
-	// helloAckPending is set when the flow's first lane pipelined HELLO with
-	// OPEN and did not wait for HELLO_OK. The acknowledgement still has to
-	// arrive and still has to be valid, but the caller no longer pays a
-	// round trip for it. onHelloOK publishes the negotiated capabilities.
-	helloAckPending bool
-	onHelloOK       func(session.HelloOK)
-	// ackRanges is set when the peer advertised that it can consume byte
-	// ranges alongside the cumulative acknowledgement. It is only useful to a
-	// striped flow, and must never be assumed of a peer that did not say so.
+	// openConfirmationRequired is true between an optimistic OPEN and OPEN_OK.
+	// A coded lane uses it to place one reliable safety copy behind OPEN while
+	// still sending the latency-sensitive coded copy immediately.
+	openConfirmationRequired atomic.Bool
+	// ackRanges is mandatory in protocol v4. It is useful to striped flows and
+	// harmless for a single lane.
 	ackRanges atomic.Bool
 	// tcpStriping is negotiated per flow. When true, and only while every
 	// healthy lane is TCP, the scheduler may distribute byte-offset chunks
@@ -348,6 +339,17 @@ func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, f
 	return f
 }
 
+// requireOpenConfirmation is called before the first lane starts. Only the
+// optimistic client path needs it; server flows and clients that explicitly
+// waited for OPEN_OK use the zero-value, already-confirmed state.
+func (f *multipathFlow) requireOpenConfirmation() {
+	f.openConfirmationRequired.Store(true)
+}
+
+func (f *multipathFlow) confirmOpen() {
+	f.openConfirmationRequired.Store(false)
+}
+
 func (f *multipathFlow) addLane(lane *mpLane) error {
 	if lane == nil || lane.fc == nil {
 		return errors.New("invalid lane")
@@ -384,6 +386,9 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 	// reader, as the first version did, meant the writer could already be
 	// asking for it.
 	lane.fc.setCodingPolicy(f.prefersCodingOverRetransmission)
+	if f.openConfirmationRequired.Load() {
+		lane.fc.setOpenSafetyPolicy(func() bool { return f.openConfirmationRequired.Load() })
+	}
 	go f.readLane(lane)
 	go f.writeLane(lane)
 	// A lane admitted while the flow is sending starts carrying data at once;
@@ -1972,32 +1977,6 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 			}
 		case event := <-f.events:
 			frame := event.frame
-			// A pipelined HELLO_OK is session-scoped and carries flow 0, so it
-			// is validated before the per-flow identity check below.
-			if frame.Header.Type == protocol.TypeHelloOK {
-				if !f.helloAckPending || frame.Header.SessionID != f.sessionID || frame.Header.FlowID != 0 {
-					return errors.New("unexpected session acknowledgement")
-				}
-				var helloOK session.HelloOK
-				if err := helloOK.UnmarshalBinary(frame.Payload); err != nil {
-					return fmt.Errorf("decode session acknowledgement: %w", err)
-				}
-				f.helloAckPending = false
-				// The peer's capabilities arrive after this flow started, so
-				// adopt the range acknowledgement setting now rather than
-				// leaving this flow on cumulative-only behavior.
-				f.ackRanges.Store(helloOK.Capabilities&session.CapabilityAckRanges != 0)
-				if f.onHelloOK != nil {
-					f.onHelloOK(helloOK)
-				}
-				continue
-			}
-			// A session-scoped rejection of the pipelined HELLO also carries
-			// flow 0. Report it as the authentication failure it is rather
-			// than as a mismatched flow identity.
-			if f.helloAckPending && frame.Header.Type == protocol.TypeReset && frame.Header.FlowID == 0 {
-				return errors.New("server rejected session authentication")
-			}
 			if frame.Header.SessionID != f.sessionID || frame.Header.FlowID != f.flowID {
 				return errors.New("frame belongs to another session or flow")
 			}
@@ -2119,14 +2098,8 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					return errors.New("unexpected flow open acknowledgement")
 				}
 				f.openAckPending = false
+				f.confirmOpen()
 			case protocol.TypeReset:
-				// A protocol rejection of a pending open is the peer saying it
-				// will not accept the fast form. Nothing on the dial path is
-				// listening any more, so the downgrade has to happen here or
-				// every later flow repeats the same rejected open.
-				if f.openAckPending && f.onProtocolReset != nil && resetCode(frame.Payload) == session.ResetProtocol {
-					f.onProtocolReset()
-				}
 				if len(frame.Payload) > 1 {
 					return fmt.Errorf("peer reset flow: %s", string(frame.Payload[1:]))
 				}

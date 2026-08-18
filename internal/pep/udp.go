@@ -7,9 +7,8 @@ package pep
 // Where the lane's QUIC connection negotiated DATAGRAM in both directions,
 // those frames go over the connection's datagrams; otherwise -- a TLS/TCP
 // lane, a peer without datagram support, or a datagram the transport refuses
-// -- they go over the control stream exactly as before. Nothing is
-// configured: QUIC's own capability exchange is what both endpoints read, so
-// a sender never routes a packet to a substrate its peer is not draining.
+// -- they go over the control stream. QUIC's transport negotiation tells both
+// endpoints whether the datagram substrate is available.
 //
 // The substrate is chosen for its semantics rather than its speed. An
 // application that chose UDP has already decided a late packet is worse than
@@ -30,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/protocol"
 	"github.com/bojieli/queqiao/internal/session"
 	"github.com/bojieli/queqiao/internal/socks5"
@@ -418,27 +418,15 @@ func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fast
 		_ = lane.fc.Close()
 		return nil, err
 	}
-	// A resumable open is only sent where the server said it understands one.
-	// An older peer would read the marker as neither an association nor a
-	// destination and refuse the flow, so the capability is what keeps the
-	// two versions interoperable rather than a retry after a failure.
-	resumable := c.peerResumesUDP()
-	payload := session.UDPAssociationMarker
-	if resumable {
-		encoded, encodeErr := session.EncodeUDPResumeOpen(resume)
-		if encodeErr != nil {
-			_ = lane.fc.Close()
-			return nil, encodeErr
-		}
-		payload = encoded
+	encoded, encodeErr := session.EncodeUDPResumeOpen(resume)
+	if encodeErr != nil {
+		_ = lane.fc.Close()
+		return nil, encodeErr
 	}
+	payload := encoded
 	_ = lane.outer.SetDeadline(time.Now().Add(handshakeBound(lane.outer, c.cfg.HandshakeTimeout)))
-	openType := protocol.TypeOpen
-	if lane.fastOpen {
-		openType = protocol.TypeOpenFast
-	}
 	if err := lane.fc.Write(protocol.Frame{Header: protocol.Header{
-		Version: protocol.Version, Type: openType, SessionID: lane.sessionID,
+		Version: protocol.Version, Type: protocol.TypeOpen, SessionID: lane.sessionID,
 		FlowID: flowID, Class: protocol.ClassInteractive,
 	}, Payload: payload}); err != nil {
 		_ = lane.fc.Close()
@@ -454,11 +442,6 @@ func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fast
 		return nil, errors.New("UDP association acknowledgement identity mismatch")
 	}
 	if response.Header.Type == protocol.TypeReset {
-		if !fastRetry && lane.fastOpen && resetCode(response.Payload) == session.ResetProtocol {
-			c.disableQUICPoolFast()
-			_ = lane.fc.Close()
-			return c.openUDPAssociationMode(ctx, resume, true, rescue)
-		}
 		_ = lane.fc.Close()
 		return nil, errors.New("remote UDP association rejected")
 	}
@@ -467,23 +450,17 @@ func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fast
 		return nil, errors.New("invalid UDP association acknowledgement")
 	}
 	association := &udpAssociation{lane: lane, flowID: flowID}
-	if resumable {
-		resumed, granted, ok := session.DecodeUDPResumeGrant(response.Payload)
-		if !ok {
-			_ = lane.fc.Close()
-			return nil, errors.New("invalid UDP association resume grant")
-		}
-		association.token = granted[:]
-		if len(resume) > 0 && !resumed {
-			// The relay was not reclaimed: it expired, or the lane that held
-			// it never failed the way the server expects. The association
-			// works, and the destination sees a new source address, which is
-			// what happened on every rescue before this existed.
-			c.cfg.Logger.Debug("UDP association relay not resumed", "flow", flowID)
-		}
-	} else if len(response.Payload) != 0 {
+	resumed, granted, ok := session.DecodeUDPResumeGrant(response.Payload)
+	if !ok {
 		_ = lane.fc.Close()
-		return nil, errors.New("invalid UDP association acknowledgement")
+		return nil, errors.New("invalid UDP association resume grant")
+	}
+	association.token = granted[:]
+	if len(resume) > 0 && !resumed {
+		// The relay was not reclaimed: it expired, or the lane that held
+		// it never failed the way the server expects. The association
+		// works, and the destination sees a new source address.
+		c.cfg.Logger.Debug("UDP association relay not resumed", "flow", flowID)
 	}
 	_ = lane.outer.SetDeadline(time.Time{})
 	return association, nil
@@ -666,7 +643,7 @@ func runClientUDPDownlink(ctx context.Context, udpConn *net.UDPConn, fc *frameCo
 	}
 }
 
-func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *frameConn, sessionID [16]byte, flowID uint64, resume []byte, resumable bool) {
+func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *frameConn, principal identity.Principal, sessionID [16]byte, flowID uint64, resume []byte, resumable bool) {
 	// A token this association asks to reclaim names a relay whose lane died.
 	// Claiming is best effort: if the token is unknown, spent, or expired,
 	// this is an ordinary open with a fresh socket, which is exactly the
@@ -674,7 +651,7 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 	var udpConn *net.UDPConn
 	resumed := false
 	if resumable && len(resume) > 0 {
-		if held := s.udpRelays.claim(resume); held != nil {
+		if held := s.udpRelays.claim(resume, principal); held != nil {
 			udpConn, resumed = held, true
 		}
 	}
@@ -710,7 +687,7 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 		if resumable && retain {
 			s.cfg.Logger.Debug("UDP association relay retained for a replacement",
 				"relay", udpConn.LocalAddr().String(), "resumed", resumed)
-			s.udpRelays.retain(grant, udpConn)
+			s.udpRelays.retain(grant, principal, udpConn)
 			return
 		}
 		_ = udpConn.Close()
@@ -809,8 +786,10 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 	s.metrics.FlowStarted()
 	idleTimer := time.NewTimer(s.cfg.FlowIdleTimeout)
 	lifetimeTimer := time.NewTimer(s.cfg.FlowMaxLifetime)
+	authorizationTicker := time.NewTicker(time.Second)
 	defer idleTimer.Stop()
 	defer lifetimeTimer.Stop()
+	defer authorizationTicker.Stop()
 	failed := false
 	var endErr error
 	resetIdle := func() {
@@ -941,6 +920,12 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 			endErr = errors.New("UDP association lifetime exceeded")
 			failed = true
 			goto done
+		case <-authorizationTicker.C:
+			if _, err := s.cfg.Credentials.Store.Authorize(principal, time.Now()); err != nil {
+				endErr = errors.New("UDP association authorization revoked")
+				failed = true
+				goto done
+			}
 		case <-assocCtx.Done():
 			// The transport this association was accepted on is shutting
 			// down. That is not the association ending -- a client whose

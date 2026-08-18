@@ -14,6 +14,7 @@ import (
 
 	"github.com/apernet/quic-go"
 	"github.com/bojieli/queqiao/internal/classifier"
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/limiter"
 	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/protocol"
@@ -28,8 +29,8 @@ const completedSessionLinger = 90 * time.Second
 
 type ServerConfig struct {
 	ListenAddr        string
-	Certificate       tls.Certificate
-	Secret            []byte
+	Credentials       identity.ServerCredentials
+	Enrollment        *identity.EnrollmentService
 	MaxPayload        uint32
 	ChunkSize         int
 	HandshakeTimeout  time.Duration
@@ -71,20 +72,16 @@ type ServerConfig struct {
 
 type Server struct {
 	cfg              ServerConfig
-	replay           *session.ReplayGuard
 	semaphore        chan struct{}
 	connections      chan struct{}
+	enrollments      chan struct{}
 	sessionsMu       sync.RWMutex
 	sessions         map[[16]byte]*serverFlow
+	accountMu        sync.Mutex
+	accountSessions  map[string]int
 	maxObservedLanes atomic.Int64
 	budget           *limiter.Budget
 	metrics          *metrics.Registry
-	// quicCapabilities is kept on the server instance so capability negotiation
-	// is consistent for every stream on a connection. It is initialized to the
-	// current capability set; tests may set it to zero to model an older peer.
-	quicCapabilities uint64
-	tcpCapabilities  uint64
-	quicFastStreams  atomic.Bool
 	// udpRelays holds the relay sockets of UDP associations whose lane died,
 	// so the replacement association keeps the source address the destination
 	// has been talking to.
@@ -93,6 +90,7 @@ type Server struct {
 
 type serverFlow struct {
 	flow        *multipathFlow
+	principal   identity.Principal
 	maxLanes    int
 	tcpMaxLanes int
 	tcpMode     bool
@@ -101,17 +99,11 @@ type serverFlow struct {
 	mu          sync.Mutex
 }
 
-// quicAuthState records authentication of the QUIC connection itself. The
-// first pooled stream still uses the normal nonce/HMAC Hello exchange. Once
-// that succeeds, later streams may use TypeOpenFast; they remain isolated by
-// their own random session and flow IDs. Dedicated lanes never share this
-// state with another QUIC connection.
-// quicAuthState is per accepted QUIC connection. flows counts the sessions
-// currently multiplexed on it, which is what tells a bulk flow whether keeping
-// its payload off the shared control lane protects anything.
+// quicAuthState carries the immutable device principal established by the
+// mutual TLS handshake. flows counts sessions multiplexed on the connection.
 type quicAuthState struct {
-	authenticated atomic.Bool
-	flows         atomic.Int64
+	principal identity.Principal
+	flows     atomic.Int64
 }
 
 // shared reports whether more than one flow is using this connection.
@@ -164,9 +156,9 @@ func (s *serverFlow) addLane(lane *mpLane) error {
 	return nil
 }
 
-func newServerFlow(flow *multipathFlow, initialKind TransportKind, tcpMaxLanes int) *serverFlow {
+func newServerFlow(flow *multipathFlow, principal identity.Principal, initialKind TransportKind, tcpMaxLanes int) *serverFlow {
 	serverSession := &serverFlow{
-		flow: flow, maxLanes: serverLaneBudget(flow.reserveControlLane),
+		flow: flow, principal: principal, maxLanes: serverLaneBudget(flow.reserveControlLane),
 		tcpMaxLanes: tcpMaxLanes,
 	}
 	if initialKind == TransportTCP {
@@ -181,11 +173,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.ListenAddr == "" {
 		return nil, errors.New("server listen address is required")
 	}
-	if len(cfg.Certificate.Certificate) == 0 || cfg.Certificate.PrivateKey == nil {
-		return nil, errors.New("server TLS certificate and key are required")
-	}
-	if len(cfg.Secret) < 16 {
-		return nil, errors.New("server secret must contain at least 16 bytes")
+	if err := cfg.Credentials.Validate(); err != nil {
+		return nil, fmt.Errorf("server identity: %w", err)
 	}
 	if cfg.MaxPayload == 0 || cfg.MaxPayload > protocol.DefaultMaxPayload {
 		cfg.MaxPayload = 256 * 1024
@@ -256,21 +245,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.EnableTCP = true
 	}
 	server := &Server{
-		cfg:              cfg,
-		replay:           session.NewReplayGuard(10*time.Minute, cfg.MaxSessions*4),
-		semaphore:        make(chan struct{}, cfg.MaxSessions),
-		connections:      make(chan struct{}, cfg.MaxSessions),
-		sessions:         make(map[[16]byte]*serverFlow),
-		budget:           limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
-		metrics:          cfg.Metrics,
-		quicCapabilities: session.CapabilityFastStreams | session.CapabilityReserveControl | session.CapabilityFastLaneJoin | session.CapabilityAckRanges | session.CapabilityUDPResume,
-		tcpCapabilities:  session.CapabilityAckRanges | session.CapabilityUDPResume,
-		udpRelays:        newUDPRelayStore(),
+		cfg:             cfg,
+		semaphore:       make(chan struct{}, cfg.MaxSessions),
+		connections:     make(chan struct{}, cfg.MaxSessions),
+		enrollments:     make(chan struct{}, min(cfg.MaxSessions, 64)),
+		sessions:        make(map[[16]byte]*serverFlow),
+		accountSessions: make(map[string]int),
+		budget:          limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
+		metrics:         cfg.Metrics,
+		udpRelays:       newUDPRelayStore(),
 	}
-	if cfg.TCPFallbackLanes > 1 {
-		server.tcpCapabilities |= session.CapabilityTCPStriping
-	}
-	server.quicFastStreams.Store(true)
 	return server, nil
 }
 
@@ -280,6 +264,7 @@ func (s *Server) Metrics() *metrics.Registry { return s.metrics }
 func (s *Server) Serve(ctx context.Context) error {
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go s.watchAuthorizationStore(serveCtx)
 	errCh := make(chan error, 2)
 	count := 0
 	if s.cfg.EnableTCP {
@@ -299,6 +284,24 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+func (s *Server) watchAuthorizationStore(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			changed, err := s.cfg.Credentials.Store.Refresh()
+			if err != nil {
+				s.cfg.Logger.Error("authorization refresh failed; retaining last known-good state", "error", err)
+			} else if changed {
+				s.cfg.Logger.Info("authorization state reloaded")
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (s *Server) serveTCP(ctx context.Context) error {
@@ -323,10 +326,9 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener) error
 		_ = listener.Close()
 	}()
 
-	tlsConfig := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{s.cfg.Certificate},
-		NextProtos:   []string{defaultALPN},
+	tlsConfig, err := identity.ServerTLSConfig(s.cfg.Credentials, defaultALPN, s.cfg.Enrollment != nil)
+	if err != nil {
+		return fmt.Errorf("configure server TLS identity: %w", err)
 	}
 	var wg sync.WaitGroup
 	s.cfg.Logger.Info("remote TLS/TCP listener ready", "address", listener.Addr().String())
@@ -365,10 +367,31 @@ func (s *Server) handleTCP(ctx context.Context, conn *tls.Conn) {
 		s.cfg.Logger.Debug("remote TLS handshake failed", "error", err)
 		return
 	}
-	if conn.ConnectionState().NegotiatedProtocol != defaultALPN {
+	state := conn.ConnectionState()
+	if state.NegotiatedProtocol == identity.EnrollmentALPN {
+		if s.cfg.Enrollment != nil && s.admitEnrollment() {
+			defer s.releaseEnrollment()
+			_ = s.cfg.Enrollment.Serve(conn)
+		}
 		return
 	}
-	s.handleSession(ctx, conn, nil)
+	if state.NegotiatedProtocol == identity.RenewalALPN {
+		if s.cfg.Enrollment != nil && s.admitEnrollment() {
+			defer s.releaseEnrollment()
+			if principal, err := identity.PrincipalFromTLS(state); err == nil {
+				_ = s.cfg.Enrollment.Renew(conn, principal)
+			}
+		}
+		return
+	}
+	if state.NegotiatedProtocol != defaultALPN {
+		return
+	}
+	principal, err := identity.PrincipalFromTLS(state)
+	if err != nil {
+		return
+	}
+	s.handleSession(ctx, conn, principal, nil)
 }
 
 func (s *Server) serveQUIC(ctx context.Context) error {
@@ -381,7 +404,12 @@ func (s *Server) serveQUIC(ctx context.Context) error {
 
 // ServePacketConn runs the QUIC listener on an already-bound UDP socket.
 func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn) error {
-	listener, err := quic.Listen(packetConn, quicServerTLSConfig(s.cfg.Certificate), quicServerConfig(
+	tlsConfig, err := identity.ServerTLSConfig(s.cfg.Credentials, defaultALPN, s.cfg.Enrollment != nil)
+	if err != nil {
+		_ = packetConn.Close()
+		return fmt.Errorf("configure server TLS identity: %w", err)
+	}
+	listener, err := quic.Listen(packetConn, tlsConfig, quicServerConfig(
 		flowWindows{stream: s.cfg.StreamReceiveWindow, connection: s.cfg.ConnectionReceiveWindow}))
 	if err != nil {
 		_ = packetConn.Close()
@@ -434,6 +462,17 @@ func (s *Server) admitConnection() bool {
 
 func (s *Server) releaseConnection() { <-s.connections }
 
+func (s *Server) admitEnrollment() bool {
+	select {
+	case s.enrollments <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseEnrollment() { <-s.enrollments }
+
 func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	var wg sync.WaitGroup
 	// Close the shared connection before waiting for stream handlers. This
@@ -445,16 +484,47 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 		kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
 		adaptiveMinBytesPerSec: s.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: s.cfg.AdaptiveMaxBytesSec,
 	})
-	if conn.ConnectionState().TLS.NegotiatedProtocol != defaultALPN {
+	state := conn.ConnectionState().TLS
+	if state.NegotiatedProtocol == identity.EnrollmentALPN {
+		if s.cfg.Enrollment == nil || !s.admitEnrollment() {
+			return
+		}
+		defer s.releaseEnrollment()
+		stream, err := acceptQUICStream(ctx, conn, controller)
+		if err == nil {
+			_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
+			_ = s.cfg.Enrollment.Serve(stream)
+			_ = stream.Close()
+		}
 		return
 	}
-	auth := &quicAuthState{}
-	// A single QUIC connection is a bounded stream pool. Its first stream
-	// authenticates the connection; later capable streams use OPEN_FAST. Every
-	// stream still owns an independent random logical-flow identity, while QUIC
-	// supplies one shared congestion controller and packet-loss state. This is
-	// the same multiplexing property that makes TUIC effective for short flows,
-	// without sharing application/session framing state.
+	if state.NegotiatedProtocol == identity.RenewalALPN {
+		if s.cfg.Enrollment == nil || !s.admitEnrollment() {
+			return
+		}
+		defer s.releaseEnrollment()
+		principal, err := identity.PrincipalFromTLS(state)
+		if err != nil {
+			return
+		}
+		stream, err := acceptQUICStream(ctx, conn, controller)
+		if err == nil {
+			_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
+			_ = s.cfg.Enrollment.Renew(stream, principal)
+			_ = stream.Close()
+		}
+		return
+	}
+	if state.NegotiatedProtocol != defaultALPN {
+		return
+	}
+	principal, err := identity.PrincipalFromTLS(state)
+	if err != nil {
+		return
+	}
+	auth := &quicAuthState{principal: principal}
+	// Mutual TLS authenticates the whole QUIC connection before any stream is
+	// accepted. Every stream therefore begins directly with OPEN or JOIN.
 	dispatch := func(lane streamConn) bool {
 		select {
 		case s.semaphore <- struct{}{}:
@@ -462,7 +532,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 			go func(lane streamConn) {
 				defer wg.Done()
 				defer func() { <-s.semaphore }()
-				s.handleSession(ctx, lane, auth)
+				s.handleSession(ctx, lane, principal, auth)
 			}(lane)
 			return true
 		default:
@@ -489,154 +559,61 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	}
 }
 
-func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicAuthState) {
+func (s *Server) handleSession(ctx context.Context, conn streamConn, principal identity.Principal, auth *quicAuthState) {
 	defer conn.Close()
 	if auth != nil {
 		auth.flows.Add(1)
 		defer auth.flows.Add(-1)
 	}
 	sessionStarted := time.Now()
-	authFinished := time.Time{}
-	openFinished := time.Time{}
 	_ = conn.SetDeadline(time.Now().Add(handshakeBound(conn, s.cfg.HandshakeTimeout)))
 	fc := newFrameConn(conn, s.cfg.MaxPayload)
 	fc.setPacketsOnStream(s.cfg.UDPOnStream)
-	var (
-		hello      session.Hello
-		sessionID  [16]byte
-		laneID     uint64
-		open       protocol.Frame
-		fastOpen   bool
-		helloReady bool
-	)
-	// A capable pooled connection can authenticate a new stream with one
-	// OPEN_FAST frame. If the stream starts with the legacy HELLO frame, retain
-	// full backward compatibility with older clients and peers.
-	if auth != nil && auth.authenticated.Load() {
-		first, readErr := fc.Read()
-		if readErr != nil {
-			// Silence here is how this hid: the stream is closed on the way
-			// out and the peer sees only EOF, with nothing on either side
-			// saying the handshake ran out of time.
-			s.cfg.Logger.Debug("pooled stream handshake failed", "error", readErr)
-			return
-		}
-		if first.Header.Type == protocol.TypeOpenJoinFast {
-			if s.quicCapabilities&session.CapabilityFastLaneJoin == 0 {
-				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "fast lane join unavailable")})
-				return
-			}
-			if session.IsZeroSessionID(first.Header.SessionID) || first.Header.FlowID == 0 || first.Header.Sequence != 0 || first.Header.Flags != protocol.FlagLaneJoin || len(first.Payload) != 8 {
-				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid fast lane join")})
-				return
-			}
-			laneID := binary.BigEndian.Uint64(first.Payload)
-			if laneID == 0 {
-				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid fast lane join")})
-				return
-			}
-			s.handleLaneJoinOpen(ctx, conn, fc, first.Header.SessionID, laneID, first)
-			return
-		} else if first.Header.Type == protocol.TypeOpenFast {
-			if !s.quicFastStreams.Load() {
-				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "fast streams unavailable")})
-				return
-			}
-			if session.IsZeroSessionID(first.Header.SessionID) || first.Header.FlowID == 0 || first.Header.Sequence != 0 {
-				_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: first.Header.SessionID, FlowID: first.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "invalid fast flow open")})
-				return
-			}
-			fastOpen = true
-			sessionID = first.Header.SessionID
-			open = first
-			laneID = 0
-			authFinished = time.Now()
-			openFinished = authFinished
-		} else {
-			hello, readErr = serverAuthenticateHelloFrameCallback(fc, s.cfg.Secret, s.replay, time.Now(), s.quicCapabilities, &first, func(h session.Hello) {
-				if (h.Kind == session.HelloNew || h.Kind == session.HelloPool) && h.LaneID == 0 {
-					auth.authenticated.Store(true)
-				}
-			})
-			if readErr != nil {
-				s.cfg.Logger.Warn("session authentication failed", "error", readErr)
-				return
-			}
-			helloReady = true
-			authFinished = time.Now()
-		}
+	open, err := fc.Read()
+	if err != nil {
+		s.cfg.Logger.Debug("read authenticated stream open", "error", err)
+		return
 	}
-	if !fastOpen && !helloReady {
-		var err error
-		if auth != nil {
-			hello, err = serverAuthenticateHelloFrameCallback(fc, s.cfg.Secret, s.replay, time.Now(), s.quicCapabilities, nil, func(h session.Hello) {
-				if (h.Kind == session.HelloNew || h.Kind == session.HelloPool) && h.LaneID == 0 {
-					auth.authenticated.Store(true)
-				}
-			})
-		} else {
-			// A TLS/TCP lane advertises only transport-independent recovery
-			// and explicitly TCP-scoped striping. QUIC pool capabilities do
-			// not belong on this connection.
-			hello, err = serverAuthenticateHelloWithCapabilities(fc, s.cfg.Secret, s.replay, time.Now(),
-				s.tcpCapabilities)
-		}
-		if err != nil {
-			s.cfg.Logger.Warn("session authentication failed", "error", err)
+	// A QUIC connection may outlive a revocation. Re-authorize every new
+	// stream so a disabled device cannot open flows, probes, or replacement
+	// lanes merely because its original TLS handshake predates the change.
+	if _, err := s.cfg.Credentials.Store.Authorize(principal, time.Now()); err != nil {
+		return
+	}
+	if open.Header.Type == protocol.TypeProbe {
+		s.handlePathProbe(fc, open)
+		return
+	}
+	if open.Header.Type == protocol.TypeJoin {
+		if session.IsZeroSessionID(open.Header.SessionID) || open.Header.FlowID == 0 || open.Header.Sequence != 0 || open.Header.Flags != 0 || len(open.Payload) != 8 {
+			_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: open.Header.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join")})
 			return
 		}
-		authFinished = time.Now()
-	}
-	if !fastOpen {
-		if hello.Kind == session.HelloPool {
-			// Pool bootstrap is connection-scoped and creates no flow/session
-			// entry. The authenticated QUIC connection may now carry only
-			// capability-gated fast operations on later streams.
-			if auth == nil || hello.LaneID != 0 || s.quicCapabilities&session.CapabilityFastLaneJoin == 0 {
-				return
-			}
-			_ = conn.SetDeadline(time.Time{})
+		laneID := binary.BigEndian.Uint64(open.Payload)
+		if laneID == 0 {
+			_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: open.Header.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join")})
 			return
 		}
-		if hello.Kind == session.HelloJoin {
-			s.handleLaneJoin(ctx, conn, fc, hello)
-			return
-		}
-		if hello.Kind != session.HelloNew || hello.LaneID != 0 {
-			return
-		}
-		sessionID = hello.SessionID
-		laneID = hello.LaneID
-		if auth != nil {
-			auth.authenticated.Store(true)
-		}
-		var err error
-		open, err = fc.Read()
-		if err != nil {
-			return
-		}
-		openFinished = time.Now()
+		s.handleLaneJoinOpen(ctx, conn, fc, principal, open.Header.SessionID, laneID, open)
+		return
 	}
-	if authFinished.IsZero() {
-		authFinished = time.Now()
-	}
-	if openFinished.IsZero() {
-		openFinished = authFinished
-	}
-	expectedOpenType := protocol.TypeOpen
-	if fastOpen {
-		expectedOpenType = protocol.TypeOpenFast
-	}
-	if open.Header.Type != expectedOpenType || open.Header.SessionID != sessionID || open.Header.FlowID == 0 || open.Header.Sequence != 0 {
+	sessionID := open.Header.SessionID
+	laneID := uint64(0)
+	if open.Header.Type != protocol.TypeOpen || session.IsZeroSessionID(sessionID) || open.Header.FlowID == 0 || open.Header.Sequence != 0 {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "invalid flow open")})
 		return
 	}
+	if err := s.acquireAccountSession(principal); err != nil {
+		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetFlowLimit, "account session unavailable")})
+		return
+	}
+	defer s.releaseAccountSession(principal.AccountID)
 	if session.IsUDPAssociation(open.Payload) {
-		s.handleUDPAssociation(ctx, conn, fc, sessionID, open.Header.FlowID, nil, false)
+		s.handleUDPAssociation(ctx, conn, fc, principal, sessionID, open.Header.FlowID, nil, false)
 		return
 	}
 	if token, resumable := session.DecodeUDPResumeOpen(open.Payload); resumable {
-		s.handleUDPAssociation(ctx, conn, fc, sessionID, open.Header.FlowID, token, true)
+		s.handleUDPAssociation(ctx, conn, fc, principal, sessionID, open.Header.FlowID, token, true)
 		return
 	}
 	destination, err := session.DecodeDestination(open.Payload)
@@ -651,19 +628,17 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		s.cfg.Logger.Debug("destination dial failed", "error", err)
 		return
 	}
-	s.cfg.Logger.Debug("remote flow opened", "transport", transportKindForConn(conn), "authentication_duration", authFinished.Sub(sessionStarted), "open_duration", openFinished.Sub(authFinished), "destination_dial_duration", time.Since(destinationDialStarted), "total_duration", time.Since(sessionStarted))
+	s.cfg.Logger.Debug("remote flow opened", "transport", transportKindForConn(conn), "account", principal.AccountID, "device", principal.DeviceID, "open_duration", destinationDialStarted.Sub(sessionStarted), "destination_dial_duration", time.Since(destinationDialStarted), "total_duration", time.Since(sessionStarted))
 	defer destinationConn.Close()
 	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics, s.cfg.Logger)
-	// The server consumes range acknowledgements from the client. It advertised
-	// the capability in HelloOK, so a client that sends them is one that read
-	// that advertisement.
+	// Wire version 4 requires range acknowledgements on both endpoints.
 	flow.ackRanges.Store(true)
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0
 	flow.controlLaneShared = auth.shared
 	initialKind := transportKindForConn(conn)
-	serverSession := newServerFlow(flow, initialKind, s.cfg.TCPFallbackLanes)
+	serverSession := newServerFlow(flow, principal, initialKind, s.cfg.TCPFallbackLanes)
 	if err := serverSession.addLane(&mpLane{id: laneID, kind: initialKind, fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
 		flow.closeAll()
 		return
@@ -676,6 +651,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 	}
 	registered := true
 	go s.watchFlowCompletion(ctx, sessionID, serverSession)
+	go s.watchAuthorization(ctx, serverSession)
 	defer func() {
 		if registered {
 			s.cfg.Logger.Debug("session released with its flow", "lanes", serverSession.flow.laneCount())
@@ -723,6 +699,39 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, auth *quicA
 		"class", classifier.Class(flow.class.Load()))
 }
 
+const (
+	maxPathProbeFrames = 128
+	maxPathProbeBytes  = 128 * 1024
+)
+
+// handlePathProbe accepts only a small, destination-free sequence. Transport
+// acknowledgements are the response; no application frame is reflected, so
+// the probe cannot be used as an amplifier or destination oracle.
+func (s *Server) handlePathProbe(fc *frameConn, first protocol.Frame) {
+	frames, bytes := 0, 0
+	frame := first
+	sessionID := first.Header.SessionID
+	for {
+		if frame.Header.Type != protocol.TypeProbe || session.IsZeroSessionID(frame.Header.SessionID) ||
+			frame.Header.SessionID != sessionID ||
+			frame.Header.FlowID != 0 || frame.Header.Sequence != uint64(frames) || frame.Header.Flags != 0 ||
+			frame.Header.Class != protocol.ClassNew || len(frame.Payload) == 0 || len(frame.Payload) > 1200 ||
+			bytes+len(frame.Payload) > maxPathProbeBytes {
+			return
+		}
+		frames++
+		bytes += len(frame.Payload)
+		if frames >= maxPathProbeFrames || bytes >= maxPathProbeBytes {
+			return
+		}
+		next, err := fc.Read()
+		if err != nil {
+			return
+		}
+		frame = next
+	}
+}
+
 // watchFlowCompletion closes a correctness gap between the application FIN
 // exchange and the flow runner's final goroutine return. Both direction FIN
 // sequences prove that no additional payload can be delivered, so retaining
@@ -764,32 +773,16 @@ func (s *Server) retainCompletedSession(sessionID [16]byte, serverSession *serve
 	})
 }
 
-func (s *Server) handleLaneJoin(ctx context.Context, conn streamConn, fc *frameConn, hello session.Hello) {
-	if hello.LaneID == 0 {
-		return
-	}
-	open, err := fc.Read()
-	if err != nil {
-		return
-	}
-	if open.Header.Type != protocol.TypeOpen || open.Header.SessionID != hello.SessionID || open.Header.FlowID == 0 || open.Header.Sequence != 0 || open.Header.Flags != 0 || len(open.Payload) != 0 {
-		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: hello.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join")})
-		return
-	}
-	s.handleLaneJoinOpen(ctx, conn, fc, hello.SessionID, hello.LaneID, open)
-}
-
-// handleLaneJoinOpen is shared by the legacy HELLO_JOIN + OPEN exchange and
-// the capability-gated one-frame fast join. Authentication and exact wire
-// validation have completed before entry; this function owns the common
-// session lookup, lane admission, tombstone replay, and lifetime handling.
-func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *frameConn, sessionID [16]byte, laneID uint64, open protocol.Frame) {
+// handleLaneJoinOpen runs only after mutual TLS and exact JOIN validation. It
+// additionally binds the new lane to the principal that created the session;
+// session and flow IDs are routing identifiers, never bearer credentials.
+func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *frameConn, principal identity.Principal, sessionID [16]byte, laneID uint64, open protocol.Frame) {
 	if session.IsZeroSessionID(sessionID) || laneID == 0 || open.Header.FlowID == 0 {
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join identity")})
 		return
 	}
 	serverSession := s.lookupSession(sessionID)
-	if serverSession == nil || serverSession.flow.flowID != open.Header.FlowID {
+	if serverSession == nil || serverSession.flow.flowID != open.Header.FlowID || !samePrincipal(serverSession.principal, principal) {
 		// A rescue arriving after the session is gone is the failure mode that
 		// matters most on a lossy path, and it used to be silent on this side.
 		s.cfg.Logger.Debug("lane join refused: unknown session", "lane", laneID, "known", serverSession != nil)
@@ -869,6 +862,56 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 	select {
 	case <-serverSession.flow.doneChan():
 	case <-ctx.Done():
+	}
+}
+
+func samePrincipal(a, b identity.Principal) bool {
+	return a.ProviderID == b.ProviderID && a.AccountID == b.AccountID && a.DeviceID == b.DeviceID
+}
+
+func (s *Server) acquireAccountSession(principal identity.Principal) error {
+	authorization, err := s.cfg.Credentials.Store.Authorize(principal, time.Now())
+	if err != nil {
+		return err
+	}
+	s.accountMu.Lock()
+	defer s.accountMu.Unlock()
+	active := s.accountSessions[principal.AccountID]
+	if authorization.Account.MaxSessions > 0 && active >= authorization.Account.MaxSessions {
+		return errors.New("account session limit reached")
+	}
+	s.accountSessions[principal.AccountID] = active + 1
+	return nil
+}
+
+func (s *Server) releaseAccountSession(accountID string) {
+	s.accountMu.Lock()
+	defer s.accountMu.Unlock()
+	if active := s.accountSessions[accountID]; active <= 1 {
+		delete(s.accountSessions, accountID)
+	} else {
+		s.accountSessions[accountID] = active - 1
+	}
+}
+
+// watchAuthorization applies revocation and account expiry to already-open
+// flows. TLS prevents new use immediately; this watcher bounds an existing
+// connection's remaining lifetime without a CRL or server restart.
+func (s *Server) watchAuthorization(ctx context.Context, flow *serverFlow) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if _, err := s.cfg.Credentials.Store.Authorize(flow.principal, time.Now()); err != nil {
+				flow.flow.closeAll()
+				return
+			}
+		case <-flow.flow.doneChan():
+			return
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 

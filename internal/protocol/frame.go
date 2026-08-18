@@ -14,18 +14,10 @@ const (
 	// Version is the framing this build speaks, and the only thing that stops
 	// two builds that disagree from appearing to work.
 	//
-	// It covers more than this header. Version 3 is version 2's frames carried
-	// over a sliding-window code rather than a block code, and the change is
-	// invisible here -- the frames are identical, and only the datagrams
-	// underneath them differ. A version 3 sender against a version 2 receiver
-	// would therefore complete its handshake, send bulk over datagrams the peer
-	// parses as shards, and have every frame silently dropped as unparseable
-	// while the session re-issued them forever.
-	//
-	// So anything that changes what is on the wire, at any layer this protocol
-	// carries, changes this. A mismatch then fails on the first frame, which is
-	// a diagnosable failure rather than a stalled flow.
-	Version           = byte(3)
+	// Version 4 removes application-level shared-secret authentication. Every
+	// connection is authenticated by provider-issued mutual TLS before a frame
+	// is accepted, and streams begin directly with OPEN or JOIN.
+	Version           = byte(4)
 	HeaderSize        = 46
 	DefaultMaxPayload = 1 << 20
 	// FlagFin marks that the sender has reached EOF for the direction carried
@@ -42,39 +34,28 @@ const (
 	// a half-close. It lets the peer release a keep-alive destination when the
 	// local socket was already closed after consuming its response.
 	FlagCloseAbort uint16 = 1 << 4
-	// FlagReserveControl is valid only on OPEN / OPEN_FAST. It asks a capable
-	// peer to keep lane 0 as a control/rescue lane once an independent bulk
-	// lane is attached. Older peers never see this flag because it is gated by
-	// the negotiated control-lane capability.
+	// FlagReserveControl is valid only on OPEN. It asks the peer to keep lane 0
+	// as a control/rescue lane once an independent bulk lane is attached.
 	FlagReserveControl uint16 = 1 << 5
-	// FlagLaneJoin is valid only on OPEN_JOIN_FAST. The lane identifier is
-	// carried in the bounded payload after the authenticated session/flow ID.
-	FlagLaneJoin uint16 = 1 << 6
 	// FlagAckRanges is valid only on ACK. The payload carries byte ranges the
 	// receiver already holds out of order, beyond the cumulative sequence.
 	//
 	// A striped flow's sender otherwise learns only the contiguous receive
 	// point, which sits behind whatever the slowest lane has not delivered, so
 	// its retention window has to cover the whole reorder span. It is
-	// capability-gated: a peer that does not advertise support never sees it.
+	// Protocol v4 requires both peers to understand it.
 	FlagAckRanges uint16 = 1 << 7
-	knownFlags           = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl | FlagLaneJoin | FlagAckRanges
+	knownFlags           = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl | FlagAckRanges
 )
 
 type Type byte
 
-// Removed in version 2: WINDOW, PING and PONG. All three were specified and
-// none was ever sent. WINDOW described a receiver-advertised byte limit, which
-// QUIC's own stream and connection flow control already provides and which the
-// scheduler bounds again above it; PING and PONG described a liveness probe
-// that QUIC's keepalive and idle timeout already perform. A frame type that
-// exists only in the document is worse than no frame type: it reads as a safety
-// property the implementation does not have.
 const (
-	TypeHello Type = iota + 1
-	TypeHelloOK
-	TypeOpen
+	TypeOpen Type = iota + 1
 	TypeOpenOK
+	// TypeJoin attaches an independently mutually authenticated lane to an
+	// existing flow. Its payload is exactly one non-zero big-endian lane ID.
+	TypeJoin
 	TypeData
 	TypeAck
 	TypeClose
@@ -83,18 +64,13 @@ const (
 	// distinct from TypeData: packet payloads preserve datagram boundaries and
 	// are not inserted into the byte-stream reassembler.
 	TypePacket
-	// TypeOpenFast opens a new logical flow on a QUIC connection whose first
-	// stream has already completed the PSK handshake. It is accepted only by
-	// the connection-level authenticated stream pool; independent lanes and
-	// TLS/TCP continue to use TypeHello followed by TypeOpen.
-	TypeOpenFast
-	// TypeOpenJoinFast attaches a stream on an authenticated secondary QUIC
-	// pool to an existing logical flow. Its payload is exactly one big-endian
-	// uint64 lane ID.
-	TypeOpenJoinFast
+	// TypeProbe carries bounded discard-only padding used after an uplink
+	// change to measure loss before a user's first flow. It is authenticated by
+	// TLS and never names or opens a destination.
+	TypeProbe
 )
 
-func (t Type) valid() bool { return t >= TypeHello && t <= TypeOpenJoinFast }
+func (t Type) valid() bool { return t >= TypeOpen && t <= TypeProbe }
 
 type Class byte
 
@@ -134,11 +110,7 @@ func (e UnsupportedVersionError) Error() string {
 }
 
 func reserveControlFlagValid(t Type, flags uint16) bool {
-	return flags&FlagReserveControl == 0 || t == TypeOpen || t == TypeOpenFast
-}
-
-func laneJoinFlagValid(t Type, flags uint16) bool {
-	return flags&FlagLaneJoin == 0 || t == TypeOpenJoinFast
+	return flags&FlagReserveControl == 0 || t == TypeOpen
 }
 
 func ackRangesFlagValid(t Type, flags uint16) bool {
@@ -200,7 +172,7 @@ func (h Header) Encode(dst []byte) error {
 	if len(dst) < HeaderSize {
 		return io.ErrShortBuffer
 	}
-	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk || h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !laneJoinFlagValid(h.Type, h.Flags) || !ackRangesFlagValid(h.Type, h.Flags) {
+	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk || h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !ackRangesFlagValid(h.Type, h.Flags) {
 		return errors.New("invalid frame header")
 	}
 	if uint64(h.PayloadLen) > DefaultMaxPayload {
@@ -224,7 +196,7 @@ func (h Header) Validate(maxPayload uint32) error {
 	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk {
 		return errors.New("invalid frame header")
 	}
-	if h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !laneJoinFlagValid(h.Type, h.Flags) || !ackRangesFlagValid(h.Type, h.Flags) {
+	if h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !ackRangesFlagValid(h.Type, h.Flags) {
 		return errors.New("unknown frame flags")
 	}
 	if maxPayload == 0 || maxPayload > DefaultMaxPayload {

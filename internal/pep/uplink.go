@@ -56,7 +56,7 @@ func (c *Client) currentUplink() string {
 		}
 		return ip.String()
 	}
-	conn, err := net.Dial("udp", c.cfg.RemoteAddr)
+	conn, err := (&net.Dialer{Control: c.cfg.SocketControl}).Dial("udp", c.cfg.RemoteAddr)
 	if err != nil {
 		return ""
 	}
@@ -127,13 +127,10 @@ func (c *Client) prewarmPath(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	// The hello is sent and not waited for. A prewarm has nobody waiting on
-	// it and nothing to authenticate for -- it opens no flow -- so waiting for
-	// the acknowledgement would only expose it to a timeout on exactly the
-	// paths it exists to measure. The connection it leaves behind is pooled,
-	// so the first real flow inherits the handshake as well as the
-	// measurement.
-	lane, err := c.dialLaneMode(warm, TransportQUIC, sessionID, 0, session.HelloNew, c.cfg.EnableQUICPool, true)
+	// Mutual TLS completes before the stream is returned. The connection stays
+	// pooled, so the first real flow inherits both the handshake and the path
+	// measurement without an application-level authentication exchange.
+	lane, err := c.dialLaneMode(warm, TransportQUIC, sessionID, 0, c.cfg.EnableQUICPool)
 	if err != nil {
 		c.cfg.Logger.Debug("path prewarm failed", "error", err)
 		return
@@ -181,8 +178,8 @@ func (c *Client) probePath(lane *authenticatedLane) {
 	for sent := 0; sent < pathProbePackets && time.Now().Before(deadline); sent++ {
 		frame := protocol.Frame{
 			Header: protocol.Header{
-				Version: protocol.Version, Type: protocol.TypeData,
-				SessionID: lane.sessionID, FlowID: probeFlowID, Class: protocol.ClassNew,
+				Version: protocol.Version, Type: protocol.TypeProbe,
+				SessionID: lane.sessionID, FlowID: probeFlowID, Sequence: uint64(sent), Class: protocol.ClassNew,
 			},
 			Payload: payload,
 		}

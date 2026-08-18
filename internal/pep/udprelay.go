@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/session"
 )
 
@@ -21,8 +22,9 @@ import (
 // preserved is the datagrams in flight when the lane died: those are lost, and
 // over the datagram substrate that is what a UDP packet is allowed to be.
 type retainedRelay struct {
-	conn    *net.UDPConn
-	expires time.Time
+	conn      *net.UDPConn
+	expires   time.Time
+	principal identity.Principal
 }
 
 // udpRelayStore holds relays waiting to be reclaimed.
@@ -86,7 +88,7 @@ func newUDPResumeToken() ([session.UDPResumeTokenSize]byte, error) {
 // request rather than an arbitrary victim when it is full: refusing to retain
 // degrades to today's behaviour, while evicting someone else's live relay
 // breaks an association that was working.
-func (s *udpRelayStore) retain(token [session.UDPResumeTokenSize]byte, conn *net.UDPConn) {
+func (s *udpRelayStore) retain(token [session.UDPResumeTokenSize]byte, principal identity.Principal, conn *net.UDPConn) {
 	if s == nil || conn == nil {
 		return
 	}
@@ -98,7 +100,7 @@ func (s *udpRelayStore) retain(token [session.UDPResumeTokenSize]byte, conn *net
 		_ = conn.Close()
 		return
 	}
-	s.relays[token] = retainedRelay{conn: conn, expires: now.Add(s.grace)}
+	s.relays[token] = retainedRelay{conn: conn, expires: now.Add(s.grace), principal: principal}
 	start := !s.sweeping
 	s.sweeping = true
 	s.mu.Unlock()
@@ -139,7 +141,7 @@ func (s *udpRelayStore) sweep() {
 // The comparison is constant time. The map lookup that finds the entry is not,
 // and cannot be, but a peer that has to guess sixteen random bytes learns
 // nothing useful from either.
-func (s *udpRelayStore) claim(token []byte) *net.UDPConn {
+func (s *udpRelayStore) claim(token []byte, principal identity.Principal) *net.UDPConn {
 	if s == nil || len(token) != session.UDPResumeTokenSize {
 		return nil
 	}
@@ -154,7 +156,7 @@ func (s *udpRelayStore) claim(token []byte) *net.UDPConn {
 		return nil
 	}
 	delete(s.relays, key)
-	if subtle.ConstantTimeCompare(key[:], token) != 1 || now.After(held.expires) {
+	if subtle.ConstantTimeCompare(key[:], token) != 1 || now.After(held.expires) || !samePrincipal(held.principal, principal) {
 		_ = held.conn.Close()
 		return nil
 	}

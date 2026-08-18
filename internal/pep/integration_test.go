@@ -3,63 +3,81 @@ package pep
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
-	"math/big"
 	"net"
 	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/protocol"
 	"github.com/bojieli/queqiao/internal/socks5"
 )
 
-func testCertificate(t *testing.T) (tlsCertificate tls.Certificate, roots *x509.CertPool) {
+func testCertificate(t *testing.T) (identity.ServerCredentials, identity.ClientCredentials) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	now := time.Now()
+	provider, err := identity.InitProvider(t.TempDir()+"/provider", "test provider", "127.0.0.1:1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "queqiao.test"},
-		DNSNames:     []string{"queqiao.test"},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	account, err := provider.Store.AddAccount("test account", time.Time{}, 0, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	_, invitation, err := provider.CreateInvitation(account.ID, time.Hour, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, device, err := provider.Store.ConsumeInvite(invitation.Token, "test device", publicKey, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM, err := provider.IssueDevice(account.ID, device.ID, publicKey, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-	tlsCertificate, err = tls.X509KeyPair(certPEM, keyPEM)
+	deviceCertificate, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots = x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(certPEM) {
-		t.Fatal("append test certificate")
+	client := identity.ClientCredentials{
+		ProviderID: provider.Metadata.ProviderID, GatewayID: provider.Metadata.GatewayID,
+		Certificate: deviceCertificate, Root: provider.RootCert, RootPin: provider.Metadata.RootPin,
 	}
-	return tlsCertificate, roots
+	return provider.ServerCredentials(), client
+}
+
+func discardDestination(listener net.Listener) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			_, _ = io.Copy(io.Discard, conn)
+			_ = conn.Close()
+		}()
+	}
 }
 
 func TestTLSOneLaneSOCKSEndToEnd(t *testing.T) {
@@ -82,10 +100,9 @@ func TestTLSOneLaneSOCKSEndToEnd(t *testing.T) {
 	}()
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
+		ListenAddr: "127.0.0.1:0", Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 	})
 	if err != nil {
@@ -96,8 +113,7 @@ func TestTLSOneLaneSOCKSEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Logger: logger,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: serverListener.Addr().String(), Credentials: roots, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +215,6 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 	}()
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	var serverListener net.Listener
 	var serverPacketConn net.PacketConn
@@ -213,7 +228,7 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 	}
 	serverAddr := serverListenerAddr(serverListener, serverPacketConn)
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverAddr, Certificate: certificate, Secret: secret,
+		ListenAddr: serverAddr, Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: transport != TransportQUIC, EnableQUIC: transport != TransportTCP, Logger: logger,
 	})
 	if err != nil {
@@ -224,8 +239,7 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: transport, EnableQUICPool: transport == TransportQUIC, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, Credentials: roots, Transport: transport, EnableQUICPool: transport == TransportQUIC, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -352,14 +366,13 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	go echoDestination(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
+		ListenAddr: "127.0.0.1:0", Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
 		Metrics: metrics.New(), HandshakeTimeout: 300 * time.Millisecond,
 	})
@@ -371,8 +384,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger,
 		Metrics: metrics.New(),
 	})
 	if err != nil {
@@ -497,14 +509,13 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 	go slowEchoDestination(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
+		ListenAddr: "127.0.0.1:0", Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
@@ -515,8 +526,7 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC, ChunkSize: 4 * 1024, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -596,14 +606,13 @@ func TestAutoTransportFallsBackToTCPWhenUDPUnavailable(t *testing.T) {
 	go echoDestination(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
+		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false, Logger: logger,
 	})
 	if err != nil {
@@ -614,8 +623,7 @@ func TestAutoTransportFallsBackToTCPWhenUDPUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportAuto, FallbackDelay: 10 * time.Millisecond, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportAuto, FallbackDelay: 10 * time.Millisecond, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -662,11 +670,10 @@ func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
 	go slowEchoDestination(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverListener, packetConn := listenTCPAndUDPOnOnePort(t)
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
+		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
@@ -677,8 +684,7 @@ func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportAuto, FallbackDelay: 300 * time.Millisecond, ChunkSize: 4 * 1024, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportAuto, FallbackDelay: 300 * time.Millisecond, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -766,14 +772,13 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	go echoDestination(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
+		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
 		Logger: logger, Metrics: metrics.New(),
 	})
@@ -785,8 +790,7 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportTCP, Logger: logger, Metrics: metrics.New(),
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportTCP, Logger: logger, Metrics: metrics.New(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -903,7 +907,6 @@ func TestLostFinalFINUsesOneTombstoneRescueWithoutStorm(t *testing.T) {
 	}()
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -914,7 +917,7 @@ func TestLostFinalFINUsesOneTombstoneRescueWithoutStorm(t *testing.T) {
 	dropFirstServerFIN.Store(true)
 	serverMetrics := metrics.New()
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
+		ListenAddr: "127.0.0.1:0", Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger, Metrics: serverMetrics,
 		testLaneWriteHook: func(frame protocol.Frame) error {
 			if frame.Header.Type == protocol.TypeClose && frame.Header.Flags&protocol.FlagFin != 0 && dropFirstServerFIN.CompareAndSwap(true, false) {
@@ -932,8 +935,7 @@ func TestLostFinalFINUsesOneTombstoneRescueWithoutStorm(t *testing.T) {
 	}
 	clientMetrics := metrics.New()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC,
 		Logger: logger, Metrics: clientMetrics,
 	})
 	if err != nil {
@@ -1010,7 +1012,6 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	go holdResponseDestination(destinationListener, response)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1018,7 +1019,7 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	}
 	serverMetrics := metrics.New()
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
+		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
 		Logger: logger, Metrics: serverMetrics,
 	})
@@ -1031,8 +1032,7 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	}
 	clientMetrics := metrics.New()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportTCP, Logger: logger, Metrics: clientMetrics,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportTCP, Logger: logger, Metrics: clientMetrics,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1109,7 +1109,6 @@ func TestTCPFallbackStripesOneFlowAcrossFourLanes(t *testing.T) {
 	}()
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1119,7 +1118,7 @@ func TestTCPFallbackStripesOneFlowAcrossFourLanes(t *testing.T) {
 	var injectLaneFailure atomic.Bool
 	injectLaneFailure.Store(true)
 	server, err = NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Certificate: certificate, Secret: secret,
+		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
 		TCPFallbackLanes: 4, Logger: logger,
 		testLaneWriteHook: func(frame protocol.Frame) error {
@@ -1137,8 +1136,7 @@ func TestTCPFallbackStripesOneFlowAcrossFourLanes(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportTCP, TCPFallbackLanes: 4, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportTCP, TCPFallbackLanes: 4, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)

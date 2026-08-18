@@ -1,14 +1,19 @@
 package pep
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/session"
+	"github.com/bojieli/queqiao/internal/identity"
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
-	base := ClientConfig{ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "queqiao.test", Secret: []byte("0123456789abcdef")}
+	_, credentials := testCertificate(t)
+	base := ClientConfig{ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", Credentials: credentials}
 	for name, mutate := range map[string]func(*ClientConfig){
 		"too many sessions":     func(c *ClientConfig) { c.MaxSessions = maxConfiguredSessions + 1 },
 		"invalid local address": func(c *ClientConfig) { c.LocalAddress = "not-an-address" },
@@ -37,10 +42,76 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 	}
 }
 
+func TestClientCredentialUpdateCannotChangeIdentity(t *testing.T) {
+	_, credentials := testCertificate(t)
+	client, err := NewClient(ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", Credentials: credentials,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateCredentials(credentials); err != nil {
+		t.Fatalf("same-device credential refresh failed: %v", err)
+	}
+	_, other := testCertificate(t)
+	if err := client.UpdateCredentials(other); err == nil {
+		t.Fatal("credential update changed the client trust domain and device")
+	}
+}
+
+func TestCodedDataGetsOneReliableSafetyCopyBeforeOpenConfirmation(t *testing.T) {
+	frameConn := &frameConn{}
+	unconfirmed := true
+	frameConn.setOpenSafetyPolicy(func() bool { return unconfirmed })
+	data := protocol.Frame{Header: protocol.Header{Type: protocol.TypeData}}
+	if !frameConn.needsOpenSafetyCopy(data) {
+		t.Fatal("first pre-confirmation coded frame had no reliable safety copy")
+	}
+	if frameConn.needsOpenSafetyCopy(data) {
+		t.Fatal("pre-confirmation safety copy was not bounded to one frame")
+	}
+	frameConn.setOpenSafetyPolicy(func() bool { return false })
+	if frameConn.needsOpenSafetyCopy(data) {
+		t.Fatal("confirmed flow retained an unnecessary safety copy")
+	}
+}
+
+func TestPerUserSessionLimitSpansDevicesAndReleases(t *testing.T) {
+	store, err := identity.NewStore(filepath.Join(t.TempDir(), "authorization.json"))
+	if err != nil || store.Initialize() != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	account, err := store.AddAccount("alice", time.Time{}, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	_, token, _ := store.CreateInvite(account.ID, time.Hour, now)
+	_, device, err := store.ConsumeInvite(token, "laptop", publicKey, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{AccountID: account.ID, DeviceID: device.ID, PublicKey: publicKey}
+	server := &Server{cfg: ServerConfig{Credentials: identity.ServerCredentials{Store: store}}, accountSessions: make(map[string]int)}
+	if err := server.acquireAccountSession(principal); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.acquireAccountSession(principal); err == nil {
+		t.Fatal("per-user session limit was exceeded")
+	}
+	server.releaseAccountSession(account.ID)
+	if err := server.acquireAccountSession(principal); err != nil {
+		t.Fatalf("released per-user session slot was not reusable: %v", err)
+	}
+	server.releaseAccountSession(account.ID)
+}
+
 func TestTUICAlignedCongestionConfigurationIsAccepted(t *testing.T) {
+	_, credentials := testCertificate(t)
 	base := ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "queqiao.test",
-		Secret: []byte("0123456789abcdef"), Congestion: CongestionBBRTUIC,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1",
+		Credentials: credentials, Congestion: CongestionBBRTUIC,
 	}
 	if _, err := NewClient(base); err != nil {
 		t.Fatalf("bbr-tuic configuration rejected: %v", err)
@@ -48,8 +119,8 @@ func TestTUICAlignedCongestionConfigurationIsAccepted(t *testing.T) {
 }
 
 func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
-	certificate, _ := testCertificate(t)
-	base := ServerConfig{ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: []byte("0123456789abcdef")}
+	credentials, _ := testCertificate(t)
+	base := ServerConfig{ListenAddr: "127.0.0.1:0", Credentials: credentials}
 	for name, mutate := range map[string]func(*ServerConfig){
 		"too many sessions": func(c *ServerConfig) { c.MaxSessions = maxConfiguredSessions + 1 },
 		"adaptive bounds":   func(c *ServerConfig) { c.AdaptiveMinBytesSec = 2; c.AdaptiveMaxBytesSec = 1 },
@@ -80,29 +151,25 @@ func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 }
 
 func TestTCPFallbackRoleDefaultsAreConservativeAtTheClient(t *testing.T) {
+	serverCredentials, clientCredentials := testCertificate(t)
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", ServerName: "queqiao.test",
-		Secret: []byte("0123456789abcdef"),
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", Credentials: clientCredentials,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if client.cfg.TCPFallbackLanes != 1 {
-		t.Fatalf("client default TCP lanes = %d, want legacy-safe one", client.cfg.TCPFallbackLanes)
+		t.Fatalf("client default TCP lanes = %d, want conservative one", client.cfg.TCPFallbackLanes)
 	}
 
-	certificate, _ := testCertificate(t)
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: []byte("0123456789abcdef"),
+		ListenAddr: "127.0.0.1:0", Credentials: serverCredentials,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if server.cfg.TCPFallbackLanes != maxTCPFallbackLanes {
 		t.Fatalf("server default TCP lane ceiling = %d, want %d", server.cfg.TCPFallbackLanes, maxTCPFallbackLanes)
-	}
-	if server.tcpCapabilities&session.CapabilityTCPStriping == 0 {
-		t.Fatal("server with a multi-lane ceiling did not advertise TCP striping")
 	}
 }
 
@@ -119,10 +186,9 @@ func TestTCPFallbackCongestionNameNormalization(t *testing.T) {
 }
 
 func TestQUICConnectionsHaveAnAdmissionBound(t *testing.T) {
-	certificate, _ := testCertificate(t)
+	credentials, _ := testCertificate(t)
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Certificate: certificate,
-		Secret: []byte("0123456789abcdef"), MaxSessions: 2,
+		ListenAddr: "127.0.0.1:0", Credentials: credentials, MaxSessions: 2,
 	})
 	if err != nil {
 		t.Fatal(err)

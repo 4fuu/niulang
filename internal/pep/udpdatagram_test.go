@@ -262,14 +262,13 @@ func udpAssociationOver(t *testing.T, path pathsim.Config, onStream bool) (*net.
 	}()
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("udp-datagram-test-secret-value32")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
+		ListenAddr: "127.0.0.1:0", Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
 		Metrics: metrics.New(), HandshakeTimeout: 30 * time.Second, UDPOnStream: onStream,
 	})
@@ -288,7 +287,7 @@ func udpAssociationOver(t *testing.T, path pathsim.Config, onStream bool) (*net.
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: relay.LocalAddr(),
-		ServerName: "queqiao.test", Secret: secret, RootCAs: roots, Transport: TransportQUIC,
+		Credentials: roots, Transport: TransportQUIC,
 		EnableQUICPool: true, Logger: logger,
 		Metrics: metrics.New(), UDPOnStream: onStream,
 	})

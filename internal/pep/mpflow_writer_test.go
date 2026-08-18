@@ -619,7 +619,7 @@ func TestNegotiatedTCPFlowStripesOnlyAcrossPureTCPBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(candidates) != 1 {
-		t.Fatalf("unnegotiated TCP candidates = %d, want legacy single lane", len(candidates))
+		t.Fatalf("disabled TCP striping candidates = %d, want one lane", len(candidates))
 	}
 }
 

@@ -42,7 +42,6 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 	go serve(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	secret := []byte("coded-lane-test-secret-value-32b")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if testing.Verbose() {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -52,7 +51,7 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Certificate: certificate, Secret: secret,
+		ListenAddr: "127.0.0.1:0", Credentials: certificate,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
 		Metrics: metrics.New(),
 		// The first connection to an erasing path spends about five seconds
@@ -78,8 +77,7 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: remote, ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportQUIC,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: remote, Credentials: roots, Transport: TransportQUIC,
 		EnableQUICPool: pooled, Logger: logger, Metrics: metrics.New(),
 	})
 	if err != nil {

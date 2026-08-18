@@ -11,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/session"
 	"github.com/bojieli/queqiao/internal/socks5"
 )
+
+var udpTestPrincipal = identity.Principal{ProviderID: "provider", AccountID: "account", DeviceID: "device"}
 
 // The store's own rules, stated where they can be checked cheaply: a token is
 // good once, an expired relay is not handed back, and neither a wrong length
@@ -35,7 +38,7 @@ func TestARetainedRelayIsHandedBackOnceAndOnlyToItsToken(t *testing.T) {
 	}
 	held := relay(t)
 	port := held.LocalAddr().(*net.UDPAddr).Port
-	store.retain(token, held)
+	store.retain(token, udpTestPrincipal, held)
 	if store.retained() != 1 {
 		t.Fatalf("retained %d relays, want 1", store.retained())
 	}
@@ -45,17 +48,17 @@ func TestARetainedRelayIsHandedBackOnceAndOnlyToItsToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if store.claim(other[:]) != nil {
+	if store.claim(other[:], udpTestPrincipal) != nil {
 		t.Fatal("a wrong token claimed a relay")
 	}
-	if store.claim(token[:len(token)-1]) != nil {
+	if store.claim(token[:len(token)-1], udpTestPrincipal) != nil {
 		t.Fatal("a short token claimed a relay")
 	}
 	if store.retained() != 1 {
 		t.Fatal("a failed claim consumed the relay it did not match")
 	}
 
-	claimed := store.claim(token[:])
+	claimed := store.claim(token[:], udpTestPrincipal)
 	if claimed == nil {
 		t.Fatal("the right token did not claim its relay")
 	}
@@ -64,7 +67,7 @@ func TestARetainedRelayIsHandedBackOnceAndOnlyToItsToken(t *testing.T) {
 	}
 	// One token, one use. A lane that failed once must not be replayable
 	// against whatever relay the association has later.
-	if store.claim(token[:]) != nil {
+	if store.claim(token[:], udpTestPrincipal) != nil {
 		t.Fatal("a token claimed a relay twice")
 	}
 	_ = claimed.Close()
@@ -77,15 +80,37 @@ func TestARetainedRelayIsHandedBackOnceAndOnlyToItsToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expired.retain(expiring, relay(t))
+	expired.retain(expiring, udpTestPrincipal, relay(t))
 	time.Sleep(time.Millisecond)
-	if expired.claim(expiring[:]) != nil {
+	if expired.claim(expiring[:], udpTestPrincipal) != nil {
 		t.Fatal("an expired relay was handed back")
 	}
 	if expired.retained() != 0 {
 		t.Fatalf("%d relays left after expiry", expired.retained())
 	}
 	expired.closeAll()
+}
+
+func TestRetainedRelayCannotCrossDevicePrincipal(t *testing.T) {
+	store := newUDPRelayStore()
+	token, err := newUDPResumeToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.retain(token, udpTestPrincipal, relay)
+	other := udpTestPrincipal
+	other.DeviceID = "other-device"
+	if claimed := store.claim(token[:], other); claimed != nil {
+		_ = claimed.Close()
+		t.Fatal("another device claimed a retained UDP relay")
+	}
+	if store.retained() != 0 {
+		t.Fatal("cross-device claim left a replayable relay behind")
+	}
 }
 
 // A relay is bounded because a peer creates them by failing associations. The
@@ -104,14 +129,14 @@ func TestRetainedRelaysAreBounded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		store.retain(token, conn)
+		store.retain(token, udpTestPrincipal, conn)
 		tokens = append(tokens, token)
 	}
 	if store.retained() != 3 {
 		t.Fatalf("retained %d relays against a maximum of 3", store.retained())
 	}
 	for _, token := range tokens[:3] {
-		if store.claim(token[:]) == nil {
+		if store.claim(token[:], udpTestPrincipal) == nil {
 			t.Fatal("a relay retained before the bound was reached was lost")
 		}
 	}
@@ -154,7 +179,6 @@ func TestARescuedUDPAssociationKeepsItsRemoteSourceAddress(t *testing.T) {
 	}
 
 	tlsCert, roots := testCertificate(t)
-	secret := []byte("udp-resume-test-secret-value-32b")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -168,7 +192,7 @@ func TestARescuedUDPAssociationKeepsItsRemoteSourceAddress(t *testing.T) {
 	}
 	serverAddr := tcpListener.Addr().String()
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverAddr, Certificate: tlsCert, Secret: secret,
+		ListenAddr: serverAddr, Credentials: tlsCert,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true,
 		Logger: logger,
 	})
@@ -181,8 +205,7 @@ func TestARescuedUDPAssociationKeepsItsRemoteSourceAddress(t *testing.T) {
 	}
 	defer clientListener.Close()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportAuto, FallbackDelay: 5 * time.Second,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, Credentials: roots, Transport: TransportAuto, FallbackDelay: 5 * time.Second,
 		UDPFailureThreshold: 1, UDPCooldown: time.Minute, Logger: logger,
 	})
 	if err != nil {

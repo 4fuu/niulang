@@ -50,6 +50,13 @@ type frameConn struct {
 	// wantsCoding reports whether this lane's flow would rather spend bytes
 	// than round trips. Nil means it would.
 	wantsCoding func() bool
+	// openUnconfirmed is installed only on an optimistic client lane. The first
+	// coded DATA frame sent before OPEN_OK is also written once behind OPEN on
+	// the reliable stream. The coded copy keeps short-flow latency; the bounded
+	// reliable copy guarantees the byte-zero gap eventually closes even if all
+	// early datagrams outrun or miss remote flow creation.
+	openUnconfirmed func() bool
+	openSafetyCopy  atomic.Bool
 	// packetsForcedToStream keeps SOCKS UDP on the control stream even where
 	// datagrams are available. It exists to measure the difference rather
 	// than to be a tuning knob, and defaults false.
@@ -73,6 +80,11 @@ type frameConn struct {
 // be called before the lane's goroutines start, because from then on the
 // answer is read on every write.
 func (c *frameConn) setCodingPolicy(wants func() bool) { c.wantsCoding = wants }
+
+func (c *frameConn) setOpenSafetyPolicy(unconfirmed func() bool) {
+	c.openUnconfirmed = unconfirmed
+	c.openSafetyCopy.Store(true)
+}
 
 // setPacketsOnStream keeps SOCKS UDP on the control stream even where the
 // connection has datagrams. Same ordering rule as above.
@@ -269,7 +281,16 @@ func (c *frameConn) countData(f protocol.Frame, coded bool) {
 func (c *frameConn) Write(f protocol.Frame) error {
 	if c.bulkFrame(f) {
 		c.countData(f, true)
-		return c.writeCoded(f)
+		if err := c.writeCoded(f); err != nil {
+			return err
+		}
+		if c.needsOpenSafetyCopy(f) {
+			c.countData(f, false)
+			c.writeMu.Lock()
+			defer c.writeMu.Unlock()
+			return c.writeLocked(f)
+		}
+		return nil
 	}
 	c.countData(f, false)
 	c.writeMu.Lock()
@@ -318,9 +339,25 @@ func (c *frameConn) WriteContext(ctx context.Context, f protocol.Frame) error {
 			return err
 		}
 		c.countData(f, true)
-		return c.writeCoded(f)
+		if err := c.writeCoded(f); err != nil {
+			return err
+		}
+		if !c.needsOpenSafetyCopy(f) {
+			return nil
+		}
+		c.countData(f, false)
+		return c.writeControlContext(ctx, f)
 	}
 	c.countData(f, false)
+	return c.writeControlContext(ctx, f)
+}
+
+func (c *frameConn) needsOpenSafetyCopy(f protocol.Frame) bool {
+	return f.Header.Type == protocol.TypeData && c.openUnconfirmed != nil &&
+		c.openUnconfirmed() && c.openSafetyCopy.CompareAndSwap(true, false)
+}
+
+func (c *frameConn) writeControlContext(ctx context.Context, f protocol.Frame) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if err := ctx.Err(); err != nil {

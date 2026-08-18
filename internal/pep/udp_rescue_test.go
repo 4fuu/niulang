@@ -35,7 +35,6 @@ func TestUDPAssociationRescuesToTCP(t *testing.T) {
 	}()
 
 	tlsCert, roots := testCertificate(t)
-	secret := []byte("integration-test-secret-value-32bytes")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -49,7 +48,7 @@ func TestUDPAssociationRescuesToTCP(t *testing.T) {
 	}
 	serverAddr := tcpListener.Addr().String()
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverAddr, Certificate: tlsCert, Secret: secret,
+		ListenAddr: serverAddr, Credentials: tlsCert,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true,
 		Logger: logger,
 	})
@@ -62,8 +61,7 @@ func TestUDPAssociationRescuesToTCP(t *testing.T) {
 	}
 	defer clientListener.Close()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportAuto, FallbackDelay: 5 * time.Second,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, Credentials: roots, Transport: TransportAuto, FallbackDelay: 5 * time.Second,
 		UDPFailureThreshold: 1, UDPCooldown: time.Minute, Logger: logger,
 	})
 	if err != nil {
@@ -148,10 +146,9 @@ func TestIntermittentUDPBlockingReturnsToQUIC(t *testing.T) {
 	tcpListener, quicPacketConn := listenTCPAndUDPOnOnePort(t)
 	defer tcpListener.Close()
 	tlsCert, roots := testCertificate(t)
-	secret := []byte("intermittent-udp-test-secret-32b")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server, err := NewServer(ServerConfig{
-		ListenAddr: tcpListener.Addr().String(), Certificate: tlsCert, Secret: secret,
+		ListenAddr: tcpListener.Addr().String(), Credentials: tlsCert,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true,
 		Logger: logger,
 	})
@@ -159,8 +156,7 @@ func TestIntermittentUDPBlockingReturnsToQUIC(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: tcpListener.Addr().String(), ServerName: "queqiao.test",
-		Secret: secret, RootCAs: roots, Transport: TransportAuto,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: tcpListener.Addr().String(), Credentials: roots, Transport: TransportAuto,
 		FallbackDelay: 250 * time.Millisecond, UDPFailureThreshold: 1, UDPCooldown: 150 * time.Millisecond,
 		DialTimeout: 2 * time.Second, HandshakeTimeout: 2 * time.Second, Logger: logger,
 	})

@@ -3,7 +3,6 @@ package pep
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 	"github.com/apernet/quic-go"
 	"github.com/bojieli/queqiao/internal/coded"
 	wancongestion "github.com/bojieli/queqiao/internal/congestion"
+	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/pathmodel"
 )
 
@@ -29,7 +29,7 @@ const (
 	TransportAuto TransportKind = "auto"
 )
 
-const defaultALPN = "queqiao/1"
+const defaultALPN = "queqiao/4"
 
 const (
 	defaultAdaptiveMinBytesPerSec = 64 * 1024
@@ -350,15 +350,11 @@ func (c *quicStreamConn) Close() error {
 	return err
 }
 
-func tlsClientConfig(serverName string, roots *x509.CertPool) *tls.Config {
-	cfg := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: serverName, NextProtos: []string{defaultALPN}}
-	if roots != nil {
-		cfg.RootCAs = roots
-	}
-	return cfg
+func tlsClientConfig(credentials identity.ClientCredentials) (*tls.Config, error) {
+	return identity.ClientTLSConfig(credentials, defaultALPN)
 }
 
-func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string) (streamConn, error) {
+func dialTCP(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error) (streamConn, error) {
 	var localAddr net.Addr
 	if localAddress != "" {
 		ip, err := resolveLocalAddress(localAddress)
@@ -367,9 +363,13 @@ func dialTCP(ctx context.Context, remote, serverName string, roots *x509.CertPoo
 		}
 		localAddr = &net.TCPAddr{IP: ip.AsSlice()}
 	}
+	tlsConfig, err := tlsClientConfig(credentials)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := (&tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second, LocalAddr: localAddr},
-		Config:    tlsClientConfig(serverName, roots),
+		NetDialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second, LocalAddr: localAddr, Control: control},
+		Config:    tlsConfig,
 	}).DialContext(ctx, "tcp", remote)
 	if err != nil {
 		return nil, err
@@ -495,8 +495,8 @@ func quicConfig(windows flowWindows) *quic.Config {
 	}
 }
 
-func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string, ccfg congestionConfig, windows flowWindows) (streamConn, error) {
-	conn, packetConn, err := dialQUICConnection(ctx, remote, serverName, roots, dialTimeout, localAddress, windows)
+func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, ccfg congestionConfig, windows flowWindows) (streamConn, error) {
+	conn, packetConn, err := dialQUICConnection(ctx, remote, credentials, dialTimeout, localAddress, control, windows)
 	if err != nil {
 		return nil, err
 	}
@@ -518,24 +518,33 @@ func dialQUIC(ctx context.Context, remote, serverName string, roots *x509.CertPo
 // dialQUICConnection establishes only the QUIC connection. Keeping this
 // separate from stream creation allows the client to pool one connection and
 // open a stream for each logical flow without paying another handshake.
-func dialQUICConnection(ctx context.Context, remote, serverName string, roots *x509.CertPool, dialTimeout time.Duration, localAddress string, windows flowWindows) (*quic.Conn, net.PacketConn, error) {
+func dialQUICConnection(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, windows flowWindows) (*quic.Conn, net.PacketConn, error) {
 	dialCtx := ctx
 	var cancel context.CancelFunc
 	if dialTimeout > 0 {
 		dialCtx, cancel = context.WithTimeout(ctx, dialTimeout)
 		defer cancel()
 	}
-	tlsCfg := tlsClientConfig(serverName, roots)
-	if localAddress != "" {
-		ip, parseErr := resolveLocalAddress(localAddress)
-		if parseErr != nil {
-			return nil, nil, parseErr
+	tlsCfg, err := tlsClientConfig(credentials)
+	if err != nil {
+		return nil, nil, err
+	}
+	if localAddress != "" || control != nil {
+		var listenAddress string
+		if localAddress != "" {
+			ip, parseErr := resolveLocalAddress(localAddress)
+			if parseErr != nil {
+				return nil, nil, parseErr
+			}
+			listenAddress = net.JoinHostPort(ip.String(), "0")
+		} else {
+			listenAddress = ":0"
 		}
 		remoteAddr, resolveErr := net.ResolveUDPAddr("udp", remote)
 		if resolveErr != nil {
 			return nil, nil, resolveErr
 		}
-		packetConn, listenErr := net.ListenUDP("udp", &net.UDPAddr{IP: ip.AsSlice()})
+		packetConn, listenErr := (&net.ListenConfig{Control: control}).ListenPacket(dialCtx, "udp", listenAddress)
 		if listenErr != nil {
 			return nil, nil, listenErr
 		}
@@ -753,10 +762,6 @@ func addressHost(addr net.Addr) string {
 		return host
 	}
 	return addr.String()
-}
-
-func quicServerTLSConfig(certificate tls.Certificate) *tls.Config {
-	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, NextProtos: []string{defaultALPN}}
 }
 
 func quicServerConfig(windows flowWindows) *quic.Config {
