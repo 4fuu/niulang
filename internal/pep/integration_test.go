@@ -1012,7 +1012,13 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	go holdResponseDestination(destinationListener, response)
 
 	certificate, roots := testCertificate(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("full-close trace:\n%s", logBuf.String())
+		}
+	})
 	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
