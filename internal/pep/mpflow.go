@@ -1089,13 +1089,15 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 		select {
 		case err := <-results:
 			completed++
-			if errors.Is(err, errLocalApplicationClose) ||
+			if errors.Is(err, errLocalApplicationClose) || f.remoteAbort.Load() ||
 				(f.localAbortSent.Load() && f.doneChanClosed()) {
-				// The full-close marker has had a bounded opportunity to reach
-				// the peer. It is now safe to stop the sibling sender even when
-				// its scheduler still holds chunks the vanished application can
-				// never acknowledge. A local cancellation is a clean flow end,
-				// not a transport failure.
+				// A local full-close marker has had a bounded opportunity to
+				// reach the peer, or an authenticated remote marker has already
+				// canceled this flow. It is safe to stop the sibling sender even
+				// when its scheduler still holds chunks the vanished application
+				// can never acknowledge. In particular, closing a Windows
+				// destination wakes its read worker with a socket error; that
+				// cleanup race is not a transport failure.
 				cancelRun()
 				f.closeAll()
 				stats.Ended = time.Now()

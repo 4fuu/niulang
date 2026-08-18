@@ -425,7 +425,11 @@ func TestLocalCloseAbortsStalledReceiveAndReleasesRun(t *testing.T) {
 func TestRemoteAbortStopsUnacknowledgedSenderAndClosesInner(t *testing.T) {
 	inner, destination := net.Pipe()
 	defer destination.Close()
-	outer := newAckCaptureConn(0, nil)
+	// Hold the abort acknowledgement long enough for closing inner to wake
+	// the sibling source reader first. Windows reliably schedules this order
+	// with a TCP destination; it must remain a clean remote cancellation even
+	// when the reader reports its close error before receiveInner returns.
+	outer := newAckCaptureConn(250*time.Millisecond, nil)
 	sessionID := [16]byte{2}
 	const flowID = uint64(9)
 	flow := newMultipathFlow(context.Background(), inner, sessionID, flowID, 1024,
