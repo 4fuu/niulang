@@ -88,6 +88,36 @@ same port. Permit both in the host firewall and the cloud security group.
 Binding metrics to loopback avoids exposing an unauthenticated operations
 endpoint.
 
+### Tune provider socket queues
+
+Linux's default socket limits are often too small for a QUIC gateway. A burst
+of new flows can then overflow both the UDP receive queue and TCP listen queue
+even when the host has idle CPU and memory. Queqiao's QUIC dependency requests
+an 8 MiB UDP buffer; the provider should leave additional kernel headroom and
+use larger network and SYN backlogs.
+
+Run the repository's idempotent tuning script on every Linux provider:
+
+```sh
+sudo ./deploy/tune-server.sh
+```
+
+The script installs `/etc/sysctl.d/90-queqiao-performance.conf`, immediately
+applies 16 MiB UDP socket maxima and larger network/TCP backlogs, verifies the
+effective values, and restarts `queqiaod.service` if it is active so the QUIC
+listener obtains its larger buffer. Use `--no-restart` when coordinating a
+separate maintenance window, or `--service NAME` for a differently named
+systemd unit. `--dry-run` prints the settings without changing the host.
+
+Afterward, confirm that the listener has room and that its drop counters do not
+keep increasing under normal traffic:
+
+```sh
+sudo ss -lntpm | grep queqiao
+sudo ss -unapm | grep queqiao
+nstat -az | grep -E 'UdpRcvbufErrors|ListenOverflows|ListenDrops'
+```
+
 Private, loopback, link-local, multicast, and unspecified destinations are
 blocked after DNS resolution. Add `--allow-private-destinations` only when the
 service is intentionally an access proxy into a private network.
