@@ -43,12 +43,25 @@ func blast(t *testing.T, cfg Config, duration time.Duration, offeredMbits float6
 		}
 	}()
 	payload := make([]byte, 1200)
+	burstPackets := 32
+	if offeredMbits > 0 {
+		// Keep paced wakeups at least two milliseconds apart. A fixed
+		// 32-packet burst requires sub-millisecond timers at the 400 Mbit/s
+		// calibration cell; under ordinary `go test ./...` package
+		// concurrency the sender can then under-offer while the relay itself
+		// remains healthy, producing a false limiter failure. The adaptive
+		// burst stays below five percent of the smallest bandwidth-delay
+		// product used by that high-rate cell.
+		packetsForTwoMilliseconds := int(offeredMbits * 1e6 * (2 * time.Millisecond).Seconds() / float64(len(payload)*8))
+		if packetsForTwoMilliseconds > burstPackets {
+			burstPackets = packetsForTwoMilliseconds
+		}
+	}
 	stop := make(chan struct{})
 	var sender sync.WaitGroup
 	sender.Add(1)
 	go func() {
 		defer sender.Done()
-		const burstPackets = 32
 		next := time.Now()
 		var burstInterval time.Duration
 		if offeredMbits > 0 {
