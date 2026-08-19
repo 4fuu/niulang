@@ -791,7 +791,7 @@ public final class MainActivity extends Activity implements TunnelHost {
                     outcome = ConnectionProbe.available(
                             Mobilecore.probeProfileJSON(active.profileJson, 10_000));
                 } catch (Exception exception) {
-                    outcome = ConnectionProbe.unavailable(exception);
+                    outcome = ConnectionProbe.unavailable(exception, VpnExclusion.current(this));
                 }
                 ConnectionProbe completed = outcome;
                 runOnUiThread(() -> {

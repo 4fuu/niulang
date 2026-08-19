@@ -300,6 +300,23 @@ final class TunnelServiceCore implements Observer {
         }
     }
 
+    /**
+     * Surfaces an advisory message against the current state and redraws the
+     * notification, without pretending the connection changed.
+     *
+     * A backend uses this for a condition it learns about after the session is
+     * already running — the exported listener discovering a VPN underneath it,
+     * for instance. Reporting it as a state change would misrepresent a healthy
+     * session as a failing one.
+     */
+    void advise(String message) {
+        String state = currentState();
+        publishState(state, message, currentMetrics());
+        service.getSystemService(NotificationManager.class).notify(
+                NOTIFICATION_ID,
+                notification(displayState(state), Mobilecore.StateRunning.equals(state)));
+    }
+
     void onDestroy() {
         boolean active;
         synchronized (lifecycleLock) {

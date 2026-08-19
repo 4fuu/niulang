@@ -48,10 +48,24 @@ final class ConnectionProbe {
         return new ConnectionProbe(Status.AVAILABLE, transport, latency, null);
     }
 
-    static ConnectionProbe unavailable(Exception exception) {
+    /**
+     * A failed test, named as precisely as the device allows.
+     *
+     * The probe opens no remote destination — it measures DNS, transport setup,
+     * mutual TLS, device authorization, and one control round trip — so a
+     * failure here is about reaching the provider at all. When another app's
+     * VPN is carrying Queqiao's own traffic, that is far and away the likeliest
+     * reason, and saying so beats handing back a timeout the user has to
+     * interpret. The underlying message is kept beneath it, because the
+     * diagnosis is a strong guess rather than a proof.
+     */
+    static ConnectionProbe unavailable(Exception exception, VpnExclusion.State exclusion) {
         String message = exception.getMessage();
         if (message == null || message.isBlank()) {
             message = exception.getClass().getSimpleName();
+        }
+        if (exclusion == VpnExclusion.State.CAPTURED) {
+            message = VpnExclusion.DIAGNOSIS + "\n\n" + message;
         }
         return new ConnectionProbe(Status.UNAVAILABLE, null, 0, message);
     }
