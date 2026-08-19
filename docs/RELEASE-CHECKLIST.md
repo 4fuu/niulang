@@ -8,32 +8,34 @@ exact commit. Production-ready language has additional gates below.
 ## Public-preview blockers
 
 - [x] Supported topology and known limitations are documented.
-- [x] Wire protocol 4 is documented, emitted in build metadata, and rejects
+- [x] Wire protocol 1 is documented, emitted in build metadata, and rejects
   every other version with a diagnosable error.
 - [x] Security reporting instructions and residual risks are documented.
-- [x] A pinned full-history secret scan reports zero unresolved findings for
-  the candidate commit.
-- [x] The history scan contains no deployed credential; field-validation
+- [ ] A pinned full-history secret scan reports zero unresolved findings for
+  the exact protocol-1 candidate commit.
+- [ ] The protocol-1 candidate history scan contains no deployed credential;
+  field-validation
   credentials and TLS material have been rotated independently, and rollback
   material contains no superseded secret.
-- [x] Current-tree operational evidence contains no active secret, private key,
+- [ ] Exact-candidate operational evidence contains no active secret, private key,
   private hostname, personal path, or unnecessary live host address.
-- [x] Linked dependency licenses and the CycloneDX SBOM match the packaged
+- [ ] Linked dependency licenses and the CycloneDX SBOM match the packaged
   binary for every target.
 - [ ] GitHub provenance attestations cover every archive, SBOM, and checksum
   manifest in the candidate artifact.
-- [x] Downloaded archives pass native runtime smoke tests on Linux, macOS, and
+- [ ] Downloaded protocol-1 archives pass native runtime smoke tests on Linux, macOS, and
   Windows; unsupported native architectures are called out rather than implied.
-- [x] Normal CI, full tests, race tests, vet, vulnerability scan, fuzz smoke,
+- [ ] Normal CI, full tests, race tests, vet, vulnerability scan, fuzz smoke,
   fallback soak, package reproducibility, and actionlint are green on the exact
   candidate commit.
-- [x] Staticcheck and the reviewed gosec baseline pass on the exact candidate;
-  retain the evidence described in
-  [`STATIC-SECURITY-AUDIT-20260817.md`](STATIC-SECURITY-AUDIT-20260817.md).
-- [x] Install, one-endpoint patch upgrade, coordinated incompatible-version
+- [ ] Staticcheck and a freshly reviewed gosec baseline pass on the exact candidate;
+  use the historical baseline in
+  [`STATIC-SECURITY-AUDIT-20260817.md`](archive/2026-08-development/STATIC-SECURITY-AUDIT-20260817.md)
+  only as a format; generate fresh evidence for protocol 1.
+- [ ] Install, one-endpoint patch upgrade, coordinated incompatible-version
   refusal, and rollback evidence is attached to the candidate report.
-- [x] `CHANGELOG.md` and the candidate release notes describe v0.1 as an
-  experimental paired fixed-egress preview.
+- [ ] `CHANGELOG.md` and the exact candidate release notes describe v0.1 as a
+  paired fixed-egress public preview.
 - [ ] The maintainer has reviewed the candidate artifacts and explicitly
   approved publication.
 - [ ] The GitHub `public-release` environment requires the approving reviewer,
@@ -52,7 +54,7 @@ exact commit. Production-ready language has additional gates below.
 
 ## Mobile release blockers
 
-- [x] Android and iOS use the protocol-4 core with full IPv4/IPv6 TCP and UDP,
+- [x] Android and iOS use the protocol-1 core with full IPv4/IPv6 TCP and UDP,
   crash-safe enrollment, platform secure storage, automatic renewal, bounded
   packet/session queues, and no third-party proxy application.
 - [x] The exact linked runtime and isolated build-tool graphs are pinned,
@@ -85,8 +87,9 @@ exact commit. Production-ready language has additional gates below.
   source-build only unless an Organization team completes App Store review and
   jurisdiction-specific VPN obligations.
 
-Completing the preview section permits a v0.1 experimental release; it does
+Completing the preview section permits a v0.1 public-preview release; it does
 not complete or waive the production-ready section.
 
-The completed technical gates and deliberately open approval/external gates
-are summarized in [`RELEASE-CANDIDATE-20260817.md`](RELEASE-CANDIDATE-20260817.md).
+The former wire-3 candidate is preserved only as a historical example in
+[`RELEASE-CANDIDATE-20260817.md`](archive/2026-08-development/RELEASE-CANDIDATE-20260817.md).
+A new complete candidate report is required for public protocol 1.

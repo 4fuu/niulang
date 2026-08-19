@@ -219,7 +219,7 @@ jobs:
           output=$($binary --version)
           echo "$output"
           grep -F "commit=${GITHUB_SHA}" <<<"$output"
-          grep -F "wire=3" <<<"$output"
+          grep -F "wire=1" <<<"$output"
       - name: Run Windows archive
         if: matrix.kind == 'windows'
         shell: pwsh
@@ -234,7 +234,7 @@ jobs:
           $output = & $binary --version
           Write-Output $output
           if ($output -notmatch [regex]::Escape("commit=$env:GITHUB_SHA")) { throw 'commit metadata mismatch' }
-          if ($output -notmatch 'wire=3') { throw 'wire metadata mismatch' }
+          if ($output -notmatch 'wire=1') { throw 'wire metadata mismatch' }
 
   provenance:
     if: github.event.repository.visibility == 'public'

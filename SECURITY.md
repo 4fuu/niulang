@@ -2,7 +2,7 @@
 
 ## Supported security design
 
-Queqiao protocol version 4 has one data-plane security mode: TLS 1.3 with
+Queqiao protocol version 1 has one data-plane security mode: TLS 1.3 with
 provider-pinned gateway authentication and provider-issued per-device mutual
 authentication. Plaintext transport and application-level shared secrets do
 not exist.

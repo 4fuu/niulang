@@ -7,10 +7,11 @@ Public-preview release engineering is implemented: a fail-closed wire contract,
 current-tree privacy review, pinned full-history secret scan, exact linked-module
 licenses and CycloneDX SBOMs, reviewed static-analysis baseline, credential
 rotation tooling, real-path soak harness, and a non-publishing candidate
-workflow with six native runtime jobs. A complete non-publishing candidate run
-has passed those gates. Publication still requires provenance on the exact
-public candidate, an independently protected maintainer approval, and every
-remaining preview blocker; this roadmap does not authorize a tag or release.
+workflow with six native runtime jobs. The successful 2026-08-17 candidate used
+wire 3 and is now historical. Public protocol 1 requires a fresh complete
+candidate run, provenance on that exact commit, an independently protected
+maintainer approval, and every remaining preview blocker; this roadmap does not
+authorize a tag or release.
 
 ## Stage 0 — repository and measurement foundation
 
@@ -72,7 +73,8 @@ Status: superseded rather than unmet. Open-loop probing showed that the live
 bottleneck is per endpoint pair, not per 4-tuple, and the multi-lane data path
 was deleted. Separate connections remain only for bulk isolation and failure
 recovery; they do not aggregate one flow's capacity. The measurements and
-deletion record are in `DESIGN-MULTIPATH.md`.
+deletion record are in the archived
+[`DESIGN-MULTIPATH.md`](archive/2026-08-development/DESIGN-MULTIPATH.md).
 
 ## Stage 4 — automatic fallback and resumption
 

@@ -2078,7 +2078,7 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 			return context.Canceled
 		}
 		if c.cfg.Transport == TransportQUIC {
-			// Protocol-v4 peers predating control-role JOINs reject the flag.
+			// Protocol-v1 development peers predating control-role JOINs reject the flag.
 			// One ordinary QUIC join preserves rolling-upgrade recovery; a new
 			// peer which genuinely lost the session rejects this one as well.
 			lane, err = c.openJoinLane(recoveryCtx, TransportQUIC, sessionID, flowID, laneID)

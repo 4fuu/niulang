@@ -347,22 +347,22 @@ func TestMutualTLSRequiresAnAuthorizedDeviceAndPinnedGateway(t *testing.T) {
 	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
 	profile := localProfile(t, provider, account, "laptop", now)
 	clientCredentials, _ := profile.Credentials()
-	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "queqiao/4", false)
+	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientConfig, _ := ClientTLSConfig(clientCredentials, "queqiao/4")
+	clientConfig, _ := ClientTLSConfig(clientCredentials, "queqiao/1")
 	if err := tlsHandshake(t, serverConfig, clientConfig); err != nil {
 		t.Fatalf("authorized mutual TLS failed: %v", err)
 	}
 	withoutDevice := EnrollmentTLSConfig(provider.Metadata.RootPin, provider.Metadata.ProviderID, provider.Metadata.GatewayID)
-	withoutDevice.NextProtos = []string{"queqiao/4"}
+	withoutDevice.NextProtos = []string{"queqiao/1"}
 	if err := tlsHandshake(t, serverConfig, withoutDevice); err == nil {
 		t.Fatal("client without a device certificate was accepted")
 	}
 	wrongGateway := clientCredentials
 	wrongGateway.GatewayID = strings.Repeat("a", 32)
-	wrongGatewayConfig, err := ClientTLSConfig(wrongGateway, "queqiao/4")
+	wrongGatewayConfig, err := ClientTLSConfig(wrongGateway, "queqiao/1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestMutualTLSRequiresAnAuthorizedDeviceAndPinnedGateway(t *testing.T) {
 	other := testProvider(t, "127.0.0.1:443", now)
 	wrongPin := clientCredentials
 	wrongPin.Root, wrongPin.RootPin, wrongPin.ProviderID = other.RootCert, other.Metadata.RootPin, other.Metadata.ProviderID
-	wrongConfig, _ := ClientTLSConfig(wrongPin, "queqiao/4")
+	wrongConfig, _ := ClientTLSConfig(wrongPin, "queqiao/1")
 	if wrongConfig != nil && tlsHandshake(t, serverConfig, wrongConfig) == nil {
 		t.Fatal("gateway was accepted under another provider root")
 	}
@@ -399,7 +399,7 @@ func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
 	if _, err := ParseInvitation(uri, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "queqiao/4", true)
+	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", true)
 	service := EnrollmentService{Provider: provider}
 	serveOne := func() {
 		raw, acceptErr := listener.Accept()
@@ -471,7 +471,7 @@ func TestEnrollmentExplainsProtocolALPNMismatch(t *testing.T) {
 		_ = tls.Server(raw, serverConfig).Handshake()
 	}()
 	_, err = EnrollWithOptions(context.Background(), invitation, "laptop", DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
-	if err == nil || !strings.Contains(err.Error(), "does not support Queqiao enrollment") || !strings.Contains(err.Error(), "protocol 4") {
+	if err == nil || !strings.Contains(err.Error(), "does not support Queqiao enrollment") || !strings.Contains(err.Error(), "protocol 1") {
 		t.Fatalf("ALPN mismatch produced unhelpful error: %v", err)
 	}
 }
@@ -489,7 +489,7 @@ func TestRenewalPreservesDeviceAndRejectsRevocation(t *testing.T) {
 	if err != nil || !needs {
 		t.Fatalf("near-expiry profile needs renewal=%t err=%v", needs, err)
 	}
-	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "queqiao/4", true)
+	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", true)
 	service := EnrollmentService{Provider: provider}
 	serveRenewal := func() {
 		raw, acceptErr := listener.Accept()
@@ -633,7 +633,7 @@ func TestGatewayRenewalIsVisibleToExistingTLSConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "queqiao/4", false)
+	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +646,7 @@ func TestGatewayRenewalIsVisibleToExistingTLSConfiguration(t *testing.T) {
 	if bytes.Equal(before, after) {
 		t.Fatal("gateway renewal retained the old leaf")
 	}
-	clientConfig, err := ClientTLSConfig(clientCredentials, "queqiao/4")
+	clientConfig, err := ClientTLSConfig(clientCredentials, "queqiao/1")
 	if err != nil {
 		t.Fatal(err)
 	}

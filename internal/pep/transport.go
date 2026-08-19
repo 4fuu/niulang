@@ -29,7 +29,7 @@ const (
 	TransportAuto TransportKind = "auto"
 )
 
-const defaultALPN = "queqiao/4"
+const defaultALPN = "queqiao/1"
 
 const (
 	defaultAdaptiveMinBytesPerSec = 64 * 1024
@@ -379,7 +379,7 @@ func dialTCP(ctx context.Context, remote string, credentials identity.ClientCred
 	tlsConn := conn.(*tls.Conn)
 	if tlsConn.ConnectionState().NegotiatedProtocol != defaultALPN {
 		_ = tlsConn.Close()
-		return nil, fmt.Errorf("gateway %q did not negotiate Queqiao protocol 4 over TCP; check that the endpoint and server version match", remote)
+		return nil, fmt.Errorf("gateway %q did not negotiate Queqiao protocol 1 over TCP; check that the endpoint and server version match", remote)
 	}
 	return tlsConn, nil
 }
@@ -658,7 +658,7 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 
 func explainDataHandshakeError(remote, transport string, err error) error {
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q rejected Queqiao protocol 4 over %s; the endpoint may still run an incompatible development server or another TLS service: %w", remote, transport, err)
+		return fmt.Errorf("gateway %q rejected Queqiao protocol 1 over %s; the endpoint may still run an incompatible development server or another TLS service: %w", remote, transport, err)
 	}
 	return err
 }

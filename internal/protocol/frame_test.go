@@ -8,6 +8,12 @@ import (
 	"testing"
 )
 
+func TestFirstPublicWireVersion(t *testing.T) {
+	if Version != 1 {
+		t.Fatalf("wire version = %d, want first public version 1", Version)
+	}
+}
+
 type shortWriter struct {
 	max int
 	b   bytes.Buffer

@@ -1,5 +1,5 @@
 // Package session contains flow identifiers and bounded flow metadata. Peer
-// authentication is deliberately not part of this package: protocol v4 binds
+// authentication is deliberately not part of this package: protocol v1 binds
 // every flow to the device principal established by mutual TLS.
 package session
 

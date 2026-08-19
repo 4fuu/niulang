@@ -14,10 +14,11 @@ const (
 	// Version is the framing this build speaks, and the only thing that stops
 	// two builds that disagree from appearing to work.
 	//
-	// Version 4 removes application-level shared-secret authentication. Every
-	// connection is authenticated by provider-issued mutual TLS before a frame
-	// is accepted, and streams begin directly with OPEN or JOIN.
-	Version           = byte(4)
+	// Version 1 is the first public wire contract. Earlier development wire
+	// numbers were never released. Every connection is authenticated by
+	// provider-issued mutual TLS before a frame is accepted, and streams begin
+	// directly with OPEN or JOIN.
+	Version           = byte(1)
 	HeaderSize        = 46
 	DefaultMaxPayload = 1 << 20
 	// FlagFin marks that the sender has reached EOF for the direction carried
@@ -43,8 +44,8 @@ const (
 	//
 	// A striped flow's sender otherwise learns only the contiguous receive
 	// point, which sits behind whatever the slowest lane has not delivered, so
-	// its retention window has to cover the whole reorder span. It is
-	// Protocol v4 requires both peers to understand it.
+	// its retention window has to cover the whole reorder span. Protocol v1
+	// requires both peers to understand it.
 	FlagAckRanges uint16 = 1 << 7
 	knownFlags           = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl | FlagAckRanges
 )

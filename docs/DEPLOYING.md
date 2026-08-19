@@ -1,8 +1,12 @@
 # Deployment guide
 
+> [!NOTE]
+> **Status:** Current operational guide for public protocol 1
+> **Last reviewed:** 2026-08-19
+
 This guide covers a provider gateway, individual user enrollment, a desktop
 SOCKS client, Clash/mihomo integration, and replacement of an earlier
-development tunnel. Protocol 4 is the only supported wire protocol. Client and
+development tunnel. Protocol 1 is the only supported wire protocol. Client and
 server must therefore be upgraded together.
 
 ## What is configured where
@@ -34,7 +38,7 @@ sudo install -m 0755 ./queqiaod /usr/local/bin/queqiaod
 /usr/local/bin/queqiaod --version
 ```
 
-The output must contain `wire=4`. Create a dedicated account once:
+The output must contain `wire=1`. Create a dedicated account once:
 
 ```sh
 sudo useradd --system --user-group \
@@ -261,11 +265,11 @@ Use this order:
    proxy request.
 2. Copy the old binaries, service definitions, client plist, and old credential
    files into timestamped rollback directories. Do not overwrite them.
-3. Install the protocol-4 binary under its final path without restarting the
+3. Install the protocol-1 binary under its final path without restarting the
    old service.
 4. Create `/var/lib/queqiao/provider`, add the user, and generate an invitation
    while the old process still owns the public port.
-5. Install the new server unit and restart the gateway. Verify protocol 4,
+5. Install the new server unit and restart the gateway. Verify protocol 1,
    TCP and UDP listeners, and loopback metrics before touching the client.
 6. Enroll with the new CLI. Its default `--local-address auto` bypasses a host
    TUN; specify `if:en0` when the machine has multiple physical interfaces.
@@ -328,7 +332,7 @@ without redaction.
 
 | Symptom | Action |
 |---|---|
-| `does not support Queqiao enrollment` or `rejected Queqiao protocol 4` | Confirm the invitation endpoint, client/server `wire=4`, and that no old TLS service still owns the port. |
+| `does not support Queqiao enrollment` or `rejected Queqiao protocol 1` | Confirm the invitation endpoint, client/server `wire=1`, and that no old TLS service still owns the port. |
 | `more than one physical IPv4 address is active` | Choose the intended uplink with `--local-address if:NAME`; use the same value for enroll and client. |
 | `interface … has no active IPv4 address` | Correct the interface name or connect it before retrying. The saved enrollment draft remains reusable. |
 | Enrollment reports a pinned-identity error | The URI belongs to another provider, the provider state was replaced, or traffic is intercepted. Never bypass pin verification. |

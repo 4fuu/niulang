@@ -14,6 +14,8 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   and per-profile all-traffic or local-network-bypass routing policies.
 - Explicit wire-protocol version reporting and diagnosable version mismatch
   errors.
+- The first public wire contract is protocol 1 (`queqiao/1`); unreleased
+  development wire numbers are intentionally not compatibility targets.
 - Public security reporting, supported-topology, known-limitations, field
   validation, security-review, and release-gate documentation.
 - Deterministic CycloneDX software bills of materials and complete linked

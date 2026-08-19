@@ -441,7 +441,7 @@ func dialIdentityEndpoint(ctx context.Context, endpoint, purpose string, options
 
 func explainIdentityHandshakeError(endpoint, purpose string, err error) error {
 	if strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q does not support Queqiao %s; confirm that this endpoint runs protocol 4 with %s enabled: %w", endpoint, purpose, purpose, err)
+		return fmt.Errorf("gateway %q does not support Queqiao %s; confirm that this endpoint runs protocol 1 with %s enabled: %w", endpoint, purpose, purpose, err)
 	}
 	return fmt.Errorf("verify the pinned provider identity at gateway %q for %s: %w", endpoint, purpose, err)
 }

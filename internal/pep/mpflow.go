@@ -280,7 +280,7 @@ type multipathFlow struct {
 	// A coded lane uses it to place one reliable safety copy behind OPEN while
 	// still sending the latency-sensitive coded copy immediately.
 	openConfirmationRequired atomic.Bool
-	// ackRanges is mandatory in protocol v4. It is useful to striped flows and
+	// ackRanges is mandatory in protocol v1. It is useful to striped flows and
 	// harmless for a single lane.
 	ackRanges atomic.Bool
 	// tcpStriping is negotiated per flow. When true, and only while every

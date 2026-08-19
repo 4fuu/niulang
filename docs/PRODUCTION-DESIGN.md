@@ -1,8 +1,14 @@
 # Production design criteria
 
-Queqiao is not released. A production claim requires evidence for both the
-transport and the multi-user security system; passing unit tests alone is not
-sufficient.
+> [!NOTE]
+> **Status:** Current release criteria
+>
+> **Applies to:** Public protocol 1
+> **Last reviewed:** 2026-08-19
+
+Queqiao is being prepared for a public preview. A production-ready claim
+requires evidence for both the transport and the multi-user security system;
+passing unit tests alone is not sufficient.
 
 ## Security criteria
 
@@ -40,6 +46,6 @@ sufficient.
 
 ## Release rule
 
-Any wire change increments the version and fails closed. Because the project is
-pre-release, version 4 has no legacy negotiation. A future compatibility policy
+Any wire change increments the version and fails closed. Because protocol 1 is
+the first public contract, it has no legacy negotiation. A future compatibility policy
 must be designed explicitly rather than inferred from permissive parsing.
