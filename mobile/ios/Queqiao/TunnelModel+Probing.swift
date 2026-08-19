@@ -2,19 +2,11 @@ import Foundation
 
 extension TunnelModel {
     var canTestProfiles: Bool {
-        !isBusy && !isTunnelActive && !profileProbeStates.values.contains(.testing)
+        !isBusy && !profileProbeStates.values.contains(.testing)
     }
 
     func testProfile(id: String) async {
-        guard canTestProfiles else {
-            if isTunnelActive {
-                presentedError = PresentedError(
-                    title: "Disconnect first",
-                    message: ModelError.disconnectBeforeTesting.localizedDescription
-                )
-            }
-            return
-        }
+        guard canTestProfiles else { return }
         profileProbeStates[id] = .testing
         let outcome = await Task.detached(priority: .userInitiated) {
             probeStoredProfile(id: id)
@@ -23,15 +15,7 @@ extension TunnelModel {
     }
 
     func testAllProfiles() async {
-        guard canTestProfiles else {
-            if isTunnelActive {
-                presentedError = PresentedError(
-                    title: "Disconnect first",
-                    message: ModelError.disconnectBeforeTesting.localizedDescription
-                )
-            }
-            return
-        }
+        guard canTestProfiles else { return }
         let profileIDs = profiles.map(\.id)
         guard !profileIDs.isEmpty else { return }
         for id in profileIDs {

@@ -520,8 +520,8 @@ const (
 
 // ProbeProfileJSON performs a destination-free, mutually authenticated
 // provider test and returns its selected transport and end-to-end setup
-// latency. Callers should run it only while their platform VPN is inactive so
-// the probe measures the device's ordinary uplink rather than another tunnel.
+// latency. When a platform VPN is active, the probe follows that platform's
+// routing policy and may measure a path through the active tunnel.
 func ProbeProfileJSON(profileJSON string, timeoutMillis int64) (string, error) {
 	timeout, err := profileProbeTimeout(timeoutMillis)
 	if err != nil {

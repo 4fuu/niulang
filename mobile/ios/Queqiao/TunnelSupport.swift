@@ -39,7 +39,6 @@ enum ModelError: LocalizedError {
     case emptyCoreResult
     case invalidPacketTunnelIdentifier
     case disconnectBeforeEditing
-    case disconnectBeforeTesting
     case emptyMetrics
 
     var errorDescription: String? {
@@ -52,8 +51,6 @@ enum ModelError: LocalizedError {
             return "The packet-tunnel bundle identifier is not configured."
         case .disconnectBeforeEditing:
             return "Disconnect the VPN before changing its selected profile or routing policy."
-        case .disconnectBeforeTesting:
-            return "Disconnect the VPN before testing provider connections."
         case .emptyMetrics:
             return "The packet-tunnel extension returned no metrics."
         }
