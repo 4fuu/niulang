@@ -40,6 +40,9 @@
   operational controls.
 - [Mobile clients](MOBILE.md) — Android/iOS build, distribution, and release
   constraints.
+- [Android export mode](ANDROID-EXPORT.md) — the released Android app as a
+  local SOCKS5 endpoint, the per-app bypass every consumer client must apply,
+  and v2rayNG/mihomo/sing-box configuration.
 - [Releasing](RELEASING.md) — local packages, candidate workflows, installation,
   and rollback.
 
