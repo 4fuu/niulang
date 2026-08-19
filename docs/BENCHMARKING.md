@@ -1,10 +1,30 @@
 # Measuring this transport
 
-This is the reference for the measurement rig. It exists because the link this
-project targets moves between roughly 0% and 50% packet loss within minutes, so
+> [!NOTE]
+> **Status:** Current benchmark methodology for public protocol 1
+> **Last reviewed:** 2026-08-19
+
+This is the reference for the measurement rig. It exists because the motivating
+link moved between roughly 0% and 50% packet loss within minutes, so
 running one transport's trials and then another's compares two path windows
 rather than two transports. Every performance claim in this repository should
 be reproducible with the commands here.
+
+## One protocol, three workload views
+
+Short-lived, interactive, and bulk are evaluation families for the same
+Queqiao architecture. The benchmark changes the offered workload; it does not
+select three transports.
+
+| Family | Primary outputs | Minimum comparison |
+| --- | --- | --- |
+| Short-lived | fresh/warm connect, first byte, completion, failure tail | matched small requests with `--latency` |
+| Interactive | latency/jitter/delivery while bulk occupies the bottleneck | `--interactive` with an idle-path control |
+| Bulk | useful goodput, completion count, physical/logical bytes, CPU and memory | matched downloads and uploads long enough to leave startup |
+
+For a transport or controller change, report applicable results from every
+family. A bulk improvement is incomplete evidence if it moves interactive tail
+latency or small-flow setup in the wrong direction.
 
 ## The three pieces
 
@@ -112,6 +132,18 @@ queueing behind the bulk transfer.
 ## Typical invocations
 
 ```sh
+# Short-lived requests: cold/warm setup, first byte, and completion.
+go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
+    --bytes $((64*1024)) --latency --trials 8
+
+# Interactive requests while the same protocol carries a bulk transfer.
+go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
+    --bytes $((50*1024*1024)) --interactive --trials 5
+
+# Bulk completion and useful goodput.
+go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
+    --bytes $((100*1024*1024)) --trials 5
+
 # Against real implementations rather than only the in-tree control.
 go run ./cmd/queqiaobench --stacks baseline,queqiao,tuic,hysteria2 \
     --sing-box /path/to/sing-box --rtt 200 --loss 1 --rate 100 --trials 5
@@ -130,10 +162,6 @@ go run ./cmd/queqiaobench --stacks vless-tcp,vless-ws \
 # One cell, both stacks, with a machine-readable record and a CI gate.
 go run ./cmd/queqiaobench --rtt 200 --loss 3 --rate 100 --trials 5 \
     --json /tmp/result.json --gate --tolerance 0.10
-
-# Does a bulk transfer damage interactive latency?
-go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
-    --bytes $((50*1024*1024)) --interactive --trials 5
 
 # Correlated loss, controller held constant so the transports are compared
 # rather than the controllers.

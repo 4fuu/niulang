@@ -1,5 +1,9 @@
 # NAT and middlebox field validation
 
+> [!NOTE]
+> **Status:** Current qualification matrix for public protocol 1
+> **Last reviewed:** 2026-08-19
+
 ## Purpose
 
 Deterministic emulation proves mechanisms; it cannot prove how unrelated
@@ -11,6 +15,18 @@ not measured.
 Do not publish subscriber addresses, device identifiers, private DNS names,
 packet payloads, or credentials. Record provider/ASN and coarse geography only
 when disclosure is acceptable; otherwise assign an opaque path identifier.
+
+Each path exercises one unified protocol. Short-lived, interactive, and bulk
+are workload views, not separate Queqiao modes:
+
+| Workload view | Required observation on each applicable path |
+| --- | --- |
+| Short-lived | fresh and warm HTTPS/API requests, setup/first-byte/completion distribution |
+| Interactive | SSH-like exchanges and UDP media-style packets, idle and during bulk contention |
+| Bulk | download and upload completion, useful goodput, overhead, and resource plateau |
+
+If one workload cannot be run, mark it missing rather than treating the cell as
+a complete transport pass.
 
 ## Minimum matrix
 
@@ -32,8 +48,8 @@ cells that ran.
 
 ## Scenarios per path
 
-1. Baseline TCP HTTPS/API requests, interactive exchanges, a large transfer,
-   and persistent SOCKS5 UDP requests.
+1. Run the three workload views above plus persistent SOCKS5 UDP, with a
+   same-window conventional proxy baseline.
 2. Ten minutes idle followed by reuse, then an idle interval long enough to
    exercise the observed UDP mapping timeout where practical.
 3. Client sleep/wake or interface down/up while a TCP flow and UDP association

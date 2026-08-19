@@ -1,202 +1,307 @@
-# Design
+# Queqiao design
 
-This is what queqiao is. `DESIGN-MULTIPATH.md` and `DESIGN-ERASURE.md` are
-dated records of how it got here and what each step measured; where they
-disagree with this document, this one is current.
+> [!NOTE]
+> **Status:** Current design of record
+>
+> **Applies to:** Public protocol 1
+> **Last reviewed:** 2026-08-19
 
-## What this is
+Queqiao is a WAN optimization protocol for two known tunnel endpoints
+whose shared long-haul segment is the dominant bottleneck for many application
+flows. It combines a shared directional path model, erasure-aware congestion
+control, selective forward-error correction, byte-offset recovery, and
+cross-flow scheduling in one authenticated proxy.
 
-**A single-connection transport for an erasure channel.**
+The archived [multipath](archive/2026-08-development/DESIGN-MULTIPATH.md) and
+[erasure](archive/2026-08-development/DESIGN-ERASURE.md) notebooks record how
+the current design was reached. When they disagree with this document, this
+document is current.
 
-One flow is carried by one connection. The channel between a client in China
-and a fixed US egress erases roughly 42-45% of packets independently of the
-rate anything sends at, and polices above a knee. Every mechanism here follows
-from that one measured fact.
+## The topology changes the control problem
 
-## The path, measured
+A general Internet congestion controller cannot assume two connections share a
+bottleneck. They may go to different destinations, leave through different
+interfaces, or encounter different queues. Its safe default is therefore
+per-connection inference and control.
 
-From `PATH-CHARACTER-20260813.md`, by open-loop UDP probe rather than by
-inference from the transport's own behaviour:
+Queqiao knows more about its deployment:
 
-- **Downstream erases about 45% at any offered rate**, and the losses are
-  independent: `P(loss | previous arrived)` equals the overall loss rate to
-  within sampling noise. ICMP loses 37% at five packets a second, so it is not
-  a queue. Nothing a sender does changes it.
-- **Above a knee at about 14.5 Mbit/s delivered** there is a token-bucket
-  policer at roughly 24 Mbit/s offered, refilled in quanta, whose losses
-  cluster into runs. This is the only genuine congestion signal on the path.
-- **Upstream is a different path**: it erases nothing measurable and polices at
-  about 14.5 Mbit/s. A transport that assumed symmetry would be wrong in both
-  directions at once.
-- **Capacity is `(1 - p)` times the line rate.** No scheme beats 0.58 of what
-  is offered, so about 14.5 Mbit/s delivered is the budget every design here
-  works inside.
+```text
+many application flows
+        │
+        v
+client Queqiao endpoint
+        │
+        │  one difficult long-haul segment
+        │  shared dominant bottleneck
+        v
+known gateway / relay endpoint
+        │
+        ├── destination A
+        ├── destination B
+        └── destination C
+```
 
-## Three axioms
+The destinations diverge after the gateway, but all proxied traffic first
+crosses the same endpoint-pair segment. Queqiao can therefore coordinate the
+aggregate offered load, share loss/RTT/capacity evidence, and reserve latency
+headroom across flows rather than asking each connection to rediscover the same
+bottleneck.
 
-**1. Loss is not congestion.** On a memoryless erasure channel there is nothing
-to back off from, and backing off does not reduce the loss. Carrying QUIC
-datagrams across the emulated path: quic-go's default (Reno/Cubic) delivers
-0.09-0.13 Mbit/s, BBR 0.39-0.95, this repo's BBR-TUIC port 1.10-5.56, Brutal
-told 25 Mbit/s reaches 14.03, and the erasure controller 10.31-11.50 against a
-14.5 ceiling. Every loss-responsive controller gives the path away.
+This optimization unit is precise, but its applicability is broad:
+intercontinental proxies and branch tunnels, remote corporate access, poor
+hotel/mobile/residential links to a stable relay, and individual long-haul legs
+of an overlay all have this shape. The current implementation exposes client
+and provider-gateway roles; a Tailscale-like product can supply discovery and
+routing around each optimized pair.
 
-**2. There is no fairness obligation.** This transport is not required to be
-TCP-friendly, multipath-friendly, or to take no more of a shared bottleneck
-than one connection would. That is a deliberate discard, and it is what permits
-a controller that does not treat erasure as a congestion signal. The one thing
-it does not permit is starving the operator's own traffic, which is what the
-aggregate token bucket and its interactive reserve are for.
+If the dominant bottleneck is beyond
+the gateway, differs by destination, or is a public bottleneck where the
+operator has no authority to use a non-TCP-friendly policy, the current design
+may be inappropriate. The protocol must be evaluated again rather than treating
+“high loss” alone as proof that the assumption holds.
 
-**3. One flow, one connection.** More connections buy no capacity on this path,
-and cost the mechanism that works. See below.
+## The motivating path has two loss regimes
 
-## Why not multipath
+The path was characterized with an open-loop UDP probe bound to the physical
+interface, not by interpreting a transport's own throughput. The full record is
+in [PATH-CHARACTER-20260813.md](PATH-CHARACTER-20260813.md).
 
-The project began as a multipath design, on a real observation: more TCP
-connections delivered more throughput. One connection measured 0.03 Mbit/s, two
-0.10, four 0.22, eight 0.52 -- linear in the connection count.
+Downstream, the measured endpoint pair showed:
 
-**The observation was real and the diagnosis was wrong.** That linearity is
-TCP's Mathis limit, `MSS / (RTT * sqrt(p))`, which at `p = 0.42` and a 300 ms
-round trip gives about 90 kbit/s per connection. The gain came from being
-loss-limited, not from an ISP policing per 4-tuple. Multipath was a workaround
-for a transport that mistook erasure for congestion, and it scaled because the
-workaround was applied n times.
+- roughly 42–45% packet loss even at low offered rate;
+- near-independent loss below the capacity knee;
+- about 14.5 Mbit/s maximum useful delivery; and
+- longer, correlated loss bursts after aggregate offered traffic crossed the
+  knee.
 
-Fix the loss response and the workaround has nothing left to do. One connection
-with the erasure controller delivers 10-11 Mbit/s live, where eight
-loss-limited TCP connections together reached 0.52.
+Upstream showed no comparable erasure floor and a different capacity limit.
+The directions must therefore be modeled independently.
 
-The open-loop probe settles it below the transport entirely: 1, 2, 4 and 8
-connections at 30 Mbit/s each all deliver 14.3 to 14.7 Mbit/s in total, and the
-same total offered rate split 1, 2 or 4 ways delivers the same total. **There is
-no per-4-tuple policer to exploit.** Connection count provably cannot buy
-capacity here.
+These observations identify two distinct network states:
 
-Nor is there loss diversity to harvest, which is the other usual argument for
-lanes. The erasure process is memoryless and shared: two connections see the
-same process, and there is nothing to average over.
+| Regime | Evidence | Correct response |
+| --- | --- | --- |
+| Rate-independent erasure | loss persists far below capacity and is approximately memoryless | keep the path fed; repair latency-sensitive gaps with FEC or retransmission |
+| Bottleneck overload | additional loss appears near the delivery knee and clusters into bursts | reduce/police aggregate offered load |
 
-**And lanes are worse than merely useless.** They multiply the offered rate into
-one policer and push the aggregate past the knee, where loss stops being
-memoryless and starts clustering. Burst factor -- mean loss-burst length over
-what independence alone would give -- is exactly the factor by which
-correlation shortens the effective length of a coded block. So lanes degrade
-the erasure code, which is the mechanism that does work. Measured live: four
-lanes deliver about 8.0 Mbit/s against a single lane's 10-11.
+One loss event does not say which regime produced it. A controller that treats
+every loss as congestion gives away a path whose erasure does not improve when
+the rate falls. A sender that ignores every loss overruns the real bottleneck
+and turns independent erasure into damaging bursts. Queqiao estimates the loss
+floor separately from excess loss and delivery behavior.
 
-## What follows
+## Network design principles
 
-**Code what wants latency, retransmit what wants bandwidth.** The two spend the
-same thing in different currencies. On a memoryless erasure channel
-retransmission resends only what was lost, `1/(1-p)`, where a code must
-provision for the binomial. So a bulk download runs at 10.1 Mbit/s on a
-retransmitting stream and 5.0 coded, and a small exchange goes the other way --
-1.9 s uncoded against 618 ms coded -- because there the currency is a round
-trip and not a byte. Nothing is configured: the code reports whether it is
-coding from the measured floor.
+### 1. The endpoint pair is one congestion domain
 
-**Control is never queued behind the data it releases.** This is one rule, and
-it is applied twice, at two layers, because it has to cover two kinds of flow.
-They are not alternatives and neither subsumes the other.
+Connections sharing the client uplink and gateway read a shared path model.
+Per-flow byte progress remains separate, but path loss, RTT, delivery rate, and
+pacing do not restart from zero for every destination.
 
-*Within a connection, by substrate.* A lane is a QUIC stream for control and
-that connection's datagrams for coded data, and the framing routes by frame
-type. A stream delivers in order, so at 42% erasure every gap stalls everything
-behind it -- but acknowledgements must not be coded either, because they
-release the data whose blocks they would then be queued behind. Measured with
-everything on one coded substrate: 0.87 Mbit/s one way, 0.008 with
-acknowledgements coming back the other. A factor of a hundred.
+The path key includes the local uplink as well as the remote gateway. A switch
+from Wi-Fi to cellular creates a new model because it changes the path, even
+though the gateway address remains the same.
 
-*Across connections, by plane.* That split only covers flows whose data is
-coded, and a bulk flow's is not: on a memoryless channel retransmission is
-cheaper than parity, so bulk rides a stream. If it rode the same stream as its
-own control, the flow's acknowledgements would sit strictly behind its own
-bulk, and one lost data frame would head-of-line block the acknowledgement that
-releases the peer's sender. So a bulk flow's *data plane* moves to a connection
-of its own while its *control plane* stays on the pooled one.
+### 2. Congestion is excess over the erasure floor
 
-That second split is what bulk isolation actually is, and it buys the
-interactive result twice over: short flows keep a connection with no bulk
-congestion window on it, and the bulk flow keeps a control path with no bulk
-in front of it. It is declined while the flow is alone on the pool, because
-paying a fresh congestion window to protect traffic that is not there costs
-about 8% of bulk goodput.
+The erasure controller corrects its loss response for the measured
+rate-independent floor. Congestive behavior is the delivery/queue regime above
+that floor, not a count of individual lost packets. Coding is sized from the
+floor; adding parity to loss created by an overflowing bottleneck would only
+add more offered load to that bottleneck.
 
-A QUIC flow's data plane is exactly one connection either way. Not "at most one
-by policy" -- one by construction, in `dataLane`, so that a flow transiently
-holding two QUIC lanes during recovery cannot stripe across them with nothing
-having decided to. The TCP-only fallback is an explicit exception: after
-`CapabilityTCPStriping` is authenticated, a classified bulk flow may use a
-bounded group of independent kernel-TCP connections. It never mixes QUIC and
-TCP lanes.
+### 3. The aggregate offered rate must fit the bottleneck
 
-**The code is a sliding window, not a block.** A block code must choose `(k,n)`
-when it seals, which means knowing the path before it has finished sending into
-it. A window sizes itself from what the channel is measured to be doing now.
+On an erasure channel with probability `p`, application-useful delivery cannot
+exceed `(1-p)` times the wire rate. Data, parity, and retransmissions all consume
+the same bottleneck budget. Queqiao coordinates pacing across the endpoint pair
+and reserves part of the bounded queue/rate budget for control and interactive
+work.
 
-**Sequence by byte offset, not by arrival.** Every chunk carries the offset it
-occupies in the application stream, and the receiver reassembles by offset and
-delivers contiguously. This is what stops one substrate's gap from gating the
-other's progress, and it is a single-connection property: measured on one
-connection with 20 ms of jitter, 8.4 Mbit/s against a relaying reference's 2.9,
-because a chunk that arrives out of order is placed rather than waited for.
+The paired segment deliberately has no TCP-friendliness requirement. This
+permits aggressive recovery through non-congestive erasure, but it does not
+remove congestion control: aggregate overload at the measured knee still
+requires restraint.
 
-**The path is measured once.** `internal/pathmodel` holds what an endpoint pair
-has been measured to do, and everything that adapts to the path reads it rather
-than estimating separately. An estimate that starts at zero says the path is
-clean, and everything sized by it is sized for a clean path.
+### 4. Recovery is selected against the WAN RTT
 
-## Several connections, for reasons that are not aggregation
+Automatic repeat request (ARQ) resends only what was lost and is therefore
+byte-efficient. On a long path it may also add one or more complete round trips
+to useful delivery. Sliding-window FEC spends additional wire bytes so a
+receiver can reconstruct some gaps without waiting for feedback.
 
-Deleting QUIC aggregation does not mean one connection per client. Other uses
-survive:
+Queqiao can use coding while avoiding another RTT is worth its parity cost and
+return DATA to the reliable stream as a flow grows. This is a cross-cutting
+policy decision inside the same logical flow, not a separate “short-flow
+protocol” and “bulk protocol.” Residual coded loss is handled by the byte-offset
+replay machinery already required for carrier failure.
 
-- **Isolation.** A flow classified bulk moves its data plane to a connection of
-  its own, keeping its control plane on the pooled one. This is a latency
-  argument and the capacity finding leaves it untouched: measured at 200 ms and
-  1% loss under a 50 MiB transfer, interactive requests see a 208 ms median
-  against 323 ms, where 208 ms is the idle round trip.
-- **Failover.** A session moves to a fresh connection when its current one
-  dies, retaining what is unacknowledged and re-issuing it. This is what
-  survives a UDP blackhole falling back to TCP, and what let a 100 MB download
-  complete intact across a server restart.
-- **TCP fallback tail protection.** Where UDP is unavailable, an explicitly
-  negotiated TCP-only bulk flow may stripe byte offsets across several stock
-  kernel TCP connections. This is not a second congestion controller: BBR or
-  the host-selected controller remains authoritative on every socket. A small
-  acknowledgement-side scheduler window prevents one buffered TLS socket from
-  pre-claiming the stream, and a bounded oldest-first sweep reinjects only a
-  stalled head. Eight lanes are the measured operating point; sixteen is an
-  admission and experiment ceiling.
+### 5. Feedback cannot be queued behind the data it releases
 
-Short flows still share a pooled connection, which is what makes a flow after
-the first cost no round trips: 1 ms against 306 ms.
+A QUIC stream is reliable but ordered: one missing transport packet can hold
+later stream bytes. Queqiao keeps OPEN, ACK, CLOSE, RESET, and recovery control
+on the reliable stream while selected DATA frames use coded datagrams. An ACK
+therefore does not wait inside the coded-data queue whose sender it releases.
+
+The same rule applies across contending flows. Priority queueing and reactive
+isolation keep a growing data stream from trapping new work and feedback in its
+connection congestion window.
+
+### 6. Downstream and upstream are different channels
+
+Each direction has its own logical ACK flag, delivery state, loss estimate,
+coding decision, and congestion behavior. Queqiao does not copy a downstream
+erasure floor or capacity estimate into the upstream.
+
+## One design, three workload goals
+
+Every TCP flow has the same:
+
+- random session and flow identity;
+- OPEN/OPEN_OK lifecycle;
+- logical byte-offset sequence space;
+- cumulative and selective range acknowledgements;
+- bounded replay and out-of-order reassembly;
+- carrier replacement and close semantics; and
+- authenticated QUIC/TCP transport machinery.
+
+The application does not label its traffic. An internal classifier observes
+byte count, rate, directionality, age, and idle gaps, and emits `NEW`,
+`INTERACTIVE`, or `BULK` as a scheduling hint. The hint can change queue
+priority, aggregate reserve, current coding value, reactive isolation, or TCP
+fallback lane admission. It does not create a new flow type or wire state
+machine.
+
+The same implementation is evaluated against three workload families:
+
+| Workload | Examples | Design requirement |
+| --- | --- | --- |
+| Short-lived | `curl`, API call, page resource | pooled setup and recovery must not add avoidable WAN round trips |
+| Interactive | SSH, voice, video, small request under load | control and packet latency must remain responsive while another flow fills the path |
+| Bulk | download or upload | useful goodput and completion must approach the path budget without unbounded parity, replay, memory, or sockets |
+
+A change is incomplete if it improves one family without reporting what it did
+to the other two.
+
+## Unified logical flow and substrate selection
+
+DATA is sequenced by byte offset rather than by arrival. The receiver can place
+a later frame immediately even if an earlier frame crossed a different
+substrate or replacement lane. Only the contiguous prefix is exposed to the
+application.
+
+Each QUIC stream has a reliable control substrate. Where QUIC DATAGRAM is
+available, the connection also owns one coded datagram substrate shared and
+demultiplexed by flow ID. Selected DATA uses it only while both path coding and
+the flow's current policy are active. UDP PACKET uses datagrams whenever
+available because the application already chose unordered, unreliable
+semantics; it does not wait for the coding policy used by TCP DATA.
+
+This split does not ask the application to select a channel. The sender routes
+each frame from the current shared path and flow state; the receiver reconstructs
+one unchanged logical flow.
+
+## Why a BBR-based proxy is not the same design
+
+BBR is a congestion controller, not a proxy. A WebSocket/TLS/TCP proxy using
+kernel BBR is a complete and valid competing stack. It should be compared as
+such, not dismissed because BBR itself lacks proxy framing.
+
+BBR estimates bandwidth and RTT per connection and can behave much better than
+classic loss-based TCP on some lossy paths. TCP still exposes an ordered byte
+stream: missing data is recovered by retransmission, and later bytes cannot be
+delivered past the gap. BBR also does not add cross-flow endpoint-pair state,
+application-visible byte-offset recovery, selective FEC, UDP relay resumption,
+or proxy scheduling.
+
+Queqiao's claim is therefore architectural and path-scoped: on a paired segment
+with a stable erasure floor and long RTT, the proxy can coordinate information
+and recovery that a per-connection congestion controller does not own. Whether
+that produces a performance advantage on a particular network remains a
+measurement question.
+
+## Why QUIC data aggregation was removed
+
+The project began with a multipath hypothesis because several TCP connections
+delivered more than one. The observation was real; the diagnosis was wrong.
+
+At high random loss, ordinary TCP goodput is bounded roughly by
+`MSS / (RTT * sqrt(p))` per connection. Adding connections multiplied that
+loss-limited allowance. Open-loop probing then showed that total path delivery
+was unchanged when the same offered load was split across one, two, four, or
+eight 4-tuples. There was no per-connection policer or independent path
+capacity to aggregate.
+
+After correcting the loss response, extra QUIC connections offered no new
+capacity. Instead, their combined offered load crossed the shared knee, made
+loss more bursty, and weakened the erasure code. The data aggregator was
+deleted.
+
+The current invariant is one active QUIC data connection per logical flow.
+Other connections exist for different reasons:
+
+- a pooled connection amortizes handshake cost across flows;
+- reactive isolation protects cross-flow latency;
+- a replacement connection recovers a failed carrier; and
+- an opt-in TCP-only bundle protects fallback tails while every socket remains
+  under its kernel congestion controller.
+
+None of these claims additional capacity beyond the endpoint-pair bottleneck.
+
+## Pooling and reactive isolation
+
+Warm flows open a new QUIC stream on an authenticated pooled connection, so
+they do not pay a new transport/TLS handshake. The pool is also the common
+control connection for path state and recovery.
+
+If a flow grows while another flow shares that connection, Queqiao can move
+the growing flow's data to a separately authenticated QUIC connection. The
+logical flow retains its IDs, byte offsets, ACK state, and recovery machinery.
+Its control role remains protected from the bulk data plane.
+
+Isolation is reactive. Moving a lone growing flow immediately would pay a cold
+congestion window without protecting anyone else and was measured to reduce
+bulk goodput. This is a contention policy, not workload-specific architecture.
+
+## Fallback and resumption
+
+Automatic mode prefers QUIC. TLS/TCP is a delayed fallback, and only a QUIC
+failure paired with a working authenticated TCP connection counts as evidence
+that UDP is unavailable. Endpoint, protocol, credential, destination, and
+caller-cancellation failures do not globally poison the UDP path.
+
+A TCP flow survives carrier replacement because the sender retains bounded
+unacknowledged byte ranges. JOIN attaches a same-principal lane and replays what
+the peer has not acknowledged. Once a flow hands off from QUIC to TCP, it stays
+on TCP rather than mixing carrier semantics.
+
+For UDP, the gateway can retain a failed association's relay socket briefly
+under a random single-use token. A same-device replacement reclaims it and
+preserves the source address visible to the destination. Datagrams in flight
+during the failure remain lost, as UDP permits.
 
 ## Non-goals
 
-- Aggregating QUIC capacity across connections. TCP fallback striping is a
-  bounded tail-protection mechanism and cannot exceed the path's aggregate
+- Universal congestion control for unrelated destinations and bottlenecks.
+- Aggregating QUIC capacity by opening more connections to the same shared
   bottleneck.
-- Fairness to other flows, TCP-friendliness, or coupled congestion control.
-- Decrypting or classifying HTTPS. Classification is behavioural -- byte
-  counts, direction, idle gaps -- and is a policy hint, not a security
-  boundary.
-- Circumventing the path's aggregate capacity limit.
+- TCP friendliness on an operator-controlled paired segment.
+- Ignoring genuine congestion or exceeding the endpoint pair's aggregate
+  capacity.
+- Decrypting HTTPS or requiring applications to declare workload type.
+- Anonymity, CDN behavior, censorship circumvention, or the discovery/routing
+  control plane of a full mesh. The paired data plane can be one leg of such a
+  system.
 
-## Where it stands
+## Evidence and current limits
 
-Measured live on 2026-08-16 against a UDP sweep of the same path that night:
+The path characterization is protocol-independent evidence for the motivating
+network model. Historical wire-3 transport campaigns produced causal evidence,
+including rejected policies and a live comparison that reached parity—not a
+general advantage—against a TUIC-shaped reference.
 
-| | the path gives | the transport gets | |
-|---|---|---|---|
-| download, one flow | 13.3 Mbit/s | 9.5-10 | 73% |
-| download, eight flows | 13.3 | 12.1 aggregate | 91% |
-| upload, one flow | 14.5 | 11.3-11.7 | 81% |
-| short flow, round trip | 210 ms | 210-260 ms | one round trip |
-
-Against a TUIC-shaped reference over fourteen alternating live rounds: 10.24
-Mbit/s against 10.59, ahead in 6 of 14. **Parity, not an advantage** -- and that
-is the number to believe over any emulated one. The project has not met the
-release gates in `PRODUCTION-DESIGN.md`.
+Those records are kept in [`archive/`](archive/), but they do not qualify the
+public protocol-1 tree. Current claim boundaries and missing field coverage are
+in [STATUS.md](STATUS.md), and the release gates are in
+[PRODUCTION-DESIGN.md](PRODUCTION-DESIGN.md).

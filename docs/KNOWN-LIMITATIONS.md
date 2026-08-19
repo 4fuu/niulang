@@ -1,7 +1,21 @@
 # Known limitations
 
-- Queqiao is a performance-enhancing SOCKS proxy, not an anonymity network or
-  a general-purpose VPN. The provider observes destinations and traffic shape.
+> [!NOTE]
+> **Status:** Current limitations for public protocol 1
+> **Last reviewed:** 2026-08-19
+
+- Queqiao is a WAN optimization data plane, not an anonymity network. The
+  desktop ingress is SOCKS5 and the native mobile apps provide a full-device
+  VPN adapter; in both cases the provider observes destinations and traffic
+  shape.
+- High loss by itself does not prove Queqiao's erasure model applies. Queue
+  overflow, bursty wireless contention, shaping, route capture, and independent
+  erasure require different responses and must be distinguished.
+- The non-TCP-friendly policy assumes an operator-controlled endpoint-pair
+  segment. It may be inappropriate when the dominant bottleneck is a shared
+  public resource outside the operator's authority.
+- No complete multi-network protocol-1 field campaign has been published yet;
+  performance on unmeasured paths is not guaranteed.
 - The SOCKS listener has no password authentication and should remain on
   loopback or another access-controlled interface.
 - Metrics have no authentication; bind them to loopback or protect them.
@@ -9,9 +23,10 @@
   a hardware security module or operating-system keychain for issuer keys.
 - The portable client profile contains the device private key. A GUI may store
   it in a platform keychain later, but the current file must remain mode 0600.
-- The default topology is one provider gateway endpoint. Multi-gateway
-  discovery, load balancing, and seamless trust-domain migration are not yet
-  implemented.
+- The packaged provider topology uses one gateway endpoint. The paired data
+  plane can serve a leg in a wider corporate or mesh overlay, but multi-gateway
+  discovery, route exchange, load balancing, and seamless trust-domain
+  migration are not implemented here.
 - Automatic physical-source selection currently considers IPv4 addresses.
   Hosts with several active physical IPv4 interfaces must choose one with
   `--local-address if:NAME`; an IPv6-only uplink needs an explicit local IPv6

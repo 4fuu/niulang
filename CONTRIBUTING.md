@@ -1,7 +1,10 @@
 # Contributing
 
-Queqiao is an experimental transport with a deliberately narrow deployment
-scope. Before proposing a large feature, open a design issue that explains the
+Queqiao is an evolving WAN optimization protocol with broad applicability to
+intercontinental tunnels, remote corporate access, weak access networks, and
+WAN overlay links. Its optimization unit is precise: an endpoint pair whose
+shared WAN segment is the dominant bottleneck. Before proposing a large
+feature, open a design issue that explains the
 measured problem, the supported topology it affects, and how the change will
 be evaluated. Do not submit protocol or congestion-control changes justified
 only by an emulated benchmark.
@@ -29,12 +32,19 @@ path, and add fail-closed compatibility tests.
 
 The full gosec invocation intentionally reports reviewed findings. Validate its
 JSON with `scripts/check_gosec.py` as documented in
-`docs/STATIC-SECURITY-AUDIT-20260817.md`; do not silence a rule globally.
+`docs/archive/2026-08-development/STATIC-SECURITY-AUDIT-20260817.md`; do not
+silence a rule globally. That audit is a historical baseline; a release
+candidate requires a fresh report for its exact commit.
 
 Measurements must record the commit, toolchain, module graph, exact command,
 path parameters, trial order, and raw output. Use alternating or shared-path
 controls for live comparisons; do not compare transports in separate time
 windows and attribute path movement to code.
+
+Network reports should follow
+[`docs/CONTRIBUTING-NETWORK-EVIDENCE.md`](docs/CONTRIBUTING-NETWORK-EVIDENCE.md).
+Short-lived, interactive, and bulk traffic are evaluation families for the same
+unified protocol, not separate architectures to implement or select.
 
 ## Pull requests
 
