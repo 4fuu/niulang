@@ -29,7 +29,7 @@ import mobilecore.Session;
  * A delegate rather than a base class, because the full tunnel must extend
  * VpnService and the exported proxy must not — they cannot share an ancestor.
  * What differs between them is only how a session is opened, which is what
- * {@link Backend} supplies.
+ * the Backend interface supplies.
  */
 final class TunnelServiceCore implements Observer {
     /** The variant-specific half of a connection. */
@@ -39,7 +39,7 @@ final class TunnelServiceCore implements Observer {
 
         /**
          * Opens whatever this variant needs and starts the core session. Runs off
-         * the main thread. {@code stillCurrent} reports whether this start is
+         * the main thread. The stillCurrent supplier reports whether this start is
          * still the newest one, so an expensive resource can be skipped once the
          * start has been superseded.
          */
@@ -47,7 +47,7 @@ final class TunnelServiceCore implements Observer {
                 throws Exception;
 
         /**
-         * Releases whatever {@link #start} opened. Called on every exit path,
+         * Releases whatever start opened. Called on every exit path,
          * including one that races a start, so it must be idempotent.
          */
         void release();

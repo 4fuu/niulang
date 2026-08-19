@@ -14,10 +14,8 @@ import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -41,15 +39,18 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import mobilecore.Mobilecore;
 
-public final class MainActivity extends Activity {
-    private static final int REQUEST_VPN = 7001;
+public final class MainActivity extends Activity implements TunnelHost {
+    private static final int REQUEST_CONSENT = 7001;
     private static final int REQUEST_NOTIFICATIONS = 7002;
+    private static final String PREFERENCES = "io.github.bojieli.queqiao.ui";
+    private static final String PREFERENCE_MODE = "mode";
 
     private enum Page {
         HOME,
@@ -63,6 +64,8 @@ public final class MainActivity extends Activity {
         return thread;
     });
     private UiKit ui;
+    private List<TunnelController> modes;
+    private TunnelController controller;
     private ProfileRepository repository;
     private ProfileRepository.Catalog catalog = new ProfileRepository.Catalog();
     private FrameLayout pageContainer;
@@ -93,7 +96,17 @@ public final class MainActivity extends Activity {
             if (!TunnelBroadcast.ACTION_STATE.equals(intent.getAction())) {
                 return;
             }
-            tunnelState = valueOr(intent.getStringExtra(TunnelBroadcast.EXTRA_STATE), Mobilecore.StateStopped);
+            String state = valueOr(intent.getStringExtra(TunnelBroadcast.EXTRA_STATE), Mobilecore.StateStopped);
+            String mode = intent.getStringExtra(TunnelBroadcast.EXTRA_MODE);
+            // A mode this screen is not showing only gets to speak when it is
+            // actually carrying traffic, which happens when the app is reopened
+            // while the other mode's service is still running.
+            if (mode != null && !mode.equals(controller.modeId())) {
+                if (Mobilecore.StateStopped.equals(state) || !selectMode(mode)) {
+                    return;
+                }
+            }
+            tunnelState = state;
             tunnelMessage = intent.getStringExtra(TunnelBroadcast.EXTRA_MESSAGE);
             serviceProfileId = intent.getStringExtra(TunnelBroadcast.EXTRA_PROFILE_ID);
             parseMetrics(intent.getStringExtra(TunnelBroadcast.EXTRA_METRICS));
@@ -107,6 +120,8 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         ui = new UiKit(this);
         repository = new ProfileRepository(this);
+        modes = TunnelModes.available(this);
+        controller = restoreMode();
         setContentView(buildShell());
         showPage(Page.HOME);
         refreshCatalog();
@@ -119,8 +134,11 @@ public final class MainActivity extends Activity {
         super.onStart();
         IntentFilter filter = new IntentFilter(TunnelBroadcast.ACTION_STATE);
         registerReceiver(stateReceiver, filter, null, null, Context.RECEIVER_NOT_EXPORTED);
-        startService(new Intent(this, QueqiaoVpnService.class)
-                .setAction(TunnelBroadcast.ACTION_STATUS));
+        // Every mode is asked, not just the shown one: the other mode's service
+        // may still be running from a previous visit, and its reply re-selects it.
+        for (TunnelController mode : modes) {
+            mode.requestStatus();
+        }
     }
 
     @Override
@@ -227,7 +245,7 @@ public final class MainActivity extends Activity {
         ProfileRepository.ProfileRecord selected = selectedRecord();
         if (selected == null) {
             LinearLayout empty = ui.card();
-            empty.addView(ui.text("No VPN profile", 19, Typeface.BOLD), UiKit.matchWrap());
+            empty.addView(ui.text("No profile", 19, Typeface.BOLD), UiKit.matchWrap());
             TextView detail = ui.text(
                     "Import a one-time invitation to create a device-bound profile.",
                     14,
@@ -245,7 +263,7 @@ public final class MainActivity extends Activity {
                     UiKit.matchWrap());
             ui.addLabelValue(current, "Profile", selected.displayName);
             ui.addLabelValue(current, "Provider", selected.summary.endpoint);
-            ui.addLabelValue(current, "Traffic policy", selected.trafficPolicy.title);
+            controller.renderConnectionDetails(ui, current, selected);
             // This is status information, deliberately rendered as text rather than a button.
             ui.addLabelValue(current, "Active device", selected.summary.deviceName);
             Button manage = ui.secondaryButton("Manage profiles");
@@ -279,7 +297,8 @@ public final class MainActivity extends Activity {
 
     @SuppressLint("SetTextI18n")
     private View buildProfilesPage() {
-        LinearLayout content = pageContent("Profiles", "Choose the identity and provider used by the VPN");
+        LinearLayout content = pageContent(
+                "Profiles", "Choose the identity and provider used by the " + controller.noun());
         Button add = ui.primaryButton("Import invitation");
         add.setOnClickListener(view -> showImportDialog(null));
         content.addView(add, ui.spacedCard());
@@ -370,10 +389,12 @@ public final class MainActivity extends Activity {
         Button licenses = ui.secondaryButton("Open-source licenses");
         licenses.setOnClickListener(view -> showLicenses());
         about.addView(licenses, ui.topSpaced());
-        Button systemSettings = ui.secondaryButton("Open Android VPN settings");
-        systemSettings.setOnClickListener(view -> openVpnSettings());
-        about.addView(systemSettings, ui.topSpaced());
         content.addView(about, ui.spacedCard());
+
+        controller.renderSettings(ui, content);
+        if (modes.size() > 1) {
+            content.addView(buildModeCard(), ui.spacedCard());
+        }
         return ui.scroll(content);
     }
 
@@ -421,32 +442,32 @@ public final class MainActivity extends Activity {
                     repository.replaceProfile(selected.id, profile);
                 }
                 pendingConnectProfileId = selected.id;
-                runOnUiThread(this::requestVpnPermission);
+                runOnUiThread(this::requestConsent);
             } catch (Exception exception) {
                 showFailure("Cannot connect", exception);
             }
         });
     }
 
-    private void requestVpnPermission() {
-        Intent permission = VpnService.prepare(this);
-        if (permission == null) {
-            startVpnService();
+    private void requestConsent() {
+        Intent consent = controller.consentIntent();
+        if (consent == null) {
+            startConnection();
         } else {
-            startActivityForResult(permission, REQUEST_VPN);
+            startActivityForResult(consent, REQUEST_CONSENT);
         }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQUEST_VPN) {
+        if (requestCode != REQUEST_CONSENT) {
             return;
         }
         if (resultCode == RESULT_OK) {
-            startVpnService();
+            startConnection();
         } else {
-            setBusy(false, "VPN permission was not granted");
+            setBusy(false, "Permission was not granted");
         }
     }
 
@@ -457,13 +478,13 @@ public final class MainActivity extends Activity {
             int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_NOTIFICATIONS) {
-            // Android permits the VPN foreground service even when notification
+            // Android permits the foreground service even when notification
             // permission is declined; the system still surfaces it in Task Manager.
             prepareConnectionAfterNotificationPermission();
         }
     }
 
-    private void startVpnService() {
+    private void startConnection() {
         String profileId = pendingConnectProfileId;
         pendingConnectProfileId = null;
         if (profileId == null) {
@@ -472,10 +493,7 @@ public final class MainActivity extends Activity {
                     new GeneralSecurityException("The selected Queqiao profile is unavailable"));
             return;
         }
-        Intent intent = new Intent(this, QueqiaoVpnService.class)
-                .setAction(TunnelBroadcast.ACTION_CONNECT)
-                .putExtra(TunnelBroadcast.EXTRA_PROFILE_ID, profileId);
-        startForegroundService(intent);
+        controller.connect(profileId);
         tunnelState = Mobilecore.StateStarting;
         serviceProfileId = profileId;
         busy = true;
@@ -483,9 +501,7 @@ public final class MainActivity extends Activity {
     }
 
     private void disconnect() {
-        Intent intent = new Intent(this, QueqiaoVpnService.class)
-                .setAction(TunnelBroadcast.ACTION_DISCONNECT);
-        startService(intent);
+        controller.disconnect();
         tunnelState = Mobilecore.StateStopping;
         busy = true;
         renderConnectionState();
@@ -640,27 +656,7 @@ public final class MainActivity extends Activity {
         testConnection.setEnabled(canTestProfiles());
         content.addView(testConnection, ui.topSpaced());
 
-        TextView policyTitle = ui.sectionTitle("Traffic policy");
-        policyTitle.setPadding(0, ui.dp(18), 0, ui.dp(2));
-        content.addView(policyTitle, UiKit.matchWrap());
-        RadioGroup policies = new RadioGroup(this);
-        for (TrafficPolicy policy : TrafficPolicy.values()) {
-            RadioButton option = new RadioButton(this);
-            option.setId(View.generateViewId());
-            option.setText(policy.title + "\n" + policy.detail);
-            option.setTextSize(14);
-            option.setTag(policy);
-            option.setChecked(profile.trafficPolicy == policy);
-            option.setEnabled(editable);
-            policies.addView(option, UiKit.matchWrap());
-        }
-        policies.setOnCheckedChangeListener((group, checkedId) -> {
-            RadioButton option = group.findViewById(checkedId);
-            if (option != null && option.getTag() instanceof TrafficPolicy) {
-                updateTrafficPolicy(profile.id, (TrafficPolicy) option.getTag());
-            }
-        });
-        content.addView(policies, UiKit.matchWrap());
+        controller.renderProfileOptions(ui, content, profile, editable);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(profile.displayName)
@@ -700,23 +696,6 @@ public final class MainActivity extends Activity {
                 });
             } catch (Exception exception) {
                 showFailure("Could not select profile", exception);
-            }
-        });
-    }
-
-    private void updateTrafficPolicy(String profileId, TrafficPolicy policy) {
-        if (isTunnelActive()) {
-            showFailure(
-                    "Disconnect first",
-                    new IllegalStateException("Disconnect before changing the traffic policy"));
-            return;
-        }
-        worker.execute(() -> {
-            try {
-                repository.setTrafficPolicy(profileId, policy);
-                runOnUiThread(this::refreshCatalog);
-            } catch (Exception exception) {
-                showFailure("Could not update traffic policy", exception);
             }
         });
     }
@@ -788,7 +767,8 @@ public final class MainActivity extends Activity {
         if (isTunnelActive()) {
             showFailure(
                     "Disconnect first",
-                    new IllegalStateException("Disconnect the VPN before testing provider connections"));
+                    new IllegalStateException(
+                            "Disconnect the " + controller.noun() + " before testing provider connections"));
             return;
         }
         if (!canTestProfiles() || profileIds.isEmpty()) {
@@ -944,14 +924,6 @@ public final class MainActivity extends Activity {
         destination.setText(value == null ? "" : value.toString().trim());
     }
 
-    private void openVpnSettings() {
-        try {
-            startActivity(new Intent(Settings.ACTION_VPN_SETTINGS));
-        } catch (Exception exception) {
-            showFailure("VPN settings are unavailable", exception);
-        }
-    }
-
     private void showLicenses() {
         try {
             String notices;
@@ -998,6 +970,109 @@ public final class MainActivity extends Activity {
                     .show();
             renderConnectionState();
         });
+    }
+
+    @Override
+    public Activity activity() {
+        return this;
+    }
+
+    @Override
+    public ProfileRepository repository() {
+        return repository;
+    }
+
+    @Override
+    public void background(Runnable work) {
+        worker.execute(work);
+    }
+
+    @Override
+    public void failure(String title, Exception exception) {
+        showFailure(title, exception);
+    }
+
+    @Override
+    public void refresh() {
+        refreshCatalog();
+    }
+
+    @Override
+    public boolean connectionActive() {
+        return isTunnelActive();
+    }
+
+    /**
+     * The mode picker exists only where more than one mode is compiled in, which
+     * today means the debug build. Switching while connected would leave the
+     * other service running with nothing on screen driving it.
+     */
+    @SuppressLint("SetTextI18n")
+    private View buildModeCard() {
+        LinearLayout card = ui.card();
+        card.addView(ui.sectionTitle("Connection mode"), UiKit.matchWrap());
+        boolean editable = !isTunnelActive() && !busy && !testingProfiles;
+        RadioGroup group = new RadioGroup(this);
+        for (TunnelController mode : modes) {
+            RadioButton option = new RadioButton(this);
+            option.setId(View.generateViewId());
+            option.setText(mode.title() + "\n" + mode.summary());
+            option.setTextSize(14);
+            option.setTag(mode);
+            option.setChecked(mode.modeId().equals(controller.modeId()));
+            option.setEnabled(editable);
+            group.addView(option, UiKit.matchWrap());
+        }
+        group.setOnCheckedChangeListener((ignored, checkedId) -> {
+            RadioButton option = group.findViewById(checkedId);
+            if (option != null && option.getTag() instanceof TunnelController) {
+                chooseMode(((TunnelController) option.getTag()).modeId());
+            }
+        });
+        card.addView(group, UiKit.matchWrap());
+        return card;
+    }
+
+    private void chooseMode(String modeId) {
+        if (modeId.equals(controller.modeId())) {
+            return;
+        }
+        if (isTunnelActive()) {
+            showFailure(
+                    "Disconnect first",
+                    new IllegalStateException("Disconnect before changing the connection mode"));
+            return;
+        }
+        if (!selectMode(modeId)) {
+            return;
+        }
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putString(PREFERENCE_MODE, modeId)
+                .apply();
+        showPage(currentPage);
+    }
+
+    /** Points the screen at a mode without persisting the choice. */
+    private boolean selectMode(String modeId) {
+        for (TunnelController mode : modes) {
+            if (mode.modeId().equals(modeId)) {
+                controller = mode;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private TunnelController restoreMode() {
+        String stored = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .getString(PREFERENCE_MODE, null);
+        for (TunnelController mode : modes) {
+            if (mode.modeId().equals(stored)) {
+                return mode;
+            }
+        }
+        return modes.get(0);
     }
 
     private LinearLayout pageContent(String title, String subtitle) {
