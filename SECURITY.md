@@ -105,7 +105,19 @@ the last known-good in-memory state active.
 
 ## Reporting a vulnerability
 
-Do not open a public issue containing exploit details or credentials. Contact
-the maintainer privately with the affected revision, reproduction, impact, and
-any proposed mitigation. Remove client profiles, invitations, provider state,
-packet captures, and public IP addresses from shared artifacts.
+Report privately through GitHub's private vulnerability reporting:
+
+**<https://github.com/bojieli/queqiao/security/advisories/new>**
+
+The draft advisory is visible only to you and the maintainer and stays private
+until a fix is published, so it is the right place for exploit detail. If that
+form is not available to you, open a public issue saying only that you hold a
+security report and asking for a private channel: no reproduction, no affected
+revision, no credentials.
+
+Include the affected revision, the reproduction, the impact, and any proposed
+mitigation. Remove client profiles, invitations, provider state, packet
+captures, and public IP addresses from what you attach.
+
+Do not open a public issue or pull request that carries exploit details or
+credentials.
