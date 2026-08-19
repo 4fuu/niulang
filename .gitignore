@@ -6,6 +6,8 @@
 /gosec.json
 /history-secret-scan.json
 /fallback-soak/
+# `go build ./tools/notices` from mobile/ drops the compiled tool here.
+/mobile/notices
 __pycache__/
 *.py[cod]
 
