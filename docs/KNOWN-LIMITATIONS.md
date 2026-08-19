@@ -56,12 +56,32 @@
   exposing it directly to a LAN or public network.
 - A trust-root/issuer compromise requires creating a new provider state and
   re-enrolling users; device revocation is insufficient.
-- The mobile clients are full-tunnel VPNs. They do not currently offer split
-  tunneling, custom DNS, or per-app routing; DNS uses Cloudflare through the
+- The released Android app is not a VPN and has no routing engine. It exports
+  an authenticated SOCKS5 endpoint on loopback, and the consumer client that
+  owns the device tunnel supplies rules, per-app policy, and DNS. That client
+  must exclude Queqiao's package from its tunnel; if it does not, Queqiao's own
+  uplink is captured and the connection loops until it times out instead of
+  failing outright. Automatic detection is not attempted — the in-app
+  connection test is the check, and it is manual.
+- The iOS client is a full-device tunnel with a bounded routing subset, not a
+  rule engine. It offers typed CIDR bypass, an experimental bundled registry
+  set, and automatic connection rules; it does not offer per-app routing,
+  domain or process rules, or custom DNS. DNS uses Cloudflare through the
   encrypted Queqiao tunnel.
-- Android always-on VPN is explicitly disabled pending physical-device locked
-  boot and restart qualification.
-- Apple App Store and Google Play VPN publication both require organization
-  developer accounts under current store rules. iOS is source-build/self-sign
-  only, and Android public builds must use a permitted direct-distribution path
-  unless an organization assumes Google Play publication.
+- The iOS bundled China route set matches addresses, not names. DNS resolves
+  through the tunnel, so a Chinese domain resolved from the gateway's vantage
+  point can return addresses outside the set and still route through Queqiao.
+  The registry also delegates address space that need not be in use. The
+  feature is therefore experimental and off by default.
+- iOS automatic connection rules match Wi-Fi networks by typed name. Queqiao
+  never scans, so a network the user has not named is treated as untrusted, and
+  a renamed network stops matching until the user updates the list.
+- Android always-on VPN is not offered at all by the released app, which
+  declares no `VpnService`. The debug tunnel keeps it disabled pending
+  physical-device locked boot and restart qualification.
+- Apple App Store VPN publication requires an organization developer account
+  under current store rules, so iOS is source-build/self-sign only. Google
+  Play's Organization requirement is scoped to apps approved to use
+  `VpnService`, which the released Android app is not; that removes one named
+  blocker but is not a guarantee of publication, and direct distribution
+  remains the supported Android path.

@@ -91,7 +91,7 @@ datagram semantics.
 
 ```mermaid
 flowchart LR
-    A[Applications / Clash / mobile packet adapter]
+    A[Applications · Clash/mihomo · Android consumer client<br/>iOS packet adapter]
     B[SOCKS5 ingress]
     C[Unified logical flow layer<br/>offsets · ACK ranges · recovery]
     D[Unified transport<br/>QUIC streams + datagrams<br/>TLS/TCP fallback]
@@ -239,7 +239,10 @@ the [field-validation matrix](docs/FIELD-VALIDATION.md).
   reclamation
 - shared path measurement, erasure-aware control, sliding-window coding,
   priority scheduling, and reactive bulk isolation
-- native Android and iOS source clients using the same protocol-1 core
+- native Android and iOS source clients using the same protocol-1 core: the
+  Android app exports an authenticated local SOCKS5 endpoint for whichever
+  routing client already owns the device tunnel, and the iOS app is a packet
+  tunnel with a bounded bypass subset
 - bounded JSON logs, Prometheus-style metrics, a local visualizer, deterministic
   benchmarks, release packaging, SBOMs, and cross-platform automation
 

@@ -63,7 +63,12 @@ exact commit. Production-ready language has additional gates below.
 
 - [x] Android and iOS use the protocol-1 core with full IPv4/IPv6 TCP and UDP,
   crash-safe enrollment, platform secure storage, automatic renewal, bounded
-  packet/session queues, and no third-party proxy application.
+  packet/session queues, and no third-party proxy application. Android carries
+  that traffic as an exported authenticated SOCKS5 endpoint; iOS carries it as
+  a packet tunnel.
+- [x] The released Android APK declares no `BIND_VPN_SERVICE` and no
+  `android.net.VpnService` intent filter, asserted in CI against the assembled
+  artifact.
 - [x] The exact linked runtime and isolated build-tool graphs are pinned,
   license-allowlisted, reproducibly audited, and their full notices are
   embedded in both applications.
@@ -74,10 +79,23 @@ exact commit. Production-ready language has additional gates below.
   and API 35 emulators.
 - [ ] Android API 30, 33, and current physical devices pass the Keystore suite
   and the complete profile-probe, TCP/UDP, IPv4/IPv6, DNS, permission, revoke,
-  and lifecycle matrix on Wi-Fi and cellular.
+  and lifecycle matrix on Wi-Fi and cellular, driven through a real consumer
+  client — v2rayNG, mihomo, or sing-box — with Queqiao excluded from its
+  tunnel.
+- [ ] Removing that exclusion is confirmed to fail loudly: the in-app
+  connection test reports an unreachable provider rather than the loop
+  degrading silently.
 - [ ] Current physical iPhones pass signing, install, packet-tunnel TCP/UDP,
   IPv4/IPv6, DNS, per-profile probe, permission, revoke, sleep/wake,
   Wi-Fi/cellular transition, and reconnect tests.
+- [ ] Extension memory and `setTunnelNetworkSettings` latency are measured on a
+  physical iPhone with the bundled route set enabled, against the profile in
+  [`MOBILE-MEMORY.md`](MOBILE-MEMORY.md). A regression drops the route bound
+  before the feature ships.
+- [ ] iOS automatic connection rules are exercised on hardware: a trusted Wi-Fi
+  network keeps the tunnel down, a manual disconnect is not undone by the
+  connect rule, and disabling the feature while disconnected takes effect
+  without a further connect.
 - [ ] iOS app-update, configuration removal, provider failure, and network-loss
   stops produce a named provider reason plus `fetchLastDisconnectError` output
   in the sanitized, shareable connection log.
@@ -89,9 +107,10 @@ exact commit. Production-ready language has additional gates below.
   and signing-key recovery procedures are exercised on release artifacts.
 - [ ] An independent mobile security/privacy review closes all critical and
   high findings and records accepted lower-severity findings publicly.
-- [ ] Android Developer Console/package registration and, if applicable,
-  Google Play Organization/VpnService declarations are complete. iOS remains
-  source-build only unless an Organization team completes App Store review and
+- [ ] Android Developer Console/package registration is complete, and any Play
+  submission has a reviewed `specialUse` foreground-service justification
+  matching what the service actually does. iOS remains source-build only
+  unless an Organization team completes App Store review and
   jurisdiction-specific VPN obligations.
 
 Completing the preview section permits a v0.1 public-preview release; it does
