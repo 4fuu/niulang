@@ -8,13 +8,32 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
 ### Added
 
-- Native iOS and Android VPN applications with connection-first home screens,
-  live aggregate session counters, secure multi-profile invitation imports,
+- Native iOS and Android applications with connection-first home screens, live
+  aggregate session counters, secure multi-profile invitation imports,
   explicit active-profile selection, profile management, explicit paste/share
-  imports, and per-profile all-traffic or local-network-bypass routing policies.
+  imports, and per-profile all-traffic or local-network-bypass routing
+  policies.
+- Android export mode, which is what the released Android app now is: it
+  enrolls the device and serves the gateway as an authenticated SOCKS5
+  endpoint on loopback for v2rayNG, mihomo, sing-box, or any other client that
+  already owns the device tunnel, with per-install credentials in the
+  Keystore-backed store, a changeable port, in-app setup snippets, and the
+  per-app exclusion step stated first because skipping it loops the uplink.
+  Routing rules, per-app policy, and DNS stay with that client rather than
+  being reimplemented here. See `docs/ANDROID-EXPORT.md`.
+- RFC 1929 username/password authentication for the SOCKS5 listener, required
+  in Android export mode because loopback is shared with every other app on
+  the device. The desktop listener's behavior is unchanged.
+- Per-profile iOS bypass routes: hand-entered CIDR blocks kept off the tunnel,
+  refused rather than silently dropped when they do not parse.
 - An experimental per-profile iOS option to keep APNIC address blocks delegated
   to China off the tunnel, backed by a reproducible, provenance-documented
   bundled route set and strict cross-language format tests.
+- Per-profile iOS automatic connection rules: bring the tunnel up on Wi-Fi, on
+  cellular, or both, and keep it down on Wi-Fi networks the user names. Names
+  are typed and never scanned, so no location permission is involved, and a
+  manual disconnect pauses the rules until the next manual connect instead of
+  being undone by them.
 - Explicit wire-protocol version reporting and diagnosable version mismatch
   errors.
 - The first public wire contract is protocol 1 (`queqiao/1`); unreleased
@@ -47,6 +66,13 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 ### Changed
 
 - The project license is now the MIT License.
+- The Android full-device `VpnService` tunnel is now a debug-only build
+  variant, retained as the vehicle that drives the shared packet stack end to
+  end on real hardware and never published. The released app declares no
+  `BIND_VPN_SERVICE` and no `android.net.VpnService` intent filter, which CI
+  asserts against the assembled release APK. A full Android tunnel put the
+  data plane in competition with mature routing clients over rules it has no
+  engine for; export mode composes with them instead.
 - Public-facing operational evidence uses placeholders instead of active host
   addresses and workstation-specific paths.
 - The frame payload limit is now a constant of protocol 1 rather than a
