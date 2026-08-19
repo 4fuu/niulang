@@ -37,6 +37,23 @@ func TestClientDefaultsNeedOnlyAnImportedProfile(t *testing.T) {
 	}
 }
 
+func TestClientListenerMustBeLiteralLoopback(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:1080", "127.0.0.2:0", "[::1]:1080"} {
+		opts := parseRuntimeForTest(t, true)
+		opts.listen = address
+		if err := validateRuntime(opts, true); err != nil {
+			t.Errorf("loopback listener %q rejected: %v", address, err)
+		}
+	}
+	for _, address := range []string{":1080", "0.0.0.0:1080", "[::]:1080", "192.168.1.2:1080", "localhost:1080"} {
+		opts := parseRuntimeForTest(t, true)
+		opts.listen = address
+		if err := validateRuntime(opts, true); err == nil {
+			t.Errorf("non-literal-loopback listener %q accepted", address)
+		}
+	}
+}
+
 func TestServerDefaultsUseBothTransports(t *testing.T) {
 	opts := parseRuntimeForTest(t, false)
 	if opts.listen != ":443" || opts.transport != "auto" || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
@@ -51,6 +68,8 @@ func TestRuntimeBoundsRejectUnsafeValues(t *testing.T) {
 		{"--max-pending-opens", "0"},
 		{"--max-pending-opens", "65537"},
 		{"--fallback-grace", "0s"},
+		{"--dial-timeout", "0s"},
+		{"--handshake-timeout", "-1s"},
 		{"--flow-idle-timeout", "2h", "--flow-max-lifetime", "1h"},
 		{"--local-address", "if:"},
 		{"--log-format", "xml"},

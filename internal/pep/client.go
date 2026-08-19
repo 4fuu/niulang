@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -1028,7 +1027,7 @@ func flowOpenRetryDelay(failedAttempt int) time.Duration {
 	}
 	window := flowOpenRetryBaseDelay << min(failedAttempt-1, 4)
 	half := window / 2
-	return half + time.Duration(rand.Int64N(int64(half)+1))
+	return half + randomDuration(half)
 }
 
 func (c *Client) waitBeforeFlowOpenRetry(ctx context.Context, failedAttempt int) error {

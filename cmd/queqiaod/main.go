@@ -487,6 +487,13 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	if opts.listen == "" || opts.maxSessions < 1 || opts.maxSessions > 1<<16 {
 		return errors.New("listen address and max-sessions (1-65536) are required")
 	}
+	if client {
+		host, _, err := net.SplitHostPort(opts.listen)
+		ip := net.ParseIP(host)
+		if err != nil || ip == nil || !ip.IsLoopback() {
+			return errors.New("client --listen must use a literal loopback IP; SOCKS has no remote authentication")
+		}
+	}
 	if opts.maxPayload == 0 || opts.maxPayload > 1<<20 || opts.chunkSize <= 0 || uint(opts.chunkSize) > opts.maxPayload {
 		return errors.New("invalid frame payload or chunk size")
 	}
@@ -498,6 +505,9 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	}
 	if opts.flowIdleTimeout <= 0 || opts.flowMaxLifetime <= 0 || opts.flowIdleTimeout > opts.flowMaxLifetime {
 		return errors.New("flow idle timeout must be positive and no longer than flow lifetime")
+	}
+	if opts.dialTimeout <= 0 || opts.handshakeTimeout <= 0 {
+		return errors.New("dial and handshake timeouts must be positive")
 	}
 	if opts.aggregateBytesPerSec == 0 && opts.interactiveReserveBytesPerSec != 0 || opts.interactiveReserveBytesPerSec > opts.aggregateBytesPerSec {
 		return errors.New("invalid aggregate/interactive byte budget")
@@ -939,7 +949,10 @@ func runLogs(args []string) error {
 			return err
 		}
 		status := "not created yet"
-		if info, err := os.Stat(path); err == nil {
+		// path is produced by operlog.DefaultPath from a fixed role. Its only
+		// variable directory is the local user's explicit QUEQIAO_LOG_DIR;
+		// listing that user's chosen log is the purpose of this command.
+		if info, err := os.Stat(path); err == nil { // #nosec G703 -- constrained by DefaultPath and fixed roles above.
 			status = fmt.Sprintf("%d bytes", info.Size())
 		} else if !errors.Is(err, os.ErrNotExist) {
 			status = err.Error()
