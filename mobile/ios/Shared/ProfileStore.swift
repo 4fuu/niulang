@@ -67,6 +67,9 @@ struct StoredProfile: Codable, Identifiable, Equatable, Sendable {
     /// ProfileCatalog.normalize on every load and save, so a caller may hand
     /// this whatever the user typed.
     var bypassRoutes: [String] = []
+    /// Whether the bundled registry set for China is added to the bypass list.
+    /// Experimental, and address-based only: see CountryRoutes.
+    var bypassChinaDirect = false
     let importedAt: String
 
     /// Splits a text field into candidate entries.
@@ -93,6 +96,7 @@ extension StoredProfile {
         summary = try container.decode(ProfileSummary.self, forKey: .summary)
         trafficPolicy = try container.decode(TrafficPolicy.self, forKey: .trafficPolicy)
         bypassRoutes = try container.decodeIfPresent([String].self, forKey: .bypassRoutes) ?? []
+        bypassChinaDirect = try container.decodeIfPresent(Bool.self, forKey: .bypassChinaDirect) ?? false
         importedAt = try container.decode(String.self, forKey: .importedAt)
     }
 }
@@ -247,6 +251,15 @@ struct ProfileStore: Sendable {
             throw ProfileStoreError.profileNotFound
         }
         catalog.profiles[index].bypassRoutes = routes
+        try save(catalog)
+    }
+
+    func setBypassChinaDirect(_ enabled: Bool, for id: String) throws {
+        var catalog = try catalog()
+        guard let index = catalog.profiles.firstIndex(where: { $0.id == id }) else {
+            throw ProfileStoreError.profileNotFound
+        }
+        catalog.profiles[index].bypassChinaDirect = enabled
         try save(catalog)
     }
 

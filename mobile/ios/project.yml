@@ -112,6 +112,10 @@ targets:
     sources:
       - path: QueqiaoTests
       - path: Shared
+      # The shipped country set rides along so a test can prove the artifact
+      # in the repository actually parses, not just that the parser works.
+      - path: PacketTunnel/Resources
+        buildPhase: resources
     dependencies:
       - target: Queqiao
       - framework: Frameworks/Mobilecore.xcframework

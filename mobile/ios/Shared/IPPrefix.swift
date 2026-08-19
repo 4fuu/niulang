@@ -58,6 +58,21 @@ struct IPPrefix: Hashable, Comparable, Sendable {
         self.init(family: parsed.family, high: parsed.high, low: parsed.low, length: length)
     }
 
+    /// Builds a prefix from an address already in memory.
+    ///
+    /// The bundled country set arrives as packed bytes, and rendering each of
+    /// several thousand entries to text only to parse it back would cost more
+    /// allocations than the extension's memory profile has to spare.
+    init?(ipv4 address: UInt32, length: Int) {
+        guard length >= 0, length <= 32 else { return nil }
+        self.init(family: .ipv4, high: 0, low: UInt64(address), length: length)
+    }
+
+    init?(ipv6 high: UInt64, low: UInt64, length: Int) {
+        guard length >= 0, length <= 128 else { return nil }
+        self.init(family: .ipv6, high: high, low: low, length: length)
+    }
+
     static func < (lhs: IPPrefix, rhs: IPPrefix) -> Bool {
         if lhs.family != rhs.family { return lhs.family.rawValue < rhs.family.rawValue }
         if lhs.high != rhs.high { return lhs.high < rhs.high }

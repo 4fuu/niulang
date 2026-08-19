@@ -40,7 +40,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
             resolveAndConfigureTunnel(
                 endpoint: record.summary.endpoint,
                 profile: profile,
-                routing: TunnelRouting(policy: policy, bypassRoutes: record.bypassRoutes),
+                routing: TunnelRouting(
+                    policy: policy,
+                    bypassRoutes: record.bypassRoutes,
+                    chinaDirect: record.bypassChinaDirect
+                ),
                 startup: startup,
                 completion: completion
             )
@@ -235,20 +239,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         }
     }
 
-    /// The set of destinations that stay off the tunnel for this profile.
-    ///
-    /// Everything about how those prefixes are parsed, deduplicated, coalesced
-    /// and capped lives in RoutePlan so it can be tested without a
-    /// NetworkExtension host.
-    private func routePlan(for routing: TunnelRouting) -> RoutePlan {
-        switch routing.policy {
-        case .allTraffic:
-            return RoutePlan.make(userRoutes: routing.bypassRoutes)
-        case .excludeLocalNetworks:
-            return RoutePlan.make(userRoutes: RoutePlan.localNetworks + routing.bypassRoutes)
-        }
-    }
-
     private func makeNetworkSettings(
         plan: RoutePlan,
         remoteAddress: String
@@ -279,11 +269,41 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
     }
 }
 
+private extension PacketTunnelProvider {
+    /// The set of destinations that stay off the tunnel for this profile.
+    ///
+    /// Everything about how those prefixes are parsed, deduplicated, coalesced
+    /// and capped lives in RoutePlan so it can be tested without a
+    /// NetworkExtension host.
+    func routePlan(for routing: TunnelRouting) -> RoutePlan {
+        var userRoutes = routing.bypassRoutes
+        if routing.policy == .excludeLocalNetworks {
+            userRoutes = RoutePlan.localNetworks + userRoutes
+        }
+        var builtIn: [IPPrefix] = []
+        if routing.chinaDirect {
+            do {
+                builtIn = try CountryRoutes.chinaDirect()
+            } catch {
+                // A missing or unreadable set is worth saying out loud, but it
+                // is not worth refusing to connect over: the tunnel still
+                // carries everything, which is the safe direction to fail in.
+                recordDiagnostic(
+                    level: .error,
+                    "Bundled China route set unavailable: \(error.localizedDescription)"
+                )
+            }
+        }
+        return RoutePlan.make(userRoutes: userRoutes, builtIn: builtIn)
+    }
+}
+
 /// Where this profile's traffic goes, read once from the stored record at
 /// startup and carried through resolution into the settings build.
 private struct TunnelRouting {
     let policy: TrafficPolicy
     let bypassRoutes: [String]
+    let chinaDirect: Bool
 }
 
 private enum TunnelError: LocalizedError {

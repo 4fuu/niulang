@@ -276,3 +276,18 @@ final class TunnelModel: ObservableObject {
         }
     }
 }
+
+extension TunnelModel {
+    func setBypassChinaDirect(_ enabled: Bool, for id: String) async {
+        guard canChangeProfile else {
+            present(ModelError.disconnectBeforeEditing, title: "Disconnect first")
+            return
+        }
+        do {
+            try await Task.detached { try ProfileStore().setBypassChinaDirect(enabled, for: id) }.value
+            await refreshProfiles()
+        } catch {
+            present(error, title: "Could not update the bundled route set")
+        }
+    }
+}

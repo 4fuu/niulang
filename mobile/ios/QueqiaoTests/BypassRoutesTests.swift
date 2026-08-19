@@ -6,7 +6,10 @@ import XCTest
 /// setting, it is a lost device identity — so these tests are as much about
 /// migration as about routing.
 final class BypassRoutesTests: XCTestCase {
-    private func makeProfile(bypassRoutes: [String] = []) -> StoredProfile {
+    private func makeProfile(
+        bypassRoutes: [String] = [],
+        bypassChinaDirect: Bool = false
+    ) -> StoredProfile {
         StoredProfile(
             id: "first",
             secretAccount: "secret.first",
@@ -24,6 +27,7 @@ final class BypassRoutesTests: XCTestCase {
             ),
             trafficPolicy: .allTraffic,
             bypassRoutes: bypassRoutes,
+            bypassChinaDirect: bypassChinaDirect,
             importedAt: "2026-08-18T00:00:00Z"
         )
     }
@@ -48,13 +52,19 @@ final class BypassRoutesTests: XCTestCase {
 
         XCTAssertEqual(catalog.profiles.count, 1)
         XCTAssertEqual(catalog.profiles[0].bypassRoutes, [])
+        XCTAssertFalse(catalog.profiles[0].bypassChinaDirect)
         XCTAssertEqual(catalog.profiles[0].summary.deviceID, "device")
     }
 
     func testTheFieldSurvivesAnEncodeDecodeRoundTrip() throws {
         let catalog = ProfileCatalog(
             selectedProfileID: "first",
-            profiles: [makeProfile(bypassRoutes: ["10.0.0.0/8", "2001:db8::/32"])]
+            profiles: [
+                makeProfile(
+                    bypassRoutes: ["10.0.0.0/8", "2001:db8::/32"],
+                    bypassChinaDirect: true
+                )
+            ]
         )
 
         let encoder = JSONEncoder()

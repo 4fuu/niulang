@@ -22,9 +22,14 @@ struct RoutePlan: Sendable, Equatable {
     ///
     /// Every exclusion is a route iOS installs and consults per packet, and
     /// setTunnelNetworkSettings has to complete inside the extension's startup
-    /// budget. Four thousand is far above any hand-written list and still
-    /// leaves the bundled country set room to be useful after coalescing.
-    static let defaultLimit = 4_096
+    /// budget, so the count is bounded rather than open.
+    ///
+    /// The number is set by the bundled country set, not guessed: the registry
+    /// delegates China 7504 blocks once collapsed, and the alternative to
+    /// carrying them all is aggregating neighbours together, which quietly
+    /// takes addresses nobody asked for off the tunnel. Eight thousand fits the
+    /// exact set with room for a full user list on top.
+    static let defaultLimit = 8_192
 
     /// Private and link-local space, the exclusion set behind the
     /// "exclude local networks" traffic policy. It matches the Android

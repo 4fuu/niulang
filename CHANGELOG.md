@@ -12,6 +12,9 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   live aggregate session counters, secure multi-profile invitation imports,
   explicit active-profile selection, profile management, explicit paste/share
   imports, and per-profile all-traffic or local-network-bypass routing policies.
+- An experimental per-profile iOS option to keep APNIC address blocks delegated
+  to China off the tunnel, backed by a reproducible, provenance-documented
+  bundled route set and strict cross-language format tests.
 - Explicit wire-protocol version reporting and diagnosable version mismatch
   errors.
 - The first public wire contract is protocol 1 (`queqiao/1`); unreleased

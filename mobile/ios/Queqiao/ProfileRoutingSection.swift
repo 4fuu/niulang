@@ -15,6 +15,7 @@ struct ProfileRoutingSection: View {
         Group {
             trafficPolicySection
             bypassSection
+            countrySetSection
         }
         .task(id: profile.id) { bypassDraft = storedBypassText }
         .onChange(of: profile.bypassRoutes) { _, _ in bypassDraft = storedBypassText }
@@ -79,6 +80,35 @@ struct ProfileRoutingSection: View {
                 "names — only on addresses."
             )
         }
+    }
+
+    private var countrySetSection: some View {
+        Section {
+            Toggle("Keep Chinese addresses direct", isOn: chinaDirectBinding)
+                .disabled(!model.canChangeProfile)
+        } header: {
+            Text("Bundled route set · experimental")
+        } footer: {
+            Text(
+                "Adds the address blocks APNIC records as delegated to China to " +
+                "the bypass list above.\n\n" +
+                "Two limits are worth knowing before turning this on. The " +
+                "registry records where a block was allocated, not where it is " +
+                "used, so the match is approximate. And because DNS resolves " +
+                "through the tunnel, a Chinese site answering with an address " +
+                "outside this set still takes the tunnel — this matches on " +
+                "addresses, never on domain names."
+            )
+        }
+    }
+
+    private var chinaDirectBinding: Binding<Bool> {
+        Binding(
+            get: { model.profile(id: profile.id)?.bypassChinaDirect ?? profile.bypassChinaDirect },
+            set: { enabled in
+                Task { await model.setBypassChinaDirect(enabled, for: profile.id) }
+            }
+        )
     }
 
     private var storedBypassText: String {
