@@ -90,13 +90,13 @@ public final class MainActivity extends Activity {
     private final BroadcastReceiver stateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (!QueqiaoVpnService.ACTION_STATE.equals(intent.getAction())) {
+            if (!TunnelBroadcast.ACTION_STATE.equals(intent.getAction())) {
                 return;
             }
-            tunnelState = valueOr(intent.getStringExtra(QueqiaoVpnService.EXTRA_STATE), Mobilecore.StateStopped);
-            tunnelMessage = intent.getStringExtra(QueqiaoVpnService.EXTRA_MESSAGE);
-            serviceProfileId = intent.getStringExtra(QueqiaoVpnService.EXTRA_PROFILE_ID);
-            parseMetrics(intent.getStringExtra(QueqiaoVpnService.EXTRA_METRICS));
+            tunnelState = valueOr(intent.getStringExtra(TunnelBroadcast.EXTRA_STATE), Mobilecore.StateStopped);
+            tunnelMessage = intent.getStringExtra(TunnelBroadcast.EXTRA_MESSAGE);
+            serviceProfileId = intent.getStringExtra(TunnelBroadcast.EXTRA_PROFILE_ID);
+            parseMetrics(intent.getStringExtra(TunnelBroadcast.EXTRA_METRICS));
             busy = isTransitioning();
             renderConnectionState();
         }
@@ -117,10 +117,10 @@ public final class MainActivity extends Activity {
     @SuppressLint("InlinedApi")
     protected void onStart() {
         super.onStart();
-        IntentFilter filter = new IntentFilter(QueqiaoVpnService.ACTION_STATE);
+        IntentFilter filter = new IntentFilter(TunnelBroadcast.ACTION_STATE);
         registerReceiver(stateReceiver, filter, null, null, Context.RECEIVER_NOT_EXPORTED);
         startService(new Intent(this, QueqiaoVpnService.class)
-                .setAction(QueqiaoVpnService.ACTION_STATUS));
+                .setAction(TunnelBroadcast.ACTION_STATUS));
     }
 
     @Override
@@ -473,8 +473,8 @@ public final class MainActivity extends Activity {
             return;
         }
         Intent intent = new Intent(this, QueqiaoVpnService.class)
-                .setAction(QueqiaoVpnService.ACTION_CONNECT)
-                .putExtra(QueqiaoVpnService.EXTRA_PROFILE_ID, profileId);
+                .setAction(TunnelBroadcast.ACTION_CONNECT)
+                .putExtra(TunnelBroadcast.EXTRA_PROFILE_ID, profileId);
         startForegroundService(intent);
         tunnelState = Mobilecore.StateStarting;
         serviceProfileId = profileId;
@@ -484,7 +484,7 @@ public final class MainActivity extends Activity {
 
     private void disconnect() {
         Intent intent = new Intent(this, QueqiaoVpnService.class)
-                .setAction(QueqiaoVpnService.ACTION_DISCONNECT);
+                .setAction(TunnelBroadcast.ACTION_DISCONNECT);
         startService(intent);
         tunnelState = Mobilecore.StateStopping;
         busy = true;
