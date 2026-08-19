@@ -42,30 +42,35 @@ exact commit. Production-ready language has additional gates below.
   paired fixed-egress public preview.
 - [ ] The maintainer has reviewed the candidate artifacts and explicitly
   approved publication.
-- [ ] The GitHub `public-release` environment requires the approving reviewer,
+- [x] The GitHub `public-release` environment requires the approving reviewer,
   and the release is triggered either by pushing the reviewed `v*` tag or by
   manual workflow inputs naming the reviewed commit and candidate run.
 
-### Gates that cannot be set before publication
+### Repository settings
 
-Four of the items above are GitHub repository settings, and GitHub offers none
-of them while the repository is private: the API refuses the environment rule
-on plan grounds and does not expose private vulnerability reporting at all.
-They are therefore ordered after the visibility flip and before the tag.
+Four of the items above are settings rather than anything in this tree, and
+GitHub offers none of them while the repository is private: rulesets and branch
+protection answer 403, the environment reviewer answers 422 on plan grounds,
+and private vulnerability reporting is not exposed at all. They are applied
+after the visibility flip and before the tag by
+[`apply_release_settings.sh`](../scripts/apply_release_settings.sh), which
+refuses to run against a private repository and reads every setting back after
+writing it.
 
-1. Make the repository public. `release.yml` already refuses to publish
-   otherwise.
-2. Enable private vulnerability reporting. Until it is on, the advisory link in
-   `SECURITY.md` gives an outside reporter a 404 instead of a form, and the
-   channel that document promises does not exist.
-3. Add the approving reviewer to the `public-release` environment. It has no
-   protection rules today, so the deployment gate in `release.yml` passes
-   without anyone reviewing anything; the required reviewer is what makes the
-   maintainer-approval item above real rather than declared.
-4. Protect `main` with the checks a candidate has to pass.
+Applied and read back on 2026-08-19:
 
-Confirm each one in repository settings rather than by assumption. From inside
-a workflow file an unconfigured gate looks exactly like a satisfied one.
+- private vulnerability reporting is enabled, so the advisory link in
+  `SECURITY.md` reaches a form rather than a 404;
+- the `protect main` ruleset blocks deletion and non-fast-forward pushes to
+  `main`, with no bypass actors;
+- the `protect release tags` ruleset blocks deletion, non-fast-forward, and
+  update across `refs/tags/v*`, so a published tag cannot be moved out from
+  under the attestation that names it; and
+- the `public-release` environment requires the maintainer as reviewer, which
+  is what makes the deployment gate in `release.yml` mean anything.
+
+Confirm them in repository settings as well. From inside a workflow file an
+unconfigured gate looks exactly like a satisfied one.
 
 ## Production-ready claim blockers
 
