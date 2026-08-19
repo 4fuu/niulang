@@ -10,9 +10,7 @@ GO_VERSION=$(sed -n 's/^go //p' "$CORE_DIR/go.mod")
 export GOTOOLCHAIN="go${GO_VERSION}+auto"
 
 : "${ANDROID_HOME:?ANDROID_HOME must point to the Android SDK}"
-if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-    ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.0.12433566"
-fi
+ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.0.12433566"
 export ANDROID_NDK_HOME
 
 BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/queqiao-android-core.XXXXXX")
