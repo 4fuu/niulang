@@ -35,7 +35,8 @@ go run ./mobile/tools/notices \
     -lock "$MOBILE_DIR/runtime-dependencies.lock" \
     -output "$MOBILE_DIR/legal/THIRD_PARTY_NOTICES.txt"
 cd "$STAGED_CORE_DIR"
-PATH="$TOOLS_DIR:$PATH" "$TOOLS_DIR/gomobile" bind \
+CGO_LDFLAGS="-Wl,-z,max-page-size=16384" \
+    PATH="$TOOLS_DIR:$PATH" "$TOOLS_DIR/gomobile" bind \
     -trimpath \
     -ldflags="-s -w" \
     -target=android \

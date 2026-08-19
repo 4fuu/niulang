@@ -18,7 +18,38 @@ trap 'rm -rf "$AUDIT_DIR"' EXIT HUP INT TERM
 
 case "$ARTIFACT" in
     *.aar)
-        unzip -q "$ARTIFACT" 'jni/arm64-v8a/libgojni.so' -d "$AUDIT_DIR"
+        unzip -q "$ARTIFACT" \
+            'jni/arm64-v8a/libgojni.so' \
+            'jni/x86_64/libgojni.so' \
+            -d "$AUDIT_DIR"
+
+        READOBJ=
+        for CANDIDATE in "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-readobj; do
+            if [ -x "$CANDIDATE" ]; then
+                READOBJ=$CANDIDATE
+                break
+            fi
+        done
+        if [ -z "$READOBJ" ]; then
+            echo "Android NDK llvm-readobj is required to audit ELF alignment" >&2
+            exit 1
+        fi
+        for ABI in arm64-v8a x86_64; do
+            LIBRARY="$AUDIT_DIR/jni/$ABI/libgojni.so"
+            if ! "$READOBJ" --program-headers "$LIBRARY" | awk '
+                /Type: PT_LOAD/ { load = 1; next }
+                load && /Alignment:/ {
+                    count++
+                    if (($2 + 0) < 16384) bad = 1
+                    load = 0
+                }
+                END { exit count == 0 || bad }
+            '; then
+                echo "Android $ABI mobile core is not 16 KiB ELF-aligned" >&2
+                exit 1
+            fi
+        done
+
         go version -m "$AUDIT_DIR/jni/arm64-v8a/libgojni.so" >"$AUDIT_DIR/buildinfo"
         awk '$1 == "dep" && $2 != "github.com/bojieli/queqiao" && $2 != "github.com/bojieli/queqiao/mobile/core" { print $2 "@" $3 }' \
             "$AUDIT_DIR/buildinfo" | sort -u >"$AUDIT_DIR/actual"
