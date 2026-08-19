@@ -11,6 +11,6 @@ final class TunnelModes {
     }
 
     static List<TunnelController> available(TunnelHost host) {
-        return List.of(new VpnTunnelController(host));
+        return List.of(new ProxyTunnelController(host), new VpnTunnelController(host));
     }
 }

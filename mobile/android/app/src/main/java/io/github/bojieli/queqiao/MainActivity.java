@@ -764,7 +764,7 @@ public final class MainActivity extends Activity implements TunnelHost {
     }
 
     private void testProfiles(java.util.List<String> profileIds) {
-        if (isTunnelActive()) {
+        if (isTunnelActive() && !controller.allowsProviderTestWhileConnected()) {
             showFailure(
                     "Disconnect first",
                     new IllegalStateException(
@@ -1104,7 +1104,8 @@ public final class MainActivity extends Activity implements TunnelHost {
     }
 
     private boolean canTestProfiles() {
-        return !isTunnelActive() && !busy && !testingProfiles;
+        boolean blockedByConnection = isTunnelActive() && !controller.allowsProviderTestWhileConnected();
+        return !blockedByConnection && !busy && !testingProfiles;
     }
 
     private boolean isTransitioning() {

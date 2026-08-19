@@ -49,6 +49,11 @@ final class VpnTunnelController implements TunnelController {
     }
 
     @Override
+    public boolean allowsProviderTestWhileConnected() {
+        return false;
+    }
+
+    @Override
     public void connect(String profileId) {
         TunnelBroadcast.connect(host.activity(), QueqiaoVpnService.class, profileId);
     }
