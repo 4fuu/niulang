@@ -4,7 +4,7 @@ All notable user-visible changes are recorded here. Queqiao uses semantic
 versioning for release artifacts, while the pre-1.0 wire-compatibility rules
 remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
-## Unreleased
+## v0.1.0 - 2026-08-19
 
 ### Added
 
@@ -130,11 +130,9 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   QUIC failure confirmed by a working TCP control advances the conservative
   UDP-failure detector.
 
-## v0.1.0 - planned
+## Release scope
 
-The first public preview has not been tagged or published.
-
-Planned scope:
+The first public preview is a paired fixed-egress deployment:
 
 - Authenticated TLS/QUIC transport with TLS/TCP fallback.
 - Fixed-egress SOCKS5 TCP CONNECT and UDP ASSOCIATE.
@@ -143,5 +141,5 @@ Planned scope:
 - PIAS-inspired flow classification and reactive bulk-flow isolation.
 - Deterministic archives for Linux, macOS, and Windows on amd64 and arm64.
 
-The release remains blocked on every unchecked item in
+Publication gates are recorded in
 [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md).
