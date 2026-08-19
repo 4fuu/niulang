@@ -219,7 +219,9 @@ jobs:
             --name queqiao_ci \
             --package "system-images;android-${{ matrix.api }};google_apis;x86_64" \
             --device pixel_6
-          nohup emulator @queqiao_ci -no-window -no-audio -no-boot-anim \
+          test -x "$ANDROID_HOME/emulator/emulator"
+          nohup "$ANDROID_HOME/emulator/emulator" @queqiao_ci \
+            -no-window -no-audio -no-boot-anim \
             -no-snapshot -wipe-data -gpu swiftshader_indirect \
             >"$RUNNER_TEMP/queqiao-emulator.log" 2>&1 &
           if ! timeout 60s adb wait-for-device; then
