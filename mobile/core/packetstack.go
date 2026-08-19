@@ -228,6 +228,14 @@ func (p *packetStack) fail(err error) {
 	_ = p.tun.Close()
 }
 
+// done reports when the stack has stopped, so a session can fail rather than
+// serve a listener with nothing behind it. metrics widens the typed snapshot to
+// the packetEngine interface, which must also describe an engine that has no
+// counters at all.
+func (p *packetStack) done() <-chan struct{} { return p.ctx.Done() }
+
+func (p *packetStack) metrics() any { return p.snapshot() }
+
 func (p *packetStack) snapshot() packetStackSnapshot {
 	return packetStackSnapshot{
 		PacketsIn: p.packetsIn.Load(), PacketsOut: p.packetsOut.Load(),

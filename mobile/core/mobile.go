@@ -19,6 +19,7 @@ import (
 	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/pep"
+	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 const (
@@ -57,12 +58,13 @@ type Session struct {
 	protector Protector
 	cancel    context.CancelFunc
 	listener  net.Listener
-	packet    *packetStack
+	packet    packetEngine
 	client    *pep.Client
 	metrics   *metrics.Registry
 	done      chan struct{}
 	runErr    error
 	resources mobileResourceLimits
+	mode      string
 }
 
 func NewSession(observer Observer, protector Protector) *Session {
@@ -79,10 +81,16 @@ func (s *Session) Start(profileJSON string, tunFD, packetOffset, mtu int64, requ
 		return errors.New("invalid tunnel descriptor configuration")
 	}
 	limits := androidResourceLimits
-	return s.start(profileJSON, requireSocketProtection, limits,
-		func(ctx context.Context, proxy socksClient, log func(string, string)) (*packetStack, error) {
+	return s.start(sessionOptions{
+		profileJSON:             profileJSON,
+		requireSocketProtection: requireSocketProtection,
+		limits:                  limits,
+		listenAddr:              privateListenAddr,
+		mode:                    ModeTunnel,
+		makePacketEngine: func(ctx context.Context, proxy socksClient, log func(string, string)) (packetEngine, error) {
 			return newPacketStack(ctx, int(tunFD), int(packetOffset), int(mtu), limits.maxSessions, proxy, log)
-		})
+		},
+	})
 }
 
 // StartPacketFlow activates an iOS tunnel over NEPacketTunnelFlow callbacks.
@@ -95,22 +103,143 @@ func (s *Session) StartPacketFlow(profileJSON string, packetIO PacketIO, mtu int
 		return errors.New("invalid packet-flow configuration")
 	}
 	limits := iosResourceLimits
-	return s.start(profileJSON, false, limits,
-		func(ctx context.Context, proxy socksClient, log func(string, string)) (*packetStack, error) {
+	return s.start(sessionOptions{
+		profileJSON: profileJSON,
+		limits:      limits,
+		listenAddr:  privateListenAddr,
+		mode:        ModeTunnel,
+		makePacketEngine: func(ctx context.Context, proxy socksClient, log func(string, string)) (packetEngine, error) {
 			return newPacketStackWithDevice(ctx, &callbackPacketDevice{packetIO: packetIO}, 0, int(mtu), limits.maxSessions, proxy, log)
-		})
+		},
+	})
 }
 
-type packetStackFactory func(context.Context, socksClient, func(string, string)) (*packetStack, error)
+// StartProxy activates export mode: a SOCKS5 listener on loopback and no packet
+// tunnel at all. Another VPN app on the same device — v2rayNG, mihomo, sing-box
+// — owns the TUN and the routing rules and treats this listener as one outbound
+// among many, which is the same role Queqiao plays behind Clash on the desktop.
+//
+// listenAddr must be a loopback literal. On Android every installed app shares
+// loopback, so username and password are mandatory: they are the only thing
+// standing between this listener and any other app on the device. There is no
+// Protector here, because without a VpnService of its own the app cannot call
+// protect() — the consumer must instead exempt Queqiao's UID from its tunnel,
+// or Queqiao's own uplink is captured by it and the path loops.
+func (s *Session) StartProxy(profileJSON, listenAddr, username, password string) error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	auth := &socks5.Credentials{Username: username, Password: password}
+	if err := auth.Validate(); err != nil {
+		return err
+	}
+	return s.start(sessionOptions{
+		profileJSON: profileJSON,
+		limits:      androidResourceLimits,
+		listenAddr:  listenAddr,
+		auth:        auth,
+		mode:        ModeProxy,
+		makePacketEngine: func(context.Context, socksClient, func(string, string)) (packetEngine, error) {
+			return nullPacketEngine{}, nil
+		},
+	})
+}
 
-func (s *Session) start(profileJSON string, requireSocketProtection bool, limits mobileResourceLimits, makePacketStack packetStackFactory) error {
+// packetEngine is the part of a session that turns tunnel packets into SOCKS
+// requests. Export mode has no tunnel and therefore no engine, so the lifecycle
+// below is written against this interface rather than being made conditional in
+// half a dozen places.
+type packetEngine interface {
+	start()
+	Close() error
+	metrics() any
+	// done fires when the engine stops on its own. A session whose engine dies
+	// must fail rather than keep a listener open with nothing behind it.
+	done() <-chan struct{}
+}
+
+// nullPacketEngine is the export-mode engine. done never fires, so run blocks
+// on the client alone, and metrics reports nothing rather than zeroes that
+// would read as an idle tunnel.
+type nullPacketEngine struct{}
+
+func (nullPacketEngine) start()                {}
+func (nullPacketEngine) Close() error          { return nil }
+func (nullPacketEngine) metrics() any          { return nil }
+func (nullPacketEngine) done() <-chan struct{} { return nil }
+
+type packetStackFactory func(context.Context, socksClient, func(string, string)) (packetEngine, error)
+
+// sessionOptions is what the exported entry points agree on before the shared
+// startup path runs. It is a struct rather than a parameter list because the
+// tunnel and export products differ in five independent ways, and a positional
+// call would make it easy to pair, say, export mode's credentials with a real
+// packet stack.
+type sessionOptions struct {
+	profileJSON             string
+	requireSocketProtection bool
+	limits                  mobileResourceLimits
+	// listenAddr must be loopback; see validateLoopbackListenAddr.
+	listenAddr string
+	// auth is nil for the tunnel products, whose listener is on an ephemeral
+	// loopback port that only this process knows.
+	auth             *socks5.Credentials
+	mode             string
+	makePacketEngine packetStackFactory
+}
+
+// privateListenAddr is the tunnel products' listener: loopback, kernel-assigned
+// port, never advertised. The packet engine learns the port from the listener.
+const privateListenAddr = "127.0.0.1:0"
+
+// Session modes, reported by MetricsJSON so a UI can tell a tunnel with no
+// traffic apart from an export listener that has no packet counters by design.
+const (
+	ModeTunnel = "tunnel"
+	ModeProxy  = "proxy"
+)
+
+// validateLoopbackListenAddr enforces in code the invariant that
+// docs/KNOWN-LIMITATIONS.md states in prose: the SOCKS listener is never
+// reachable off-host. A hostname is rejected rather than resolved, because
+// resolution depends on state this process does not control and "localhost"
+// has been made to point elsewhere before.
+func validateLoopbackListenAddr(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid SOCKS listen address %q: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("SOCKS listen address %q must use an IP literal, not a hostname", address)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("SOCKS listen address %q must be on loopback", address)
+	}
+	number, err := net.LookupPort("tcp", port)
+	if err != nil {
+		return fmt.Errorf("invalid SOCKS listen port in %q: %w", address, err)
+	}
+	// Ports below 1024 are unreachable to an unprivileged Android app and a
+	// request for one is a configuration mistake, not something to discover at
+	// bind time as a permission error.
+	if number != 0 && number < 1024 {
+		return fmt.Errorf("SOCKS listen port %d is privileged", number)
+	}
+	return nil
+}
+
+func (s *Session) start(opts sessionOptions) error {
+	if err := validateLoopbackListenAddr(opts.listenAddr); err != nil {
+		return err
+	}
+	limits := opts.limits
 	s.mu.Lock()
 	if s.state != StateStopped {
 		state := s.state
 		s.mu.Unlock()
 		return fmt.Errorf("cannot start tunnel while state is %s", state)
 	}
-	if requireSocketProtection && s.protector == nil {
+	if opts.requireSocketProtection && s.protector == nil {
 		s.mu.Unlock()
 		return errors.New("socket protection is required for this tunnel")
 	}
@@ -120,7 +249,7 @@ func (s *Session) start(profileJSON string, requireSocketProtection bool, limits
 	s.notifyState(StateStarting)
 	applyRuntimeLimits(limits)
 
-	profile, err := decodeProfile(profileJSON)
+	profile, err := decodeProfile(opts.profileJSON)
 	if err != nil {
 		return s.startFailed(err)
 	}
@@ -128,9 +257,9 @@ func (s *Session) start(profileJSON string, requireSocketProtection bool, limits
 	if err != nil {
 		return s.startFailed(err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", opts.listenAddr)
 	if err != nil {
-		return s.startFailed(fmt.Errorf("open private SOCKS listener: %w", err))
+		return s.startFailed(fmt.Errorf("open SOCKS listener on %s: %w", opts.listenAddr, err))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	registry := metrics.New()
@@ -141,8 +270,9 @@ func (s *Session) start(profileJSON string, requireSocketProtection bool, limits
 		// "auto" interface here would bypass that contract and can select the
 		// VPN itself after its default route is installed.
 		ListenAddr: listener.Addr().String(), RemoteAddr: profile.Endpoint, LocalAddress: "",
-		SocketControl: s.socketControl(requireSocketProtection), Credentials: credentials,
-		MaxPayload: limits.maxPayload, ChunkSize: limits.chunkSize,
+		SocketControl: s.socketControl(opts.requireSocketProtection), SOCKSAuth: opts.auth,
+		Credentials: credentials,
+		MaxPayload:  limits.maxPayload, ChunkSize: limits.chunkSize,
 		DialTimeout: 10 * time.Second, HandshakeTimeout: 30 * time.Second,
 		FlowIdleTimeout: 10 * time.Minute, FlowMaxLifetime: 6 * time.Hour,
 		MaxSessions: limits.maxSessions, MaxPendingOpens: limits.maxPendingOpens, Transport: pep.TransportAuto,
@@ -161,12 +291,22 @@ func (s *Session) start(profileJSON string, requireSocketProtection bool, limits
 		_ = listener.Close()
 		return s.startFailed(err)
 	}
-	packet, err := makePacketStack(ctx,
+	packet, err := opts.makePacketEngine(ctx,
 		socksClient{address: listener.Addr().String(), handshakeTimeout: 10 * time.Second}, s.notifyLog)
 	if err != nil {
 		cancel()
 		_ = listener.Close()
 		return s.startFailed(err)
+	}
+	// The in-process packet engine dials the listener without credentials, so a
+	// real engine behind an authenticating listener would deadlock every flow at
+	// the greeting. The two are set together by construction above; this keeps a
+	// future entry point from separating them.
+	if _, exported := packet.(nullPacketEngine); opts.auth != nil && !exported {
+		cancel()
+		_ = listener.Close()
+		_ = packet.Close()
+		return s.startFailed(errors.New("SOCKS authentication cannot be combined with a packet engine"))
 	}
 	done := make(chan struct{})
 	s.mu.Lock()
@@ -178,7 +318,7 @@ func (s *Session) start(profileJSON string, requireSocketProtection bool, limits
 		return errors.New("tunnel start was interrupted")
 	}
 	s.cancel, s.listener, s.packet, s.client, s.metrics, s.done = cancel, listener, packet, client, registry, done
-	s.resources = limits
+	s.resources, s.mode = limits, opts.mode
 	s.state = StateRunning
 	s.mu.Unlock()
 
@@ -238,7 +378,7 @@ func (s *Session) maintainIdentity(ctx context.Context, profile identity.ClientP
 	}
 }
 
-func (s *Session) run(ctx context.Context, cancel context.CancelFunc, client *pep.Client, listener net.Listener, packet *packetStack, done chan struct{}) {
+func (s *Session) run(ctx context.Context, cancel context.CancelFunc, client *pep.Client, listener net.Listener, packet packetEngine, done chan struct{}) {
 	clientResult := make(chan error, 1)
 	go func() { clientResult <- client.ServeListener(ctx, listener) }()
 	var err error
@@ -249,7 +389,7 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc, client *pe
 		if err == nil && unexpected {
 			err = errors.New("queqiao client stopped unexpectedly")
 		}
-	case <-packet.ctx.Done():
+	case <-packet.done():
 		unexpected = ctx.Err() == nil
 		if unexpected {
 			err = errors.New("packet engine stopped unexpectedly")
@@ -325,6 +465,18 @@ func (s *Session) Stop() error {
 	}
 }
 
+// ListenAddress is the address the SOCKS listener actually bound, which export
+// mode needs because the port is normally left for the kernel to choose and the
+// consumer app has to be told the result. It is empty when nothing is running.
+func (s *Session) ListenAddress() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return ""
+	}
+	return s.listener.Addr().String()
+}
+
 func (s *Session) State() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -334,14 +486,24 @@ func (s *Session) State() string {
 func (s *Session) MetricsJSON() string {
 	s.mu.Lock()
 	state, registry, packet, client, resources := s.state, s.metrics, s.packet, s.client, s.resources
+	mode, listener := s.mode, s.listener
 	s.mu.Unlock()
+	if mode == "" {
+		mode = ModeTunnel
+	}
+	listen := ""
+	if listener != nil {
+		listen = listener.Addr().String()
+	}
 	var transport any = struct{}{}
 	if registry != nil {
 		transport = registry.Snapshot()
 	}
 	var packets any = struct{}{}
 	if packet != nil {
-		packets = packet.snapshot()
+		if snapshot := packet.metrics(); snapshot != nil {
+			packets = snapshot
+		}
 	}
 	var memoryStats runtime.MemStats
 	runtime.ReadMemStats(&memoryStats)
@@ -350,12 +512,16 @@ func (s *Session) MetricsJSON() string {
 		payload = client.MemoryStats()
 	}
 	encoded, err := json.Marshal(struct {
-		Version   int    `json:"version"`
-		State     string `json:"state"`
+		Version int    `json:"version"`
+		State   string `json:"state"`
+		// Mode tells a UI whether the absent packet counters mean "idle" or
+		// "this product has no packet engine".
+		Mode      string `json:"mode"`
+		Listen    string `json:"listen,omitempty"`
 		Packets   any    `json:"packets"`
 		Transport any    `json:"transport"`
 		Memory    any    `json:"memory"`
-	}{Version: 2, State: state, Packets: packets, Transport: transport, Memory: struct {
+	}{Version: 2, State: state, Mode: mode, Listen: listen, Packets: packets, Transport: transport, Memory: struct {
 		Profile   string `json:"profile"`
 		GoLimit   int64  `json:"go_limit_bytes"`
 		HeapAlloc uint64 `json:"heap_alloc_bytes"`
