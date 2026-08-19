@@ -10,18 +10,28 @@ basis, retention, and local-law obligations.
 
 ## Traffic handled while connected
 
-The Android and iOS apps route all device IPv4, IPv6, and DNS traffic through
-the selected Queqiao gateway. The app-to-gateway tunnel is encrypted and
-mutually authenticated. After the gateway forwards traffic, protection to the
-final destination depends on the application protocol: HTTPS remains encrypted
+What reaches the gateway differs by platform:
+
+- The iOS app routes all device IPv4, IPv6, and DNS traffic through the
+  selected Queqiao gateway, minus anything the user has explicitly kept off
+  the tunnel through its bypass options. DNS is sent through the tunnel to
+  Cloudflare's public resolvers at `1.1.1.1` and `2606:4700:4700::1111`;
+  Cloudflare's separate privacy terms then apply to those DNS requests.
+- The released Android app routes nothing on its own. It serves an
+  authenticated SOCKS5 endpoint on loopback, and the separate client that owns
+  the device tunnel decides which traffic is sent into it and how names are
+  resolved. That client's own privacy notice governs those decisions; Queqiao
+  neither resolves names nor selects destinations there.
+
+In both cases the app-to-gateway tunnel is encrypted and mutually
+authenticated. After the gateway forwards traffic, protection to the final
+destination depends on the application protocol: HTTPS remains encrypted
 end-to-end, while an unencrypted protocol can be read by the gateway operator
 and other networks after egress.
 
 The gateway operator can necessarily observe destination addresses, connection
 times, traffic sizes and timing, and any content not independently encrypted
-end-to-end. DNS is sent through the tunnel to Cloudflare's public resolvers at
-`1.1.1.1` and `2606:4700:4700::1111`; Cloudflare's separate privacy terms then
-apply to those DNS requests.
+end-to-end.
 
 ## Identity data
 

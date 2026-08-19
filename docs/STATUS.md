@@ -41,7 +41,7 @@ for the Internet's congestion control.
 | Contention | behavioral flow state, priority queues, reactive bulk isolation, bounded opt-in TCP fallback striping |
 | Identity | one-time invitations, provider-pinned gateway identity, per-device mutual TLS, renewal, revocation, per-user limits |
 | Operations | bounded JSON logs, metrics, local visualizer, service examples, release packaging, SBOMs, and rollback procedure |
-| Clients | command-line desktop client plus native Android and iOS source clients using the same protocol-1 core |
+| Clients | command-line desktop client, an Android app exporting an authenticated local SOCKS5 endpoint for an existing routing client, and an iOS packet tunnel with a bounded bypass subset, all on the same protocol-1 core |
 | Conformance | committed protocol-1 vectors for framing, acknowledgement, destination canonicalization, UDP carriage, sliding-window coding, and enrollment, replayed by the test suite |
 
 ## Evidence boundary
