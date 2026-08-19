@@ -46,6 +46,27 @@ exact commit. Production-ready language has additional gates below.
   and the release is triggered either by pushing the reviewed `v*` tag or by
   manual workflow inputs naming the reviewed commit and candidate run.
 
+### Gates that cannot be set before publication
+
+Four of the items above are GitHub repository settings, and GitHub offers none
+of them while the repository is private: the API refuses the environment rule
+on plan grounds and does not expose private vulnerability reporting at all.
+They are therefore ordered after the visibility flip and before the tag.
+
+1. Make the repository public. `release.yml` already refuses to publish
+   otherwise.
+2. Enable private vulnerability reporting. Until it is on, the advisory link in
+   `SECURITY.md` gives an outside reporter a 404 instead of a form, and the
+   channel that document promises does not exist.
+3. Add the approving reviewer to the `public-release` environment. It has no
+   protection rules today, so the deployment gate in `release.yml` passes
+   without anyone reviewing anything; the required reviewer is what makes the
+   maintainer-approval item above real rather than declared.
+4. Protect `main` with the checks a candidate has to pass.
+
+Confirm each one in repository settings rather than by assumption. From inside
+a workflow file an unconfigured gate looks exactly like a satisfied one.
+
 ## Production-ready claim blockers
 
 - [ ] The real-network matrix in `FIELD-VALIDATION.md` is complete across the
