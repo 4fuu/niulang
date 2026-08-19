@@ -1,10 +1,29 @@
 # Mobile clients
 
 Queqiao has native Android and iOS applications backed by one shared Go core.
-These are full-device packet tunnels, not wrappers around the desktop user
-interface. The Android app uses `VpnService`; the iOS app and its packet-tunnel
-extension use public Network Extension APIs, including `NEPacketTunnelFlow`.
-No private iOS API is used.
+Neither is a wrapper around the desktop user interface, and the two are
+deliberately different products:
+
+- **Android** is an export client. It enrolls the device, holds the identity,
+  keeps the certificate renewed, and serves the gateway as one authenticated
+  SOCKS5 endpoint on loopback for whichever routing client the user already
+  runs. The released build declares no `VpnService`.
+  [Android export mode](ANDROID-EXPORT.md) is the full account.
+- **iOS** is a full-device packet tunnel, because it cannot compose: the
+  platform runs one tunnel provider at a time, a plain app cannot hold a
+  background listener, and no App Store routing client offers a plugin
+  interface. It therefore carries a deliberately bounded routing subset of its
+  own.
+
+This follows the scope rule in [Vision](VISION.md) — Queqiao supplies the
+paired data plane, and a larger overlay supplies discovery, routing, and
+policy. Android can honour it because loopback is shared between apps; iOS
+cannot, so it gets a bounded subset rather than a rule engine.
+
+The iOS app and its packet-tunnel extension use public Network Extension APIs,
+including `NEPacketTunnelFlow`. The Android debug build, and only the debug
+build, additionally offers a `VpnService` tunnel as the test vehicle for the
+shared packet stack. No private iOS API is used.
 
 ## Distribution constraints
 
@@ -17,9 +36,13 @@ These constraints are store policy, not a technical restriction in the source:
   onto that developer's registered devices, but it does not make the app
   eligible for public App Store publication.
 - [Google Play Console requirements](https://support.google.com/googleplay/android-developer/answer/10788890)
-  require developers of apps approved to use `VpnService` to register as an
-  Organization. A personal Play account is therefore not a publication route
-  for Queqiao.
+  require developers of *apps approved to use the `VpnService` class* to
+  register as an Organization. The released Android app declares no
+  `VpnService`, so it falls outside that clause. That removes the one blocker
+  known by name; it is not a guarantee of publication, because the app's
+  `specialUse` foreground-service justification is a review surface of its own
+  and Play has separate policy pages. CI asserts the property on the assembled
+  release APK so it cannot regress unnoticed.
 - Android distribution outside Google Play is a separate system. The
   [Android Developer Console](https://developer.android.com/developer-verification)
   supports verified direct distribution, including personal accounts. Its
@@ -29,55 +52,66 @@ These constraints are store policy, not a technical restriction in the source:
   re-check the current rules before publishing.
 
 The project consequently produces Android APK/AAB artifacts suitable for
-testing and permitted direct distribution, while iOS remains source-build and
-self-sign only until an organization deliberately assumes store, privacy, and
-support responsibility. Store policy can change; the linked primary sources
-are authoritative.
+testing and permitted direct distribution, and treats direct distribution as
+the supported Android path whether or not a Play submission is attempted. iOS
+remains source-build and self-sign only until an organization deliberately
+assumes store, privacy, and support responsibility. Store policy can change;
+the linked primary sources are authoritative.
 
 ## Functional parity
 
 | Capability | Desktop | Android | iOS |
 | --- | --- | --- | --- |
+| Product model | SOCKS5 helper | SOCKS5 helper | Full-device tunnel |
+| Owner of routing policy | Clash/mihomo | The consumer VPN client | Queqiao, bounded |
 | One-time `queqiao://` enrollment | Yes | Yes | Yes |
 | Crash-safe enrollment draft | Mode-0600 file | Keystore-encrypted | This-device-only Keychain |
 | TLS 1.3 mutual authentication and root pin | Yes | Same core | Same core |
 | Hourly certificate maintenance | Yes | Yes | Yes |
 | QUIC with TLS/TCP fallback | Yes | Same core | Same core |
-| SOCKS TCP and UDP | Ingress API | Internal adapter | Internal adapter |
-| Full IPv4 and IPv6 tunnel | Via external TUN client | Native | Native |
+| SOCKS TCP and UDP | Ingress API | Exported listener | Internal adapter |
+| SOCKS listener authentication | None; loopback-only | Required, per install | N/A |
+| Full IPv4 and IPv6 tunnel | Via external TUN client | Debug build only | Native |
 | Bounded sessions and packet queues | Yes | Yes | Yes |
 | Aggregate in-memory metrics | Yes | Yes | Yes |
 | Multiple device-bound provider profiles | N/A (one profile per process) | Yes | Yes |
 | Explicit selected-profile choice | N/A (CLI profile argument) | Yes | Yes |
 | Authenticated per-profile reachability and latency test | No | Yes | Yes |
-| Full-tunnel and local-network bypass policies | External TUN policy | Native | Native |
+| Full-tunnel and local-network bypass policies | External TUN policy | Consumer client | Native |
+| User-supplied CIDR bypass | External TUN policy | Consumer client | Native, bounded |
+| Bundled China route set | External TUN policy | Consumer client | Experimental, per profile |
+| Automatic connection rules | N/A | N/A | Per profile, typed Wi-Fi names |
 
 ## Mobile product model
 
-The mobile applications are organized as VPN clients rather than enrollment
-forms:
+The mobile applications are organized as connection clients rather than
+enrollment forms. Home, Profiles, and Settings work the same way on both
+platforms; what differs is what a connection *is*.
 
 - **Home** owns the connection state and the single Connect/Disconnect action.
-  It shows the selected provider profile, traffic policy, enrolled device name,
-  and aggregate per-connection transfer and flow counters. “Selected” means the
-  profile that the next Connect action will use; it never means the VPN tunnel
-  is connected. “Active device” is status information; it is not an action.
+  It shows the selected provider profile, the routing or endpoint detail for
+  the active mode, enrolled device name, and aggregate per-connection transfer
+  and flow counters. “Selected” means the profile that the next Connect action
+  will use; it never means the connection is up. “Active device” is status
+  information; it is not an action.
 - **Profiles** is a multi-profile library. Importing another invitation adds a
   profile instead of overwriting the current one. Users can select, rename,
-  inspect, test, change the route policy for, and delete profiles. “Test all
-  connections” runs at most four iOS probes concurrently and runs Android
+  inspect, test, change the routing options for, and delete profiles. “Test
+  all connections” runs at most four iOS probes concurrently and runs Android
   probes serially on its bounded application worker. Each probe measures DNS,
   transport setup, mutual TLS, current device authorization, Queqiao protocol
   negotiation, and one authenticated control round trip. It opens no remote
-  destination. Selection, testing, and routing changes require the tunnel to
-  be disconnected so displayed state cannot diverge from the running
-  extension or service or be measured through another active VPN.
+  destination. Selection, testing, and routing changes require the connection
+  to be down so displayed state cannot diverge from the running extension or
+  service or be measured through another active VPN.
 - **Settings** contains stable privacy, key-storage, version, system VPN, and
-  license information rather than connection controls. Its encrypted
-  connection-log ring records named iOS stop reasons and the system's last
-  disconnect error, and users can share a sanitized text copy from production
-  builds. The app reloads its saved VPN manager after configuration changes;
-  an unloaded manager is shown as loading rather than as a false disconnect.
+  license information rather than connection controls. On Android it also
+  holds the exported endpoint, its credentials, and the consumer client setup.
+  Its encrypted connection-log ring records named iOS stop reasons and the
+  system's last disconnect error, and users can share a sanitized text copy
+  from production builds. The app reloads its saved VPN manager after
+  configuration changes; an unloaded manager is shown as loading rather than
+  as a false disconnect.
 
 Both apps import a `queqiao://` invitation through an explicit in-app paste
 action; Android can also appear as a user-selected target for shared plain text.
@@ -95,30 +129,85 @@ Android-Keystore-encrypted envelope excluded from backup. The portable input is
 the provider-issued one-time invitation. Deleting a profile therefore requires
 a new invitation, consistent with the desktop identity model.
 
-Each profile has one of two policies:
+### Android: one endpoint, someone else's rules
+
+The released Android app connects by starting a foreground service that serves
+an authenticated SOCKS5 endpoint on loopback, and by doing nothing else. It
+declares no `VpnService`, holds no routing rules, and answers no DNS. The
+client that owns the device's tunnel decides what reaches Queqiao, and has to
+exclude Queqiao's own package from that tunnel or Queqiao's uplink is captured
+by it and the connection loops rather than failing.
+[Android export mode](ANDROID-EXPORT.md) covers the endpoint, the per-install
+credentials, the bypass step for each consumer client, and the setup snippets
+the app renders with the live values filled in.
+
+The full-device tunnel remains in the debug build as the vehicle that drives
+the shared packet stack end to end on real hardware, and is never published.
+
+### iOS: a bounded routing subset
+
+iOS cannot compose, so the tunnel carries routing policy itself. What it
+carries is deliberately a subset rather than a rule engine.
+
+Each profile has one of two base policies:
 
 - **All traffic** routes IPv4, IPv6, and DNS through Queqiao.
 - **Exclude local networks** keeps IPv4 private, shared-address, loopback, and
   link-local destinations plus IPv6 unique-local, loopback, and link-local
   destinations outside the tunnel. Internet and DNS traffic still use
-  Queqiao. iOS expresses these as excluded Network Extension routes. Android
-  constructs the exact complement as included CIDR routes so behavior is the
-  same on every supported API level, including releases before Android added
-  `VpnService.Builder.excludeRoute`.
+  Queqiao. iOS expresses these as excluded Network Extension routes. The
+  Android debug tunnel constructs the exact complement as included CIDR routes
+  so behavior is the same on every supported API level, including releases
+  before Android added `VpnService.Builder.excludeRoute`.
 
-The encrypted catalog stores only profile metadata, selection, and policy;
-each private profile remains a separate encrypted record. Existing single-
+On top of the base policy, a profile may carry:
+
+- **Typed bypass routes** — up to 256 hand-entered CIDR blocks kept off the
+  tunnel. An entry that is not a CIDR block is refused as it is saved rather
+  than dropped quietly, because a discarded route would leave the user
+  believing a destination is off the tunnel when it is not.
+- **The bundled China route set**, experimental and off by default. It carries
+  the APNIC-delegated blocks exactly as the registry publishes them rather than
+  aggregating neighbours together, because aggregation would take addresses
+  nobody asked for off the tunnel — the failure the route plan exists to
+  prevent. Provenance, regeneration commands, and the registry's own caveat
+  that delegated space need not be in use are in
+  `mobile/legal/COUNTRY_ROUTES.md`. The set is address-based only: DNS resolves
+  through the tunnel via Cloudflare, so a Chinese domain resolved from the
+  gateway's vantage point returns addresses that need not be in the set and
+  will still route through Queqiao. The UI states this rather than implying
+  domain-level routing.
+- **Automatic connection rules**, off by default. A profile may bring the
+  tunnel up on Wi-Fi, on cellular, or both, and keep it down on Wi-Fi networks
+  the user names. Names are typed, never scanned — scanning would require
+  location permission, while the system evaluates `ssidMatch` without it. A
+  manual disconnect pauses the rules until the next manual connect, since
+  otherwise the system would bring the tunnel straight back up and the button
+  would appear broken.
+
+A route plan is bounded, and truncation is reported rather than silent. The
+bound exists because every excluded route is one iOS installs and consults per
+packet, and `setTunnelNetworkSettings` has to complete inside the extension's
+startup budget. The parsed route set is built, applied, and released before the
+packet engine starts, so its peak does not collide with the Go memory budget in
+[Mobile memory](MOBILE-MEMORY.md).
+
+The encrypted catalog stores only profile metadata, selection, and routing
+options; each private profile remains a separate encrypted record. Existing single-
 profile installations migrate in place on first launch. The packet-tunnel
 extension and VPN service receive an explicit profile identifier when starting,
-and automatic certificate renewal writes back only to that identity.
+and automatic certificate renewal writes back only to that identity. A catalog
+written before a routing field existed decodes with that field's default rather
+than failing and taking every enrolled profile on the device with it.
 
 The apps deliberately do not expose experimental transport tuning in their
-primary UI. They use the reviewed desktop defaults. Both install an MTU of
-1280 and send DNS through the Queqiao tunnel to Cloudflare's `1.1.1.1` and
-`2606:4700:4700::1111` resolvers. The default policy routes all IPv4 and IPv6
-traffic; users may explicitly bypass local networks per profile. Always-on mode
-is disabled on Android until restart and locked-device behavior has completed
-the physical-device qualification matrix.
+primary UI. They use the reviewed desktop defaults. The iOS tunnel installs an
+MTU of 1280 and sends DNS through Queqiao to Cloudflare's `1.1.1.1` and
+`2606:4700:4700::1111` resolvers; on Android the consumer client decides both.
+Always-on VPN is not offered by the released Android app at all, since it
+declares no `VpnService`; the debug tunnel keeps it disabled until restart and
+locked-device behavior has completed the physical-device qualification
+matrix.
 
 ## Dependency policy
 
@@ -197,8 +286,22 @@ export QUEQIAO_ANDROID_KEY_PASSWORD='...'
 Never commit a keystore or password. Keep an offline backup: losing the key
 prevents trustworthy updates. Register the final package name and signing
 certificate through the applicable Android distribution console before a wide
-release. Google Play additionally requires its `VpnService` declaration,
-privacy policy, Data safety answers, and an Organization account.
+release. Google Play additionally requires a privacy policy and Data safety
+answers; its Organization requirement is scoped to apps approved to use
+`VpnService`, which the release build is not.
+
+The release APK must declare no `BIND_VPN_SERVICE` and no
+`android.net.VpnService` intent filter. CI checks this with `aapt2 dump
+xmltree` over the assembled artifact, and it holds structurally as well: the
+tunnel sources live in `app/src/debug/`, so the release build never compiles
+them. Verify it locally the same way when changing anything about the manifest
+or the source-set split:
+
+```sh
+"$ANDROID_HOME"/build-tools/36.0.0/aapt2 dump xmltree \
+  --file AndroidManifest.xml app/build/outputs/apk/release/*.apk \
+  | grep -iE 'BIND_VPN_SERVICE|android\.net\.VpnService'
+```
 
 ## Build iOS for a physical device
 
@@ -252,3 +355,14 @@ At minimum this includes physical-device TCP/UDP and IPv4/IPv6 traffic, DNS,
 QUIC-to-TCP fallback, certificate renewal, revocation, suspend/resume,
 Wi-Fi/cellular transitions, bounded 24-hour load, clean install/update/rollback,
 store/direct-distribution declarations, and independent security review.
+
+Two qualifications are specific to the current product split:
+
+- Android export mode is qualified against a real consumer client with Queqiao
+  excluded from its tunnel, and then again with the exclusion removed to
+  confirm the loop fails loudly. The steps are in
+  [Android export mode](ANDROID-EXPORT.md).
+- The iOS bundled route set is qualified by measuring extension memory and
+  `setTunnelNetworkSettings` latency with it enabled, against the profile in
+  [Mobile memory](MOBILE-MEMORY.md). If either regresses, the route bound drops
+  before the feature ships.
