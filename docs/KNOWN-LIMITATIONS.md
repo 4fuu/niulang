@@ -41,6 +41,9 @@
   or the selected gateway port.
 - `--allow-private-destinations` removes the default SSRF boundary and should
   be used only for an intentional private-access service.
+- The desktop SOCKS listener is intentionally loopback-only and has no remote
+  authentication. Use a separately authenticated access layer rather than
+  exposing it directly to a LAN or public network.
 - A trust-root/issuer compromise requires creating a new provider state and
   re-enrolling users; device revocation is insufficient.
 - The mobile clients are full-tunnel VPNs. They do not currently offer split

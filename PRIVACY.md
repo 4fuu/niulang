@@ -1,6 +1,6 @@
 # Queqiao mobile privacy
 
-Last updated: August 18, 2026.
+Last updated: August 19, 2026.
 
 Queqiao is open-source software that connects a device to the Queqiao provider
 selected by an enrollment invitation. The project maintainer does not operate
@@ -44,7 +44,11 @@ The mobile apps contain no advertising, analytics, tracking SDK, account
 system, or crash-reporting service. They do not sell traffic data. Packet and
 transport counters are aggregate and remain in process memory. Diagnostic
 errors may be retained temporarily by the operating system's normal logging
-facilities; Queqiao does not intentionally log packet payloads or private keys.
+facilities. On iOS, dynamic core and error details are credential-sanitized and
+marked private in unified logging; the shareable connection-log ring is
+encrypted in this-device-only Keychain storage and sanitized again on export.
+Queqiao does not intentionally log packet payloads, invitations, or private
+keys.
 
 The apps contact only the provider endpoint encoded in the invitation/profile
 and the DNS resolvers described above as part of their operation. The exact

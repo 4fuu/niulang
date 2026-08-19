@@ -14,7 +14,9 @@ not the wall clock, as the build date:
 version=v0.1.0
 commit=$(git rev-parse HEAD)
 build_date=$(git show -s --format=%cI HEAD)
-go run ./cmd/queqiaopack \
+GOENV=off GOEXPERIMENT= GOFIPS140=off GOFLAGS=-mod=readonly \
+  GOTOOLCHAIN=go1.25.13 GOWORK=off GOAMD64=v1 GOARM64=v8.0 \
+  go run ./cmd/queqiaopack \
   --version "$version" --commit "$commit" --build-date "$build_date" \
   --output dist
 ```
@@ -24,6 +26,13 @@ output directory must not already exist, preventing a new release from being
 mixed with stale artifacts. Every target has an adjacent CycloneDX SBOM, and
 each archive contains the same SBOM plus complete license texts for the exact
 modules linked into its binary. `SHA256SUMS` covers every archive and SBOM.
+The packager refuses a checkout containing modified, untracked, or ignored
+files, a `--commit` other than the full current HEAD SHA, or a `--build-date`
+other than that commit's committer timestamp. It requires the exact patched Go
+toolchain declared in `go.mod`, verifies the downloaded module cache, and
+disables ambient Go workspaces, overlays, build flags, experiments, and
+architecture-level changes; the provenance fields therefore cannot silently
+describe different source bytes.
 
 Verify a downloaded release before unpacking it:
 
@@ -49,9 +58,10 @@ Validate the complete directory before executing an archive:
 ./scripts/validate_release.py dist
 ```
 
-The validator checks checksum coverage, archive paths and modes, build metadata,
-binary hashes, internal/external SBOM identity, dependency/license coverage,
-and the wire version.
+The validator checks the complete six-target matrix and its shared provenance,
+checksum coverage, archive paths and modes, build metadata, binary hashes,
+internal/external SBOM identity, dependency/license coverage, and the wire
+version.
 
 ## Atomic Unix installation
 
@@ -108,8 +118,21 @@ vulnerability, fallback, history-secret, and reproducibility gates. The full
 Go suite runs natively on Linux, macOS, and Windows for amd64 and arm64; the
 race suite runs on every one of those targets supported by Go (all except
 Windows/arm64). A separate six-native-runner gate executes each packaged
-archive. The workflow uploads candidate archives and evidence but cannot create
-a tag or GitHub Release.
+archive. It also refuses to qualify a commit unless an exact-SHA push or manual
+run of the normal CI workflow succeeded, binding the Android, iOS, emulator,
+and short native-suite evidence into the candidate decision. The fail-closed
+selector has Python regression coverage. Pull-request CI does not qualify
+because GitHub tests a synthetic merge commit for that event.
+The workflow uploads candidate archives and evidence but cannot create a tag or
+GitHub Release.
+
+The current Go vulnerability database also reports GO-2026-5932 at module
+scope because `golang.org/x/crypto` contains the unmaintained `openpgp` package.
+There is no fixed module version. Neither the desktop nor mobile package graph
+imports `openpgp`, and `govulncheck` reports zero affected packages and symbols;
+reviewers must recheck that reachability result on the exact candidate rather
+than treating the module-only notice as either a reachable vulnerability or a
+reason to suppress future findings.
 
 GitHub artifact attestations on Free/Pro/Team require a public repository. The
 candidate workflow therefore records them when the repository is public and
@@ -134,11 +157,12 @@ run while the repository is private.
 
 Both paths execute the identical pipeline. The release workflow refuses a
 private repository, a moved/mismatched tag, or a commit with no successful
-candidate run. It rebuilds the final version, executes the downloaded archive
-on native Linux, macOS, and Windows runners for amd64 and arm64, creates
-build-provenance attestations for every published file and CycloneDX
-attestations for every binary, waits at the `public-release` environment, and
-only then creates the GitHub Release.
+candidate run. It rebuilds the final version twice from clean Go build caches
+and requires byte-identical output, executes the downloaded archive on native
+Linux, macOS, and Windows runners for amd64 and arm64, creates build-provenance
+attestations for every published file and CycloneDX attestations for every
+binary, waits at the `public-release` environment, and only then creates the
+GitHub Release.
 
 Verify provenance after downloading:
 

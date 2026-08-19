@@ -10,8 +10,8 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
 - Native iOS and Android VPN applications with connection-first home screens,
   live aggregate session counters, secure multi-profile invitation imports,
-  explicit active-profile selection, profile management, deep-link imports,
-  and per-profile all-traffic or local-network-bypass routing policies.
+  explicit active-profile selection, profile management, explicit paste/share
+  imports, and per-profile all-traffic or local-network-bypass routing policies.
 - Explicit wire-protocol version reporting and diagnosable version mismatch
   errors.
 - The first public wire contract is protocol 1 (`queqiao/1`); unreleased
@@ -37,6 +37,26 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
 ### Fixed
 
+- CI now installs a commit-pinned Android command-line toolchain and runs a
+  checksum-verified, version-pinned SwiftLint binary instead of depending on
+  mutable hosted-runner contents.
+- Release candidates now require successful normal CI evidence for the exact
+  commit, including mobile qualification, and final publication rebuilds every
+  release target twice to reject non-reproducible output.
+- The release packager now rejects dirty or ambiently overridden builds and
+  mismatched commit/date metadata instead of trusting caller-supplied
+  provenance strings.
+- The default destination policy now rejects NAT64/6to4-encoded private IPv4
+  targets and current non-global IANA special-purpose ranges.
+- The desktop client now rejects non-loopback SOCKS listener addresses instead
+  of allowing an accidentally exposed unauthenticated proxy.
+- Mobile invitation fields opt out of platform state/autofill exposure, and
+  iOS no longer marks dynamic core and error details as public unified-log data.
+- Mobile apps no longer claim the unauthenticated `queqiao` custom URL scheme,
+  preventing another installed app from intercepting an unused bearer invitation.
+- The transitive `klauspost/compress` dependency is updated past the affected
+  range for GO-2026-5841, even though the vulnerable S2 symbols were not
+  reachable from Queqiao.
 - Peer-supplied handshake timestamp and in-memory frame-length conversions are
   checked before narrowing.
 - Outer EOF following a peer CLOSE is treated as a normal read half-close,

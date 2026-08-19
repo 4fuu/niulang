@@ -214,8 +214,9 @@ handshake, per new stream, and periodically for active resources.
 
 The invitation is a short-lived bearer credential only for enrollment. Session,
 flow, lane, and UDP-resume IDs route already-authenticated state and never grant
-authority. The SOCKS listener and metrics endpoints are local trust boundaries
-and should remain on loopback or behind independent access control.
+authority. The unauthenticated SOCKS listener is restricted to a literal
+loopback address by the CLI. Metrics endpoints are local trust boundaries and
+should remain on loopback or behind independent access control.
 
 ## Persistence and resource bounds
 

@@ -21,7 +21,9 @@ WebPKI certificate, and user-managed root CA file are unnecessary.
 - Invitations contain provider metadata, a root fingerprint, expiry, and a
   random 256-bit bearer token. They contain no device private key. Treat an
   unused invitation like a temporary password and send it over a private
-  channel.
+  channel. Mobile users should paste or explicitly share the invitation into
+  Queqiao; the apps do not claim the unauthenticated `queqiao` custom URL scheme,
+  which another installed application could impersonate.
 - The client generates an Ed25519 device key locally during enrollment. The
   mode-0600 profile contains that key, its certificate, endpoint, and pinned
   provider identity. Back it up or re-enroll; never publish it.
@@ -79,9 +81,10 @@ repaired by device revocation alone.
 ## Network policy and resource bounds
 
 The gateway rejects private, loopback, multicast, unspecified, and link-local
-destinations by default, including DNS results, to reduce SSRF and network-pivot
-risk. Operators can explicitly allow private destinations for controlled
-deployments.
+destinations by default, including DNS results and IPv4 destinations encoded in
+NAT64/6to4 IPv6 prefixes, to reduce SSRF and network-pivot risk. Non-routable
+IANA special-purpose ranges are rejected as well. Operators can explicitly
+allow private destinations for controlled deployments.
 
 TLS/enrollment deadlines, maximum frame and enrollment sizes, global and
 per-user sessions, lane counts, retained UDP relays, acknowledgement ranges,

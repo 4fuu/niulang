@@ -79,11 +79,14 @@ forms:
   builds. The app reloads its saved VPN manager after configuration changes;
   an unloaded manager is shown as loading rather than as a false disconnect.
 
-Both apps accept a `queqiao://` invitation opened from another application.
-iOS also offers an explicit paste action; Android accepts both a link and a
-shared plain-text invitation. Enrollment remains crash-safe: a draft containing
-the newly generated device key is encrypted before the one-time token is sent,
-and an interrupted import resumes that exact draft.
+Both apps import a `queqiao://` invitation through an explicit in-app paste
+action; Android can also appear as a user-selected target for shared plain text.
+They intentionally do not register the `queqiao` custom URL scheme because
+mobile platforms cannot authenticate which installed application owns a custom
+scheme, while an unused invitation is a bearer credential. Enrollment remains
+crash-safe: a draft containing the newly generated device key is encrypted
+before the one-time token is sent, and an interrupted import resumes that exact
+draft.
 
 Queqiao does not import or export the resulting private client-profile JSON as
 a portable configuration file. That JSON contains the device identity and is
@@ -131,7 +134,8 @@ to MIT, BSD-3-Clause, or Apache-2.0, and checked from the compiled package graph
 by `mobile/scripts/audit-dependencies.sh` and from the built AAR/XCFramework by
 `mobile/scripts/audit-mobile-binary.sh`. The x/mobile binding support that
 gomobile links is included in the runtime lock and notices. The gomobile/gobind
-command graph and Android build tools are pinned separately in
+command graph, Android build tools, and downloaded SwiftLint binary are pinned
+separately in
 `mobile/build-tools.lock`; compiler dependencies such as x/mod, x/sync, and
 x/tools are build-only and are not linked into the apps.
 Gradle's complete downloaded plugin graph is SHA-256 pinned in
@@ -233,7 +237,7 @@ cd mobile/ios
 xcodebuild -project Queqiao.xcodeproj -scheme Queqiao \
   -destination 'platform=iOS Simulator,name=iPhone 17' \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO test
-swiftlint lint --strict --config .swiftlint.yml .
+../scripts/run-swiftlint.sh lint --strict --config .swiftlint.yml .
 ```
 
 Simulator success proves compilation and app/core boundary behavior only. A
