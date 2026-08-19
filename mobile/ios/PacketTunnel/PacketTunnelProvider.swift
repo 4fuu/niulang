@@ -127,8 +127,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         startup: StartupAttempt,
         completion: OneShotErrorCompletion
     ) {
+        let plan = routePlan(for: policy)
+        recordDiagnostic(level: .info, "Route plan: \(plan.diagnosticSummary)")
         setTunnelNetworkSettings(
-            makeNetworkSettings(policy: policy, remoteAddress: remoteAddress)
+            makeNetworkSettings(plan: plan, remoteAddress: remoteAddress)
         ) { [self] error in
             if let error {
                 recordDiagnostic(
@@ -233,8 +235,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         }
     }
 
+    /// The set of destinations that stay off the tunnel for this policy.
+    ///
+    /// Everything about which prefixes those are, and how they are parsed,
+    /// deduplicated, coalesced and capped, lives in RoutePlan so it can be
+    /// tested without a NetworkExtension host.
+    private func routePlan(for policy: TrafficPolicy) -> RoutePlan {
+        switch policy {
+        case .allTraffic:
+            return .empty
+        case .excludeLocalNetworks:
+            return RoutePlan.localNetworkPlan()
+        }
+    }
+
     private func makeNetworkSettings(
-        policy: TrafficPolicy,
+        plan: RoutePlan,
         remoteAddress: String
     ) -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
@@ -242,26 +258,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
 
         let ipv4 = NEIPv4Settings(addresses: ["10.77.0.2"], subnetMasks: ["255.255.255.255"])
         ipv4.includedRoutes = [.default()]
-        if policy == .excludeLocalNetworks {
-            ipv4.excludedRoutes = [
-                NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
-                NEIPv4Route(destinationAddress: "100.64.0.0", subnetMask: "255.192.0.0"),
-                NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
-                NEIPv4Route(destinationAddress: "169.254.0.0", subnetMask: "255.255.0.0"),
-                NEIPv4Route(destinationAddress: "172.16.0.0", subnetMask: "255.240.0.0"),
-                NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0")
-            ]
+        let ipv4Excluded = plan.ipv4Routes
+        if !ipv4Excluded.isEmpty {
+            ipv4.excludedRoutes = ipv4Excluded
         }
         settings.ipv4Settings = ipv4
 
         let ipv6 = NEIPv6Settings(addresses: ["fd77:7171:6f::2"], networkPrefixLengths: [128])
         ipv6.includedRoutes = [.default()]
-        if policy == .excludeLocalNetworks {
-            ipv6.excludedRoutes = [
-                NEIPv6Route(destinationAddress: "::1", networkPrefixLength: 128),
-                NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),
-                NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10)
-            ]
+        let ipv6Excluded = plan.ipv6Routes
+        if !ipv6Excluded.isEmpty {
+            ipv6.excludedRoutes = ipv6Excluded
         }
         settings.ipv6Settings = ipv6
 
