@@ -226,6 +226,10 @@ jobs:
         run: |
           test "$ANDROID_HOME" = /usr/local/lib/android/sdk
           sudo rm -rf -- /usr/local/lib/android/sdk/ndk
+          # The AAR and both APKs are complete. Hosted runners are tight enough
+          # that emulator 37 may otherwise miss creation of its userdata image
+          # by only a few hundred MB, so release the Go caches before the AVD.
+          go clean -cache -modcache -testcache -fuzzcache
       - name: start isolated emulator
         run: |
           if [ -e /dev/kvm ]; then
