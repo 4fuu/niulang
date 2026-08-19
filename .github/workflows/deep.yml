@@ -54,7 +54,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - run: go test -count=1 -timeout 50m ./...
+      # -p=1 for the same reason the race job below uses it: parallel packages
+      # let CPU-bound erasure coding starve the wall-clock network emulators,
+      # and a starved emulator reports a healthy path as a transport fault.
+      - run: go test -p=1 -count=1 -timeout 50m ./...
 
   # The race detector costs this tree roughly an order of magnitude in the
   # erasure code -- internal/fec alone takes seven minutes on a 32-core

@@ -87,7 +87,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - run: go test -count=1 -timeout 50m ./...
+      # -p=1 for the same reason the race job uses it: the wall-clock network
+      # emulators in internal/pathsim and internal/pep share cores with
+      # CPU-bound erasure coding when packages run in parallel, and a starved
+      # emulator reports a healthy 300 ms path as a transport fault. A
+      # four-core hosted runner has no headroom to absorb that; a developer
+      # workstation does, which is why `go test ./...` passes locally and
+      # failed here on macOS/amd64 and both Windows targets.
+      - run: go test -p=1 -count=1 -timeout 50m ./...
 
   race:
     timeout-minutes: 120
