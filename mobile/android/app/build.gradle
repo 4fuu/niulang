@@ -78,7 +78,15 @@ android {
         abortOnError = true
         checkReleaseBuilds = true
         warningsAsErrors = true
-        disable += ["OldTargetApi"]
+        // AndroidGradlePluginVersion reports what upstream has published, not
+        // anything about this source. With warningsAsErrors it fails the build
+        // on Gradle's release schedule: 9.7.1 landed between two commits here
+        // that touched no Android file, and broke the second one. The wrapper
+        // version is deliberately pinned, checksummed, and asserted against
+        // mobile/build-tools.lock by mobile/scripts/audit-dependencies.sh, so
+        // upgrades are a reviewed change to that lock rather than something a
+        // lint check should force. Every other check stays an error.
+        disable += ["OldTargetApi", "AndroidGradlePluginVersion"]
     }
 }
 
