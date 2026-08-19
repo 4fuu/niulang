@@ -279,13 +279,38 @@ jobs:
       - run: mobile/scripts/build-ios-core.sh
       - run: ../scripts/run-swiftlint.sh lint --strict --config .swiftlint.yml .
         working-directory: mobile/ios
+      - name: prepare hosted iOS simulator
+        id: ios-simulator
+        run: |
+          set -euo pipefail
+          # Hosted arm64 images intermittently start with an empty device set
+          # even though the runtimes are installed. Listing first refreshes
+          # CoreSimulator's inventory; creating the device covers the cases
+          # where the refresh finds the runtime but no precreated phones.
+          xcrun simctl list
+          device_id=$(
+            xcrun simctl list devices available --json |
+              jq -r '[.devices[][] | select(.name == "iPhone 17")] | last.udid // empty'
+          )
+          if [[ -z "$device_id" ]]; then
+            runtime_id=$(
+              xcrun simctl list runtimes available --json |
+                jq -r '[.runtimes[] | select(.identifier | contains(".SimRuntime.iOS-"))] | last.identifier // empty'
+            )
+            test -n "$runtime_id"
+            device_id=$(
+              xcrun simctl create "Queqiao CI iPhone 17" \
+                com.apple.CoreSimulator.SimDeviceType.iPhone-17 "$runtime_id"
+            )
+          fi
+          echo "id=$device_id" >> "$GITHUB_OUTPUT"
       - name: simulator build and boundary tests
         working-directory: mobile/ios
         run: >-
           xcodebuild
           -project Queqiao.xcodeproj
           -scheme Queqiao
-          -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest'
+          -destination 'platform=iOS Simulator,id=${{ steps.ios-simulator.outputs.id }}'
           -derivedDataPath DerivedData
           CODE_SIGNING_ALLOWED=NO
           test
