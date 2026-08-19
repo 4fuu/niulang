@@ -155,7 +155,7 @@ jobs:
           cmdline-tools-version: "14742923"
           packages: ""
       - name: install pinned Android SDK components
-        run: sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;28.0.12433566"
+        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;28.0.12433566"
       - run: mobile/scripts/build-android-core.sh
       - name: lint, shrink, and package
         working-directory: mobile/android
@@ -193,7 +193,7 @@ jobs:
       - name: install official Android emulator image
         run: >-
           sdkmanager
-          "platforms;android-37" "build-tools;36.0.0" "ndk;28.0.12433566"
+          "platforms;android-37.0" "build-tools;36.0.0" "ndk;28.0.12433566"
           "emulator" "platform-tools"
           "system-images;android-${{ matrix.api }};google_apis;x86_64"
       - run: mobile/scripts/build-android-core.sh
