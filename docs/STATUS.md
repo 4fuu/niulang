@@ -42,6 +42,7 @@ for the Internet's congestion control.
 | Identity | one-time invitations, provider-pinned gateway identity, per-device mutual TLS, renewal, revocation, per-user limits |
 | Operations | bounded JSON logs, metrics, local visualizer, service examples, release packaging, SBOMs, and rollback procedure |
 | Clients | command-line desktop client plus native Android and iOS source clients using the same protocol-1 core |
+| Conformance | committed protocol-1 vectors for framing, acknowledgement, destination canonicalization, UDP carriage, sliding-window coding, and enrollment, replayed by the test suite |
 
 ## Evidence boundary
 
@@ -86,6 +87,16 @@ Protocol 1 is the only supported wire protocol. Protocol changes must increment
 the version, update [the protocol specification](PROTOCOL.md), add fail-closed
 tests, and describe an explicit migration path. Pre-1.0 does not mean silently
 accepting incompatible or unauthenticated peers.
+
+Protocol 1's limits are fixed by the specification, not by configuration.
+Version 1 has no capability exchange, so two peers configured differently would
+be mutually unintelligible in one direction with nothing on the wire to say so;
+the payload limit, the repair-window and decoder bounds, and the path-probe
+budget are therefore wire constants. `testdata/protocol1/vectors.json` records
+those limits together with the encodings that carry them, including the repair
+coefficients that are generated on both ends and never transmitted. The test
+suite replays the file on every run, and regenerating it for anything already
+published is a wire break requiring a new version rather than a routine update.
 
 ## Help qualify the design
 

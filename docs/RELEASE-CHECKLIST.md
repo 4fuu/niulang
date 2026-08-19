@@ -10,6 +10,10 @@ exact commit. Production-ready language has additional gates below.
 - [x] Supported topology and known limitations are documented.
 - [x] Wire protocol 1 is documented, emitted in build metadata, and rejects
   every other version with a diagnosable error.
+- [x] Every protocol-1 limit is fixed by the specification rather than by
+  configuration, and `testdata/protocol1/vectors.json` records the framing,
+  acknowledgement, destination, UDP, coding, and enrollment encodings as
+  committed vectors that the test suite replays on every run.
 - [x] Security reporting instructions and residual risks are documented.
 - [ ] A pinned full-history secret scan reports zero unresolved findings for
   the exact protocol-1 candidate commit.
@@ -52,6 +56,8 @@ exact commit. Production-ready language has additional gates below.
   and high findings are fixed, and accepted lower-severity findings are public.
 - [ ] Operational monitoring, incident response, supported-version lifetime,
   and credential-rotation ownership have named maintainers.
+- [ ] An implementation outside this tree replays `testdata/protocol1/vectors.json`
+  and interoperates, so protocol 1 is demonstrated rather than only documented.
 
 ## Mobile release blockers
 

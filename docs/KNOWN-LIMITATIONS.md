@@ -16,6 +16,16 @@
   public resource outside the operator's authority.
 - No complete multi-network protocol-1 field campaign has been published yet;
   performance on unmeasured paths is not guaranteed.
+- The frame payload limit is a constant of protocol 1 rather than a deployment
+  setting, so a gateway cannot be configured to accept less than the wire
+  requires. Version 1 negotiates no capabilities, and a private receive limit
+  would fail one direction of traffic without naming the setting or the peer
+  holding it. The former `--max-payload` flag is removed; `--chunk-size`
+  remains, because what a sender chooses to emit is a local choice.
+- The committed conformance vectors are replayed only against this
+  implementation. They pin the wire and make a silent divergence loud, but no
+  independent implementation has been checked against them yet, so protocol 1
+  is documented rather than demonstrated interoperable.
 - The SOCKS listener has no password authentication and should remain on
   loopback or another access-controlled interface.
 - Metrics have no authentication; bind them to loopback or protect them.

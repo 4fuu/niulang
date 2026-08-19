@@ -28,12 +28,30 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   configured endpoints that fail over both QUIC/UDP and TLS/TCP.
 - A light project icon in the README and release archives, so extracted release
   documentation retains its branding without a broken relative image.
+- Committed protocol-1 conformance vectors in `testdata/protocol1/vectors.json`
+  covering frame headers that must be accepted and refused, acknowledgement
+  ranges, destination canonicalization, UDP association and PACKET carriage,
+  RESET payloads, sliding-window coefficients and repairs, coded datagrams, and
+  enrollment invitations. The test suite replays them on every run, which makes
+  the coefficient generator -- derived on both ends and never transmitted, so a
+  mismatch would otherwise surface only as unexplained loss -- checkable by a
+  second implementation.
+- Explicit protocol-1 bounds where the specification previously left a
+  receiver's obligations to the sender's policy: the repair window, the
+  receiver's decoder width and linear-system floor, and the payload, frame, and
+  byte budget of a path probe.
 
 ### Changed
 
 - The project license is now the MIT License.
 - Public-facing operational evidence uses placeholders instead of active host
   addresses and workstation-specific paths.
+- The frame payload limit is now a constant of protocol 1 rather than a
+  configurable one, and the `--max-payload` flag is removed. Version 1
+  negotiates no capabilities, so a per-deployment receive limit made two peers
+  mutually unintelligible in one direction with no way to attribute the
+  failure. `--chunk-size` is unchanged and is now validated against the wire
+  limit; operators who set `--max-payload` should drop it.
 
 ### Fixed
 
@@ -59,6 +77,12 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   reachable from Queqiao.
 - Peer-supplied handshake timestamp and in-memory frame-length conversions are
   checked before narrowing.
+- A gateway that accepts a path probe without echoing it is now treated as the
+  protocol violation it is. The client checks every echoed frame against what it
+  sent, and on a mismatch logs the discrepancy, counts a peer protocol
+  violation, and discards the prewarmed lane and pooled connection instead of
+  handing user traffic to a peer that disagrees about protocol 1. A probe cut
+  short by its own time budget remains an incomplete measurement, not a fault.
 - Outer EOF following a peer CLOSE is treated as a normal read half-close,
   preserving the lane's final-ACK/write direction without delaying retirement
   of a lane that fails before sending CLOSE.
