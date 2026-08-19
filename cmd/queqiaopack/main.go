@@ -38,6 +38,8 @@ var defaultTargets = []target{
 }
 
 var safeMetadata = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
+var fullCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var goDirective = regexp.MustCompile(`(?m)^go ([0-9]+\.[0-9]+\.[0-9]+)$`)
 
 type target struct {
 	goos   string
@@ -170,8 +172,8 @@ func packageRelease(ctx context.Context, cfg config) error {
 	if !safeMetadata.MatchString(cfg.version) {
 		return errors.New("--version is required and may contain only release-safe characters")
 	}
-	if !safeMetadata.MatchString(cfg.commit) {
-		return errors.New("--commit is required and may contain only release-safe characters")
+	if !fullCommit.MatchString(cfg.commit) {
+		return errors.New("--commit must be a full lowercase Git commit SHA")
 	}
 	if cfg.buildDate.IsZero() {
 		return errors.New("--build-date is required")
@@ -189,6 +191,12 @@ func packageRelease(ctx context.Context, cfg config) error {
 	}
 	if _, err := os.Stat(filepath.Join(repoRoot, "go.mod")); err != nil {
 		return fmt.Errorf("repository root %q has no go.mod: %w", repoRoot, err)
+	}
+	if err := verifyReleaseToolchain(repoRoot); err != nil {
+		return err
+	}
+	if err := verifySourceCheckout(ctx, repoRoot, cfg.commit, cfg.buildDate); err != nil {
+		return err
 	}
 	outputDir, err := filepath.Abs(cfg.outputDir)
 	if err != nil {
@@ -244,6 +252,69 @@ func packageRelease(ctx context.Context, cfg config) error {
 	return nil
 }
 
+func verifyReleaseToolchain(repoRoot string) error {
+	// repoRoot is the explicit repository selected for packaging; reading its
+	// fixed go.mod is required to bind the release compiler version.
+	data, err := os.ReadFile(filepath.Join(repoRoot, "go.mod")) // #nosec G304 -- fixed file in the selected release repository.
+	if err != nil {
+		return fmt.Errorf("read go.mod: %w", err)
+	}
+	match := goDirective.FindSubmatch(data)
+	if match == nil {
+		return errors.New("go.mod must declare a full patched Go version")
+	}
+	want := "go" + string(match[1])
+	if runtime.Version() != want {
+		return fmt.Errorf("packager toolchain is %s; go.mod requires %s", runtime.Version(), want)
+	}
+	return nil
+}
+
+// verifySourceCheckout binds the provenance written into BUILDINFO and the
+// SBOM to the bytes that Go will actually compile. The release workflows make
+// the same checks, but keeping the invariant in the packager prevents a local
+// or future caller from producing credible-looking artifacts from a dirty or
+// different checkout.
+func verifySourceCheckout(ctx context.Context, repoRoot, commit string, buildDate time.Time) error {
+	git := func(args ...string) ([]byte, error) {
+		// #nosec G204 -- every call below supplies a fixed, reviewable Git
+		// subcommand; no user-controlled value reaches the executable or argv.
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = repoRoot
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, output)
+		}
+		return output, nil
+	}
+	head, err := git("rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return fmt.Errorf("inspect source commit: %w", err)
+	}
+	if strings.TrimSpace(string(head)) != commit {
+		return fmt.Errorf("source checkout HEAD does not match --commit %s", commit)
+	}
+	dateText, err := git("show", "-s", "--format=%cI", "HEAD")
+	if err != nil {
+		return fmt.Errorf("inspect source commit time: %w", err)
+	}
+	commitDate, err := time.Parse(time.RFC3339, strings.TrimSpace(string(dateText)))
+	if err != nil {
+		return fmt.Errorf("parse source commit time: %w", err)
+	}
+	if !commitDate.Equal(buildDate) {
+		return fmt.Errorf("--build-date does not match source commit time %s", commitDate.Format(time.RFC3339))
+	}
+	status, err := git("status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching")
+	if err != nil {
+		return fmt.Errorf("inspect source worktree: %w", err)
+	}
+	if len(status) != 0 {
+		return errors.New("source worktree is not clean; commit every release input before packaging")
+	}
+	return nil
+}
+
 func buildTarget(ctx context.Context, repoRoot, tempDir, resultDir string, cfg config, target target, documents []archiveFile, moduleDirs map[string]string) (map[string][sha256.Size]byte, error) {
 	packageBase := fmt.Sprintf("queqiaod_%s_%s_%s", cfg.version, target.goos, target.goarch)
 	binaryName := "queqiaod"
@@ -263,10 +334,12 @@ func buildTarget(ctx context.Context, repoRoot, tempDir, resultDir string, cfg c
 	}, " ")
 	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-ldflags", ldflags, "-o", binaryPath, "./cmd/queqiaod")
 	cmd.Dir = repoRoot
-	cmd.Env = withEnv(os.Environ(), map[string]string{
+	cmd.Env = withEnv(releaseGoEnv(os.Environ()), map[string]string{
 		"CGO_ENABLED": "0",
 		"GOOS":        target.goos,
 		"GOARCH":      target.goarch,
+		"GOAMD64":     "v1",
+		"GOARM64":     "v8.0",
 	})
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("build %s: %w\n%s", target, err, output)
@@ -397,10 +470,15 @@ func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 // are read from dependency source trees, which the module cache may not have
 // extracted yet.
 func downloadModuleSources(ctx context.Context, repoRoot string) error {
-	cmd := exec.CommandContext(ctx, "go", "mod", "download")
-	cmd.Dir = repoRoot
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("download module sources: %w\n%s", err, output)
+	for _, arguments := range [][]string{{"mod", "download"}, {"mod", "verify"}} {
+		// Both argument lists are fixed literals above; no caller input reaches
+		// the executable or argv.
+		cmd := exec.CommandContext(ctx, "go", arguments...) // #nosec G204 -- fixed Go subcommands.
+		cmd.Dir = repoRoot
+		cmd.Env = releaseGoEnv(os.Environ())
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("go %s: %w\n%s", strings.Join(arguments, " "), err, output)
+		}
 	}
 	return nil
 }
@@ -408,6 +486,7 @@ func downloadModuleSources(ctx context.Context, repoRoot string) error {
 func listModuleDirs(ctx context.Context, repoRoot string) (map[string]string, error) {
 	cmd := exec.CommandContext(ctx, "go", "list", "-m", "-json", "all")
 	cmd.Dir = repoRoot
+	cmd.Env = releaseGoEnv(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("list module locations: %w", err)
@@ -430,6 +509,9 @@ func readLinkedModules(binaryPath string, moduleDirs map[string]string) ([]linke
 	info, err := buildinfo.ReadFile(binaryPath)
 	if err != nil {
 		return nil, err
+	}
+	if info.GoVersion != runtime.Version() {
+		return nil, fmt.Errorf("linked binary Go version %s differs from packager %s", info.GoVersion, runtime.Version())
 	}
 	modules := make([]linkedModule, 0, len(info.Deps))
 	for _, dependency := range info.Deps {
@@ -698,4 +780,19 @@ func withEnv(base []string, replacements map[string]string) []string {
 		result = append(result, key+"="+replacements[key])
 	}
 	return result
+}
+
+// releaseGoEnv prevents ambient per-user Go configuration, workspaces, build
+// tags, overlays, experiments, or architecture levels from changing the bytes
+// described by release provenance. Cache and module-download locations remain
+// caller-selectable so CI can isolate them without affecting build semantics.
+func releaseGoEnv(base []string) []string {
+	return withEnv(base, map[string]string{
+		"GOENV":        "off",
+		"GOEXPERIMENT": "",
+		"GOFIPS140":    "off",
+		"GOFLAGS":      "-mod=readonly",
+		"GOTOOLCHAIN":  runtime.Version(),
+		"GOWORK":       "off",
+	})
 }

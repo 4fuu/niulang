@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import io
 import json
 import pathlib
 import re
+import stat
 import tarfile
 import zipfile
 
@@ -66,6 +68,20 @@ REQUIRED_ARCHIVE_FILES = {
     "internal/congestion/NOTICE",
 }
 CHECKSUM = re.compile(r"[0-9a-f]{64}")
+FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+SAFE_METADATA = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*")
+TARGET = re.compile(r"[a-z0-9]+/[a-z0-9]+")
+GO_VERSION = re.compile(r"go[0-9]+\.[0-9]+\.[0-9]+")
+UTC_BUILD_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+NOTICE_ROW = re.compile(r"^\| `([^`]+)` \| ([^ |]+) \| ([A-Za-z0-9.-]+) \|$")
+EXPECTED_TARGETS = {
+    "darwin/amd64",
+    "darwin/arm64",
+    "linux/amd64",
+    "linux/arm64",
+    "windows/amd64",
+    "windows/arm64",
+}
 BUILDINFO_KEYS = {
     "version",
     "commit",
@@ -118,6 +134,9 @@ def archive_files(path: pathlib.Path, expected_root: str) -> dict[str, tuple[byt
             for entry in archive.infolist():
                 if entry.is_dir():
                     raise ValueError(f"unexpected archive directory {entry.filename!r}")
+                raw_mode = entry.external_attr >> 16
+                if entry.create_system != 3 or stat.S_IFMT(raw_mode) != stat.S_IFREG:
+                    raise ValueError(f"unexpected non-file ZIP member {entry.filename!r}")
                 relative = archive_relative(entry.filename, expected_root)
                 if relative in result:
                     raise ValueError(f"duplicate archive member {relative!r}")
@@ -139,7 +158,17 @@ def archive_files(path: pathlib.Path, expected_root: str) -> dict[str, tuple[byt
 
 
 def properties(component: dict) -> dict[str, str]:
-    return {item["name"]: item["value"] for item in component.get("properties", [])}
+    result: dict[str, str] = {}
+    for item in component.get("properties", []):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("value"), str)
+            or item["name"] in result
+        ):
+            raise ValueError("SBOM contains an invalid or duplicate property")
+        result[item["name"]] = item["value"]
+    return result
 
 
 def parse_buildinfo(data: bytes) -> dict[str, str]:
@@ -151,10 +180,68 @@ def parse_buildinfo(data: bytes) -> dict[str, str]:
         result[key] = value
     if set(result) != BUILDINFO_KEYS or any(not value for value in result.values()):
         raise ValueError("BUILDINFO keys or values are incomplete")
+    if SAFE_METADATA.fullmatch(result["version"]) is None:
+        raise ValueError("BUILDINFO version is not release-safe")
+    if FULL_COMMIT.fullmatch(result["commit"]) is None:
+        raise ValueError("BUILDINFO commit is not a full lowercase SHA")
+    if UTC_BUILD_DATE.fullmatch(result["build_date"]) is None:
+        raise ValueError("BUILDINFO build date is not canonical UTC RFC3339")
+    try:
+        build_date = datetime.datetime.strptime(
+            result["build_date"], "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except ValueError as error:
+        raise ValueError("BUILDINFO build date is invalid") from error
+    if build_date.year < 1980:
+        raise ValueError("BUILDINFO build date predates ZIP support")
+    if TARGET.fullmatch(result["target"]) is None:
+        raise ValueError("BUILDINFO target is invalid")
+    if GO_VERSION.fullmatch(result["go"]) is None:
+        raise ValueError("BUILDINFO Go version is not a patched release toolchain")
+    if result["wire_protocol"] != "1":
+        raise ValueError("BUILDINFO does not declare wire protocol 1")
+    if CHECKSUM.fullmatch(result["binary_sha256"]) is None:
+        raise ValueError("BUILDINFO binary hash is invalid")
     return result
 
 
-def validate_sbom(data: bytes, archive_name: str, archive: dict[str, tuple[bytes, int]]) -> None:
+def parse_notice_rows(data: bytes) -> set[tuple[str, str, str]]:
+    rows: set[tuple[str, str, str]] = set()
+    for line in data.decode("utf-8").splitlines():
+        match = NOTICE_ROW.fullmatch(line)
+        if match is None:
+            continue
+        row = match.groups()
+        if row in rows:
+            raise ValueError(f"duplicate third-party notice row for {row[0]}")
+        rows.add(row)
+    if not rows:
+        raise ValueError("third-party notice contains no module rows")
+    return rows
+
+
+def validate_notice_summary(
+    data: bytes, module_components: list[dict], archive_name: str
+) -> None:
+    expected = {
+        (
+            item["name"],
+            item["version"],
+            item["licenses"][0]["license"]["id"],
+        )
+        for item in module_components
+    }
+    actual = parse_notice_rows(data)
+    if actual != expected:
+        raise ValueError(
+            f"{archive_name}: third-party notice differs from linked modules: "
+            f"missing={sorted(expected - actual)} unexpected={sorted(actual - expected)}"
+        )
+
+
+def validate_sbom(
+    data: bytes, archive_name: str, archive: dict[str, tuple[bytes, int]]
+) -> list[dict]:
     bom = json.loads(data)
     if bom.get("bomFormat") != "CycloneDX" or bom.get("specVersion") != "1.5":
         raise ValueError(f"{archive_name}: unsupported SBOM identity")
@@ -171,11 +258,14 @@ def validate_sbom(data: bytes, archive_name: str, archive: dict[str, tuple[bytes
         ("queqiao:commit", "commit"),
         ("queqiao:target", "target"),
         ("queqiao:wire-protocol", "wire_protocol"),
+        ("queqiao:go-version", "go"),
     ):
         if component_properties.get(sbom_key) != buildinfo.get(build_key):
             raise ValueError(f"{archive_name}: SBOM {sbom_key} disagrees with BUILDINFO")
     if component.get("version") != buildinfo.get("version"):
         raise ValueError(f"{archive_name}: SBOM version disagrees with BUILDINFO")
+    if bom.get("metadata", {}).get("timestamp") != buildinfo["build_date"]:
+        raise ValueError(f"{archive_name}: SBOM timestamp disagrees with BUILDINFO")
 
     binary_name = "queqiaod.exe" if buildinfo["target"].startswith("windows/") else "queqiaod"
     binary, mode = archive[binary_name]
@@ -183,8 +273,17 @@ def validate_sbom(data: bytes, archive_name: str, archive: dict[str, tuple[bytes
         raise ValueError(f"{archive_name}: binary is not executable")
     if sha256(binary) != buildinfo.get("binary_sha256"):
         raise ValueError(f"{archive_name}: binary hash disagrees with BUILDINFO")
-    hashes = {item["alg"]: item["content"] for item in component.get("hashes", [])}
-    if hashes.get("SHA-256") != buildinfo["binary_sha256"]:
+    hash_items = component.get("hashes", [])
+    hashes = {
+        item.get("alg"): item.get("content")
+        for item in hash_items
+        if isinstance(item, dict)
+    }
+    if (
+        len(hash_items) != 1
+        or len(hashes) != len(hash_items)
+        or hashes.get("SHA-256") != buildinfo["binary_sha256"]
+    ):
         raise ValueError(f"{archive_name}: binary hash disagrees with SBOM")
 
     module_components = bom.get("components", [])
@@ -192,23 +291,45 @@ def validate_sbom(data: bytes, archive_name: str, archive: dict[str, tuple[bytes
     component_refs = {item["bom-ref"] for item in module_components}
     if not modules or len(modules) != len(module_components) or len(component_refs) != len(module_components):
         raise ValueError(f"{archive_name}: SBOM has no linked modules")
-    if any(
-        not item.get("licenses")
-        or not item["licenses"][0].get("license", {}).get("id")
-        for item in module_components
-    ):
-        raise ValueError(f"{archive_name}: an SBOM module has no SPDX license")
+    for item in module_components:
+        licenses = item.get("licenses")
+        if (
+            not isinstance(licenses, list)
+            or len(licenses) != 1
+            or not isinstance(licenses[0], dict)
+            or set(licenses[0]) != {"license"}
+            or not isinstance(licenses[0]["license"], dict)
+            or set(licenses[0]["license"]) != {"id"}
+            or not isinstance(licenses[0]["license"]["id"], str)
+            or not licenses[0]["license"]["id"]
+        ):
+            raise ValueError(
+                f"{archive_name}: an SBOM module lacks one unambiguous SPDX license"
+            )
     license_bundle = archive["THIRD_PARTY_LICENSES.txt"][0].decode("utf-8")
     missing_licenses = sorted(module for module in modules if module not in license_bundle)
     if missing_licenses:
         raise ValueError(f"{archive_name}: license bundle omits {missing_licenses}")
     root_ref = component.get("bom-ref")
-    dependencies = {item["ref"]: set(item.get("dependsOn", [])) for item in bom.get("dependencies", [])}
+    dependency_items = bom.get("dependencies", [])
+    dependencies = {
+        item["ref"]: set(item.get("dependsOn", [])) for item in dependency_items
+    }
+    if len(dependencies) != len(dependency_items):
+        raise ValueError(f"{archive_name}: SBOM has duplicate dependency nodes")
     if dependencies.get(root_ref) != component_refs:
         raise ValueError(f"{archive_name}: SBOM dependency graph is incomplete")
+    return module_components
 
 
 def validate_release(directory: pathlib.Path) -> None:
+    invalid_entries = sorted(
+        path.name
+        for path in directory.iterdir()
+        if path.is_symlink() or not path.is_file()
+    )
+    if invalid_entries:
+        raise ValueError(f"release directory contains non-regular entries: {invalid_entries}")
     checksums_path = directory / "SHA256SUMS"
     if not checksums_path.is_file():
         raise ValueError("SHA256SUMS is missing")
@@ -223,6 +344,9 @@ def validate_release(directory: pathlib.Path) -> None:
     sboms = sorted(directory.glob("*.cdx.json"))
     if not sboms:
         raise ValueError("no CycloneDX SBOMs found")
+    module_components: list[dict] = []
+    notice_summaries: list[tuple[str, bytes]] = []
+    buildinfos: list[dict[str, str]] = []
     for sbom_path in sboms:
         stem = sbom_path.name.removesuffix(".cdx.json")
         archive_path = directory / (stem + (".zip" if stem.endswith(("windows_amd64", "windows_arm64")) else ".tar.gz"))
@@ -246,8 +370,12 @@ def validate_release(directory: pathlib.Path) -> None:
         external_sbom = sbom_path.read_bytes()
         if contents["SBOM.cdx.json"][0] != external_sbom:
             raise ValueError(f"{archive_path.name}: internal and external SBOM differ")
-        validate_sbom(external_sbom, archive_path.name, contents)
+        module_components.extend(validate_sbom(external_sbom, archive_path.name, contents))
+        notice_summaries.append(
+            (archive_path.name, contents["THIRD_PARTY_NOTICES.md"][0])
+        )
         buildinfo = parse_buildinfo(contents["BUILDINFO"][0])
+        buildinfos.append(buildinfo)
         expected_stem = "queqiaod_{}_{}".format(
             buildinfo["version"], buildinfo["target"].replace("/", "_")
         )
@@ -257,6 +385,30 @@ def validate_release(directory: pathlib.Path) -> None:
     archives = list(directory.glob("*.tar.gz")) + list(directory.glob("*.zip"))
     if len(archives) != len(sboms):
         raise ValueError(f"archive/SBOM count differs: {len(archives)} != {len(sboms)}")
+    validate_release_cohort(buildinfos)
+    # The public notice is shared by every target and conservatively covers the
+    # union of modules linked across the release. Platform-specific dependency
+    # pruning (for example, x/net on Windows) therefore cannot be checked one
+    # archive at a time. Requiring exact equality with the complete release
+    # union still rejects stale versions, omissions, and obsolete rows.
+    for archive_name, notice in notice_summaries:
+        validate_notice_summary(notice, module_components, archive_name)
+
+
+def validate_release_cohort(buildinfos: list[dict[str, str]]) -> None:
+    targets = [item["target"] for item in buildinfos]
+    if len(targets) != len(set(targets)):
+        raise ValueError("release contains a duplicate target")
+    if set(targets) != EXPECTED_TARGETS:
+        raise ValueError(
+            "release target matrix differs: "
+            f"missing={sorted(EXPECTED_TARGETS - set(targets))} "
+            f"unexpected={sorted(set(targets) - EXPECTED_TARGETS)}"
+        )
+    identity_fields = ("version", "commit", "build_date", "go", "wire_protocol")
+    identities = {tuple(item[field] for field in identity_fields) for item in buildinfos}
+    if len(identities) != 1:
+        raise ValueError("release targets do not share one provenance identity")
 
 
 def main() -> None:

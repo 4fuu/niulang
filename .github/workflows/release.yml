@@ -111,6 +111,14 @@ jobs:
       VERSION: ${{ needs.authorize.outputs.version }}
       COMMIT: ${{ needs.authorize.outputs.commit }}
       BUILD_DATE: ${{ needs.authorize.outputs.build_date }}
+      GOENV: "off"
+      GOEXPERIMENT: ""
+      GOFIPS140: "off"
+      GOFLAGS: -mod=readonly
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GOAMD64: v1
+      GOARM64: v8.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -125,13 +133,24 @@ jobs:
         run: go test -short -timeout 20m ./...
       - name: Scan reachable dependencies
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
-      - name: Build final release artifacts
+      - name: Build final release artifacts reproducibly
         run: |
+          set -euo pipefail
+          first="$RUNNER_TEMP/queqiao-dist-first"
+          second="$RUNNER_TEMP/queqiao-dist-second"
           go run ./cmd/queqiaopack \
             --version "$VERSION" \
             --commit "$COMMIT" \
             --build-date "$BUILD_DATE" \
-            --output dist
+            --output "$first"
+          go clean -cache
+          go run ./cmd/queqiaopack \
+            --version "$VERSION" \
+            --commit "$COMMIT" \
+            --build-date "$BUILD_DATE" \
+            --output "$second"
+          diff -r "$first" "$second"
+          mv "$first" dist
           ./scripts/validate_release.py dist
           (cd dist && sha256sum -c SHA256SUMS)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

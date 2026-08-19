@@ -3,6 +3,9 @@
 /dist/
 /coverage.out
 /coverage.html
+/gosec.json
+/history-secret-scan.json
+/fallback-soak/
 __pycache__/
 *.py[cod]
 

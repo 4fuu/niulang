@@ -5,13 +5,16 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +170,117 @@ func TestThirdPartyLicenseBundleUsesExactModuleText(t *testing.T) {
 		if !bytes.Contains(data, want) {
 			t.Fatalf("license bundle does not contain %q:\n%s", want, data)
 		}
+	}
+}
+
+func TestSourceCheckoutMustMatchProvenanceAndBeClean(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(env []string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), env...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit(nil, "init", "--quiet")
+	tracked := filepath.Join(dir, "source.go")
+	if err := os.WriteFile(tracked, []byte("package source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("ignored.go\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(nil, "add", "source.go", ".gitignore")
+	date := time.Date(2026, time.August, 19, 4, 0, 0, 0, time.UTC)
+	dateText := date.Format(time.RFC3339)
+	runGit(
+		[]string{"GIT_AUTHOR_DATE=" + dateText, "GIT_COMMITTER_DATE=" + dateText},
+		"-c", "user.name=Queqiao Test", "-c", "user.email=test@invalid.example",
+		"commit", "--quiet", "-m", "source",
+	)
+	commit := runGit(nil, "rev-parse", "HEAD")
+	ctx := context.Background()
+	if err := verifySourceCheckout(ctx, dir, commit, date); err != nil {
+		t.Fatalf("clean exact checkout rejected: %v", err)
+	}
+	if err := verifySourceCheckout(ctx, dir, strings.Repeat("0", 40), date); err == nil {
+		t.Fatal("mismatched source commit accepted")
+	}
+	if err := verifySourceCheckout(ctx, dir, commit, date.Add(time.Second)); err == nil {
+		t.Fatal("mismatched source commit time accepted")
+	}
+	if err := os.WriteFile(tracked, []byte("package changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySourceCheckout(ctx, dir, commit, date); err == nil {
+		t.Fatal("modified tracked source accepted")
+	}
+	if err := os.WriteFile(tracked, []byte("package source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "untracked.go"), []byte("package source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySourceCheckout(ctx, dir, commit, date); err == nil {
+		t.Fatal("untracked source accepted")
+	}
+	if err := os.Remove(filepath.Join(dir, "untracked.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ignored.go"), []byte("package source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySourceCheckout(ctx, dir, commit, date); err == nil {
+		t.Fatal("ignored source accepted")
+	}
+}
+
+func TestReleaseGoEnvNeutralizesAmbientBuildInputs(t *testing.T) {
+	env := releaseGoEnv([]string{
+		"PATH=/bin",
+		"GOCACHE=/tmp/cache",
+		"GOENV=/tmp/goenv",
+		"GOEXPERIMENT=boringcrypto",
+		"GOFIPS140=v1.0.0",
+		"GOFLAGS=-overlay=outside.json",
+		"GOTOOLCHAIN=auto",
+		"GOWORK=/tmp/go.work",
+	})
+	values := make(map[string]string)
+	for _, entry := range env {
+		key, value, found := strings.Cut(entry, "=")
+		if found {
+			values[key] = value
+		}
+	}
+	for key, want := range map[string]string{
+		"PATH": "/bin", "GOCACHE": "/tmp/cache", "GOENV": "off",
+		"GOEXPERIMENT": "", "GOFIPS140": "off", "GOFLAGS": "-mod=readonly",
+		"GOTOOLCHAIN": runtime.Version(), "GOWORK": "off",
+	} {
+		if got := values[key]; got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestReleaseToolchainMustMatchPatchedGoDirective(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo "+strings.TrimPrefix(runtime.Version(), "go")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyReleaseToolchain(dir); err != nil {
+		t.Fatalf("matching toolchain rejected: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyReleaseToolchain(dir); err == nil {
+		t.Fatal("unpatched Go directive accepted")
 	}
 }
 
