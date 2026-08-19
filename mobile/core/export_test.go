@@ -3,6 +3,7 @@ package mobilecore
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -56,8 +57,9 @@ func TestValidateLoopbackListenAddr(t *testing.T) {
 
 // recordingObserver captures the lifecycle callbacks a platform would receive.
 type recordingObserver struct {
-	mu     sync.Mutex
-	states []string
+	mu       sync.Mutex
+	states   []string
+	profiles chan string
 }
 
 func (o *recordingObserver) OnStateChanged(state string) {
@@ -68,7 +70,32 @@ func (o *recordingObserver) OnStateChanged(state string) {
 
 func (o *recordingObserver) OnLog(string, string) {}
 
-func (o *recordingObserver) OnProfileUpdated(string) bool { return true }
+// OnProfileUpdated stands in for the platform's encrypted store. Returning
+// false is what a real one does when the write fails, and the maintenance loop
+// treats that as "retry later", so the test reports the renewed profile and
+// accepts it.
+func (o *recordingObserver) OnProfileUpdated(profileJSON string) bool {
+	o.mu.Lock()
+	sink := o.profiles
+	o.mu.Unlock()
+	if sink == nil {
+		return true
+	}
+	select {
+	case sink <- profileJSON:
+	default:
+	}
+	return true
+}
+
+// watchProfiles starts recording renewed profiles. Buffered, because the
+// maintenance loop must not block on a test that is not reading yet.
+func (o *recordingObserver) watchProfiles() <-chan string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.profiles = make(chan string, 4)
+	return o.profiles
+}
 
 func (o *recordingObserver) seen(state string) bool {
 	o.mu.Lock()
@@ -468,5 +495,211 @@ func TestExportModeRejectsUnsafeConfiguration(t *testing.T) {
 				t.Fatalf("state = %s after a rejected start", state)
 			}
 		})
+	}
+}
+
+// TestExportModeRenewsTheDeviceIdentityWhileServingTraffic covers the claim
+// that made export mode possible in the first place: identity maintenance is
+// independent of the packet stack, so a session with no tunnel at all still
+// renews its certificate and keeps serving.
+//
+// The failure this guards against is silent. A start path added without the
+// maintenance goroutine works perfectly for thirty days and then strands every
+// installed device, which is exactly the interval no manual test covers.
+func TestExportModeRenewsTheDeviceIdentityWhileServingTraffic(t *testing.T) {
+	restoreInterval, restoreLead := identityMaintenanceInterval, identityRenewalLead
+	// Long enough that every certificate this provider issues is inside the
+	// window, so the first tick renews instead of the test having to
+	// manufacture an almost-expired identity.
+	identityMaintenanceInterval, identityRenewalLead = 250*time.Millisecond, 100*365*24*time.Hour
+	t.Cleanup(func() {
+		identityMaintenanceInterval, identityRenewalLead = restoreInterval, restoreLead
+	})
+
+	gateway := startTestGateway(t)
+	origin := startEchoOrigin(t)
+	observer := &recordingObserver{}
+	renewals := observer.watchProfiles()
+
+	session := NewSession(observer, nil)
+	if err := session.StartProxy(gateway.profileJSON, "127.0.0.1:0", "queqiao", "s3cret-token"); err != nil {
+		t.Fatalf("start export session: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Stop() })
+
+	// Certificate validity is encoded to the second, and the gateway refuses a
+	// renewal that does not extend it, so the first attempts inside the issuing
+	// second are expected to fail and retry.
+	var renewedJSON string
+	select {
+	case renewedJSON = <-renewals:
+	case <-time.After(30 * time.Second):
+		t.Fatal("export session never renewed its device identity")
+	}
+
+	original, renewed := mustDecodeProfile(t, gateway.profileJSON), mustDecodeProfile(t, renewedJSON)
+	if renewed.DeviceID != original.DeviceID || renewed.AccountID != original.AccountID {
+		t.Fatalf("renewal changed the enrolled identity: %s/%s became %s/%s",
+			original.AccountID, original.DeviceID, renewed.AccountID, renewed.DeviceID)
+	}
+	if !certificateExpiry(t, renewed).After(certificateExpiry(t, original)) {
+		t.Fatal("renewed certificate does not outlive the original")
+	}
+
+	// The renewed credentials were handed to the live client. Traffic after the
+	// swap is what proves the swap did not break it.
+	if state := session.State(); state != StateRunning {
+		t.Fatalf("state after renewal = %s, want %s", state, StateRunning)
+	}
+	client := dialConsumer(t, session.ListenAddress())
+	status, err := client.greet(2, "queqiao", "s3cret-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 0 {
+		t.Fatalf("authentication status after renewal = %d", status)
+	}
+	if _, err := client.request(socks5.CommandConnect, origin); err != nil {
+		t.Fatalf("CONNECT after renewal: %v", err)
+	}
+	echoThrough(t, client.conn, []byte("queqiao-after-renewal"))
+}
+
+// TestExportModeServesConcurrentConsumers pins that the listener is a proxy and
+// not a single-slot one. A routing client opens a connection per flow, so a
+// listener that serialized them would look like a working proxy in a manual
+// test and stall under an ordinary page load.
+func TestExportModeServesConcurrentConsumers(t *testing.T) {
+	gateway := startTestGateway(t)
+	origin := startEchoOrigin(t)
+	session := NewSession(&recordingObserver{}, nil)
+	if err := session.StartProxy(gateway.profileJSON, "127.0.0.1:0", "queqiao", "s3cret-token"); err != nil {
+		t.Fatalf("start export session: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Stop() })
+	listen := session.ListenAddress()
+
+	const consumers = 8
+	var wg sync.WaitGroup
+	wg.Add(consumers)
+	failures := make(chan error, consumers)
+	// One barrier, so the connections genuinely overlap rather than arriving
+	// one after another fast enough to hide serialization.
+	ready := make(chan struct{})
+	for index := range consumers {
+		go func() {
+			defer wg.Done()
+			client := dialConsumer(t, listen)
+			<-ready
+			status, err := client.greet(2, "queqiao", "s3cret-token")
+			if err != nil {
+				failures <- err
+				return
+			}
+			if status != 0 {
+				failures <- fmt.Errorf("consumer %d authentication status %d", index, status)
+				return
+			}
+			if _, err := client.request(socks5.CommandConnect, origin); err != nil {
+				failures <- fmt.Errorf("consumer %d CONNECT: %w", index, err)
+				return
+			}
+			payload := []byte("queqiao-consumer-" + strconv.Itoa(index))
+			if _, err := client.conn.Write(payload); err != nil {
+				failures <- err
+				return
+			}
+			echo := make([]byte, len(payload))
+			if _, err := io.ReadFull(client.conn, echo); err != nil {
+				failures <- fmt.Errorf("consumer %d read: %w", index, err)
+				return
+			}
+			if !bytes.Equal(echo, payload) {
+				failures <- fmt.Errorf("consumer %d echoed %q", index, echo)
+			}
+		}()
+	}
+	close(ready)
+	wg.Wait()
+	close(failures)
+	for err := range failures {
+		t.Error(err)
+	}
+}
+
+// TestExportModeCredentialRotationTakesEffectOnRestart covers the Regenerate
+// credentials action. Its whole purpose is to lock out whatever was configured
+// with the old pair, so a rotation that left the old credentials working would
+// be worse than no action at all.
+func TestExportModeCredentialRotationTakesEffectOnRestart(t *testing.T) {
+	gateway := startTestGateway(t)
+	first := NewSession(&recordingObserver{}, nil)
+	if err := first.StartProxy(gateway.profileJSON, "127.0.0.1:0", "qq-old", "old-secret"); err != nil {
+		t.Fatalf("start export session: %v", err)
+	}
+	if err := first.Stop(); err != nil {
+		t.Fatalf("stop export session: %v", err)
+	}
+
+	// A fresh session per start, the way the Android service builds one.
+	second := NewSession(&recordingObserver{}, nil)
+	if err := second.StartProxy(gateway.profileJSON, "127.0.0.1:0", "qq-new", "new-secret"); err != nil {
+		t.Fatalf("restart export session: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Stop() })
+	listen := second.ListenAddress()
+
+	stale := dialConsumer(t, listen)
+	status, err := stale.greet(2, "qq-old", "old-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status == 0 {
+		t.Fatal("the previous credentials still authenticate after rotation")
+	}
+
+	current := dialConsumer(t, listen)
+	status, err = current.greet(2, "qq-new", "new-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 0 {
+		t.Fatalf("rotated credentials rejected with status %d", status)
+	}
+}
+
+func mustDecodeProfile(t *testing.T, profileJSON string) identity.ClientProfile {
+	t.Helper()
+	profile, err := decodeProfile(profileJSON)
+	if err != nil {
+		t.Fatalf("decode profile: %v", err)
+	}
+	return profile
+}
+
+func certificateExpiry(t *testing.T, profile identity.ClientProfile) time.Time {
+	t.Helper()
+	credentials, err := profile.Credentials()
+	if err != nil {
+		t.Fatalf("load profile credentials: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(credentials.Certificate.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse device certificate: %v", err)
+	}
+	return leaf.NotAfter
+}
+
+func echoThrough(t *testing.T, conn net.Conn, payload []byte) {
+	t.Helper()
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	echo := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, echo); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(echo, payload) {
+		t.Fatalf("origin echoed %q, want %q", echo, payload)
 	}
 }

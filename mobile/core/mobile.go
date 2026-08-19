@@ -329,7 +329,17 @@ func (s *Session) start(opts sessionOptions) error {
 	return nil
 }
 
-const identityMaintenanceInterval = time.Hour
+// How often the enrolled identity is checked, and how far ahead of expiry a
+// renewal is attempted.
+//
+// Variables rather than constants so the lifecycle test can drive a real
+// renewal against a real gateway. The alternative is a test that waits an hour
+// or manufactures a nearly expired certificate, and neither would exercise the
+// path that matters: renewal while a session is serving traffic.
+var (
+	identityMaintenanceInterval = time.Hour
+	identityRenewalLead         = 7 * 24 * time.Hour
+)
 
 func (s *Session) maintainIdentity(ctx context.Context, profile identity.ClientProfile, client *pep.Client) {
 	ticker := time.NewTicker(identityMaintenanceInterval)
@@ -340,7 +350,7 @@ func (s *Session) maintainIdentity(ctx context.Context, profile identity.ClientP
 		case <-ctx.Done():
 			return
 		}
-		needsRenewal, err := profile.NeedsRenewal(time.Now(), 7*24*time.Hour)
+		needsRenewal, err := profile.NeedsRenewal(time.Now(), identityRenewalLead)
 		if err != nil {
 			s.notifyLog("error", fmt.Sprintf("check device identity lifetime: %v", err))
 			continue
