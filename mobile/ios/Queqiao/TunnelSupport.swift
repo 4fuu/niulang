@@ -38,7 +38,6 @@ enum ModelError: LocalizedError {
     case missingProfile
     case emptyCoreResult
     case invalidPacketTunnelIdentifier
-    case invalidInvitationLink
     case disconnectBeforeEditing
     case disconnectBeforeTesting
     case emptyMetrics
@@ -51,8 +50,6 @@ enum ModelError: LocalizedError {
             return "The Queqiao core returned an empty result."
         case .invalidPacketTunnelIdentifier:
             return "The packet-tunnel bundle identifier is not configured."
-        case .invalidInvitationLink:
-            return "Only queqiao:// enrollment invitations can be imported."
         case .disconnectBeforeEditing:
             return "Disconnect the VPN before changing its selected profile or routing policy."
         case .disconnectBeforeTesting:

@@ -67,7 +67,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
             do {
                 try resources.session?.stopChecked()
             } catch {
-                logger.error("Tunnel stop reported an error: \(error.localizedDescription, privacy: .public)")
+                let detail = DiagnosticStore.sanitize(error.localizedDescription)
+                logger.error("Tunnel stop reported an error: \(detail, privacy: .private)")
             }
             completion.call()
         }
@@ -100,14 +101,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
     func onLog(_ level: String?, message: String?) {
         guard let message else { return }
         let normalizedLevel = level?.uppercased()
+        // Core failures can contain provider addresses or credential-shaped
+        // values supplied by lower layers. Keep useful text in the encrypted
+        // diagnostic ring, but never publish the raw interpolation to OSLog.
+        let sanitized = DiagnosticStore.sanitize(message)
         if normalizedLevel == "ERROR" {
-            logger.error("\(message, privacy: .public)")
-            recordDiagnostic(level: .error, message)
+            logger.error("\(sanitized, privacy: .private)")
+            recordDiagnostic(level: .error, sanitized)
         } else if normalizedLevel == "WARN" || normalizedLevel == "WARNING" {
-            logger.warning("\(message, privacy: .public)")
-            recordDiagnostic(level: .warning, message)
+            logger.warning("\(sanitized, privacy: .private)")
+            recordDiagnostic(level: .warning, sanitized)
         } else {
-            logger.info("\(message, privacy: .public)")
+            logger.info("\(sanitized, privacy: .private)")
         }
     }
 

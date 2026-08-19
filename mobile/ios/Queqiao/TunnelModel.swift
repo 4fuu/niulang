@@ -74,20 +74,6 @@ final class TunnelModel: ObservableObject {
         await refreshDiagnostics()
     }
 
-    func receiveInvitation(_ url: URL) {
-        guard url.scheme?.lowercased() == "queqiao" else {
-            present(ModelError.invalidInvitationLink, title: "Cannot import profile")
-            return
-        }
-        do {
-            try MobileCore.validateInvitation(url.absoluteString)
-            invitation = url.absoluteString
-            isImporterPresented = true
-        } catch {
-            present(error, title: "Invalid invitation")
-        }
-    }
-
     func enroll() async {
         guard !isBusy else { return }
         let invitation = invitation.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -66,6 +66,7 @@ struct ImportProfileView: View {
                 .font(.footnote.monospaced())
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .privacySensitive()
                 .accessibilityLabel("Queqiao invitation")
             Button {
                 if let value = UIPasteboard.general.string {

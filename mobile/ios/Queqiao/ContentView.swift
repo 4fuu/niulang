@@ -28,7 +28,6 @@ struct ContentView: View {
         .sheet(isPresented: $model.isImporterPresented) {
             ImportProfileView()
         }
-        .onOpenURL { model.receiveInvitation($0) }
         .task { await model.start() }
         .alert(item: $model.presentedError) { error in
             Alert(

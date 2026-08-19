@@ -50,10 +50,6 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSApplicationCategoryType: public.app-category.utilities
-        CFBundleURLTypes:
-          - CFBundleURLName: io.github.bojieli.queqiao.invitation
-            CFBundleURLSchemes:
-              - queqiao
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UILaunchScreen: {}

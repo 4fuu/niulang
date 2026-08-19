@@ -15,7 +15,6 @@ import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
@@ -512,7 +511,12 @@ public final class MainActivity extends Activity {
             invitation.setInputType(
                     InputType.TYPE_CLASS_TEXT
                             | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                            | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                             | InputType.TYPE_TEXT_VARIATION_URI);
+            // The invitation is a short-lived bearer credential. Keep Android
+            // from offering it to Autofill or saving it in view-instance state.
+            invitation.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+            invitation.setSaveEnabled(false);
             invitation.setMinLines(4);
             invitation.setGravity(Gravity.TOP | Gravity.START);
             content.addView(invitation, matchWrap());
@@ -916,12 +920,7 @@ public final class MainActivity extends Activity {
             return;
         }
         String invitation = null;
-        if (Intent.ACTION_VIEW.equals(intent.getAction())) {
-            Uri data = intent.getData();
-            if (data != null && "queqiao".equalsIgnoreCase(data.getScheme())) {
-                invitation = data.toString();
-            }
-        } else if (Intent.ACTION_SEND.equals(intent.getAction())
+        if (Intent.ACTION_SEND.equals(intent.getAction())
                 && "text/plain".equals(intent.getType())) {
             invitation = intent.getStringExtra(Intent.EXTRA_TEXT);
         }
