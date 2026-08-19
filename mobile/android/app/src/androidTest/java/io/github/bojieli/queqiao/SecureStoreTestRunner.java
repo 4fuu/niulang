@@ -25,7 +25,9 @@ public final class SecureStoreTestRunner extends Instrumentation {
                 new NamedCheck("ciphertextCannotMoveBetweenAccounts", this::testCiphertextCannotBeMovedBetweenAccounts),
                 new NamedCheck("profileCatalogRoundTripAndNormalization", this::testProfileCatalogRoundTripAndNormalization),
                 new NamedCheck("localNetworkRoutePolicy", this::testLocalNetworkRoutePolicy),
-                new NamedCheck("connectionProbeWireFormat", this::testConnectionProbeWireFormat)
+                new NamedCheck("connectionProbeWireFormat", this::testConnectionProbeWireFormat),
+                new NamedCheck("vpnExclusionReadsTheDefaultNetwork", this::testVpnExclusionReadsTheDefaultNetwork),
+                new NamedCheck("listenPortCollisionIsNamed", this::testListenPortCollisionIsNamed)
         };
         for (int index = 0; index < checks.length; index++) {
             NamedCheck check = checks[index];
@@ -44,7 +46,8 @@ public final class SecureStoreTestRunner extends Instrumentation {
             }
         }
         Bundle result = new Bundle();
-        result.putString("stream", "\nOK (6 mobile storage, routing, and protocol-boundary checks)\n");
+        result.putString("stream",
+                "\nOK (8 mobile storage, routing, connectivity, and protocol-boundary checks)\n");
         finish(Activity.RESULT_OK, result);
     }
 
@@ -148,6 +151,46 @@ public final class SecureStoreTestRunner extends Instrumentation {
         requireInvalidProbe("{\"version\":2,\"transport\":\"quic\",\"latency_ms\":87}");
         requireInvalidProbe("{\"version\":1,\"transport\":\"unknown\",\"latency_ms\":87}");
         requireInvalidProbe("{\"version\":1,\"transport\":\"tcp\",\"latency_ms\":0}");
+    }
+
+    /**
+     * Export mode's loop warning rests on one platform claim: the default
+     * network ConnectivityManager reports is per-UID, so a VPN visible here is
+     * one that did not exclude this app. The claim is only checkable on a
+     * device, which is why it is checked here rather than nowhere.
+     */
+    private void testVpnExclusionReadsTheDefaultNetwork() throws Exception {
+        require(VpnExclusion.of(null) == VpnExclusion.State.UNKNOWN,
+                "an unknown network was reported as an answer");
+
+        // No VPN is configured on a test device or emulator, so the app's own
+        // default network must not look like one. A failure here on a phone
+        // with a device-wide VPN running is the honest answer, not a bug.
+        require(VpnExclusion.current(getTargetContext()) != VpnExclusion.State.CAPTURED,
+                "no VPN is running, yet the default network reports one");
+
+        // The TRANSPORT_VPN half cannot be checked from here: NetworkCapabilities
+        // has no public constructor or builder, so the only capabilities an
+        // instrumented test can obtain are the ones the device actually has.
+        // Standing up a real VpnService to produce one would be testing the
+        // debug tunnel, not this. What remains checkable is checked.
+    }
+
+    /**
+     * The port is the user's to choose and loopback is shared with every app on
+     * the device, so a taken port is an ordinary outcome that has to name
+     * itself. Anything else must reach the user unedited.
+     */
+    private void testListenPortCollisionIsNamed() throws Exception {
+        Exception collision = QueqiaoProxyService.listenFailure(
+                1080, new java.io.IOException("listen tcp 127.0.0.1:1080: bind: address already in use"));
+        String message = collision.getMessage();
+        require(message != null && message.contains("1080") && message.contains("Settings"),
+                "a taken port did not name the port or where to change it: " + message);
+
+        Exception other = new java.io.IOException("certificate has expired");
+        require(QueqiaoProxyService.listenFailure(1080, other) == other,
+                "an unrelated listener failure was rewritten");
     }
 
     private void requireInvalidProbe(String encoded) throws Exception {

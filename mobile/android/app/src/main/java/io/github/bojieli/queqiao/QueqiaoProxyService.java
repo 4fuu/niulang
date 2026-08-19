@@ -74,7 +74,7 @@ public final class QueqiaoProxyService extends Service implements TunnelServiceC
                     endpoint.username,
                     endpoint.password);
         } catch (Exception exception) {
-            throw listenFailure(endpoint, exception);
+            throw listenFailure(endpoint.port, exception);
         }
         listenAddress = session.listenAddress();
         watchForCapture();
@@ -105,12 +105,12 @@ public final class QueqiaoProxyService extends Service implements TunnelServiceC
      * already in use", which is true and useless — it names neither the port
      * nor the setting that changes it.
      */
-    private Exception listenFailure(ProxyEndpoint endpoint, Exception cause) {
+    static Exception listenFailure(int port, Exception cause) {
         String message = cause.getMessage();
         String lowered = message == null ? "" : message.toLowerCase(Locale.ROOT);
         if (lowered.contains("address already in use") || lowered.contains("address in use")) {
             return new IOException(
-                    "Port " + endpoint.port + " is already used by another app on this device. "
+                    "Port " + port + " is already used by another app on this device. "
                             + "Choose a different port in Settings, then connect again.",
                     cause);
         }
