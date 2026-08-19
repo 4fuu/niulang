@@ -1,8 +1,10 @@
 name: release
 
-# Publication is deliberately manual. The requested tag must already exist,
-# point at the reviewed commit, and have a successful non-publishing release
-# candidate run for the same commit.
+# Publication keeps a human gate. The tag must already exist, point at the
+# reviewed commit, and have a successful non-publishing release candidate run
+# for the same commit. Pushing a v* tag triggers the same pipeline: the
+# version and approved commit are taken from the tag itself and the successful
+# candidate run for that commit is discovered automatically.
 on:
   workflow_dispatch:
     inputs:
@@ -18,12 +20,15 @@ on:
         description: Successful release-candidate workflow run ID for that commit
         required: true
         type: string
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.version }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -40,12 +45,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          ref: ${{ inputs.version }}
+          ref: ${{ inputs.version || github.ref_name }}
       - name: Verify review and immutable inputs
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
           APPROVED_COMMIT: ${{ inputs.approved_commit }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
           REPOSITORY: ${{ github.repository }}
@@ -60,13 +65,27 @@ jobs:
             echo "version must be a release-safe v-prefixed semantic version" >&2
             exit 1
           }
+          git rev-parse --verify "refs/tags/$VERSION"
+          commit=$(git rev-list -n 1 "$VERSION")
+          # A tag push approves the tagged commit by the act of pushing it.
+          if test -z "$APPROVED_COMMIT"; then
+            APPROVED_COMMIT="$commit"
+          fi
           case "$APPROVED_COMMIT" in
             [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
             *) echo "approved_commit must be a full lowercase SHA" >&2; exit 1 ;;
           esac
+          # A tag push discovers the successful candidate run for the commit.
+          if test -z "$CANDIDATE_RUN_ID"; then
+            CANDIDATE_RUN_ID=$(gh api \
+              "repos/$REPOSITORY/actions/workflows/release-candidate.yml/runs?event=workflow_dispatch&head_sha=$commit&status=success&per_page=1" \
+              --jq '.workflow_runs[0].id // empty')
+            test -n "$CANDIDATE_RUN_ID" || {
+              echo "no successful release-candidate run found for $commit" >&2
+              exit 1
+            }
+          fi
           case "$CANDIDATE_RUN_ID" in *[!0-9]*|'') echo "candidate_run_id must be numeric" >&2; exit 1 ;; esac
-          git rev-parse --verify "refs/tags/$VERSION"
-          commit=$(git rev-list -n 1 "$VERSION")
           test "$commit" = "$APPROVED_COMMIT" || {
             echo "tag commit $commit differs from reviewed commit $APPROVED_COMMIT" >&2
             exit 1

@@ -124,15 +124,21 @@ run while the repository is private.
    reviewer and prevent administrator bypass where the repository plan permits.
 3. After approval, create an immutable `v*` tag on the reviewed commit. Do not
    move a tag; replace a bad candidate with a new version.
-4. Manually run `.github/workflows/release.yml` with the tag, full reviewed
-   commit SHA, and successful candidate workflow run ID.
+4. Publish either way:
+   - Push the `v*` tag. The push runs `.github/workflows/release.yml`
+     automatically: the version and approved commit come from the tag itself,
+     and the workflow discovers the successful candidate run for the tagged
+     commit on its own.
+   - Or run `.github/workflows/release.yml` manually with the tag, full
+     reviewed commit SHA, and successful candidate workflow run ID.
 
-The release workflow refuses a private repository, a moved/mismatched tag, or a
-candidate run for another commit. It rebuilds the final version, executes the
-downloaded archive on native Linux, macOS, and Windows runners for amd64 and
-arm64, creates build-provenance attestations for every published file and
-CycloneDX attestations for every binary, waits at the `public-release`
-environment, and only then creates the GitHub Release.
+Both paths execute the identical pipeline. The release workflow refuses a
+private repository, a moved/mismatched tag, or a commit with no successful
+candidate run. It rebuilds the final version, executes the downloaded archive
+on native Linux, macOS, and Windows runners for amd64 and arm64, creates
+build-provenance attestations for every published file and CycloneDX
+attestations for every binary, waits at the `public-release` environment, and
+only then creates the GitHub Release.
 
 Verify provenance after downloading:
 

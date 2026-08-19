@@ -39,7 +39,8 @@ exact commit. Production-ready language has additional gates below.
 - [ ] The maintainer has reviewed the candidate artifacts and explicitly
   approved publication.
 - [ ] The GitHub `public-release` environment requires the approving reviewer,
-  and the final workflow inputs name the reviewed commit and candidate run.
+  and the release is triggered either by pushing the reviewed `v*` tag or by
+  manual workflow inputs naming the reviewed commit and candidate run.
 
 ## Production-ready claim blockers
 
