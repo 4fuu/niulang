@@ -8,11 +8,11 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
 ### Added
 
-- Native iOS and Android applications with connection-first home screens, live
-  aggregate session counters, secure multi-profile invitation imports,
-  explicit active-profile selection, profile management, explicit paste/share
-  imports, and per-profile all-traffic or local-network-bypass routing
-  policies.
+- Native iOS and Android applications with connection-first home screens,
+  secure multi-profile invitation imports, explicit active-profile selection,
+  profile management, and explicit paste/share imports.
+- Live aggregate session counters and per-profile all-traffic or
+  local-network-bypass routing policies in the iOS packet-tunnel app.
 - Android export mode, which is what the released Android app now is: it
   enrolls the device and serves the gateway as an authenticated SOCKS5
   endpoint on loopback for v2rayNG, mihomo, sing-box, or any other client that
