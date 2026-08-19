@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -59,7 +60,10 @@ func TestWriteAtomicReplacesContentAndMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o644 {
+	// Windows does not expose Unix permission bits through os.Stat. Content
+	// replacement is still covered there; the archive validator checks the
+	// shipped notice mode independently for every release target.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
 		t.Fatalf("notice mode = %o", info.Mode().Perm())
 	}
 }

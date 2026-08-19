@@ -150,6 +150,10 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          cmdline-tools-version: "14742923"
+          packages: ""
       - name: install pinned Android SDK components
         run: sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;28.0.12433566"
       - run: mobile/scripts/build-android-core.sh
@@ -182,6 +186,10 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          cmdline-tools-version: "14742923"
+          packages: ""
       - name: install official Android emulator image
         run: >-
           sdkmanager
@@ -233,7 +241,7 @@ jobs:
             go.sum
             mobile/core/go.sum
       - run: mobile/scripts/build-ios-core.sh
-      - run: swiftlint lint --strict --config .swiftlint.yml .
+      - run: ../scripts/run-swiftlint.sh lint --strict --config .swiftlint.yml .
         working-directory: mobile/ios
       - name: simulator build and boundary tests
         working-directory: mobile/ios

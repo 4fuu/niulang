@@ -14,7 +14,7 @@ final class PacketFlowBridge: NSObject, MobilecorePacketIOProtocol, @unchecked S
     private static let queueByteLimit = 128 * 1_024
     private static let refillPacketWatermark = 16
     private static let refillByteWatermark = 32 * 1_024
-    private var packets = Array<Data?>(repeating: nil, count: PacketFlowBridge.queueLimit)
+    private var packets = [Data?](repeating: nil, count: PacketFlowBridge.queueLimit)
     private var head = 0
     private var count = 0
     private var queuedBytes = 0
