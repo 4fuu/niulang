@@ -63,9 +63,9 @@ exact commit. Production-ready language has additional gates below.
 
 - [x] Android and iOS use the protocol-1 core with full IPv4/IPv6 TCP and UDP,
   crash-safe enrollment, platform secure storage, automatic renewal, bounded
-  packet/session queues, and no third-party proxy application. Android carries
-  that traffic as an exported authenticated SOCKS5 endpoint; iOS carries it as
-  a packet tunnel.
+  packet/session queues, and pinned runtime dependencies. Android exposes that
+  traffic as an authenticated SOCKS5 endpoint for a consumer routing client;
+  iOS carries it as a packet tunnel.
 - [x] The released Android APK declares no `BIND_VPN_SERVICE` and no
   `android.net.VpnService` intent filter, asserted in CI against the assembled
   artifact.
