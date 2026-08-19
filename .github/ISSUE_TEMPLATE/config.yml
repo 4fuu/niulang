@@ -1,0 +1,17 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/bojieli/queqiao/security/advisories/new
+    about: >-
+      Report privately. Never open a public issue carrying exploit detail,
+      credentials, or provider state.
+  - name: Before reporting a measurement
+    url: https://github.com/bojieli/queqiao/blob/main/docs/CONTRIBUTING-NETWORK-EVIDENCE.md
+    about: >-
+      What a network result must record to be interpretable, and what to
+      remove before publishing it.
+  - name: Design change proposal
+    url: https://github.com/bojieli/queqiao/blob/main/CONTRIBUTING.md
+    about: >-
+      Protocol and congestion-control changes need a measured problem, not an
+      emulated benchmark. Open a blank design issue after reading this.

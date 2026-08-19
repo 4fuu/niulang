@@ -1,0 +1,125 @@
+name: Network evidence
+description: A measured result from a network the maintainers cannot reach.
+labels: ["network-evidence"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        A result that disproves a design assumption is as valuable as a
+        performance win. Read
+        [Contributing network evidence](https://github.com/bojieli/queqiao/blob/main/docs/CONTRIBUTING-NETWORK-EVIDENCE.md)
+        first — it defines what makes a measurement interpretable and what must
+        be removed before publishing it.
+
+
+        Use semantic labels such as `residential-path-a` rather than real
+        addresses. If a maintainer needs sensitive raw evidence, arrange a
+        private transfer instead of attaching it here.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question or suspected counterexample
+      description: What did you set out to establish, confirm, or contradict?
+    validations:
+      required: true
+  - type: textarea
+    id: path
+    attributes:
+      label: Path and route-isolation controls
+      description: >-
+        Client and gateway region, access class, whether the gateway is fixed,
+        transport availability (UDP, TCP, ports, PMTU, NAT or middlebox
+        behavior), and RTT range. State how you verified that a TUN, existing
+        proxy, or fake-IP route did not capture the supposedly direct path.
+    validations:
+      required: true
+  - type: textarea
+    id: builds
+    attributes:
+      label: Exact builds and configuration
+      description: >-
+        Queqiao commit, wire version, Go version, OS and architecture, and the
+        exact command. For a comparison, identify the complete baseline stack:
+        proxy, framing, transport, recovery, and congestion-controller
+        implementation — not just "BBR".
+      render: shell
+    validations:
+      required: true
+  - type: checkboxes
+    id: families
+    attributes:
+      label: Workload families exercised
+      description: >-
+        These are ways of evaluating one transport, not three architectures. If
+        a change helps one family and damages another, report both.
+      options:
+        - label: Short-lived (setup, first byte, completion, failure tail)
+        - label: Interactive (request latency, jitter, delivery, tail under contention)
+        - label: Bulk (goodput, completion, byte ratio, CPU, memory, descriptors)
+  - type: textarea
+    id: procedure
+    attributes:
+      label: Procedure
+      description: >-
+        Trial count and order, offered load, workload size, endpoint, and
+        direction. State whether candidates alternated within one window or ran
+        in separate windows.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Raw summary and distributions
+      description: >-
+        Completion counts and distributions, not only the best or median
+        sample. Preserve failed and incomplete trials; do not discard stalls.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: loss_origin
+    attributes:
+      label: Where the loss came from
+      description: Only an observed real access network can fill a field-validation cell.
+      options:
+        - Observed on a real access network
+        - Endpoint-emulated
+        - Injected
+        - No meaningful loss observed
+        - Not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: interpretation
+    attributes:
+      label: Interpretation, with alternative explanations
+      description: >-
+        Do not infer independent erasure from a loss percentage alone. A 15% or
+        42% rate may be erasure, queue overflow, wireless contention, shaping, a
+        broken route, or a measurement artifact — say which time-series or
+        conditional-loss data distinguishes them here, and whether a capacity
+        knee was visible.
+    validations:
+      required: true
+  - type: textarea
+    id: limits
+    attributes:
+      label: Limits
+      description: What does this result not establish?
+    validations:
+      required: true
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I removed invitations, profiles, private keys, certificates,
+            tokens, and provider state.
+          required: true
+        - label: >-
+            I removed non-essential public gateway or subscriber addresses,
+            private hostnames, usernames, local paths, packet payloads, user
+            traffic, and raw logs carrying destinations or other users'
+            metadata.
+          required: true

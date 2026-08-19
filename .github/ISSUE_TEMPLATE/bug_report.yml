@@ -1,0 +1,85 @@
+name: Bug report
+description: Something in Queqiao behaves differently from what its documentation says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not use this form for a vulnerability. Report those privately at
+        [Security advisories](https://github.com/bojieli/queqiao/security/advisories/new).
+
+
+        Strip invitations, profiles, private keys, provider state, public
+        gateway or subscriber addresses, private hostnames, local paths, and
+        user traffic from everything you paste here.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened, and what should have happened instead
+      description: >-
+        Name the documented behavior you expected, and where it is documented
+        if you know.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: >-
+        Exact commands and configuration, with secrets removed. Say whether it
+        reproduces every time or intermittently.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Queqiao build
+      description: >-
+        Commit or release tag, plus the wire version reported in build
+        metadata.
+      placeholder: "commit ff971ad, wire 1"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS, architecture, and Go version
+      placeholder: "Linux/amd64, Go 1.25.13"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Client (queqiaod client)
+        - Server or gateway (queqiaod server)
+        - Android app
+        - iOS app
+        - Packaging, install, or rollback
+        - Documentation
+        - Other or not sure
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >-
+        From the bounded JSON runtime log where possible. Redact destinations
+        and other users' metadata before pasting.
+      render: shell
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I removed credentials, keys, provider state, and address or
+            hostname detail that is not essential to the report.
+          required: true
+        - label: >-
+            This is not a security vulnerability. (If it is, close this and use
+            the private advisory form.)
+          required: true
