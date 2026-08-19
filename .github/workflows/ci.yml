@@ -237,6 +237,11 @@ jobs:
             --name queqiao_ci \
             --package "system-images;android-${{ matrix.api }};google_apis;x86_64" \
             --device pixel_6
+          config="$ANDROID_AVD_HOME/queqiao_ci.avd/config.ini"
+          grep -q '^disk\.dataPartition\.size' "$config"
+          sed -i -E \
+            's/^disk\.dataPartition\.size[[:space:]]*=.*/disk.dataPartition.size = 2147483648/' \
+            "$config"
           test -x "$ANDROID_HOME/emulator/emulator"
           nohup "$ANDROID_HOME/emulator/emulator" @queqiao_ci \
             -no-window -no-audio -no-boot-anim \
