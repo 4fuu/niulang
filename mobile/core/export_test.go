@@ -507,21 +507,18 @@ func TestExportModeRejectsUnsafeConfiguration(t *testing.T) {
 // maintenance goroutine works perfectly for thirty days and then strands every
 // installed device, which is exactly the interval no manual test covers.
 func TestExportModeRenewsTheDeviceIdentityWhileServingTraffic(t *testing.T) {
-	restoreInterval, restoreLead := identityMaintenanceInterval, identityRenewalLead
-	// Long enough that every certificate this provider issues is inside the
-	// window, so the first tick renews instead of the test having to
-	// manufacture an almost-expired identity.
-	identityMaintenanceInterval, identityRenewalLead = 250*time.Millisecond, 100*365*24*time.Hour
-	t.Cleanup(func() {
-		identityMaintenanceInterval, identityRenewalLead = restoreInterval, restoreLead
-	})
-
 	gateway := startTestGateway(t)
 	origin := startEchoOrigin(t)
 	observer := &recordingObserver{}
 	renewals := observer.watchProfiles()
 
 	session := NewSession(observer, nil)
+	// Long enough that every certificate this provider issues is inside the
+	// window, so the first tick renews instead of the test having to
+	// manufacture an almost-expired identity. These are per-session so a
+	// still-stopping session from another test cannot race with this hook.
+	session.identityMaintenanceInterval = 250 * time.Millisecond
+	session.identityRenewalLead = 100 * 365 * 24 * time.Hour
 	if err := session.StartProxy(gateway.profileJSON, "127.0.0.1:0", "queqiao", "s3cret-token"); err != nil {
 		t.Fatalf("start export session: %v", err)
 	}

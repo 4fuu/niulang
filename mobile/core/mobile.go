@@ -65,10 +65,21 @@ type Session struct {
 	runErr    error
 	resources mobileResourceLimits
 	mode      string
+	// Copied into the maintenance goroutine when a run starts. Tests shorten
+	// these on their own Session; keeping them per-session prevents one test
+	// from changing the clock under a still-stopping session.
+	identityMaintenanceInterval time.Duration
+	identityRenewalLead         time.Duration
 }
 
 func NewSession(observer Observer, protector Protector) *Session {
-	return &Session{state: StateStopped, observer: observer, protector: protector}
+	return &Session{
+		state:                       StateStopped,
+		observer:                    observer,
+		protector:                   protector,
+		identityMaintenanceInterval: defaultIdentityMaintenanceInterval,
+		identityRenewalLead:         defaultIdentityRenewalLead,
+	}
 }
 
 // Start activates a full-device tunnel over a platform-provided TUN descriptor.
@@ -323,7 +334,13 @@ func (s *Session) start(opts sessionOptions) error {
 	s.mu.Unlock()
 
 	packet.start()
-	go s.maintainIdentity(ctx, profile, client)
+	go s.maintainIdentity(
+		ctx,
+		profile,
+		client,
+		s.identityMaintenanceInterval,
+		s.identityRenewalLead,
+	)
 	go s.run(ctx, cancel, client, listener, packet, done)
 	s.notifyState(StateRunning)
 	return nil
@@ -332,17 +349,22 @@ func (s *Session) start(opts sessionOptions) error {
 // How often the enrolled identity is checked, and how far ahead of expiry a
 // renewal is attempted.
 //
-// Variables rather than constants so the lifecycle test can drive a real
-// renewal against a real gateway. The alternative is a test that waits an hour
-// or manufactures a nearly expired certificate, and neither would exercise the
-// path that matters: renewal while a session is serving traffic.
-var (
-	identityMaintenanceInterval = time.Hour
-	identityRenewalLead         = 7 * 24 * time.Hour
+// NewSession copies these into each session. The lifecycle test can therefore
+// drive a real renewal quickly without changing timing under another session's
+// goroutine.
+const (
+	defaultIdentityMaintenanceInterval = time.Hour
+	defaultIdentityRenewalLead         = 7 * 24 * time.Hour
 )
 
-func (s *Session) maintainIdentity(ctx context.Context, profile identity.ClientProfile, client *pep.Client) {
-	ticker := time.NewTicker(identityMaintenanceInterval)
+func (s *Session) maintainIdentity(
+	ctx context.Context,
+	profile identity.ClientProfile,
+	client *pep.Client,
+	maintenanceInterval time.Duration,
+	renewalLead time.Duration,
+) {
+	ticker := time.NewTicker(maintenanceInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -350,7 +372,7 @@ func (s *Session) maintainIdentity(ctx context.Context, profile identity.ClientP
 		case <-ctx.Done():
 			return
 		}
-		needsRenewal, err := profile.NeedsRenewal(time.Now(), identityRenewalLead)
+		needsRenewal, err := profile.NeedsRenewal(time.Now(), renewalLead)
 		if err != nil {
 			s.notifyLog("error", fmt.Sprintf("check device identity lifetime: %v", err))
 			continue
