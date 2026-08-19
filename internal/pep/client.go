@@ -473,8 +473,26 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 	defer listener.Close()
 	defer c.closeQUICPool()
 
-	// A change of uplink is a change of path, and nothing else will say so.
-	go c.watchUplink(ctx)
+	// Readiness includes the first bounded path measurement. Starting it in a
+	// background watcher made the first accepted flow race the prewarm and
+	// usually become the traffic which discovered the path after all. Capture
+	// the route first so the watcher can still detect a change which happens
+	// during this measurement.
+	uplink := c.currentUplink()
+	c.prewarmPath(ctx)
+	// A route can change during a long lossy handshake. Reconcile once before
+	// publishing readiness; otherwise the listener accepts flows for up to one
+	// polling interval using the pool and path model the prewarm just measured
+	// on an uplink which is already gone.
+	if current := c.currentUplink(); current != "" {
+		if uplink != "" && current != uplink {
+			c.cfg.Logger.Info("uplink changed during path prewarm", "from", uplink, "to", current)
+			c.onUplinkChanged(ctx)
+		}
+		uplink = current
+	}
+	// A later change of uplink is a change of path, and nothing else will say so.
+	go c.watchUplink(ctx, uplink)
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, c.cfg.MaxSessions)

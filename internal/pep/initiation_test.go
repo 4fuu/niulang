@@ -10,6 +10,7 @@ import (
 
 	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/pathsim"
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 func TestCurrentUplinkAppliesSocketControl(t *testing.T) {
@@ -29,6 +30,51 @@ func TestCurrentUplinkAppliesSocketControl(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("socket control calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestPathProbeEchoIsOneForOneAndDestinationFree(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	serverFrames := newFrameConn(serverConn, protocol.DefaultMaxPayload)
+	clientFrames := newFrameConn(clientConn, protocol.DefaultMaxPayload)
+	defer serverFrames.Close()
+	defer clientFrames.Close()
+
+	var sessionID [16]byte
+	sessionID[0] = 1
+	probe := func(sequence uint64) protocol.Frame {
+		return protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeProbe,
+			SessionID: sessionID, FlowID: probeFlowID, Sequence: sequence, Class: protocol.ClassNew,
+		}, Payload: make([]byte, probePayloadBytes)}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		(&Server{}).handlePathProbe(serverFrames, probe(0))
+		close(done)
+	}()
+	for sequence := uint64(0); sequence < 4; sequence++ {
+		if sequence > 0 {
+			if err := clientFrames.Write(probe(sequence)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		echo, err := clientFrames.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if echo.Header.Type != protocol.TypeProbe || echo.Header.SessionID != sessionID ||
+			echo.Header.FlowID != probeFlowID || echo.Header.Sequence != sequence ||
+			len(echo.Payload) != probePayloadBytes {
+			t.Fatalf("probe echo %d changed identity or size: %+v", sequence, echo.Header)
+		}
+	}
+	_ = clientFrames.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("probe handler did not stop at the delimited input")
 	}
 }
 
@@ -87,10 +133,13 @@ func TestFlowInitiationCostsNoRoundTripsWhenTheConnectionIsWarm(t *testing.T) {
 				i, elapsed.Round(time.Millisecond), roundTrip)
 		}
 	}
-	// And establishment must stay bounded rather than creeping: two round
-	// trips for the first flow, one for the second.
-	if establishing[0] > 3*roundTrip {
-		t.Errorf("first flow took %v, more than three round trips", establishing[0].Round(time.Millisecond))
+	// And establishment must stay bounded rather than creeping. Listener
+	// readiness now includes the one-time bidirectional path measurement, so a
+	// caller which connects before readiness may wait for the handshake plus
+	// that bounded exchange. The later flows are still the latency property
+	// this test exists to protect.
+	if establishing[0] > 5*roundTrip {
+		t.Errorf("first flow took %v, more than five round trips including path measurement", establishing[0].Round(time.Millisecond))
 	}
 	_ = net.Dialer{}
 }

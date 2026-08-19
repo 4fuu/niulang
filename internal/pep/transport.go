@@ -289,6 +289,8 @@ type quicStreamConn struct {
 	// stream; closing the connection would tear down unrelated flows.
 	closeConn bool
 	once      sync.Once
+	writeOnce sync.Once
+	writeErr  error
 	// bulk carries this lane's data frames as coded datagrams when the path
 	// erases enough to make that worth doing. It belongs to the connection
 	// rather than the stream, so a pooled connection's streams share it.
@@ -329,6 +331,16 @@ func (c *quicStreamConn) SetDeadline(t time.Time) error {
 func (c *quicStreamConn) SetWriteDeadline(t time.Time) error {
 	return c.stream.SetWriteDeadline(t)
 }
+
+// CloseWrite finishes one side of a pooled probe stream while leaving its read
+// side and the shared QUIC connection alive. The client uses that half-close
+// to delimit a bounded bidirectional prewarm without inventing another wire
+// flag or closing connections which already carry flows.
+func (c *quicStreamConn) CloseWrite() error {
+	c.writeOnce.Do(func() { c.writeErr = c.stream.Close() })
+	return c.writeErr
+}
+
 func (c *quicStreamConn) Close() error {
 	var err error
 	c.once.Do(func() {
@@ -337,7 +349,7 @@ func (c *quicStreamConn) Close() error {
 		// aborted pooled streams indefinitely even though the logical lane was
 		// already gone.
 		c.stream.CancelRead(0)
-		err = c.stream.Close()
+		err = c.CloseWrite()
 		if c.closeConn {
 			// Dedicated lanes own their QUIC connection and socket. Pooled
 			// streams deliberately leave both alive for other flows.

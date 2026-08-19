@@ -21,9 +21,9 @@ const (
 	Version           = byte(1)
 	HeaderSize        = 46
 	DefaultMaxPayload = 1 << 20
-	// FlagFin marks that the sender has reached EOF for the direction carried
-	// by the frame. A FIN is carried on a zero-length DATA frame so that it is
-	// ordered with respect to preceding bytes.
+	// FlagFin marks that the sender has reached EOF for one application-byte
+	// direction. It is carried on CLOSE with the final logical byte offset, so
+	// it remains ordered with respect to preceding DATA frames.
 	FlagFin uint16 = 1 << 0
 	// FlagAckFinal marks an acknowledgement as final for the flow.
 	FlagAckFinal uint16 = 1 << 1
@@ -66,9 +66,10 @@ const (
 	// distinct from TypeData: packet payloads preserve datagram boundaries and
 	// are not inserted into the byte-stream reassembler.
 	TypePacket
-	// TypeProbe carries bounded discard-only padding used after an uplink
-	// change to measure loss before a user's first flow. It is authenticated by
-	// TLS and never names or opens a destination.
+	// TypeProbe carries bounded padding used after an uplink change to measure
+	// both sending directions before a user's first flow. It is authenticated
+	// by TLS, never names or opens a destination, and is echoed one-for-one so
+	// it cannot amplify traffic.
 	TypeProbe
 )
 

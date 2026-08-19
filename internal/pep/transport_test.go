@@ -226,6 +226,26 @@ func TestQUICLaneCloseReleasesBothStreamDirections(t *testing.T) {
 	}
 }
 
+func TestQUICLaneHalfClosePreservesReadUntilFullClose(t *testing.T) {
+	stream := &closeTrackingQUICStream{}
+	lane := &quicStreamConn{stream: stream}
+	if err := lane.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lane.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if stream.closes != 1 || stream.cancelReads != 0 {
+		t.Fatalf("half-close called Close %d times and CancelRead %d times, want 1 and 0", stream.closes, stream.cancelReads)
+	}
+	if err := lane.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if stream.closes != 1 || stream.cancelReads != 1 {
+		t.Fatalf("full close called Close %d times and CancelRead %d times, want 1 and 1", stream.closes, stream.cancelReads)
+	}
+}
+
 func TestQUICPathEvidenceExcludesPeerAndLifecycleFailures(t *testing.T) {
 	tests := []struct {
 		name string

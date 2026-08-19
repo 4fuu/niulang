@@ -7,7 +7,6 @@ import (
 
 	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
 )
 
 // The path a client is on is not a property of the server. Moving from Wi-Fi
@@ -65,18 +64,9 @@ func (c *Client) currentUplink() string {
 }
 
 // watchUplink notices the machine changing how it reaches the server.
-func (c *Client) watchUplink(ctx context.Context) {
+func (c *Client) watchUplink(ctx context.Context, known string) {
 	ticker := time.NewTicker(uplinkPollInterval)
 	defer ticker.Stop()
-	known := c.currentUplink()
-	// The uplink a client starts on is as unmeasured as one it moves to, and
-	// the first flow pays the same ignorance either way. Measuring it here is
-	// the whole reason the prewarm exists; running it only on a change left
-	// every client's first flows carried uncoded across a channel nothing had
-	// yet noticed erases -- and a client that asks small questions never
-	// notices at all, because measuring the direction you send into needs you
-	// to have sent something.
-	c.prewarmPath(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -123,18 +113,30 @@ func (c *Client) prewarmPath(ctx context.Context) {
 	warm, cancel := context.WithTimeout(ctx, prewarmTimeout)
 	defer cancel()
 
-	sessionID, err := session.NewSessionID()
-	if err != nil {
-		return
+	// Prewarming is not a second transport policy. AUTO must use the same
+	// delayed TCP standby and bounded QUIC preference as an application flow;
+	// bypassing that decision made a TCP-only gateway hold the local listener
+	// unready for the entire QUIC timeout. A selected TCP lane needs no erasure
+	// measurement, while a selected QUIC lane is the path the flow will use.
+	var lane *authenticatedLane
+	var err error
+	if c.cfg.Transport == TransportAuto {
+		lane, err = c.chooseAuthenticatedLane(warm)
+	} else {
+		lane, err = c.dialAuthenticatedCandidate(warm, TransportQUIC)
 	}
-	// Mutual TLS completes before the stream is returned. The connection stays
-	// pooled, so the first real flow inherits both the handshake and the path
-	// measurement without an application-level authentication exchange.
-	lane, err := c.dialLaneMode(warm, TransportQUIC, sessionID, 0, c.cfg.EnableQUICPool)
 	if err != nil {
 		c.cfg.Logger.Debug("path prewarm failed", "error", err)
 		return
 	}
+	if lane.kind != TransportQUIC {
+		_ = lane.fc.Close()
+		return
+	}
+	// Mutual TLS completes before the stream is returned. When pooling is
+	// enabled the connection stays pooled, so the first real flow inherits both
+	// the handshake and the path measurement without another authentication
+	// exchange.
 	// The handshake alone is about ten packets, which is enough to notice that
 	// a path erases and not enough to say how much, so the prewarm sends a
 	// little more before letting go.
@@ -164,18 +166,20 @@ const (
 // probePath sends enough traffic for the congestion controller to measure the
 // path, and throws it away.
 //
-// The measurement is not of the padding but of what came back: the controller
-// reads the erasure floor from the acknowledgements of its own packets, and
-// publishes it to the model that every flow on this uplink then starts from.
-// Nothing needs to receive the padding, and nothing does -- it is addressed to
-// a flow that does not exist, which the peer's demultiplexer drops.
+// The measurement is not of the padding's contents but of its transport
+// acknowledgements. The server reflects the authenticated, destination-free
+// sequence one-for-one, so each endpoint's controller measures the direction
+// it actually sends into and publishes that evidence before a user flow is
+// accepted.
 func (c *Client) probePath(lane *authenticatedLane) {
 	if lane == nil || lane.fc == nil {
 		return
 	}
 	payload := make([]byte, probePayloadBytes)
 	deadline := time.Now().Add(pathProbeBudget)
-	for sent := 0; sent < pathProbePackets && time.Now().Before(deadline); sent++ {
+	_ = lane.outer.SetDeadline(deadline)
+	sent := 0
+	for sent < pathProbePackets && time.Now().Before(deadline) {
 		frame := protocol.Frame{
 			Header: protocol.Header{
 				Version: protocol.Version, Type: protocol.TypeProbe,
@@ -186,8 +190,34 @@ func (c *Client) probePath(lane *authenticatedLane) {
 		if err := lane.fc.Write(frame); err != nil {
 			return
 		}
+		sent++
+	}
+	// A half-close is the probe's delimiter. The authenticated server echoes
+	// exactly the bounded padding it received, then closes its send direction;
+	// reading that echo makes the connection carry enough server-to-client
+	// traffic for the server's own controller to measure that direction. Old
+	// servers return EOF without an echo, so this remains wire-compatible.
+	if closer, ok := lane.outer.(interface{ CloseWrite() error }); ok && sent > 0 {
+		if err := closer.CloseWrite(); err == nil {
+			c.readPathProbeEchoes(lane, sent)
+		}
 	}
 	c.awaitMeasurement(lane, deadline)
+}
+
+func (c *Client) readPathProbeEchoes(lane *authenticatedLane, sent int) {
+	for sequence := 0; sequence < sent; sequence++ {
+		frame, err := lane.fc.Read()
+		if err != nil {
+			return
+		}
+		if frame.Header.Type != protocol.TypeProbe || frame.Header.SessionID != lane.sessionID ||
+			frame.Header.FlowID != probeFlowID || frame.Header.Sequence != uint64(sequence) ||
+			frame.Header.Flags != 0 || frame.Header.Class != protocol.ClassNew ||
+			len(frame.Payload) != probePayloadBytes {
+			return
+		}
+	}
 }
 
 // awaitMeasurement waits for the answer the probe was asking for.
@@ -204,7 +234,7 @@ func (c *Client) awaitMeasurement(lane *authenticatedLane, deadline time.Time) {
 	}
 	model := pathmodel.Shared(keyed.pathIdentity())
 	for time.Now().Before(deadline) {
-		if model.Current().Floor > 0 {
+		if model.Current().ObservedSamples >= pathProbePackets {
 			return
 		}
 		time.Sleep(measurementPoll)
