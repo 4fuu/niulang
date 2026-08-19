@@ -33,7 +33,8 @@ struct RoutePlan: Sendable, Equatable {
 
     /// Private and link-local space, the exclusion set behind the
     /// "exclude local networks" traffic policy. It matches the Android
-    /// client's RoutePolicy list exactly; the two must not drift.
+    /// client's RoutePolicy list exactly, and scripts/test_mobile_route_parity.py
+    /// fails the build if they stop matching.
     static let localNetworks = [
         "10.0.0.0/8",
         "100.64.0.0/10",

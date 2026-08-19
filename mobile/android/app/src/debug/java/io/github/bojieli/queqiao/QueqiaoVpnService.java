@@ -22,6 +22,9 @@ public final class QueqiaoVpnService extends VpnService
         implements Protector, TunnelServiceCore.Backend {
     static final String MODE = "tunnel";
 
+    // The MTU, resolvers, and interface addresses below are declared again in
+    // iOS's TunnelNetworkSettings and, for the MTU, in the Go packet stack.
+    // scripts/test_mobile_route_parity.py holds the three copies together.
     private static final int MTU = 1280;
 
     private final TunnelServiceCore core = new TunnelServiceCore(this, this);

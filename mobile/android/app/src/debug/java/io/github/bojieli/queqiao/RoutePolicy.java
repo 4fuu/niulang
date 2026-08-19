@@ -10,6 +10,8 @@ import java.util.Collections;
 import java.util.List;
 
 final class RoutePolicy {
+    // The same list as RoutePlan.localNetworks on iOS. Neither client can see
+    // the other, so scripts/test_mobile_route_parity.py compares them.
     private static final String[] LOCAL_EXCLUSIONS = {
             "10.0.0.0/8",
             "100.64.0.0/10",
