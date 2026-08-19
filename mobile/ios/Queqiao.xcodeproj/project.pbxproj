@@ -23,6 +23,7 @@
 		3C0FE36DB580D47F17DBA03E /* Mobilecore.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		3C958E31AD65ABB4069C2B7E /* IPPrefix.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F70D796385BB2592A8B6306 /* IPPrefix.swift */; };
 		3E1B7B05A3F97BA727C9DB48 /* PacketTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 93EEE451E856BB5D399404F3 /* PacketTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		3F76B3107BE68FACC7B6256D /* BypassRoutesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A0052E94D098F8C7C9C7AB /* BypassRoutesTests.swift */; };
 		4007FACE560270557CCC4796 /* OneShotErrorCompletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6977BB55BDEB946A63AC7481 /* OneShotErrorCompletion.swift */; };
 		4216F96A859623582815FACD /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3358D1947A2D5AFE5A1F91 /* SettingsView.swift */; };
 		429DA085FD40939BA064D46F /* RoutePlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A73080843F759E47498727DB /* RoutePlanTests.swift */; };
@@ -46,6 +47,7 @@
 		A90475B33DB098B5DC21F192 /* CoreBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F638CF570C7A5852DE2269B7 /* CoreBoundaryTests.swift */; };
 		AE0C9D533965F2EBEE29BBF2 /* DiagnosticExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1188477F059F8F42E5A2B2E1 /* DiagnosticExporter.swift */; };
 		B25FEDFD51756D3F16858CF1 /* VPNDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D1A32A7D2EA758E64DF5615 /* VPNDiagnostics.swift */; };
+		B29C3BEEFE05BCF4AF1DFD82 /* ProfileRoutingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8325591D1B5330766175145 /* ProfileRoutingSection.swift */; };
 		B5E6AFBE8082FE6958A4F4C0 /* Mobilecore.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 219A9C59F3F189F39004E980 /* Mobilecore.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		B61D6221C49C32C886381815 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C48647B91FBCC1F15F977C5 /* KeychainStore.swift */; };
 		C62CC189B8350A3DE082BF48 /* ProviderEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85BC6F6EB97A4D90EB38EB5 /* ProviderEndpoint.swift */; };
@@ -142,6 +144,8 @@
 		A73080843F759E47498727DB /* RoutePlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutePlanTests.swift; sourceTree = "<group>"; };
 		ACE67DE2C949D4B7DC369AA5 /* TunnelModel+Probing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TunnelModel+Probing.swift"; sourceTree = "<group>"; };
 		B177679FBC7D995ACD2B8D5E /* ProfileProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileProbe.swift; sourceTree = "<group>"; };
+		B1A0052E94D098F8C7C9C7AB /* BypassRoutesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BypassRoutesTests.swift; sourceTree = "<group>"; };
+		B8325591D1B5330766175145 /* ProfileRoutingSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileRoutingSection.swift; sourceTree = "<group>"; };
 		BCDA99C2486E8ABD530118BE /* QueqiaoTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = QueqiaoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0722AD3C50275E1BCDD5351 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		C68809144D3F97622B923A85 /* Queqiao.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Queqiao.entitlements; sourceTree = "<group>"; };
@@ -193,6 +197,7 @@
 				DBF55AD691B9BED3EE19D353 /* Info.plist */,
 				430D58D7442C39B4BD9C12FB /* LicenseNoticeView.swift */,
 				B177679FBC7D995ACD2B8D5E /* ProfileProbe.swift */,
+				B8325591D1B5330766175145 /* ProfileRoutingSection.swift */,
 				06E70DE072DD84C6BF2E8288 /* ProfilesView.swift */,
 				C68809144D3F97622B923A85 /* Queqiao.entitlements */,
 				85EB3D7717BB422AD61D738D /* QueqiaoApp.swift */,
@@ -209,6 +214,7 @@
 		252104A8FEB273ABDD00265A /* QueqiaoTests */ = {
 			isa = PBXGroup;
 			children = (
+				B1A0052E94D098F8C7C9C7AB /* BypassRoutesTests.swift */,
 				F638CF570C7A5852DE2269B7 /* CoreBoundaryTests.swift */,
 				A73080843F759E47498727DB /* RoutePlanTests.swift */,
 			);
@@ -422,6 +428,7 @@
 				07F155EAF1B380CBE528972D /* MobileCore.swift in Sources */,
 				245F5C0D5897F75A03B740CF /* OneShotErrorCompletion.swift in Sources */,
 				A220EC905FD9ED834F0DF619 /* ProfileProbe.swift in Sources */,
+				B29C3BEEFE05BCF4AF1DFD82 /* ProfileRoutingSection.swift in Sources */,
 				5E0CBFE215332DDE2B40736C /* ProfileStore.swift in Sources */,
 				EFAAE976107F9765D9616D73 /* ProfilesView.swift in Sources */,
 				CEF53BD49453638B9109EE4C /* ProviderEndpoint.swift in Sources */,
@@ -441,6 +448,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3F76B3107BE68FACC7B6256D /* BypassRoutesTests.swift in Sources */,
 				A90475B33DB098B5DC21F192 /* CoreBoundaryTests.swift in Sources */,
 				375FB5454F776236A3760973 /* DiagnosticStore.swift in Sources */,
 				25A3E872695919417DAE9CCE /* IPPrefix.swift in Sources */,

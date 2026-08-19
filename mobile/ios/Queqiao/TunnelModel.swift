@@ -192,6 +192,28 @@ final class TunnelModel: ObservableObject {
         }
     }
 
+    /// Persists bypass routes, refusing entries that are not CIDR blocks rather
+    /// than dropping them: silently discarding a typed route would leave the
+    /// user believing a destination is off the tunnel when it is not.
+    func setBypassRoutes(from text: String, for id: String) async {
+        guard canChangeProfile else {
+            present(ModelError.disconnectBeforeEditing, title: "Disconnect first")
+            return
+        }
+        let entries = StoredProfile.routeEntries(from: text)
+        let rejected = IPPrefix.parseList(entries).rejected
+        guard rejected.isEmpty else {
+            present(ModelError.invalidBypassRoutes(rejected), title: "Check the bypass list")
+            return
+        }
+        do {
+            try await Task.detached { try ProfileStore().setBypassRoutes(entries, for: id) }.value
+            await refreshProfiles()
+        } catch {
+            present(error, title: "Could not update bypass routes")
+        }
+    }
+
     func deleteProfile(id: String) async {
         guard canChangeProfile else {
             present(ModelError.disconnectBeforeEditing, title: "Disconnect first")

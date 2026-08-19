@@ -54,17 +54,7 @@ struct RoutePlan: Sendable, Equatable {
         builtIn: [IPPrefix] = [],
         limit: Int = defaultLimit
     ) -> RoutePlan {
-        var rejected: [String] = []
-        var parsed: [IPPrefix] = []
-        for entry in userRoutes {
-            let trimmed = entry.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
-            guard let prefix = IPPrefix(cidr: trimmed) else {
-                rejected.append(trimmed)
-                continue
-            }
-            parsed.append(prefix)
-        }
+        let (parsed, rejected) = IPPrefix.parseList(userRoutes)
 
         var truncated = 0
         var kept = IPPrefix.coalesce(parsed)

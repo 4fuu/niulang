@@ -129,6 +129,24 @@ struct IPPrefix: Hashable, Comparable, Sendable {
         return halves.flatMap { $0.subtracting(exclusion) }
     }
 
+    /// Parses a list of user-typed entries. Blank entries are ignored; every
+    /// other one either parses or is returned, trimmed, in `rejected` so the
+    /// caller can say which entry was wrong instead of how many.
+    static func parseList(_ entries: [String]) -> (parsed: [IPPrefix], rejected: [String]) {
+        var parsed: [IPPrefix] = []
+        var rejected: [String] = []
+        for entry in entries {
+            let trimmed = entry.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            if let prefix = IPPrefix(cidr: trimmed) {
+                parsed.append(prefix)
+            } else {
+                rejected.append(trimmed)
+            }
+        }
+        return (parsed, rejected)
+    }
+
     /// Collapses a set into the smallest equivalent one: subnets are absorbed
     /// into the blocks that already cover them, and sibling halves become their
     /// parent. The result is sorted.

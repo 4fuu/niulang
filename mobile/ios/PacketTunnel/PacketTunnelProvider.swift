@@ -40,7 +40,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
             resolveAndConfigureTunnel(
                 endpoint: record.summary.endpoint,
                 profile: profile,
-                policy: policy,
+                routing: TunnelRouting(policy: policy, bypassRoutes: record.bypassRoutes),
                 startup: startup,
                 completion: completion
             )
@@ -122,12 +122,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
 
     private func configureTunnel(
         profile: String,
-        policy: TrafficPolicy,
+        routing: TunnelRouting,
         remoteAddress: String,
         startup: StartupAttempt,
         completion: OneShotErrorCompletion
     ) {
-        let plan = routePlan(for: policy)
+        let plan = routePlan(for: routing)
         recordDiagnostic(level: .info, "Route plan: \(plan.diagnosticSummary)")
         setTunnelNetworkSettings(
             makeNetworkSettings(plan: plan, remoteAddress: remoteAddress)
@@ -153,7 +153,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
     private func resolveAndConfigureTunnel(
         endpoint: String,
         profile: String,
-        policy: TrafficPolicy,
+        routing: TunnelRouting,
         startup: StartupAttempt,
         completion: OneShotErrorCompletion
     ) {
@@ -167,7 +167,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
                 recordDiagnostic(level: .info, "Provider endpoint resolved to \(remoteAddress)")
                 configureTunnel(
                     profile: profile,
-                    policy: policy,
+                    routing: routing,
                     remoteAddress: remoteAddress,
                     startup: startup,
                     completion: completion
@@ -235,17 +235,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         }
     }
 
-    /// The set of destinations that stay off the tunnel for this policy.
+    /// The set of destinations that stay off the tunnel for this profile.
     ///
-    /// Everything about which prefixes those are, and how they are parsed,
-    /// deduplicated, coalesced and capped, lives in RoutePlan so it can be
-    /// tested without a NetworkExtension host.
-    private func routePlan(for policy: TrafficPolicy) -> RoutePlan {
-        switch policy {
+    /// Everything about how those prefixes are parsed, deduplicated, coalesced
+    /// and capped lives in RoutePlan so it can be tested without a
+    /// NetworkExtension host.
+    private func routePlan(for routing: TunnelRouting) -> RoutePlan {
+        switch routing.policy {
         case .allTraffic:
-            return .empty
+            return RoutePlan.make(userRoutes: routing.bypassRoutes)
         case .excludeLocalNetworks:
-            return RoutePlan.localNetworkPlan()
+            return RoutePlan.make(userRoutes: RoutePlan.localNetworks + routing.bypassRoutes)
         }
     }
 
@@ -277,6 +277,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         settings.dnsSettings = dns
         return settings
     }
+}
+
+/// Where this profile's traffic goes, read once from the stored record at
+/// startup and carried through resolution into the settings build.
+private struct TunnelRouting {
+    let policy: TrafficPolicy
+    let bypassRoutes: [String]
 }
 
 private enum TunnelError: LocalizedError {

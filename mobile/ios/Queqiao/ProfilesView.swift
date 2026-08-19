@@ -130,7 +130,7 @@ private struct ProfileDetailView: View {
                 Form {
                     summarySection(profile)
                     connectionTestSection(profile)
-                    trafficPolicySection(profile)
+                    ProfileRoutingSection(profile: profile)
                     actionsSection(profile)
                     identitySection(profile)
                 }
@@ -218,30 +218,6 @@ private struct ProfileDetailView: View {
         }
     }
 
-    private func trafficPolicySection(_ profile: StoredProfile) -> some View {
-        Section {
-            Picker("Routing", selection: policyBinding(profile)) {
-                ForEach(TrafficPolicy.allCases) { policy in
-                    Text(policy.title).tag(policy)
-                }
-            }
-            .pickerStyle(.inline)
-            .labelsHidden()
-            .disabled(!model.canChangeProfile)
-
-            Text(profile.trafficPolicy.detail)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        } header: {
-            Text("Traffic policy")
-        } footer: {
-            Text(
-                "DNS uses the Queqiao tunnel in both modes. Local-network exclusions " +
-                "affect private and link-local destinations only."
-            )
-        }
-    }
-
     private func actionsSection(_ profile: StoredProfile) -> some View {
         Section {
             if profile.id == model.selectedProfileID {
@@ -267,15 +243,6 @@ private struct ProfileDetailView: View {
             LabeledContent("Device ID", value: profile.summary.deviceID)
         }
         .font(.footnote)
-    }
-
-    private func policyBinding(_ profile: StoredProfile) -> Binding<TrafficPolicy> {
-        Binding(
-            get: { model.profile(id: profile.id)?.trafficPolicy ?? profile.trafficPolicy },
-            set: { policy in
-                Task { await model.setTrafficPolicy(policy, for: profile.id) }
-            }
-        )
     }
 
     private func formattedExpiry(_ encoded: String) -> String {

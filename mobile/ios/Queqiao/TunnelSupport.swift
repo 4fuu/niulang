@@ -40,6 +40,7 @@ enum ModelError: LocalizedError {
     case invalidPacketTunnelIdentifier
     case disconnectBeforeEditing
     case emptyMetrics
+    case invalidBypassRoutes([String])
 
     var errorDescription: String? {
         switch self {
@@ -53,6 +54,10 @@ enum ModelError: LocalizedError {
             return "Disconnect the VPN before changing its selected profile or routing policy."
         case .emptyMetrics:
             return "The packet-tunnel extension returned no metrics."
+        case .invalidBypassRoutes(let entries):
+            let listed = entries.prefix(5).joined(separator: ", ")
+            let suffix = entries.count > 5 ? " and \(entries.count - 5) more" : ""
+            return "Not a network address or CIDR block: \(listed)\(suffix)."
         }
     }
 }
