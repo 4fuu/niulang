@@ -1,9 +1,11 @@
 // Package socks5 implements the bounded SOCKS5 surface used by the local
-// agent. It supports no-authentication TCP CONNECT and UDP ASSOCIATE; BIND
-// and authentication methods are rejected explicitly.
+// agent. It supports TCP CONNECT and UDP ASSOCIATE with either no
+// authentication or RFC 1929 username/password; BIND and every other
+// authentication method are rejected explicitly.
 package socks5
 
 import (
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,7 +17,16 @@ import (
 const (
 	version5             = 5
 	methodNone           = 0
+	methodUserPass       = 2
 	methodNoneAcceptable = 0xff
+
+	// userPassVersion is the RFC 1929 sub-negotiation version, which is
+	// independent of the SOCKS version in the surrounding exchange.
+	userPassVersion = 1
+	userPassSuccess = 0
+	userPassFailure = 1
+
+	maxUserPassFieldLength = 255
 
 	CommandConnect      = 1
 	CommandUDPAssociate = 3
@@ -36,36 +47,57 @@ type Request struct {
 	Destination string
 }
 
+// Credentials is one RFC 1929 username/password pair. A nil *Credentials
+// selects no-authentication; a non-nil one makes username/password the only
+// acceptable method, so a client that offers no-authentication is rejected
+// rather than silently downgraded.
+type Credentials struct {
+	Username string
+	Password string
+}
+
+// Validate reports whether the pair fits the RFC 1929 wire encoding. Both
+// fields are length-prefixed with a single byte, and an empty username cannot
+// be distinguished from an absent one by a peer.
+func (c *Credentials) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if c.Username == "" {
+		return errors.New("SOCKS5 username must not be empty")
+	}
+	if len(c.Username) > maxUserPassFieldLength {
+		return fmt.Errorf("SOCKS5 username exceeds %d bytes", maxUserPassFieldLength)
+	}
+	if len(c.Password) > maxUserPassFieldLength {
+		return fmt.Errorf("SOCKS5 password exceeds %d bytes", maxUserPassFieldLength)
+	}
+	return nil
+}
+
+// matches compares a presented pair without a data-dependent branch. Both
+// fields are always compared so the running time does not reveal which one
+// differed.
+func (c *Credentials) matches(username, password string) bool {
+	user := subtle.ConstantTimeCompare([]byte(c.Username), []byte(username))
+	pass := subtle.ConstantTimeCompare([]byte(c.Password), []byte(password))
+	return user&pass == 1
+}
+
 type UDPDatagram struct {
 	Destination string
 	Payload     []byte
 }
 
-func ReadRequest(rw io.ReadWriter) (Request, error) {
-	var greeting [2]byte
-	if _, err := io.ReadFull(rw, greeting[:]); err != nil {
-		return Request{}, fmt.Errorf("read greeting: %w", err)
+// ReadRequest performs method negotiation, any required authentication, and
+// then reads one request. Passing nil credentials preserves the
+// no-authentication behaviour used by the loopback desktop listener.
+func ReadRequest(rw io.ReadWriter, credentials *Credentials) (Request, error) {
+	if err := credentials.Validate(); err != nil {
+		return Request{}, err
 	}
-	if greeting[0] != version5 || greeting[1] == 0 {
-		return Request{}, errors.New("invalid SOCKS5 greeting")
-	}
-	methods := make([]byte, int(greeting[1]))
-	if _, err := io.ReadFull(rw, methods); err != nil {
-		return Request{}, fmt.Errorf("read methods: %w", err)
-	}
-	found := false
-	for _, method := range methods {
-		if method == methodNone {
-			found = true
-			break
-		}
-	}
-	if !found {
-		_, _ = rw.Write([]byte{version5, methodNoneAcceptable})
-		return Request{}, errors.New("client did not offer no-authentication method")
-	}
-	if err := writeFull(rw, []byte{version5, methodNone}); err != nil {
-		return Request{}, fmt.Errorf("write method selection: %w", err)
+	if err := negotiateMethod(rw, credentials); err != nil {
+		return Request{}, err
 	}
 
 	var header [4]byte
@@ -94,6 +126,87 @@ func ReadRequest(rw io.ReadWriter) (Request, error) {
 		return Request{}, errors.New("destination port must not be zero")
 	}
 	return Request{Command: header[1], Destination: net.JoinHostPort(host, strconv.Itoa(int(port)))}, nil
+}
+
+// negotiateMethod selects exactly one method and completes it. The required
+// method is decided by the listener's configuration, never by what the client
+// prefers, so an unauthenticated client cannot negotiate authentication away.
+func negotiateMethod(rw io.ReadWriter, credentials *Credentials) error {
+	required := byte(methodNone)
+	if credentials != nil {
+		required = methodUserPass
+	}
+
+	var greeting [2]byte
+	if _, err := io.ReadFull(rw, greeting[:]); err != nil {
+		return fmt.Errorf("read greeting: %w", err)
+	}
+	if greeting[0] != version5 || greeting[1] == 0 {
+		return errors.New("invalid SOCKS5 greeting")
+	}
+	methods := make([]byte, int(greeting[1]))
+	if _, err := io.ReadFull(rw, methods); err != nil {
+		return fmt.Errorf("read methods: %w", err)
+	}
+	found := false
+	for _, method := range methods {
+		if method == required {
+			found = true
+			break
+		}
+	}
+	if !found {
+		_, _ = rw.Write([]byte{version5, methodNoneAcceptable})
+		if required == methodUserPass {
+			return errors.New("client did not offer username/password authentication")
+		}
+		return errors.New("client did not offer no-authentication method")
+	}
+	if err := writeFull(rw, []byte{version5, required}); err != nil {
+		return fmt.Errorf("write method selection: %w", err)
+	}
+	if credentials == nil {
+		return nil
+	}
+	return authenticate(rw, credentials)
+}
+
+// authenticate runs the RFC 1929 sub-negotiation. A failed exchange still
+// receives a well-formed failure reply so a misconfigured client reports an
+// authentication error rather than a protocol error.
+func authenticate(rw io.ReadWriter, credentials *Credentials) error {
+	var prefix [2]byte
+	if _, err := io.ReadFull(rw, prefix[:]); err != nil {
+		return fmt.Errorf("read authentication header: %w", err)
+	}
+	if prefix[0] != userPassVersion {
+		_ = writeFull(rw, []byte{userPassVersion, userPassFailure})
+		return errors.New("unsupported SOCKS5 authentication version")
+	}
+	if prefix[1] == 0 {
+		_ = writeFull(rw, []byte{userPassVersion, userPassFailure})
+		return errors.New("empty SOCKS5 username")
+	}
+	username := make([]byte, int(prefix[1]))
+	if _, err := io.ReadFull(rw, username); err != nil {
+		return fmt.Errorf("read username: %w", err)
+	}
+	var passwordLength [1]byte
+	if _, err := io.ReadFull(rw, passwordLength[:]); err != nil {
+		return fmt.Errorf("read password length: %w", err)
+	}
+	password := make([]byte, int(passwordLength[0]))
+	if _, err := io.ReadFull(rw, password); err != nil {
+		return fmt.Errorf("read password: %w", err)
+	}
+	if !credentials.matches(string(username), string(password)) {
+		_ = writeFull(rw, []byte{userPassVersion, userPassFailure})
+		return errors.New("SOCKS5 authentication rejected")
+	}
+	if err := writeFull(rw, []byte{userPassVersion, userPassSuccess}); err != nil {
+		return fmt.Errorf("write authentication reply: %w", err)
+	}
+	return nil
 }
 
 const (

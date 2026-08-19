@@ -314,7 +314,7 @@ func (c *Client) Close() {
 
 func (c *Client) handle(ctx context.Context, inner net.Conn) {
 	defer inner.Close()
-	request, err := socks5.ReadRequest(inner)
+	request, err := socks5.ReadRequest(inner, nil)
 	if err != nil {
 		return
 	}

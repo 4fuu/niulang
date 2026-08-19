@@ -68,7 +68,13 @@ type ClientConfig struct {
 	// is bound or connected. Mobile VPN clients use it to exempt Queqiao's own
 	// TCP and UDP sockets from the virtual interface. A failure aborts the dial;
 	// silently continuing would route the tunnel through itself.
-	SocketControl    func(network, address string, conn syscall.RawConn) error
+	SocketControl func(network, address string, conn syscall.RawConn) error
+	// SOCKSAuth optionally requires RFC 1929 username/password on the local
+	// SOCKS5 listener. It is nil for the loopback-private listener used by the
+	// desktop agent and the mobile packet tunnel, and set when the listener is
+	// reachable by other applications on the same host, as in Android export
+	// mode where loopback is shared across every installed app.
+	SOCKSAuth        *socks5.Credentials
 	Credentials      identity.ClientCredentials
 	MaxPayload       uint32
 	ChunkSize        int
@@ -289,6 +295,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, errors.New("client listen and remote addresses are required")
 	}
 	if err := validateLocalAddressSpec(cfg.LocalAddress); err != nil {
+		return nil, err
+	}
+	if err := cfg.SOCKSAuth.Validate(); err != nil {
 		return nil, err
 	}
 	if err := cfg.Credentials.Validate(time.Now()); err != nil {
@@ -606,7 +615,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	// connection after both ends had opened it successfully. The application
 	// saw EOF from a flow that was working.
 	_ = inner.SetDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
-	req, err := socks5.ReadRequest(inner)
+	req, err := socks5.ReadRequest(inner, c.cfg.SOCKSAuth)
 	if err != nil {
 		c.cfg.Logger.Debug("SOCKS5 negotiation failed", "error", err)
 		return

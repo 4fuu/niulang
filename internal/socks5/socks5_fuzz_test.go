@@ -51,20 +51,32 @@ func FuzzReadRequestNeverPanics(f *testing.F) {
 	f.Add([]byte{5, 0})
 	f.Add([]byte{4, 1, 0})
 	f.Add([]byte{})
+	// The username/password path parses two more caller-declared lengths
+	// before the request, so it gets its own seeds: a complete exchange, a
+	// truncated password, and a sub-negotiation version nobody supports.
+	f.Add([]byte{5, 1, 2, 1, 2, 'h', 'i', 2, 'p', 'w', 5, 1, 0, 1, 127, 0, 0, 1, 0x1f, 0x90})
+	f.Add([]byte{5, 1, 2, 1, 2, 'h', 'i', 0xff, 'p'})
+	f.Add([]byte{5, 1, 2, 9, 1, 'h'})
+	f.Add([]byte{5, 1, 2, 1, 0})
 	f.Fuzz(func(t *testing.T, in []byte) {
-		stream := struct {
-			io.Reader
-			io.Writer
-		}{bytes.NewReader(in), io.Discard}
-		request, err := ReadRequest(stream)
-		if err != nil {
-			return
-		}
-		if request.Command != CommandConnect && request.Command != CommandUDPAssociate {
-			t.Fatalf("accepted command %d", request.Command)
-		}
-		if request.Destination == "" {
-			t.Fatal("accepted a request with no destination")
+		// Both listener configurations read the same attacker-controlled
+		// bytes, and only the authenticated one can reach the sub-negotiation
+		// parser, so neither is redundant.
+		for _, credentials := range []*Credentials{nil, {Username: "hi", Password: "pw"}} {
+			stream := struct {
+				io.Reader
+				io.Writer
+			}{bytes.NewReader(in), io.Discard}
+			request, err := ReadRequest(stream, credentials)
+			if err != nil {
+				continue
+			}
+			if request.Command != CommandConnect && request.Command != CommandUDPAssociate {
+				t.Fatalf("accepted command %d", request.Command)
+			}
+			if request.Destination == "" {
+				t.Fatal("accepted a request with no destination")
+			}
 		}
 	})
 }
