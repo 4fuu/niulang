@@ -105,15 +105,18 @@ the last known-good in-memory state active.
 
 ## Reporting a vulnerability
 
-Report privately through GitHub's private vulnerability reporting:
+Report privately, by either channel:
 
-**<https://github.com/bojieli/queqiao/security/advisories/new>**
+- **Email the maintainer: <bojieli@gmail.com>.** This works regardless of how
+  the repository is configured, so use it if anything else is unavailable.
+- **GitHub private vulnerability reporting:**
+  <https://github.com/bojieli/queqiao/security/advisories/new>. The draft
+  advisory stays between you and the maintainer until a fix is published, which
+  makes it a convenient place to hold the exploit detail and the eventual
+  disclosure together.
 
-The draft advisory is visible only to you and the maintainer and stays private
-until a fix is published, so it is the right place for exploit detail. If that
-form is not available to you, open a public issue saying only that you hold a
-security report and asking for a private channel: no reproduction, no affected
-revision, no credentials.
+Do not wait for an acknowledgement before the report is complete: send what you
+have to the address above rather than holding a finding until a form works.
 
 Include the affected revision, the reproduction, the impact, and any proposed
 mitigation. Remove client profiles, invitations, provider state, packet
