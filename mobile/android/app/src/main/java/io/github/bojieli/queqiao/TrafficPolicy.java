@@ -1,5 +1,14 @@
 package io.github.bojieli.queqiao;
 
+/**
+ * How the full-device tunnel divides traffic.
+ *
+ * Only the debug build acts on this — the released app routes nothing and hands
+ * the decision to the consumer's routing client. It stays in the main source
+ * set because the profile catalog is one JSON document written by both build
+ * types, and a value the release build could not parse would make a catalog
+ * saved by the debug build unreadable on the same device.
+ */
 enum TrafficPolicy {
     ALL_TRAFFIC(
             "all-traffic",
