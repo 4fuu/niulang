@@ -190,6 +190,10 @@ jobs:
         with:
           cmdline-tools-version: "14742923"
           packages: ""
+      - name: remove preinstalled NDKs before pinned install
+        run: |
+          test "$ANDROID_HOME" = /usr/local/lib/android/sdk
+          sudo rm -rf -- /usr/local/lib/android/sdk/ndk
       - name: install official Android emulator image
         run: >-
           sdkmanager
