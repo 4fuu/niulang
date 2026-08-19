@@ -837,6 +837,12 @@ func (f *multipathFlow) deliverInbound(lane *mpLane, frame protocol.Frame) bool 
 	select {
 	case f.events <- inboundEvent{lane: lane, frame: frame}:
 		return true
+	case <-f.done:
+		// Flow teardown is independent of the client lifetime. In particular,
+		// a reader can be waiting behind a full event queue when another lane
+		// completes or aborts the flow; waiting only on f.ctx would strand that
+		// goroutine until the entire VPN stopped.
+		return false
 	case <-f.ctx.Done():
 		return false
 	}

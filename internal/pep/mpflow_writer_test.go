@@ -995,3 +995,30 @@ func TestTheDataPlaneMovesOffTheControlLaneWhenThePoolIsShared(t *testing.T) {
 			len(candidates), candidates[0].id)
 	}
 }
+
+func TestInboundDeliveryBlockedByAFullQueueStopsWithTheFlow(t *testing.T) {
+	flow := &multipathFlow{
+		ctx:    context.Background(),
+		done:   make(chan struct{}),
+		events: make(chan inboundEvent, 1),
+	}
+	flow.events <- inboundEvent{}
+
+	started := make(chan struct{})
+	result := make(chan bool, 1)
+	go func() {
+		close(started)
+		result <- flow.deliverInbound(&mpLane{id: 1}, protocol.Frame{})
+	}()
+	<-started
+	flow.signalDone()
+
+	select {
+	case delivered := <-result:
+		if delivered {
+			t.Fatal("frame was delivered through a full queue")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("inbound reader remained blocked after flow teardown")
+	}
+}
