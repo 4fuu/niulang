@@ -47,6 +47,16 @@
 
     <string>--log-level</string>
     <string>info</string>
+
+    <!-- A machine-readable, bounded runtime log. queqiaod creates the parent
+         directory and rotates at 32 MiB with five backups by default. -->
+    <string>--log-file</string>
+    <string>/Users/YOU/Library/Logs/Queqiao/client.log</string>
+    <string>--log-format</string>
+    <string>json</string>
+    <string>--log-stderr=false</string>
+    <string>--telemetry-log-interval</string>
+    <string>5s</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -60,11 +70,6 @@
     <key>SuccessfulExit</key>
     <false/>
   </dict>
-
-  <key>StandardOutPath</key>
-  <string>/Users/YOU/.queqiao/client.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/YOU/.queqiao/client.log</string>
 
   <key>ProcessType</key>
   <string>Interactive</string>

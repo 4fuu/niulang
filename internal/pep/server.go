@@ -140,10 +140,11 @@ func (s *serverFlow) addLane(lane *mpLane) error {
 	}
 	if s.flow.laneCount() >= s.maxLanes {
 		// The peer can detect a dead QUIC socket before this endpoint does
-		// (for example, when the return path is black-holed). Retire one
-		// oldest active lane to admit the authenticated replacement while
-		// preserving the configured active-lane and memory bound.
-		if !s.flow.retireOldestLane() || s.flow.laneCount() >= s.maxLanes {
+		// (for example, when the return path is black-holed). Retire the
+		// oldest lane with the same role as its authenticated replacement.
+		// A bulk replacement must never evict the control lane, and a control
+		// generation replacement must not evict healthy bulk capacity.
+		if !s.flow.retireOldestLane(lane.control) || s.flow.laneCount() >= s.maxLanes {
 			return errors.New("flow lane limit reached")
 		}
 	}
@@ -585,7 +586,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 		return
 	}
 	if open.Header.Type == protocol.TypeJoin {
-		if session.IsZeroSessionID(open.Header.SessionID) || open.Header.FlowID == 0 || open.Header.Sequence != 0 || open.Header.Flags != 0 || len(open.Payload) != 8 {
+		if session.IsZeroSessionID(open.Header.SessionID) || open.Header.FlowID == 0 || open.Header.Sequence != 0 || open.Header.Flags&^protocol.FlagReserveControl != 0 || len(open.Payload) != 8 {
 			_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: open.Header.SessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join")})
 			return
 		}
@@ -639,7 +640,10 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 	flow.controlLaneShared = auth.shared
 	initialKind := transportKindForConn(conn)
 	serverSession := newServerFlow(flow, principal, initialKind, s.cfg.TCPFallbackLanes)
-	if err := serverSession.addLane(&mpLane{id: laneID, kind: initialKind, fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
+	if err := serverSession.addLane(&mpLane{
+		id: laneID, kind: initialKind, fc: fc, writeHook: s.cfg.testLaneWriteHook,
+		control: flow.reserveControlLane && initialKind == TransportQUIC,
+	}); err != nil {
 		flow.closeAll()
 		return
 	}
@@ -684,19 +688,22 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 		s.retainCompletedSession(sessionID, serverSession)
 		registered = false
 	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		s.cfg.Logger.Debug("remote flow ended with error", "error", err, "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent, "lane_bytes", stats.LaneBytes)
-		return
-	}
 	codedFrames, streamFrames := flow.dataSubstrates()
 	substrate, hasCoded := flow.codedSubstrate()
-	s.cfg.Logger.Info("remote flow complete", "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent,
+	logFields := []any{"session_id", fmt.Sprintf("%x", sessionID), "flow_id", flow.flowID,
+		"transport", transportKindForConn(conn), "bytes_from_client", stats.BytesRead, "bytes_to_client", stats.BytesSent,
 		"duration", stats.Ended.Sub(stats.Started), "lane_bytes", stats.LaneBytes,
 		// Where the payload went. The server is the sender for a download, so
 		// this is the split that decides what a download costs.
 		"data_coded", codedFrames, "data_stream", streamFrames,
 		"coded_substrate", codedSubstrateFields(substrate, hasCoded),
-		"class", classifier.Class(flow.class.Load()))
+		"class", classifier.Class(flow.class.Load())}
+	logFields = append(logFields, codedSubstrateLogFields(substrate, hasCoded)...)
+	if !flowComplete && err != nil && !errors.Is(err, context.Canceled) {
+		s.cfg.Logger.Warn("remote flow ended with error", append(logFields, "error", err)...)
+		return
+	}
+	s.cfg.Logger.Info("remote flow complete", logFields...)
 }
 
 const (
@@ -789,6 +796,12 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "unknown session")})
 		return
 	}
+	kind := transportKindForConn(conn)
+	controlReplacement := open.Header.Flags&protocol.FlagReserveControl != 0
+	if controlReplacement && (!serverSession.flow.reserveControlLane || kind != TransportQUIC) {
+		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid control lane replacement")})
+		return
+	}
 	_ = conn.SetDeadline(time.Time{})
 	if serverSession.completed.Load() {
 		s.cfg.Logger.Debug("lane join reached a completed session", "lane", laneID)
@@ -822,16 +835,23 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 		}
 		return
 	}
-	if err := serverSession.addLane(&mpLane{id: laneID, kind: transportKindForConn(conn), fc: fc, writeHook: s.cfg.testLaneWriteHook}); err != nil {
+	replacement := &mpLane{
+		id: laneID, kind: kind, fc: fc, writeHook: s.cfg.testLaneWriteHook,
+		control: controlReplacement, staged: true,
+	}
+	if err := serverSession.addLane(replacement); err != nil {
 		s.cfg.Logger.Debug("lane join refused: lane unavailable", "lane", laneID, "error", err)
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetFlowLimit, "lane unavailable")})
 		return
 	}
-	s.cfg.Logger.Debug("lane joined", "lane", laneID, "transport", transportKindForConn(conn), "lanes", serverSession.flow.laneCount())
-	s.observeLanes(serverSession.flow.laneCount())
 	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
 		return
 	}
+	if err := serverSession.flow.activateLane(replacement); err != nil {
+		return
+	}
+	s.cfg.Logger.Debug("lane joined", "lane", laneID, "transport", kind, "control", controlReplacement, "lanes", serverSession.flow.laneCount())
+	s.observeLanes(serverSession.flow.laneCount())
 	// A replacement can arrive after the destination has already reached EOF
 	// but before the original lane carried the logical FIN. Replay any known
 	// close state on this active lane immediately. Without this, the first

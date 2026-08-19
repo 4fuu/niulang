@@ -18,12 +18,13 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	r.Fallback()
 	r.UDPPathUnavailable()
 	r.EndpointTransportRaceFailure()
+	r.TransientUDPSendError()
 	r.UDPAssociationReconnect()
 	r.UDPAssociationRescueFailure()
 	r.FlowTimeout()
 	r.ObserveQUIC(1, QUICObservation{
 		Lanes: 2, LatestRTT: 250 * time.Millisecond, SmoothedRTT: 200 * time.Millisecond,
-		BytesSent: 100, BytesReceived: 200, BytesLost: 3, PacketsLost: 1,
+		BytesSent: 100, BytesReceived: 200, PacketsSent: 80, PacketsReceived: 75, BytesLost: 3, PacketsLost: 4,
 		ControllerKind: "bbr", ControllerMode: 3, ControllerMaxBandwidth: 1_000_000,
 		ControllerLatestSample: 900_000, ControllerLatestAckRate: 1_100_000,
 		ControllerLatestSendRate: 900_000, ControllerSamples: 12,
@@ -31,7 +32,8 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 		ControllerStateMisses: 1, ControllerZeroSamples: 3, ControllerRound: 7,
 		ControllerPacingRate: 1_250_000, ControllerCongestionWindow: 400_000,
 		ControllerBytesInFlight: 200_000, ControllerMinRTT: 190 * time.Millisecond,
-		ControllerInRecovery: true,
+		ControllerErasureFloor: 0.0475,
+		ControllerInRecovery:   true,
 	})
 	r.FlowFinished(10, 20, false)
 	r.FlowStarted()
@@ -40,12 +42,15 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	if s.ActiveFlows != 0 || s.FlowsStarted != 2 || s.FlowsCompleted != 1 || s.FlowsFailed != 1 || s.BytesUp != 11 || s.BytesDown != 22 {
 		t.Fatalf("unexpected snapshot: %+v", s)
 	}
-	if s.UDPPathUnavailable != 1 || s.EndpointTransportRaceFailures != 1 {
+	if s.UDPPathUnavailable != 1 || s.EndpointTransportRaceFailures != 1 || s.TransientUDPSendErrors != 1 {
 		t.Fatalf("unexpected endpoint transport snapshot: %+v", s)
+	}
+	if s.QUICPacketsSent != 80 || s.QUICPacketsReceived != 75 || s.QUICPacketsLost != 4 || s.QUICControllerErasureFloor != 0.0475 {
+		t.Fatalf("unexpected loss telemetry snapshot: %+v", s)
 	}
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "queqiao_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_path_unavailable_total 1") || !strings.Contains(rec.Body.String(), "queqiao_endpoint_transport_races_failed_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "queqiao_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_latest_sample_bytes_per_second 900000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_latest_ack_rate_bytes_per_second 1100000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_non_app_limited_samples_total 10") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_state_misses_total 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_round 7") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_in_recovery 1") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "queqiao_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_path_unavailable_total 1") || !strings.Contains(rec.Body.String(), "queqiao_endpoint_transport_races_failed_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_transient_send_errors_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "queqiao_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "queqiao_quic_packets_sent 80") || !strings.Contains(rec.Body.String(), "queqiao_quic_packets_received 75") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_latest_sample_bytes_per_second 900000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_latest_ack_rate_bytes_per_second 1100000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_non_app_limited_samples_total 10") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_state_misses_total 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_round 7") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_erasure_floor_ratio 0.047500000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_in_recovery 1") {
 		t.Fatalf("unexpected exposition: %s", rec.Body.String())
 	}
 }

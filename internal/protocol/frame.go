@@ -34,8 +34,9 @@ const (
 	// a half-close. It lets the peer release a keep-alive destination when the
 	// local socket was already closed after consuming its response.
 	FlagCloseAbort uint16 = 1 << 4
-	// FlagReserveControl is valid only on OPEN. It asks the peer to keep lane 0
-	// as a control/rescue lane once an independent bulk lane is attached.
+	// FlagReserveControl asks the peer to reserve a control/rescue role. On
+	// OPEN, lane zero begins in that role. On JOIN, the new lane replaces that
+	// role after a pooled connection generation has expired.
 	FlagReserveControl uint16 = 1 << 5
 	// FlagAckRanges is valid only on ACK. The payload carries byte ranges the
 	// receiver already holds out of order, beyond the cumulative sequence.
@@ -110,7 +111,7 @@ func (e UnsupportedVersionError) Error() string {
 }
 
 func reserveControlFlagValid(t Type, flags uint16) bool {
-	return flags&FlagReserveControl == 0 || t == TypeOpen
+	return flags&FlagReserveControl == 0 || t == TypeOpen || t == TypeJoin
 }
 
 func ackRangesFlagValid(t Type, flags uint16) bool {

@@ -11,6 +11,10 @@ Group=queqiao
 # Put whitespace-separated server flags in /etc/queqiao/queqiaod.env as:
 # QUEQIAOD_ARGS=--state /var/lib/queqiao/provider --listen :12540 ...
 EnvironmentFile=/etc/queqiao/queqiaod.env
+# The shared runtime logger resolves this to /var/log/queqiao/server.log,
+# rotates it at 32 MiB, and retains five backups. stderr remains available in
+# journald as an independent emergency/debugging surface.
+Environment=QUEQIAO_LOG_DIR=/var/log/queqiao
 ExecStart=/usr/local/bin/queqiaod server $QUEQIAOD_ARGS
 Restart=on-failure
 RestartSec=2s

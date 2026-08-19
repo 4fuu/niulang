@@ -32,11 +32,16 @@ type Registry struct {
 	// UDP failures tells an operator whether TCP was a usable (but degraded)
 	// escape path or whether the endpoint was unreachable on both transports.
 	endpointRaceFailures atomic.Uint64
-	udpReconnects        atomic.Uint64
-	udpRescueFailures    atomic.Uint64
-	completionTimeouts   atomic.Uint64
-	flowTimeouts         atomic.Uint64
-	classTransitions     [3]atomic.Uint64
+	// transientUDPSendErrors counts local route/buffer failures which were
+	// deliberately presented to QUIC as packet loss. Without that translation
+	// a sub-second Wi-Fi reassociation would terminate every stream sharing the
+	// UDP socket instead of entering ordinary PTO recovery.
+	transientUDPSendErrors atomic.Uint64
+	udpReconnects          atomic.Uint64
+	udpRescueFailures      atomic.Uint64
+	completionTimeouts     atomic.Uint64
+	flowTimeouts           atomic.Uint64
+	classTransitions       [3]atomic.Uint64
 	// The rescue window is dropped rather than allowed to throttle the
 	// application. That trade has to be visible: a flow that has evicted part
 	// of its window will fail rather than recover if its lane dies, so a
@@ -55,30 +60,33 @@ type Registry struct {
 }
 
 type Snapshot struct {
-	ActiveFlows, FlowsStarted, FlowsCompleted, FlowsFailed           int64
-	BytesUp, BytesDown, LaneFailures, LaneReplacements, Fallbacks    uint64
-	UDPPathUnavailable, EndpointTransportRaceFailures                uint64
-	UDPAssociationReconnects, UDPAssociationRescueFailures           uint64
-	CompletionTimeouts                                               uint64
-	FlowTimeouts                                                     uint64
-	ClassTransitions                                                 [3]uint64
-	BulkIsolations, Reinjections                                     uint64
-	ReplayBytesInUse                                                 int64
-	QUICLanes                                                        int64
-	QUICLatestRTT, QUICSmoothedRTT                                   time.Duration
-	QUICBytesSent, QUICBytesReceived, QUICBytesLost, QUICPacketsLost uint64
-	QUICControllerKind                                               string
-	QUICControllerMode                                               uint32
-	QUICControllerMaxBandwidth, QUICControllerPacingRate             uint64
-	QUICControllerLatestSample, QUICControllerSamples                uint64
-	QUICControllerLatestAckRate, QUICControllerLatestSendRate        uint64
-	QUICControllerNonAppSamples, QUICControllerAppSamples            uint64
-	QUICControllerStateMisses, QUICControllerZeroSamples             uint64
-	QUICControllerRound                                              uint64
-	QUICControllerCongestionWindow, QUICControllerBytesInFlight      uint64
-	QUICControllerBytesLost, QUICControllerPacketsLost               uint64
-	QUICControllerMinRTT                                             time.Duration
-	QUICControllerInRecovery                                         bool
+	ActiveFlows, FlowsStarted, FlowsCompleted, FlowsFailed        int64
+	BytesUp, BytesDown, LaneFailures, LaneReplacements, Fallbacks uint64
+	UDPPathUnavailable, EndpointTransportRaceFailures             uint64
+	TransientUDPSendErrors                                        uint64
+	UDPAssociationReconnects, UDPAssociationRescueFailures        uint64
+	CompletionTimeouts                                            uint64
+	FlowTimeouts                                                  uint64
+	ClassTransitions                                              [3]uint64
+	BulkIsolations, Reinjections                                  uint64
+	ReplayBytesInUse                                              int64
+	QUICLanes                                                     int64
+	QUICLatestRTT, QUICSmoothedRTT                                time.Duration
+	QUICBytesSent, QUICBytesReceived, QUICBytesLost               uint64
+	QUICPacketsSent, QUICPacketsReceived, QUICPacketsLost         uint64
+	QUICControllerKind                                            string
+	QUICControllerMode                                            uint32
+	QUICControllerMaxBandwidth, QUICControllerPacingRate          uint64
+	QUICControllerLatestSample, QUICControllerSamples             uint64
+	QUICControllerLatestAckRate, QUICControllerLatestSendRate     uint64
+	QUICControllerNonAppSamples, QUICControllerAppSamples         uint64
+	QUICControllerStateMisses, QUICControllerZeroSamples          uint64
+	QUICControllerRound                                           uint64
+	QUICControllerCongestionWindow, QUICControllerBytesInFlight   uint64
+	QUICControllerBytesLost, QUICControllerPacketsLost            uint64
+	QUICControllerMinRTT                                          time.Duration
+	QUICControllerErasureFloor                                    float64
+	QUICControllerInRecovery                                      bool
 }
 
 // QUICObservation is a point-in-time aggregate over the lanes of one logical
@@ -91,6 +99,8 @@ type QUICObservation struct {
 	SmoothedRTT                time.Duration
 	BytesSent                  uint64
 	BytesReceived              uint64
+	PacketsSent                uint64
+	PacketsReceived            uint64
 	BytesLost                  uint64
 	PacketsLost                uint64
 	ControllerKind             string
@@ -111,6 +121,7 @@ type QUICObservation struct {
 	ControllerBytesLost        uint64
 	ControllerPacketsLost      uint64
 	ControllerMinRTT           time.Duration
+	ControllerErasureFloor     float64
 	ControllerInRecovery       bool
 }
 
@@ -146,6 +157,9 @@ func (r *Registry) UDPPathUnavailable() {
 }
 func (r *Registry) EndpointTransportRaceFailure() {
 	r.endpointRaceFailures.Add(1)
+}
+func (r *Registry) TransientUDPSendError() {
+	r.transientUDPSendErrors.Add(1)
 }
 func (r *Registry) UDPAssociationReconnect() {
 	r.udpReconnects.Add(1)
@@ -226,6 +240,7 @@ func (r *Registry) Snapshot() Snapshot {
 		LaneReplacements: r.laneReplacements.Load(), Fallbacks: r.fallbacks.Load(),
 		UDPPathUnavailable:            r.udpPathUnavailable.Load(),
 		EndpointTransportRaceFailures: r.endpointRaceFailures.Load(),
+		TransientUDPSendErrors:        r.transientUDPSendErrors.Load(),
 		UDPAssociationReconnects:      r.udpReconnects.Load(),
 		UDPAssociationRescueFailures:  r.udpRescueFailures.Load(),
 		CompletionTimeouts:            r.completionTimeouts.Load(),
@@ -240,7 +255,7 @@ func (r *Registry) Snapshot() Snapshot {
 	r.telemetryMu.Lock()
 	var quicLanes int64
 	var latestRTT, smoothedRTT time.Duration
-	var bytesSent, bytesReceived, bytesLost, packetsLost uint64
+	var bytesSent, bytesReceived, packetsSent, packetsReceived, bytesLost, packetsLost uint64
 	var controllerKind string
 	var controllerMode uint32
 	var controllerMaxBandwidth, controllerPacingRate, controllerCwnd, controllerBytesInFlight uint64
@@ -249,6 +264,7 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerStateMisses, controllerZeroSamples, controllerRound uint64
 	var controllerBytesLost, controllerPacketsLost uint64
 	var controllerMinRTT time.Duration
+	var controllerErasureFloor float64
 	var controllerRecovery bool
 	for _, o := range r.quicFlows {
 		quicLanes += int64(o.Lanes)
@@ -260,6 +276,8 @@ func (r *Registry) Snapshot() Snapshot {
 		}
 		bytesSent += o.BytesSent
 		bytesReceived += o.BytesReceived
+		packetsSent += o.PacketsSent
+		packetsReceived += o.PacketsReceived
 		bytesLost += o.BytesLost
 		packetsLost += o.PacketsLost
 		if o.ControllerKind != "" {
@@ -305,6 +323,9 @@ func (r *Registry) Snapshot() Snapshot {
 			if o.ControllerMinRTT > controllerMinRTT {
 				controllerMinRTT = o.ControllerMinRTT
 			}
+			if o.ControllerErasureFloor > controllerErasureFloor {
+				controllerErasureFloor = o.ControllerErasureFloor
+			}
 			controllerRecovery = controllerRecovery || o.ControllerInRecovery
 		}
 	}
@@ -314,6 +335,8 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICSmoothedRTT = smoothedRTT
 	s.QUICBytesSent = bytesSent
 	s.QUICBytesReceived = bytesReceived
+	s.QUICPacketsSent = packetsSent
+	s.QUICPacketsReceived = packetsReceived
 	s.QUICBytesLost = bytesLost
 	s.QUICPacketsLost = packetsLost
 	s.QUICControllerKind = controllerKind
@@ -334,6 +357,7 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICControllerBytesLost = controllerBytesLost
 	s.QUICControllerPacketsLost = controllerPacketsLost
 	s.QUICControllerMinRTT = controllerMinRTT
+	s.QUICControllerErasureFloor = controllerErasureFloor
 	s.QUICControllerInRecovery = controllerRecovery
 	return s
 }
@@ -359,6 +383,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_fallbacks_total %d\n", s.Fallbacks)
 	fmt.Fprintf(w, "queqiao_udp_path_unavailable_total %d\n", s.UDPPathUnavailable)
 	fmt.Fprintf(w, "queqiao_endpoint_transport_races_failed_total %d\n", s.EndpointTransportRaceFailures)
+	fmt.Fprintf(w, "queqiao_udp_transient_send_errors_total %d\n", s.TransientUDPSendErrors)
 	fmt.Fprintf(w, "queqiao_udp_association_reconnects_total %d\n", s.UDPAssociationReconnects)
 	fmt.Fprintf(w, "queqiao_udp_association_rescue_failures_total %d\n", s.UDPAssociationRescueFailures)
 	fmt.Fprintf(w, "queqiao_completion_timeouts_total %d\n", s.CompletionTimeouts)
@@ -375,6 +400,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_quic_bytes_sent %d\n", s.QUICBytesSent)
 	fmt.Fprintf(w, "queqiao_quic_bytes_received %d\n", s.QUICBytesReceived)
 	fmt.Fprintf(w, "queqiao_quic_bytes_lost %d\n", s.QUICBytesLost)
+	fmt.Fprintf(w, "queqiao_quic_packets_sent %d\n", s.QUICPacketsSent)
+	fmt.Fprintf(w, "queqiao_quic_packets_received %d\n", s.QUICPacketsReceived)
 	fmt.Fprintf(w, "queqiao_quic_packets_lost %d\n", s.QUICPacketsLost)
 	if s.QUICControllerKind != "" {
 		fmt.Fprintf(w, "queqiao_quic_controller_kind{kind=\"%s\"} 1\n", s.QUICControllerKind)
@@ -396,6 +423,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_quic_controller_bytes_lost %d\n", s.QUICControllerBytesLost)
 	fmt.Fprintf(w, "queqiao_quic_controller_packets_lost %d\n", s.QUICControllerPacketsLost)
 	fmt.Fprintf(w, "queqiao_quic_controller_min_rtt_seconds %.9f\n", s.QUICControllerMinRTT.Seconds())
+	fmt.Fprintf(w, "queqiao_quic_controller_erasure_floor_ratio %.9f\n", s.QUICControllerErasureFloor)
 	if s.QUICControllerInRecovery {
 		fmt.Fprintln(w, "queqiao_quic_controller_in_recovery 1")
 	} else {

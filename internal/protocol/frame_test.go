@@ -102,11 +102,15 @@ func TestDecodeRejectsUnknownFlags(t *testing.T) {
 	}
 }
 
-func TestReserveControlFlagIsScopedToOpen(t *testing.T) {
+func TestReserveControlFlagIsScopedToOpenAndJoin(t *testing.T) {
 	var raw [HeaderSize]byte
 	open := Header{Version: Version, Type: TypeOpen, Flags: FlagReserveControl, FlowID: 1, Class: ClassNew}
 	if err := open.Encode(raw[:]); err != nil {
 		t.Fatalf("OPEN reserve flag rejected: %v", err)
+	}
+	join := Header{Version: Version, Type: TypeJoin, Flags: FlagReserveControl, FlowID: 1, Class: ClassBulk}
+	if err := join.Encode(raw[:]); err != nil {
+		t.Fatalf("JOIN control replacement flag rejected: %v", err)
 	}
 	data := Header{Version: Version, Type: TypeData, Flags: FlagReserveControl, FlowID: 1, Class: ClassBulk}
 	if err := data.Encode(raw[:]); err == nil {

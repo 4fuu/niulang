@@ -69,12 +69,13 @@ type ErasureSender struct {
 	outcomes []packetOutcome
 
 	// floorTrusted remembers that this lane has seen evidence of an
-	// independent channel. bootstrapFloor carries that first conservative
-	// estimate until the estimator closes its first full round. Later
-	// congestion makes the current loss process clustered, but it does not
-	// make the channel floor disappear.
-	floorTrusted   bool
-	bootstrapFloor float64
+	// independent channel. establishedFloor is the lowest such estimate seen
+	// by this connection. A physical erasure floor is a lower envelope: queue
+	// loss may raise an observation, but it cannot raise the channel floor.
+	// A replacement connection gets a fresh estimator and can establish a
+	// genuinely different floor after a path change.
+	floorTrusted     bool
+	establishedFloor float64
 
 	// arrival is the last computed arrival rate, published for the pacer and
 	// the congestion window, which run outside the callback that computes it.
@@ -289,8 +290,15 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 
 // establishedErasureFloor turns the stateless early discriminator into a
 // stable measurement. Once an independent floor has been seen, a later burst
-// of congestion must not make it vanish, nor may a still-partial round raise
-// it. The estimator's windowed minimum takes over after its first full round.
+// of congestion must not make it vanish or raise it. The floor is a lower
+// envelope for the lifetime of this connection: allowing a completed but
+// congested measurement to increase it creates positive feedback, because
+// both the pacer and FEC then add traffic to an already overloaded path.
+//
+// A lower independent measurement may refine the floor downward. If the
+// physical path really changes to a higher erasure rate, lane recovery creates
+// a new connection and therefore a new estimator; guessing upward inside a
+// congested connection is the unsafe direction.
 func (e *ErasureSender) establishedErasureFloor(snapshot lossmodel.Snapshot) (floor, samples float64) {
 	candidate, _ := conservativeErasureFloor(snapshot)
 	if candidate > 0 {
@@ -305,18 +313,15 @@ func (e *ErasureSender) establishedErasureFloor(snapshot lossmodel.Snapshot) (fl
 		if measured <= 0 {
 			measured = snapshot.Floor
 		}
-		if measured > 0 && !e.floorTrusted {
-			e.bootstrapFloor = measured
+		if measured > 0 && (!e.floorTrusted || measured < e.establishedFloor) {
+			e.establishedFloor = measured
 		}
 		e.floorTrusted = true
 	}
 	if !e.floorTrusted {
 		return 0, 0
 	}
-	if snapshot.Decided >= lossmodel.DefaultRoundSamples {
-		return snapshot.Floor, snapshot.Samples
-	}
-	return e.bootstrapFloor, snapshot.Samples
+	return e.establishedFloor, snapshot.Samples
 }
 
 // conservativeErasureFloor separates evidence of an independent channel from

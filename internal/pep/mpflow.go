@@ -87,6 +87,16 @@ type mpLane struct {
 	kind        TransportKind
 	fc          *frameConn
 	tcpStriping bool
+	// staged lanes consume admission capacity but cannot carry any flow frame
+	// until their JOIN acknowledgement is on the wire. Without this state, an
+	// active scheduler can put replayed DATA ahead of OPEN_OK on a replacement
+	// stream, making a correct client reject the handshake.
+	staged bool
+	ready  atomic.Bool
+	// control is a role, not a lane number. Lane zero begins in this role on a
+	// pooled flow, but after a connection-generation reset its replacement has
+	// a non-zero join ID and must inherit the same scheduling protection.
+	control bool
 	// writeHook is an internal deterministic fault-injection point used by
 	// integration tests. Production lanes leave it nil, so the data path has
 	// only one predictable nil check before the real framed write.
@@ -382,6 +392,35 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 		f.nextJoinID = lane.id + 1
 	}
 	f.lanesMu.Unlock()
+	if lane.staged {
+		return nil
+	}
+	f.startLane(lane)
+	return nil
+}
+
+// activateLane publishes a staged JOIN lane only after its OPEN_OK was
+// successfully written. QUIC buffers peer data during this tiny interval, so
+// no application frame needs to race the acknowledgement.
+func (f *multipathFlow) activateLane(lane *mpLane) error {
+	if lane == nil || !lane.staged {
+		return errors.New("lane is not staged")
+	}
+	f.lanesMu.RLock()
+	current := f.lanes[lane.id]
+	closed := lane.closed.Load()
+	f.lanesMu.RUnlock()
+	if current != lane || closed || f.doneChanClosed() {
+		return errors.New("staged lane is no longer available")
+	}
+	if !lane.ready.CompareAndSwap(false, true) {
+		return nil
+	}
+	f.startLane(lane)
+	return nil
+}
+
+func (f *multipathFlow) startLane(lane *mpLane) {
 	// The policy is set before either goroutine exists. Setting it from the
 	// reader, as the first version did, meant the writer could already be
 	// asking for it.
@@ -398,7 +437,6 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 			f.startLanePuller(*ctx, lane, sched)
 		}
 	}
-	return nil
 }
 
 // writeLane serializes data and close frames for one lane while allowing
@@ -566,6 +604,8 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 		}
 		observation.BytesSent += stats.bytesSent
 		observation.BytesReceived += stats.bytesReceived
+		observation.PacketsSent += stats.packetsSent
+		observation.PacketsReceived += stats.packetsReceived
 		observation.BytesLost += stats.bytesLost
 		observation.PacketsLost += stats.packetsLost
 		controller := stats.controller
@@ -604,6 +644,9 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 			if controller.MinRTT > observation.ControllerMinRTT {
 				observation.ControllerMinRTT = controller.MinRTT
 			}
+			if controller.ErasureFloor > observation.ControllerErasureFloor {
+				observation.ControllerErasureFloor = controller.ErasureFloor
+			}
 			observation.ControllerInRecovery = observation.ControllerInRecovery || controller.InRecovery
 		}
 	}
@@ -632,11 +675,11 @@ func (f *multipathFlow) laneCount() int {
 // dead lane but the server-side socket is still half-open. It is only used at
 // the configured lane cap; deleting the entry keeps the cap a real resource
 // bound rather than allowing unbounded historical lane IDs.
-func (f *multipathFlow) retireOldestLane() bool {
+func (f *multipathFlow) retireOldestLane(control bool) bool {
 	f.lanesMu.Lock()
 	var victim *mpLane
 	for _, lane := range f.lanes {
-		if lane.closed.Load() {
+		if lane.closed.Load() || !f.laneReady(lane) || f.laneIsControl(lane) != control {
 			continue
 		}
 		if victim == nil || lane.id < victim.id {
@@ -693,7 +736,7 @@ func (f *multipathFlow) retireLeastProductiveLane() bool {
 	f.lanesMu.Lock()
 	var victim *mpLane
 	for _, lane := range f.lanes {
-		if lane.closed.Load() || lane.id == 0 {
+		if lane.closed.Load() || !f.laneReady(lane) || lane.id == 0 || f.laneIsControl(lane) {
 			continue
 		}
 		if victim == nil || lane.sent.Load()+lane.recv.Load() < victim.sent.Load()+victim.recv.Load() ||
@@ -877,6 +920,11 @@ func (f *multipathFlow) laneRetransmits(laneID uint64) bool {
 // goroutines, and notifies the flow-level recovery coordinator. A failed lane
 // is never selected again, even if a buffered write completes later.
 func (f *multipathFlow) failLane(lane *mpLane, err error) {
+	if lane != nil && lane.fc != nil && !lane.closed.Load() {
+		if observer, ok := lane.fc.transport().(interface{ transportFailed(error) }); ok {
+			observer.transportFailed(err)
+		}
+	}
 	if !f.closeFailedLane(lane) {
 		return
 	}
@@ -944,12 +992,16 @@ func (f *multipathFlow) healthyLanes() []*mpLane {
 	defer f.lanesMu.RUnlock()
 	lanes := make([]*mpLane, 0, len(f.lanes))
 	for _, lane := range f.lanes {
-		if !lane.closed.Load() {
+		if !lane.closed.Load() && f.laneReady(lane) {
 			lanes = append(lanes, lane)
 		}
 	}
 	sort.Slice(lanes, func(i, j int) bool { return lanes[i].id < lanes[j].id })
 	return lanes
+}
+
+func (f *multipathFlow) laneReady(lane *mpLane) bool {
+	return lane != nil && (!lane.staged || lane.ready.Load())
 }
 
 // laneCandidates returns the lanes eligible to carry a frame, in preference
@@ -988,10 +1040,15 @@ func (f *multipathFlow) laneCandidates(bulk bool) ([]*mpLane, error) {
 		return nil, errors.New("no healthy lanes")
 	}
 	if !bulk {
-		// Control goes on the lowest-numbered healthy lane, which is lane zero
-		// whenever it is alive. That is the authenticated one, it is the one a
-		// peer can always answer on, and for an isolated bulk flow it is the
-		// one that is not carrying the bulk.
+		// Prefer the explicit control role. It begins on lane zero, but a
+		// connection-generation reset replaces it with a non-zero JOIN lane.
+		// Falling back to the oldest healthy lane keeps old/non-reserved flows
+		// and the interval before a replacement is admitted available.
+		for _, lane := range lanes {
+			if f.laneIsControl(lane) {
+				return []*mpLane{lane}, nil
+			}
+		}
 		return lanes[:1], nil
 	}
 	return f.dataLane(lanes), nil
@@ -1014,13 +1071,14 @@ func (f *multipathFlow) dataLane(lanes []*mpLane) []*mpLane {
 	if len(lanes) == 1 || !f.reserveControlLane {
 		return lanes[:1]
 	}
-	// Lane zero is the control plane. Prefer the isolated lane for data, but
+	// The lane carrying the control role is the control plane. Prefer the
+	// isolated lane for data, but
 	// only once one is actually healthy: during a join failure or a lane
 	// recovery, falling back to lane zero is what keeps the flow alive, and an
 	// available flow beats an isolated one.
 	var control *mpLane
 	for _, lane := range lanes {
-		if lane.id == 0 {
+		if f.laneIsControl(lane) {
 			control = lane
 			continue
 		}
@@ -1030,6 +1088,15 @@ func (f *multipathFlow) dataLane(lanes []*mpLane) []*mpLane {
 		break
 	}
 	return lanes[:1]
+}
+
+func (f *multipathFlow) laneIsControl(lane *mpLane) bool {
+	if lane == nil || !f.reserveControlLane {
+		return false
+	}
+	// The lane-zero fallback preserves the role for flows constructed by older
+	// peers and for focused tests which predate the explicit role field.
+	return lane.control || lane.id == 0
 }
 
 // isolateFromControlLane reports whether a bulk flow should stop putting
@@ -2206,7 +2273,17 @@ func (f *multipathFlow) observe(n int, up bool) bool {
 // which is what says whether a flow that went slowly was one the code failed
 // or one that never used it.
 func (f *multipathFlow) codedSubstrate() (coded.Stats, bool) {
-	for _, lane := range f.healthyLanes() {
+	// run closes the physical lanes before its caller writes the completion
+	// record. The frame connection retains the coded path's atomic counters
+	// after Close, so inspect every lane here rather than only lanes still
+	// marked healthy. Otherwise a normal completed flow would usually report
+	// fec_available=false precisely when its final FEC record is needed.
+	f.lanesMu.RLock()
+	defer f.lanesMu.RUnlock()
+	for _, lane := range f.lanes {
+		if lane.fc == nil {
+			continue
+		}
 		if stats, ok := lane.fc.CodedPath(); ok {
 			return stats, true
 		}
@@ -2223,6 +2300,45 @@ func codedSubstrateFields(stats coded.Stats, ok bool) string {
 	return fmt.Sprintf("sent=%d repairs=%d recovered=%d lost=%d window=%d coding=%t rate=%.2f",
 		stats.Sent, stats.Repairs, stats.Recovered, stats.Lost, stats.Window,
 		stats.Plan.Code, stats.Plan.Rate)
+}
+
+// codedSubstrateLogFields exposes the code plan and the loss estimator as
+// typed attributes. coded_substrate above remains for old text consumers, but
+// production analysis must not have to parse an opaque summary string.
+func codedSubstrateLogFields(stats coded.Stats, ok bool) []any {
+	fields := []any{"fec_available", ok}
+	if !ok {
+		return fields
+	}
+	snapshot, plan := stats.Snapshot, stats.Plan
+	return append(fields,
+		"fec_sent_total", stats.Sent,
+		"fec_repairs_total", stats.Repairs,
+		"fec_recovered_total", stats.Recovered,
+		"fec_residual_lost_total", stats.Lost,
+		"fec_oversize_total", stats.Oversize,
+		"fec_window_symbols", stats.Window,
+		"fec_coding", plan.Code,
+		"fec_plan_k", plan.K,
+		"fec_plan_n", plan.N,
+		"fec_code_rate", plan.Rate,
+		"fec_estimated_residual", plan.Residual,
+		"fec_loss_coded", plan.LossCoded,
+		"fec_effective_burst", plan.EffectiveBurst,
+		"fec_reason", plan.Why,
+		"fec_observed_samples", snapshot.Samples,
+		"fec_observed_loss", snapshot.Loss,
+		"fec_loss_after_arrival", snapshot.LossAfterArrival,
+		"fec_arrival_after_loss", snapshot.ArrivalAfterLoss,
+		"fec_mean_burst", snapshot.MeanBurst,
+		"fec_burst_factor", snapshot.BurstFactor,
+		"fec_memoryless", snapshot.Memoryless,
+		"fec_erasure_floor", snapshot.Floor,
+		"fec_congestive_loss", snapshot.Congestive,
+		"fec_recent_loss", snapshot.Recent,
+		"fec_reordered_total", snapshot.Reordered,
+		"fec_decided_total", snapshot.Decided,
+	)
 }
 
 // dataSubstrates totals where this flow's payload went across its lanes.

@@ -5,19 +5,24 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bojieli/queqiao/internal/identity"
+	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/netbind"
+	"github.com/bojieli/queqiao/internal/operlog"
 	"github.com/bojieli/queqiao/internal/pep"
 	"github.com/bojieli/queqiao/internal/protocol"
 )
@@ -37,7 +42,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("a command is required: provider, enroll, client, server, or version")
+		return errors.New("a command is required: provider, enroll, client, server, logs, or version")
 	}
 	switch args[0] {
 	case "version", "--version", "-version":
@@ -54,8 +59,10 @@ func run(args []string) error {
 		return runClient(args[1:])
 	case "server":
 		return runServer(args[1:])
+	case "logs":
+		return runLogs(args[1:])
 	default:
-		return fmt.Errorf("unknown command %q; want provider, enroll, client, server, or version", args[0])
+		return fmt.Errorf("unknown command %q; want provider, enroll, client, server, logs, or version", args[0])
 	}
 }
 
@@ -420,8 +427,12 @@ type runtimeOptions struct {
 	fallbackDelay, fallbackGrace, udpCooldown                       time.Duration
 	udpFailureThreshold                                             int
 	allowPrivate                                                    bool
-	logLevel                                                        string
+	logLevel, logFile, logFormat                                    string
 	jsonLogs                                                        bool
+	logStderr                                                       bool
+	logMaxSizeMiB                                                   int64
+	logMaxBackups                                                   int
+	telemetryLogInterval                                            time.Duration
 	metricsListen                                                   string
 }
 
@@ -449,7 +460,13 @@ func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
 	fs.Uint64Var(&opts.aggregateBytesPerSec, "aggregate-bytes-per-sec", 0, "optional aggregate byte budget")
 	fs.Uint64Var(&opts.interactiveReserveBytesPerSec, "interactive-reserve-bytes-per-sec", 0, "interactive portion of aggregate budget")
 	fs.StringVar(&opts.logLevel, "log-level", "info", "debug, info, warn, or error")
-	fs.BoolVar(&opts.jsonLogs, "json-logs", false, "write JSON logs")
+	fs.StringVar(&opts.logFile, "log-file", "auto", "runtime log path; auto selects the platform location, none disables the file")
+	fs.StringVar(&opts.logFormat, "log-format", "json", "runtime log format: json or text")
+	fs.BoolVar(&opts.jsonLogs, "json-logs", false, "deprecated alias for --log-format=json")
+	fs.BoolVar(&opts.logStderr, "log-stderr", true, "also write runtime logs to stderr or the service journal")
+	fs.Int64Var(&opts.logMaxSizeMiB, "log-max-size-mib", operlog.DefaultMaxSizeBytes/(1024*1024), "rotate the runtime log after this many MiB")
+	fs.IntVar(&opts.logMaxBackups, "log-max-backups", operlog.DefaultMaxBackups, "number of rotated runtime logs to retain")
+	fs.DurationVar(&opts.telemetryLogInterval, "telemetry-log-interval", 5*time.Second, "structured performance snapshot interval while state changes (0 disables)")
 	fs.StringVar(&opts.metricsListen, "metrics-listen", "", "optional metrics listen address")
 	if client {
 		fs.StringVar(&opts.localAddress, "local-address", "auto", "outer source: auto, IP, or if:NAME")
@@ -491,6 +508,26 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	if opts.congestion == string(pep.CongestionBrutal) && opts.brutalBytesPerSec == 0 {
 		return errors.New("--brutal-bytes-per-sec is required with brutal congestion")
 	}
+	if opts.logFormat != "json" && opts.logFormat != "text" {
+		return errors.New("--log-format must be json or text")
+	}
+	switch strings.ToLower(opts.logLevel) {
+	case "debug", "info", "warn", "warning", "error":
+	default:
+		return errors.New("--log-level must be debug, info, warn, or error")
+	}
+	if opts.logFile == operlog.DisabledPath && !opts.logStderr {
+		return errors.New("--log-file=none requires --log-stderr=true")
+	}
+	if opts.logMaxSizeMiB < 1 || opts.logMaxSizeMiB > 10*1024 {
+		return errors.New("--log-max-size-mib must be between 1 and 10240")
+	}
+	if opts.logMaxBackups < 0 || opts.logMaxBackups > 100 {
+		return errors.New("--log-max-backups must be between 0 and 100")
+	}
+	if opts.telemetryLogInterval < 0 || opts.telemetryLogInterval > 0 && opts.telemetryLogInterval < time.Second {
+		return errors.New("--telemetry-log-interval must be 0 or at least 1s")
+	}
 	if client && (opts.maxPendingOpens < 1 || opts.maxPendingOpens > 1<<16) {
 		return errors.New("--max-pending-opens must be between 1 and 65536")
 	}
@@ -505,7 +542,7 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	return nil
 }
 
-func runClient(args []string) error {
+func runClient(args []string) (returnErr error) {
 	fs := newFlagSet("client")
 	profilePath := fs.String("profile", "", "imported client profile")
 	noAutoRenew := fs.Bool("no-auto-renew", false, "disable certificate renewal before expiry")
@@ -514,18 +551,23 @@ func runClient(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if opts.jsonLogs {
+		opts.logFormat = "json"
+	}
 	if err := requireNoArguments(fs); err != nil {
 		return err
-	}
-	if *profilePath == "" {
-		return errors.New("--profile is required; import an invitation first with `queqiaod enroll INVITATION`")
 	}
 	if err := validateRuntime(opts, true); err != nil {
 		return err
 	}
-	logger, err := newLogger(opts.logLevel, opts.jsonLogs)
+	logger, logSink, err := openRuntimeLogger(opts, "client")
 	if err != nil {
 		return err
+	}
+	defer finishRuntimeLog(logger, logSink, "client", &returnErr)
+	logRuntimeConfiguration(logger, opts, true)
+	if *profilePath == "" {
+		return errors.New("--profile is required; import an invitation first with `queqiaod enroll INVITATION`")
 	}
 	profile, err := identity.LoadClientProfile(*profilePath)
 	if err != nil {
@@ -571,6 +613,8 @@ func runClient(args []string) error {
 	if err != nil {
 		return err
 	}
+	stopTelemetry := startTelemetryLog(ctx, opts.telemetryLogInterval, client.Metrics(), logger)
+	defer stopTelemetry()
 	if !*noAutoRenew {
 		go maintainClientIdentity(ctx, *profilePath, profile, client, opts.handshakeTimeout, opts.localAddress, logger)
 	}
@@ -582,7 +626,7 @@ func runClient(args []string) error {
 	return client.Serve(ctx)
 }
 
-func runServer(args []string) error {
+func runServer(args []string) (returnErr error) {
 	fs := newFlagSet("server")
 	state := fs.String("state", "", "provider state directory")
 	var opts runtimeOptions
@@ -590,17 +634,22 @@ func runServer(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if opts.jsonLogs {
+		opts.logFormat = "json"
+	}
 	if err := requireNoArguments(fs); err != nil {
 		return err
 	}
 	if err := validateRuntime(opts, false); err != nil {
 		return err
 	}
-	provider, err := loadProviderRequired(*state)
+	logger, logSink, err := openRuntimeLogger(opts, "server")
 	if err != nil {
 		return err
 	}
-	logger, err := newLogger(opts.logLevel, opts.jsonLogs)
+	defer finishRuntimeLog(logger, logSink, "server", &returnErr)
+	logRuntimeConfiguration(logger, opts, false)
+	provider, err := loadProviderRequired(*state)
 	if err != nil {
 		return err
 	}
@@ -629,6 +678,8 @@ func runServer(args []string) error {
 	defer stopMetrics()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	stopTelemetry := startTelemetryLog(ctx, opts.telemetryLogInterval, server.Metrics(), logger)
+	defer stopTelemetry()
 	go maintainGatewayIdentity(ctx, provider, logger)
 	return server.Serve(ctx)
 }
@@ -693,25 +744,214 @@ func maintainGatewayIdentity(ctx context.Context, provider *identity.Provider, l
 	}
 }
 
-func newLogger(level string, json bool) (*slog.Logger, error) {
-	var slogLevel slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		slogLevel = slog.LevelDebug
-	case "info":
-		slogLevel = slog.LevelInfo
-	case "warn", "warning":
-		slogLevel = slog.LevelWarn
-	case "error":
-		slogLevel = slog.LevelError
-	default:
-		return nil, fmt.Errorf("unsupported log level %q", level)
+func openRuntimeLogger(opts runtimeOptions, role string) (*slog.Logger, *operlog.Sink, error) {
+	var console io.Writer
+	if opts.logStderr {
+		console = os.Stderr
 	}
-	options := &slog.HandlerOptions{Level: slogLevel}
-	if json {
-		return slog.New(slog.NewJSONHandler(os.Stderr, options)), nil
+	logger, sink, err := operlog.Open(operlog.Config{
+		Role: role, Path: opts.logFile, Level: opts.logLevel, Format: opts.logFormat,
+		Console: console, MaxBytes: opts.logMaxSizeMiB * 1024 * 1024, MaxBackups: opts.logMaxBackups,
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, options)), nil
+	path := sink.Path()
+	if path == "" {
+		path = "disabled"
+	}
+	logger.Info("runtime logging initialized",
+		"log_file", path, "log_format", opts.logFormat, "log_level", opts.logLevel,
+		"log_max_size_mib", opts.logMaxSizeMiB, "log_max_backups", opts.logMaxBackups,
+		"telemetry_interval", opts.telemetryLogInterval,
+		"version", version, "commit", commit, "wire_protocol", protocol.Version)
+	return logger, sink, nil
+}
+
+// logRuntimeConfiguration records the non-secret controls needed to reproduce
+// a performance result. Identity files and provider state paths are excluded;
+// the role-specific listener and transport behavior are not.
+func logRuntimeConfiguration(logger *slog.Logger, opts runtimeOptions, client bool) {
+	attrs := []slog.Attr{
+		slog.Int("config_schema", 1),
+		slog.String("listen", opts.listen),
+		slog.String("transport", opts.transport),
+		slog.String("congestion", opts.congestion),
+		slog.Int("max_sessions", opts.maxSessions),
+		slog.Uint64("max_payload_bytes", uint64(opts.maxPayload)),
+		slog.Int("chunk_size_bytes", opts.chunkSize),
+		slog.Int("tcp_fallback_lanes", opts.tcpFallbackLanes),
+		slog.Bool("udp_on_stream", opts.udpOnStream),
+		slog.Duration("dial_timeout", opts.dialTimeout),
+		slog.Duration("handshake_timeout", opts.handshakeTimeout),
+		slog.Duration("flow_idle_timeout", opts.flowIdleTimeout),
+		slog.Duration("flow_max_lifetime", opts.flowMaxLifetime),
+		slog.Uint64("aggregate_bytes_per_second", opts.aggregateBytesPerSec),
+		slog.Uint64("interactive_reserve_bytes_per_second", opts.interactiveReserveBytesPerSec),
+		slog.String("metrics_listen", opts.metricsListen),
+	}
+	if client {
+		attrs = append(attrs,
+			slog.String("local_address", opts.localAddress),
+			slog.Int("max_pending_opens", opts.maxPendingOpens),
+			slog.Bool("quic_pool", opts.quicPool),
+			slog.Bool("wait_for_open_ack", opts.waitForOpenAck),
+			slog.Duration("fallback_delay", opts.fallbackDelay),
+			slog.Duration("fallback_grace", opts.fallbackGrace),
+		)
+	} else {
+		attrs = append(attrs,
+			slog.String("tcp_congestion", opts.tcpCongestion),
+			slog.Bool("allow_private_destinations", opts.allowPrivate),
+		)
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "runtime configuration", attrs...)
+}
+
+func finishRuntimeLog(logger *slog.Logger, sink *operlog.Sink, role string, returnErr *error) {
+	if *returnErr != nil && !errors.Is(*returnErr, context.Canceled) {
+		logger.Error("runtime stopped with error", "error", *returnErr)
+	} else {
+		logger.Info("runtime stopped", "reason", "shutdown")
+	}
+	if err := sink.Close(); err != nil && *returnErr == nil {
+		*returnErr = fmt.Errorf("close %s runtime log: %w", role, err)
+	}
+}
+
+// startTelemetryLog writes a stable, flat metrics record immediately, while a
+// flow is active, whenever counters change, and once more at shutdown. The
+// names match /metrics so one parser can consume both surfaces.
+func startTelemetryLog(ctx context.Context, interval time.Duration, registry *metrics.Registry, logger *slog.Logger) func() {
+	if interval == 0 || registry == nil || logger == nil {
+		return func() {}
+	}
+	previous := registry.Snapshot()
+	logPerformanceSnapshot(logger, previous, interval)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				current := registry.Snapshot()
+				if current != previous || current.ActiveFlows > 0 {
+					logPerformanceSnapshot(logger, current, interval)
+					previous = current
+				}
+			case <-ctx.Done():
+				current := registry.Snapshot()
+				if current != previous {
+					logPerformanceSnapshot(logger, current, interval)
+				}
+				return
+			case <-stop:
+				current := registry.Snapshot()
+				if current != previous {
+					logPerformanceSnapshot(logger, current, interval)
+				}
+				return
+			}
+		}
+	}()
+	return func() {
+		stopOnce.Do(func() { close(stop) })
+		<-done
+	}
+}
+
+func logPerformanceSnapshot(logger *slog.Logger, s metrics.Snapshot, interval time.Duration) {
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "performance snapshot",
+		slog.Int("telemetry_schema", 1), slog.String("type", "metrics"),
+		slog.Float64("sample_interval_seconds", interval.Seconds()),
+		slog.Int64("queqiao_active_flows", s.ActiveFlows),
+		slog.Int64("queqiao_flows_started_total", s.FlowsStarted),
+		slog.Int64("queqiao_flows_completed_total", s.FlowsCompleted),
+		slog.Int64("queqiao_flows_failed_total", s.FlowsFailed),
+		slog.Uint64("queqiao_bytes_up_total", s.BytesUp),
+		slog.Uint64("queqiao_bytes_down_total", s.BytesDown),
+		slog.Uint64("queqiao_lane_failures_total", s.LaneFailures),
+		slog.Uint64("queqiao_lane_replacements_total", s.LaneReplacements),
+		slog.Uint64("queqiao_fallbacks_total", s.Fallbacks),
+		slog.Uint64("queqiao_udp_path_unavailable_total", s.UDPPathUnavailable),
+		slog.Uint64("queqiao_endpoint_transport_races_failed_total", s.EndpointTransportRaceFailures),
+		slog.Uint64("queqiao_udp_transient_send_errors_total", s.TransientUDPSendErrors),
+		slog.Uint64("queqiao_udp_association_reconnects_total", s.UDPAssociationReconnects),
+		slog.Uint64("queqiao_udp_association_rescue_failures_total", s.UDPAssociationRescueFailures),
+		slog.Uint64("queqiao_completion_timeouts_total", s.CompletionTimeouts),
+		slog.Uint64("queqiao_flow_timeouts_total", s.FlowTimeouts),
+		slog.Int64("queqiao_replay_bytes_in_use", s.ReplayBytesInUse),
+		slog.Uint64("queqiao_bulk_isolations_total", s.BulkIsolations),
+		slog.Uint64("queqiao_lane_reinjections_total", s.Reinjections),
+		slog.Int64("queqiao_quic_lanes", s.QUICLanes),
+		slog.Float64("queqiao_quic_latest_rtt_seconds", s.QUICLatestRTT.Seconds()),
+		slog.Float64("queqiao_quic_smoothed_rtt_seconds", s.QUICSmoothedRTT.Seconds()),
+		slog.Uint64("queqiao_quic_bytes_sent", s.QUICBytesSent),
+		slog.Uint64("queqiao_quic_bytes_received", s.QUICBytesReceived),
+		slog.Uint64("queqiao_quic_bytes_lost", s.QUICBytesLost),
+		slog.Uint64("queqiao_quic_packets_sent", s.QUICPacketsSent),
+		slog.Uint64("queqiao_quic_packets_received", s.QUICPacketsReceived),
+		slog.Uint64("queqiao_quic_packets_lost", s.QUICPacketsLost),
+		slog.String("queqiao_quic_controller_kind", s.QUICControllerKind),
+		slog.Uint64("queqiao_quic_controller_mode", uint64(s.QUICControllerMode)),
+		slog.Uint64("queqiao_quic_controller_max_bandwidth_bytes_per_second", s.QUICControllerMaxBandwidth),
+		slog.Uint64("queqiao_quic_controller_latest_sample_bytes_per_second", s.QUICControllerLatestSample),
+		slog.Uint64("queqiao_quic_controller_latest_ack_rate_bytes_per_second", s.QUICControllerLatestAckRate),
+		slog.Uint64("queqiao_quic_controller_latest_send_rate_bytes_per_second", s.QUICControllerLatestSendRate),
+		slog.Uint64("queqiao_quic_controller_samples_total", s.QUICControllerSamples),
+		slog.Uint64("queqiao_quic_controller_non_app_limited_samples_total", s.QUICControllerNonAppSamples),
+		slog.Uint64("queqiao_quic_controller_app_limited_samples_total", s.QUICControllerAppSamples),
+		slog.Uint64("queqiao_quic_controller_state_misses_total", s.QUICControllerStateMisses),
+		slog.Uint64("queqiao_quic_controller_zero_samples_total", s.QUICControllerZeroSamples),
+		slog.Uint64("queqiao_quic_controller_round", s.QUICControllerRound),
+		slog.Uint64("queqiao_quic_controller_pacing_rate_bytes_per_second", s.QUICControllerPacingRate),
+		slog.Uint64("queqiao_quic_controller_congestion_window_bytes", s.QUICControllerCongestionWindow),
+		slog.Uint64("queqiao_quic_controller_bytes_in_flight", s.QUICControllerBytesInFlight),
+		slog.Uint64("queqiao_quic_controller_bytes_lost", s.QUICControllerBytesLost),
+		slog.Uint64("queqiao_quic_controller_packets_lost", s.QUICControllerPacketsLost),
+		slog.Float64("queqiao_quic_controller_min_rtt_seconds", s.QUICControllerMinRTT.Seconds()),
+		slog.Float64("queqiao_quic_controller_erasure_floor_ratio", s.QUICControllerErasureFloor),
+		slog.Bool("queqiao_quic_controller_in_recovery", s.QUICControllerInRecovery),
+		slog.Uint64("queqiao_class_transitions_0_total", s.ClassTransitions[0]),
+		slog.Uint64("queqiao_class_transitions_1_total", s.ClassTransitions[1]),
+		slog.Uint64("queqiao_class_transitions_2_total", s.ClassTransitions[2]),
+	)
+}
+
+func runLogs(args []string) error {
+	roles := []string{"client", "server"}
+	if len(args) > 1 {
+		return errors.New("usage: queqiaod logs [client|server]")
+	}
+	if len(args) == 1 {
+		if args[0] != "client" && args[0] != "server" {
+			return errors.New("usage: queqiaod logs [client|server]")
+		}
+		roles = []string{args[0]}
+	}
+	for _, role := range roles {
+		path, err := operlog.DefaultPath(role)
+		if err != nil {
+			return err
+		}
+		status := "not created yet"
+		if info, err := os.Stat(path); err == nil {
+			status = fmt.Sprintf("%d bytes", info.Size())
+		} else if !errors.Is(err, os.ErrNotExist) {
+			status = err.Error()
+		}
+		fmt.Printf("%s log\n  file: %s\n  status: %s\n", role, path, status)
+		if runtime.GOOS == "windows" {
+			fmt.Printf("  read: Get-Content -Tail 200 -Wait %q\n", path)
+		} else {
+			fmt.Printf("  read: tail -n 200 -f %q\n", path)
+		}
+	}
+	return nil
 }
 
 func goVersion() string {

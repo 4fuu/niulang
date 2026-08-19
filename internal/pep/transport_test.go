@@ -5,12 +5,200 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/apernet/quic-go"
+	"github.com/bojieli/queqiao/internal/identity"
 )
+
+type routeErrorPacketConn struct{ err error }
+
+func (*routeErrorPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
+	return 0, nil, errors.New("unused read")
+}
+func (c *routeErrorPacketConn) WriteTo([]byte, net.Addr) (int, error) { return 0, c.err }
+func (*routeErrorPacketConn) Close() error                            { return nil }
+func (*routeErrorPacketConn) LocalAddr() net.Addr                     { return &net.UDPAddr{} }
+func (*routeErrorPacketConn) SetDeadline(time.Time) error             { return nil }
+func (*routeErrorPacketConn) SetReadDeadline(time.Time) error         { return nil }
+func (*routeErrorPacketConn) SetWriteDeadline(time.Time) error        { return nil }
+
+type routeErrorOOBConn struct {
+	*net.UDPConn
+	err error
+}
+
+type switchableRouteConn struct {
+	*net.UDPConn
+	failing atomic.Bool
+}
+
+func (c *switchableRouteConn) WriteTo(payload []byte, addr net.Addr) (int, error) {
+	if c.failing.Load() {
+		return 0, syscall.ENETUNREACH
+	}
+	return c.UDPConn.WriteTo(payload, addr)
+}
+
+func (c *switchableRouteConn) WriteMsgUDP(payload, oob []byte, addr *net.UDPAddr) (int, int, error) {
+	if c.failing.Load() {
+		return 0, 0, syscall.ENETUNREACH
+	}
+	return c.UDPConn.WriteMsgUDP(payload, oob, addr)
+}
+
+func (c *routeErrorOOBConn) WriteTo([]byte, net.Addr) (int, error) { return 0, c.err }
+func (c *routeErrorOOBConn) WriteMsgUDP([]byte, []byte, *net.UDPAddr) (int, int, error) {
+	return 0, 0, c.err
+}
+
+func TestTransientLocalRouteErrorsBecomeQUICPacketLoss(t *testing.T) {
+	transient := []error{
+		syscall.ENETDOWN, syscall.ENETUNREACH, syscall.EHOSTDOWN,
+		syscall.EHOSTUNREACH, syscall.EADDRNOTAVAIL, syscall.ENOBUFS,
+	}
+	for _, writeErr := range transient {
+		t.Run(writeErr.Error(), func(t *testing.T) {
+			observed := 0
+			conn := tolerateTransientRouteErrors(&routeErrorPacketConn{err: &net.OpError{Op: "write", Net: "udp", Err: writeErr}}, func(error) {
+				observed++
+			})
+			payload := []byte("one lost QUIC datagram")
+			n, err := conn.WriteTo(payload, &net.UDPAddr{})
+			if err != nil || n != len(payload) {
+				t.Fatalf("transient write = %d, %v; want %d, nil", n, err, len(payload))
+			}
+			if observed != 1 {
+				t.Fatalf("observer called %d times, want one", observed)
+			}
+		})
+	}
+}
+
+func TestPermanentUDPSocketErrorsRemainFatal(t *testing.T) {
+	want := &net.OpError{Op: "write", Net: "udp", Err: syscall.EBADF}
+	conn := tolerateTransientRouteErrors(&routeErrorPacketConn{err: want}, nil)
+	if _, err := conn.WriteTo([]byte("packet"), &net.UDPAddr{}); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("permanent socket error = %v, want EBADF", err)
+	}
+}
+
+func TestTransientRouteWrapperPreservesAndProtectsQUICFastPath(t *testing.T) {
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	observed := 0
+	wrapped := tolerateTransientRouteErrors(&routeErrorOOBConn{UDPConn: udp, err: syscall.ENETUNREACH}, func(error) {
+		observed++
+	})
+	oob, ok := wrapped.(quic.OOBCapablePacketConn)
+	if !ok {
+		t.Fatal("route-error wrapper disabled quic-go's OOBCapablePacketConn fast path")
+	}
+	payload, control := []byte("packet"), []byte{1, 2, 3}
+	n, oobn, err := oob.WriteMsgUDP(payload, control, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9})
+	if err != nil || n != len(payload) || oobn != len(control) {
+		t.Fatalf("transient OOB write = %d/%d, %v; want %d/%d, nil", n, oobn, err, len(payload), len(control))
+	}
+	if observed != 1 {
+		t.Fatalf("observer called %d times, want one", observed)
+	}
+}
+
+func TestQUICConnectionSurvivesATransientLocalRouteOutage(t *testing.T) {
+	serverCredentials, clientCredentials := testCertificate(t)
+	serverTLS, err := identity.ServerTLSConfig(serverCredentials, defaultALPN, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientTLS, err := tlsClientConfig(clientCredentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPacket, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverPacket.Close()
+	listener, err := quic.Listen(serverPacket, serverTLS, quicConfig(flowWindows{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	payload := []byte("the stream survived the Wi-Fi route disappearing")
+	serverResult := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept(ctx)
+		if acceptErr != nil {
+			serverResult <- acceptErr
+			return
+		}
+		stream, acceptErr := conn.AcceptStream(ctx)
+		if acceptErr != nil {
+			serverResult <- acceptErr
+			return
+		}
+		got := make([]byte, len(payload))
+		_, acceptErr = io.ReadFull(stream, got)
+		if acceptErr == nil && string(got) != string(payload) {
+			acceptErr = fmt.Errorf("stream payload = %q, want %q", got, payload)
+		}
+		serverResult <- acceptErr
+	}()
+
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	faults := &switchableRouteConn{UDPConn: udp}
+	var suppressed atomic.Int64
+	packet := tolerateTransientRouteErrors(faults, func(error) { suppressed.Add(1) })
+	remote := serverPacket.LocalAddr().(*net.UDPAddr)
+	conn, err := quic.Dial(ctx, packet, remote, clientTLS, quicConfig(flowWindows{}))
+	if err != nil {
+		_ = packet.Close()
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = conn.CloseWithError(0, "test complete")
+		_ = packet.Close()
+	}()
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	faults.failing.Store(true)
+	if _, err := stream.Write(payload); err != nil {
+		t.Fatalf("write during transient outage: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for suppressed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if suppressed.Load() == 0 {
+		t.Fatal("fault injection did not reach the QUIC packet writer")
+	}
+	// Keep the route absent long enough to cross at least one normal local send
+	// attempt, but well below the connection idle timeout.
+	time.Sleep(150 * time.Millisecond)
+	faults.failing.Store(false)
+	if err := <-serverResult; err != nil {
+		t.Fatalf("stream did not recover after route restoration: %v", err)
+	}
+	if err := conn.Context().Err(); err != nil {
+		t.Fatalf("transient route outage closed QUIC connection: %v", err)
+	}
+}
 
 type closeTrackingQUICStream struct {
 	cancelReads int

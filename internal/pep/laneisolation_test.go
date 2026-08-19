@@ -114,6 +114,28 @@ func newIsolationTestFlow(t *testing.T, reserveControl bool) *multipathFlow {
 	return flow
 }
 
+func TestStagedJoinLaneIsInvisibleUntilAcknowledged(t *testing.T) {
+	flow := newIsolationTestFlow(t, true)
+	lane := isolationLane(t, 1)
+	lane.staged = true
+	lane.control = true
+	if err := flow.addLane(lane); err != nil {
+		t.Fatal(err)
+	}
+	if got := flow.laneCount(); got != 1 {
+		t.Fatalf("staged lane consumes %d admission slots, want one", got)
+	}
+	if got := len(flow.healthyLanes()); got != 0 {
+		t.Fatalf("%d staged lanes became schedulable before OPEN_OK", got)
+	}
+	if err := flow.activateLane(lane); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(flow.healthyLanes()); got != 1 {
+		t.Fatalf("healthy lanes after OPEN_OK = %d, want one", got)
+	}
+}
+
 // A flow's data lives on one lane. A flow that negotiated the control-lane
 // reservation keeps lane zero for interactive and rescue traffic in addition
 // to that one.
@@ -133,6 +155,37 @@ func TestServerAdmitsBulkLanesBesidesTheControlLane(t *testing.T) {
 	}
 	if got := flow.laneCount(); got != 2 {
 		t.Fatalf("lane count = %d, want the control lane plus one bulk lane", got)
+	}
+}
+
+func TestServerReplacesALaneWithTheSameRole(t *testing.T) {
+	flow := newIsolationTestFlow(t, true)
+	session := newServerFlow(flow, identity.Principal{}, TransportQUIC, 1)
+	control := isolationLane(t, 0)
+	control.control = true
+	bulk := isolationLane(t, 1)
+	if err := session.addLane(control); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.addLane(bulk); err != nil {
+		t.Fatal(err)
+	}
+
+	bulkReplacement := isolationLane(t, 2)
+	if err := session.addLane(bulkReplacement); err != nil {
+		t.Fatalf("bulk replacement refused: %v", err)
+	}
+	if control.closed.Load() || !bulk.closed.Load() {
+		t.Fatalf("bulk replacement retired control=%t bulk=%t, want false/true", control.closed.Load(), bulk.closed.Load())
+	}
+
+	controlReplacement := isolationLane(t, 3)
+	controlReplacement.control = true
+	if err := session.addLane(controlReplacement); err != nil {
+		t.Fatalf("control replacement refused: %v", err)
+	}
+	if !control.closed.Load() || bulkReplacement.closed.Load() {
+		t.Fatalf("control replacement retired old-control=%t bulk=%t, want true/false", control.closed.Load(), bulkReplacement.closed.Load())
 	}
 }
 

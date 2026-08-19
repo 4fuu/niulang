@@ -69,7 +69,7 @@ Install [`deploy/queqiaod.service`](../deploy/queqiaod.service), then create
 `/etc/queqiao/queqiaod.env` owned by `root:queqiao` with mode `0640`:
 
 ```text
-QUEQIAOD_ARGS=--state /var/lib/queqiao/provider --listen :443 --transport auto --max-sessions 4096 --metrics-listen 127.0.0.1:19090 --log-level info --json-logs
+QUEQIAOD_ARGS=--state /var/lib/queqiao/provider --listen :443 --transport auto --max-sessions 4096 --metrics-listen 127.0.0.1:19090 --log-level info --log-format json --log-file /var/log/queqiao/server.log --telemetry-log-interval 5s
 ```
 
 The environment file is a whitespace-separated argument list; do not put a
@@ -81,12 +81,16 @@ sudo systemctl enable --now queqiaod
 systemctl is-active queqiaod
 sudo ss -lntup | grep ':443'
 curl -fsS http://127.0.0.1:19090/metrics | head
+sudo test -s /var/log/queqiao/server.log
+sudo tail -n 5 /var/log/queqiao/server.log
 ```
 
 With `--transport auto`, two listener rows are expected: TCP and UDP on the
 same port. Permit both in the host firewall and the cloud security group.
 Binding metrics to loopback avoids exposing an unauthenticated operations
-endpoint.
+endpoint. The server runtime log is independent of `/metrics`: it contains the
+same performance counters as timestamped JSON records and rotates internally
+at 32 MiB with five backups. See [`LOGGING.md`](LOGGING.md).
 
 ### Tune provider socket queues
 
@@ -200,6 +204,11 @@ queqiaod client \
   --metrics-listen 127.0.0.1:12090
 ```
 
+The client creates its JSON runtime log automatically. Run `queqiaod logs client`
+to print the absolute path and a follow command; on macOS the default
+is `~/Library/Logs/Queqiao/client.log`. The file contains five-second
+performance snapshots and rotates with the same bounds as the server.
+
 The profile must remain readable only by its owner. Queqiao rejects a
 group/world-readable profile rather than silently using an exposed key.
 
@@ -211,6 +220,7 @@ cp deploy/me.01.queqiao.client.plist ~/Library/LaunchAgents/
 launchctl bootstrap "gui/$(id -u)" \
   ~/Library/LaunchAgents/me.01.queqiao.client.plist
 launchctl print "gui/$(id -u)/me.01.queqiao.client"
+tail -n 20 -f ~/Library/Logs/Queqiao/client.log
 ```
 
 After changing an already loaded plist, use `launchctl bootout` followed by

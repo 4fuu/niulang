@@ -235,10 +235,11 @@ type quicBidiStream interface {
 // connection counters.  Keeping the QUIC type out of the flow and metrics
 // packages lets TCP rescue lanes remain dependency-independent.
 type laneTransportStats struct {
-	latestRTT, smoothedRTT   time.Duration
-	bytesSent, bytesReceived uint64
-	bytesLost, packetsLost   uint64
-	controller               wancongestion.ControllerTelemetry
+	latestRTT, smoothedRTT       time.Duration
+	bytesSent, bytesReceived     uint64
+	packetsSent, packetsReceived uint64
+	bytesLost, packetsLost       uint64
+	controller                   wancongestion.ControllerTelemetry
 }
 
 type laneStatsProvider interface {
@@ -310,6 +311,7 @@ func (c *quicStreamConn) transportStats() laneTransportStats {
 	stats := laneTransportStats{
 		latestRTT: s.LatestRTT, smoothedRTT: s.SmoothedRTT,
 		bytesSent: s.BytesSent, bytesReceived: s.BytesReceived,
+		packetsSent: s.PacketsSent, packetsReceived: s.PacketsReceived,
 		bytesLost: s.BytesLost, packetsLost: s.PacketsLost,
 	}
 	if c.controller != nil {
@@ -495,8 +497,8 @@ func quicConfig(windows flowWindows) *quic.Config {
 	}
 }
 
-func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, ccfg congestionConfig, windows flowWindows) (streamConn, error) {
-	conn, packetConn, err := dialQUICConnection(ctx, remote, credentials, dialTimeout, localAddress, control, windows)
+func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, observeTransientWrite func(error), ccfg congestionConfig, windows flowWindows) (streamConn, error) {
+	conn, packetConn, err := dialQUICConnection(ctx, remote, credentials, dialTimeout, localAddress, control, observeTransientWrite, windows)
 	if err != nil {
 		return nil, err
 	}
@@ -515,10 +517,110 @@ func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCre
 	}, nil
 }
 
+// transientRoutePacketConn gives a short local route outage the same meaning
+// as a datagram lost in the network.
+//
+// A Wi-Fi reassociation can make sendmsg return ENETUNREACH or EHOSTUNREACH
+// for a few hundred milliseconds even though the socket, local address and
+// peer are all still valid. quic-go quite reasonably treats an arbitrary
+// PacketConn write error as terminal, because it cannot know whether the
+// application supplied a permanently broken socket. For a client-owned UDP
+// socket these particular errors are different: closing the connection turns
+// one lost packet into the loss of every multiplexed stream. Reporting the
+// datagram as accepted lets QUIC's normal loss detection and PTO retransmit it
+// after the route returns. The negotiated idle timeout remains the finite
+// bound for a path that does not return.
+//
+// The wrapper deliberately recognizes only local availability and buffer
+// errors. Permission, descriptor, message-size and peer/protocol errors still
+// reach quic-go and close the unusable transport.
+type transientRoutePacketConn struct {
+	net.PacketConn
+	observe func(error)
+}
+
+func (c *transientRoutePacketConn) WriteTo(payload []byte, addr net.Addr) (int, error) {
+	n, err := c.PacketConn.WriteTo(payload, addr)
+	if err == nil || !transientRouteWriteError(err) {
+		return n, err
+	}
+	if c.observe != nil {
+		c.observe(err)
+	}
+	return len(payload), nil
+}
+
+// transientRouteOOBPacketConn preserves quic-go's UDP fast path. Hiding
+// ReadMsgUDP / WriteMsgUDP behind a plain net.PacketConn would disable ECN,
+// batched I/O and GSO on Linux, turning a resilience fix into a throughput
+// regression.
+type transientRouteOOBPacketConn struct {
+	*transientRoutePacketConn
+	oob    quic.OOBCapablePacketConn
+	stream net.Conn
+}
+
+// x/net's OOB adapter unwraps PacketConn through net.Conn. The socket behind
+// quic-go's OOB interface is a UDPConn, so preserve that part of its method
+// set as well as the packet methods exposed by the embedded wrapper.
+func (c *transientRouteOOBPacketConn) Read(payload []byte) (int, error) {
+	return c.stream.Read(payload)
+}
+
+func (c *transientRouteOOBPacketConn) Write(payload []byte) (int, error) {
+	return c.stream.Write(payload)
+}
+
+func (c *transientRouteOOBPacketConn) RemoteAddr() net.Addr {
+	return c.stream.RemoteAddr()
+}
+
+func (c *transientRouteOOBPacketConn) SyscallConn() (syscall.RawConn, error) {
+	return c.oob.SyscallConn()
+}
+
+func (c *transientRouteOOBPacketConn) SetReadBuffer(bytes int) error {
+	return c.oob.SetReadBuffer(bytes)
+}
+
+func (c *transientRouteOOBPacketConn) ReadMsgUDP(payload, oob []byte) (int, int, int, *net.UDPAddr, error) {
+	return c.oob.ReadMsgUDP(payload, oob)
+}
+
+func (c *transientRouteOOBPacketConn) WriteMsgUDP(payload, oob []byte, addr *net.UDPAddr) (int, int, error) {
+	n, oobn, err := c.oob.WriteMsgUDP(payload, oob, addr)
+	if err == nil || !transientRouteWriteError(err) {
+		return n, oobn, err
+	}
+	if c.observe != nil {
+		c.observe(err)
+	}
+	return len(payload), len(oob), nil
+}
+
+func tolerateTransientRouteErrors(conn net.PacketConn, observe func(error)) net.PacketConn {
+	base := &transientRoutePacketConn{PacketConn: conn, observe: observe}
+	if oob, ok := conn.(quic.OOBCapablePacketConn); ok {
+		if stream, ok := conn.(net.Conn); ok {
+			return &transientRouteOOBPacketConn{transientRoutePacketConn: base, oob: oob, stream: stream}
+		}
+	}
+	return base
+}
+
+func transientRouteWriteError(err error) bool {
+	return errors.Is(err, syscall.ENETDOWN) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTDOWN) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.EADDRNOTAVAIL) ||
+		errors.Is(err, syscall.ENOBUFS)
+}
+
 // dialQUICConnection establishes only the QUIC connection. Keeping this
 // separate from stream creation allows the client to pool one connection and
 // open a stream for each logical flow without paying another handshake.
-func dialQUICConnection(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, windows flowWindows) (*quic.Conn, net.PacketConn, error) {
+func dialQUICConnection(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, observeTransientWrite func(error), windows flowWindows) (*quic.Conn, net.PacketConn, error) {
 	dialCtx := ctx
 	var cancel context.CancelFunc
 	if dialTimeout > 0 {
@@ -529,37 +631,29 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 	if err != nil {
 		return nil, nil, err
 	}
-	if localAddress != "" || control != nil {
-		var listenAddress string
-		if localAddress != "" {
-			ip, parseErr := resolveLocalAddress(localAddress)
-			if parseErr != nil {
-				return nil, nil, parseErr
-			}
-			listenAddress = net.JoinHostPort(ip.String(), "0")
-		} else {
-			listenAddress = ":0"
+	listenAddress := ":0"
+	if localAddress != "" {
+		ip, parseErr := resolveLocalAddress(localAddress)
+		if parseErr != nil {
+			return nil, nil, parseErr
 		}
-		remoteAddr, resolveErr := net.ResolveUDPAddr("udp", remote)
-		if resolveErr != nil {
-			return nil, nil, resolveErr
-		}
-		packetConn, listenErr := (&net.ListenConfig{Control: control}).ListenPacket(dialCtx, "udp", listenAddress)
-		if listenErr != nil {
-			return nil, nil, listenErr
-		}
-		conn, dialErr := quic.Dial(dialCtx, packetConn, remoteAddr, tlsCfg, quicConfig(windows))
-		if dialErr != nil {
-			_ = packetConn.Close()
-			return nil, nil, explainDataHandshakeError(remote, "QUIC", dialErr)
-		}
-		return conn, packetConn, nil
+		listenAddress = net.JoinHostPort(ip.String(), "0")
 	}
-	conn, err := quic.DialAddr(dialCtx, remote, tlsCfg, quicConfig(windows))
+	remoteAddr, err := net.ResolveUDPAddr("udp", remote)
 	if err != nil {
+		return nil, nil, err
+	}
+	packetConn, err := (&net.ListenConfig{Control: control}).ListenPacket(dialCtx, "udp", listenAddress)
+	if err != nil {
+		return nil, nil, err
+	}
+	packetConn = tolerateTransientRouteErrors(packetConn, observeTransientWrite)
+	conn, err := quic.Dial(dialCtx, packetConn, remoteAddr, tlsCfg, quicConfig(windows))
+	if err != nil {
+		_ = packetConn.Close()
 		return nil, nil, explainDataHandshakeError(remote, "QUIC", err)
 	}
-	return conn, nil, nil
+	return conn, packetConn, nil
 }
 
 func explainDataHandshakeError(remote, transport string, err error) error {

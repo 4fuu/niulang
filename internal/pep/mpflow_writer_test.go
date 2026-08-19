@@ -662,6 +662,38 @@ func TestControlAndDataTakeDifferentLanesWhenAFlowIsIsolated(t *testing.T) {
 	}
 }
 
+func TestControlRoleSurvivesANonzeroGenerationReplacement(t *testing.T) {
+	flow := &multipathFlow{
+		done: make(chan struct{}),
+		lanes: map[uint64]*mpLane{
+			3: {id: 3, kind: TransportQUIC, control: true},
+			4: {id: 4, kind: TransportQUIC},
+		},
+		reserveControlLane: true,
+		controlLaneShared:  func() bool { return true },
+	}
+	control, err := flow.laneCandidates(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := flow.laneCandidates(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(control) != 1 || control[0].id != 3 {
+		t.Fatalf("control selected %+v, want replacement lane 3", control)
+	}
+	if len(data) != 1 || data[0].id != 4 {
+		t.Fatalf("data selected %+v, want isolated lane 4", data)
+	}
+	if !flow.retireLeastProductiveLane() {
+		t.Fatal("no non-control lane was available to retire")
+	}
+	if flow.lanes[3].closed.Load() {
+		t.Fatal("nonzero control replacement was retired as ordinary data")
+	}
+}
+
 // Isolation is declined while nothing else is on the pooled connection, and
 // then both planes share it. Paying a fresh congestion window to protect
 // traffic that is not there costs about 8% of bulk goodput for nothing.

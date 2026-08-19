@@ -109,6 +109,19 @@ authenticated and cannot change the account or device identity. If a profile
 is lost, a device is revoked, or renewal is allowed to pass certificate expiry,
 the provider issues a new one-time invitation.
 
+## Runtime logs and performance telemetry
+
+Both the client and server create bounded JSON runtime logs by default. Run
+`queqiaod logs` to print the exact client/server paths and follow commands.
+The logs rotate at 32 MiB with five backups and include five-second structured
+performance snapshots suitable for the local dashboard in
+[`tools/visualizer`](tools/visualizer/). Production systemd deployments write
+the server log to `/var/log/queqiao/server.log`; the standard macOS client path
+is `~/Library/Logs/Queqiao/client.log`.
+
+See [runtime logging](docs/LOGGING.md) for paths on every platform, retention,
+schema, controls, security considerations, and service operation.
+
 ## Android and iOS
 
 The repository includes native Android and iOS clients in [`mobile/`](mobile).
@@ -189,6 +202,8 @@ command-line override.
 - `mobile/android`: native Android `VpnService` application
 - `mobile/ios`: native iOS Network Extension application
 - `cmd/queqiaobench`: deterministic WAN benchmark harness
+- `internal/operlog`: structured client/server logs and bounded rotation
+- `tools/visualizer`: offline performance-log and benchmark dashboard
 - `deploy`: service-manager and Clash examples
 
 ## Security reports

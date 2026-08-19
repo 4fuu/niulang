@@ -201,6 +201,63 @@ func TestAnEstablishedEarlyFloorSurvivesLaterClustering(t *testing.T) {
 	}
 }
 
+// A saturated path can keep every round congested long enough for the
+// estimator's entire minimum window to rise. That observation is not a new
+// physical erasure floor: compensating for it would add parity and pacing
+// pressure to the queue that caused it.
+func TestCompletedCongestedRoundsCannotRaiseAnEstablishedFloor(t *testing.T) {
+	e := NewErasureSender(1200)
+	established := lossmodel.Snapshot{
+		Decided:          200,
+		Samples:          200,
+		Loss:             0.42,
+		LossAfterArrival: 0.42,
+		BurstFactor:      1,
+		Floor:            0.42,
+	}
+	if floor, _ := e.establishedErasureFloor(established); floor != 0.42 {
+		t.Fatalf("established floor = %.3f, want 0.420", floor)
+	}
+
+	overloaded := lossmodel.Snapshot{
+		Decided:          10 * lossmodel.DefaultRoundSamples,
+		Samples:          4 * lossmodel.DefaultRoundSamples,
+		Loss:             0.72,
+		LossAfterArrival: 0.50,
+		BurstFactor:      1.4,
+		Floor:            0.66,
+	}
+	if floor, _ := e.establishedErasureFloor(overloaded); floor != 0.42 {
+		t.Fatalf("congested rounds raised established floor to %.3f, want 0.420", floor)
+	}
+}
+
+func TestIndependentEvidenceCanLowerAnEstablishedFloor(t *testing.T) {
+	e := NewErasureSender(1200)
+	first := lossmodel.Snapshot{
+		Decided:          200,
+		Samples:          200,
+		Loss:             0.42,
+		LossAfterArrival: 0.42,
+		BurstFactor:      1,
+		Floor:            0.42,
+	}
+	e.establishedErasureFloor(first)
+
+	cleaner := lossmodel.Snapshot{
+		Decided:          2 * lossmodel.DefaultRoundSamples,
+		Samples:          lossmodel.DefaultRoundSamples,
+		Loss:             0.30,
+		LossAfterArrival: 0.30,
+		BurstFactor:      1,
+		Floor:            0.30,
+		Memoryless:       true,
+	}
+	if floor, _ := e.establishedErasureFloor(cleaner); floor != 0.30 {
+		t.Fatalf("lower independent floor = %.3f, want 0.300", floor)
+	}
+}
+
 // A channel whose loss is entirely its floor is not congested at any rate, and
 // forwarding those losses is what costs the path: BBR-TUIC delivers 1.56
 // Mbit/s where the same path carries 13.89.

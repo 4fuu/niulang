@@ -1,5 +1,28 @@
 # Measurement harnesses
 
+## Local performance dashboard
+
+[`tools/visualizer/`](../tools/visualizer/) is an offline HTML dashboard for
+the bounded JSON files created automatically by both `queqiaod client` and
+`queqiaod server`, optional lane traces, benchmark JSON, field-soak JSONL, and
+the TSV/CSV files produced by these harnesses. Run `queqiaod logs` to locate
+the standard runtime files, then open the visualizer's `index.html` directly.
+
+Use `capture_metrics.py` when an independent `/metrics` scrape is needed. The
+normal runtime log already contains five-second performance snapshots. This
+script adds a UTC and
+monotonic timestamp to each scrape, preserves failed scrapes as gaps, writes a
+new JSON Lines file, and runs until interrupted when `--duration` is zero:
+
+```sh
+./scripts/capture_metrics.py \
+  --url http://127.0.0.1:12090/metrics --interval 1 --duration 120 \
+  --label client --output /tmp/client-metrics.jsonl
+```
+
+See the [visualizer guide](../tools/visualizer/README.md) for the recommended
+combined metrics, lane-trace, and structured-log capture.
+
 ## Static security gate
 
 `check_gosec.py` applies the reviewed rule-and-file ceilings from the public
@@ -189,6 +212,33 @@ opaque path label rather than an ISP account or subscriber address.
 The harness does not create network diversity. Run it separately on the exact
 independent paths recorded in `docs/FIELD-VALIDATION.md`; endpoint-injected
 faults must be labeled as such.
+
+`website_latency_soak.py` is a focused overnight TCP/HTTPS stability check. It
+uses fresh requests through the running Queqiao SOCKS5 listener to several
+small endpoints, records each attempt as JSON Lines, and writes per-target and
+hourly success rates plus p50/p95/p99 latency in a checksummed summary. A round
+where every unrelated target fails is reported separately from a one-site
+failure.
+
+```sh
+run_dir=/tmp/queqiao-websites-$(date -u +%Y%m%dT%H%M%SZ)
+nohup caffeinate -i ./scripts/website_latency_soak.py \
+  --socks 127.0.0.1:12080 --duration 28800 --interval 60 \
+  --output-dir "$run_dir" >"$run_dir.log" 2>&1 &
+echo "PID $!; results: $run_dir; progress: $run_dir.log"
+```
+
+`caffeinate -i` keeps macOS awake while the process runs; omit it on Linux or
+on a host whose sleep policy is already disabled.
+
+The defaults probe Cloudflare, Google, Apple, GitHub, and Wikipedia. Repeated
+`--target NAME=https://URL` arguments replace that set. The script resolves
+destination names through SOCKS (`socks5h`), forces curl not to honor a
+conflicting `NO_PROXY`, applies no retries, and exits nonzero if any target's
+success rate is below `--min-success-rate` (default 99%). An optional
+`--max-p95-ms` adds a per-target TTFB gate. Individual website failures are not
+by themselves proof of a Queqiao failure; correlated rounds and Queqiao's own
+metrics/logs provide the stronger signal.
 
 `udp_association_check.py` is the live-path companion. It sends DNS queries
 through one unchanged SOCKS5 UDP association, records every loss and latency as

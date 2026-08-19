@@ -1,11 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bojieli/queqiao/internal/metrics"
 )
 
 func parseRuntimeForTest(t *testing.T, client bool, args ...string) runtimeOptions {
@@ -25,14 +32,14 @@ func parseRuntimeForTest(t *testing.T, client bool, args ...string) runtimeOptio
 
 func TestClientDefaultsNeedOnlyAnImportedProfile(t *testing.T) {
 	opts := parseRuntimeForTest(t, true)
-	if opts.listen != "127.0.0.1:1080" || !opts.quicPool || opts.transport != "auto" || opts.maxSessions != 2048 || opts.maxPendingOpens != 256 {
+	if opts.listen != "127.0.0.1:1080" || !opts.quicPool || opts.transport != "auto" || opts.maxSessions != 2048 || opts.maxPendingOpens != 256 || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
 		t.Fatalf("unexpected client defaults: %+v", opts)
 	}
 }
 
 func TestServerDefaultsUseBothTransports(t *testing.T) {
 	opts := parseRuntimeForTest(t, false)
-	if opts.listen != ":443" || opts.transport != "auto" {
+	if opts.listen != ":443" || opts.transport != "auto" || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
 		t.Fatalf("unexpected server defaults: %+v", opts)
 	}
 }
@@ -46,6 +53,12 @@ func TestRuntimeBoundsRejectUnsafeValues(t *testing.T) {
 		{"--fallback-grace", "0s"},
 		{"--flow-idle-timeout", "2h", "--flow-max-lifetime", "1h"},
 		{"--local-address", "if:"},
+		{"--log-format", "xml"},
+		{"--log-level", "verbose"},
+		{"--log-max-size-mib", "0"},
+		{"--log-max-backups", "101"},
+		{"--telemetry-log-interval", "500ms"},
+		{"--log-file", "none", "--log-stderr=false"},
 	} {
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -88,8 +101,92 @@ func TestEnrollmentURIAllowsFollowingFlags(t *testing.T) {
 }
 
 func TestClientMissingProfileExplainsEnrollment(t *testing.T) {
+	t.Setenv("QUEQIAO_LOG_DIR", t.TempDir())
 	err := runClient(nil)
 	if err == nil || !strings.Contains(err.Error(), "queqiaod enroll") {
 		t.Fatalf("missing profile produced unhelpful error: %v", err)
+	}
+}
+
+func TestClientAndServerCreateSeparateRuntimeLogs(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("QUEQIAO_LOG_DIR", directory)
+	for _, role := range []string{"client", "server"} {
+		opts := parseRuntimeForTest(t, role == "client", "--log-stderr=false")
+		logger, sink, err := openRuntimeLogger(opts, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		logger.Info("role-specific record")
+		if err := sink.Close(); err != nil {
+			t.Fatal(err)
+		}
+		payload, err := os.ReadFile(filepath.Join(directory, role+".log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(payload, []byte(`"role":"`+role+`"`)) || !bytes.Contains(payload, []byte(`"msg":"runtime logging initialized"`)) {
+			t.Fatalf("%s log is missing runtime metadata: %s", role, payload)
+		}
+	}
+}
+
+func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	registry := metrics.New()
+	registry.FlowStarted()
+	registry.ObserveQUIC(1, metrics.QUICObservation{
+		Lanes: 1, SmoothedRTT: 210 * time.Millisecond, BytesSent: 1234, BytesReceived: 5678,
+		PacketsSent: 123, PacketsReceived: 119, PacketsLost: 3, ControllerKind: "bbr-tuic",
+		ControllerPacingRate: 9999, ControllerErasureFloor: 0.025,
+	})
+	logPerformanceSnapshot(logger, registry.Snapshot(), 5*time.Second)
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{
+		"msg": "performance snapshot", "type": "metrics", "telemetry_schema": float64(1),
+		"sample_interval_seconds": float64(5), "queqiao_active_flows": float64(1),
+		"queqiao_quic_smoothed_rtt_seconds": 0.21, "queqiao_quic_bytes_received": float64(5678),
+		"queqiao_quic_packets_sent": float64(123), "queqiao_quic_packets_received": float64(119),
+		"queqiao_quic_controller_kind": "bbr-tuic", "queqiao_quic_controller_pacing_rate_bytes_per_second": float64(9999),
+		"queqiao_quic_controller_erasure_floor_ratio": 0.025,
+	} {
+		if record[key] != want {
+			t.Fatalf("%s = %#v, want %#v in %#v", key, record[key], want, record)
+		}
+	}
+}
+
+func TestRuntimeConfigurationLogsRoleSpecificControls(t *testing.T) {
+	for _, test := range []struct {
+		role   string
+		client bool
+		want   string
+		absent string
+	}{
+		{role: "client", client: true, want: "local_address", absent: "tcp_congestion"},
+		{role: "server", client: false, want: "tcp_congestion", absent: "local_address"},
+	} {
+		t.Run(test.role, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, nil))
+			logRuntimeConfiguration(logger, parseRuntimeForTest(t, test.client), test.client)
+			var record map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record["msg"] != "runtime configuration" || record["config_schema"] != float64(1) || record["transport"] != "auto" {
+				t.Fatalf("incomplete runtime configuration: %#v", record)
+			}
+			if _, ok := record[test.want]; !ok {
+				t.Fatalf("%s configuration is missing %q: %#v", test.role, test.want, record)
+			}
+			if _, ok := record[test.absent]; ok {
+				t.Fatalf("%s configuration unexpectedly contains %q: %#v", test.role, test.absent, record)
+			}
+		})
 	}
 }
