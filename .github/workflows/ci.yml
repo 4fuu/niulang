@@ -164,6 +164,22 @@ jobs:
           lintDebug lintRelease
           assembleDebug assembleDebugAndroidTest
           assembleRelease bundleRelease
+      - name: assert the released app declares no VPN interface
+        run: |
+          set -euo pipefail
+          aapt2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          apk=$(ls mobile/android/app/build/outputs/apk/release/*.apk)
+          manifest=$("$aapt2" dump xmltree --file AndroidManifest.xml "$apk")
+          # Export mode is the whole point of the release build: routing policy
+          # belongs to whichever client the user already runs, and this app has
+          # no reason to hold BIND_VPN_SERVICE. The tunnel is debug-only, and
+          # nothing but this check keeps a stray manifest merge from shipping it.
+          if grep -qiE 'BIND_VPN_SERVICE|android\.net\.VpnService' <<<"$manifest"; then
+            echo "the release manifest declares a VPN service:" >&2
+            grep -inE 'BIND_VPN_SERVICE|android\.net\.VpnService' <<<"$manifest" >&2
+            exit 1
+          fi
+          grep -q 'QueqiaoProxyService' <<<"$manifest"
 
   android-instrumentation:
     name: Android Keystore API ${{ matrix.api }}
