@@ -14,10 +14,10 @@ func TestTheFloorIsPooledAcrossLanes(t *testing.T) {
 	m := NewPathModel()
 	// Three lanes with plenty of samples agree on 0.42; a fourth has just
 	// started and has seen almost nothing.
-	m.Report(1, 0.42, 5000, 1e6, 0)
-	m.Report(2, 0.42, 5000, 1e6, 0)
-	m.Report(3, 0.42, 5000, 1e6, 0)
-	floor := m.Report(4, 0.05, 20, 1e6, 0).Floor
+	m.Report(1, 0.42, 5000, 5000, 1e6, 0)
+	m.Report(2, 0.42, 5000, 5000, 1e6, 0)
+	m.Report(3, 0.42, 5000, 5000, 1e6, 0)
+	floor := m.Report(4, 0.05, 20, 20, 1e6, 0).Floor
 
 	if math.Abs(floor-0.42) > 0.01 {
 		t.Fatalf("pooled floor %.3f, want the weight of the measured lanes at about 0.42", floor)
@@ -35,10 +35,10 @@ func TestTheFloorIsPooledAcrossLanes(t *testing.T) {
 func TestTheShareDividesTheBottleneck(t *testing.T) {
 	m := NewPathModel()
 	const perLane = 1e6 // bytes per second
-	m.Report(1, 0.42, 5000, perLane, 0)
-	m.Report(2, 0.42, 5000, perLane, 0)
-	m.Report(3, 0.42, 5000, perLane, 0)
-	share := m.Report(4, 0.42, 5000, perLane, 0).Share
+	m.Report(1, 0.42, 5000, 5000, perLane, 0)
+	m.Report(2, 0.42, 5000, 5000, perLane, 0)
+	m.Report(3, 0.42, 5000, 5000, perLane, 0)
+	share := m.Report(4, 0.42, 5000, 5000, perLane, 0).Share
 
 	if m.Members() != 4 {
 		t.Fatalf("model counts %d lanes, want 4", m.Members())
@@ -60,8 +60,53 @@ func TestTheShareDividesTheBottleneck(t *testing.T) {
 // A lane on its own must not be capped by a bottleneck nobody has measured.
 func TestAnUnknownBottleneckDoesNotCap(t *testing.T) {
 	m := NewPathModel()
-	if share := m.Report(1, 0, 0, 0, 0).Share; share != 0 {
+	if share := m.Report(1, 0, 0, 0, 0, 0).Share; share != 0 {
 		t.Fatalf("share %.0f before any delivered rate was reported, want 0 for no cap", share)
+	}
+}
+
+func TestObservationProgressDoesNotWeightAnUntrustedFloor(t *testing.T) {
+	m := NewPathModel()
+	m.Report(1, 0.42, 5000, 5000, 1e6, 0)
+	state := m.Report(2, 0, 0, 120, 0, 0)
+	if state.ObservedSamples != 5120 {
+		t.Fatalf("observed samples = %.0f, want 5120", state.ObservedSamples)
+	}
+	if math.Abs(state.Floor-0.42) > 0.001 {
+		t.Fatalf("untrusted zero diluted established floor to %.3f", state.Floor)
+	}
+}
+
+func TestPathKnowledgeOutlivesTheConnectionThatMeasuredIt(t *testing.T) {
+	m := NewPathModel()
+	m.Report(1, 0.42, 5000, 5000, 1e6, 240*time.Millisecond)
+
+	// Membership governs only concurrent bandwidth sharing. Simulate a lane
+	// going idle without making a five-second unit test: the measurement must
+	// remain until the owner explicitly forgets this path.
+	m.mu.Lock()
+	m.members[1].at = time.Now().Add(-memberIdle - time.Second)
+	m.mu.Unlock()
+
+	state := m.Current()
+	if state.Floor != 0.42 {
+		t.Fatalf("retained floor = %.3f, want 0.420", state.Floor)
+	}
+	if state.ObservedSamples != 5000 {
+		t.Fatalf("retained observations = %.0f, want 5000", state.ObservedSamples)
+	}
+	if state.RoundTrip != 240*time.Millisecond {
+		t.Fatalf("retained round trip = %v, want 240ms", state.RoundTrip)
+	}
+	if m.Members() != 0 {
+		t.Fatalf("idle measuring connection still counts as an active member")
+	}
+
+	// Retained knowledge is a handoff, not a permanent verdict. Once a new
+	// connection supplies trusted evidence, it becomes the path's knowledge.
+	changed := m.Report(2, 0.55, 5000, 5000, 1e6, 300*time.Millisecond)
+	if changed.Floor != 0.55 {
+		t.Fatalf("new generation floor = %.3f, want 0.550", changed.Floor)
 	}
 }
 
@@ -70,8 +115,8 @@ func TestAnUnknownBottleneckDoesNotCap(t *testing.T) {
 // controller, so membership has to expire.
 func TestAnIdleLaneStopsCounting(t *testing.T) {
 	m := NewPathModel()
-	m.Report(1, 0.42, 5000, 1e6, 0)
-	m.Report(2, 0.42, 5000, 1e6, 0)
+	m.Report(1, 0.42, 5000, 5000, 1e6, 0)
+	m.Report(2, 0.42, 5000, 5000, 1e6, 0)
 	if m.Members() != 2 {
 		t.Fatalf("members = %d, want 2", m.Members())
 	}
@@ -80,7 +125,7 @@ func TestAnIdleLaneStopsCounting(t *testing.T) {
 	m.members[1].at = time.Now().Add(-2 * memberIdle)
 	m.mu.Unlock()
 
-	state := m.Report(2, 0.42, 5000, 1e6, 0)
+	state := m.Report(2, 0.42, 5000, 5000, 1e6, 0)
 	if m.Members() != 1 {
 		t.Fatalf("members = %d after one went idle, want 1", m.Members())
 	}
@@ -111,7 +156,7 @@ func TestSharedPathIsPerPeer(t *testing.T) {
 func TestASingleSharedLaneIsNotPenalised(t *testing.T) {
 	m := NewPathModel()
 	const rate = 2e6
-	state := m.Report(1, 0.42, 5000, rate, 0)
+	state := m.Report(1, 0.42, 5000, 5000, rate, 0)
 	// Not capped at its own rate: not capped at all. A lone lane has nothing
 	// to compound with, and a ceiling equal to what it has already delivered
 	// is one it can never probe past.
@@ -157,7 +202,7 @@ func TestTheShareDoesNotRatchetDown(t *testing.T) {
 			var share float64
 			for round := 0; round < 40; round++ {
 				for i := 0; i < lanes; i++ {
-					share = m.Report(Member(i+1), 0.1, 5000, delivered[i], 0).Share
+					share = m.Report(Member(i+1), 0.1, 5000, 5000, delivered[i], 0).Share
 					// The next round delivers what this one is allowed to,
 					// bounded by the path itself.
 					next := capacity / float64(lanes)

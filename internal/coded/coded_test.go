@@ -96,7 +96,7 @@ func (p *lossyPipe) stats() (sent, lost int) {
 // connection.
 func measuredPath(floor float64) *pathmodel.PathModel {
 	m := pathmodel.NewPathModel()
-	m.Report(1, floor, 5000, 2e6, 0)
+	m.Report(1, floor, 5000, 5000, 2e6, 0)
 	return m
 }
 
@@ -382,19 +382,12 @@ func TestAClosedCarrierEndsThePath(t *testing.T) {
 	}
 }
 
-// A path must be able to size its code from the direction it can measure.
-//
-// The erasure rate of the direction a sender sends into is learned from its
-// own acknowledgements, and only a sender with something to send has any. A
-// client that asks small questions and receives large answers never measures
-// its own direction -- so with nothing else to go on it would carry its
-// requests uncoded across a channel it has every reason to know erases.
-//
-// What it receives, it can always measure. Borrowing that is an assumption,
-// and a weaker one than assuming the path is clean.
-func TestAPathSizesItsCodeFromWhatItCanMeasure(t *testing.T) {
-	// A model that knows nothing, which is what a lane carrying almost no
-	// traffic leaves behind.
+// Incoming loss is not evidence about the direction this path sends into.
+// Even on a symmetric link it includes congestion caused by the peer's
+// offered rate, which this endpoint cannot observe. The bidirectional prewarm
+// gives each direction's congestion controller traffic of its own; until then
+// the safe substrate is the reliable stream.
+func TestAPathDoesNotInferItsOutboundFloorFromReverseLoss(t *testing.T) {
 	pa, pb := newPipes(30, 0)
 	cfg := Config{SymbolBytes: 1100, RoundTrip: 60 * time.Millisecond, Path: pathmodel.NewPathModel()}
 	quiet, loud := New(pa, cfg), New(pb, cfg)
@@ -404,9 +397,10 @@ func TestAPathSizesItsCodeFromWhatItCanMeasure(t *testing.T) {
 		t.Fatal("a path that has measured nothing at all decided to code")
 	}
 
-	// The other end sends, and the erasing channel is visible in the gaps of
-	// the sequence it stamped, however little this end has sent.
-	payload := bytes.Repeat([]byte("x"), 500)
+	// Give the receiver enough independent reverse-direction loss for a formal
+	// estimator verdict. It still says nothing causal about this sender's
+	// outbound direction.
+	payload := bytes.Repeat([]byte("x"), 1000)
 	pb.mu.Lock()
 	pb.loss = 0.42
 	pb.mu.Unlock()
@@ -422,7 +416,7 @@ func TestAPathSizesItsCodeFromWhatItCanMeasure(t *testing.T) {
 			t.Fatalf("the receiving end never measured the channel: %+v", quiet.Stats().Snapshot)
 		default:
 		}
-		if quiet.Stats().Snapshot.Decided >= reverseFloorSamples {
+		if quiet.Stats().Snapshot.Memoryless {
 			break
 		}
 		if _, err := quiet.Receive(); err != nil {
@@ -430,11 +424,10 @@ func TestAPathSizesItsCodeFromWhatItCanMeasure(t *testing.T) {
 		}
 	}
 
-	// A path re-chooses its code on its own cadence, so the answer that
-	// matters is the one after it has had the chance to.
+	// A path re-chooses its code on its own cadence. Reverse loss must not make
+	// that outbound decision change.
 	time.Sleep(codingTTL + 20*time.Millisecond)
-	if !quiet.Coding() {
-		t.Errorf("a path receiving across a 42%% erasure channel will not code what "+
-			"it sends: %+v", quiet.Stats())
+	if quiet.Coding() {
+		t.Errorf("reverse loss selected outbound coding without outbound evidence: %+v", quiet.Stats())
 	}
 }

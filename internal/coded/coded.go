@@ -696,58 +696,23 @@ func (p *Path) symbolPayload() int {
 
 // channel is what is known about the direction this path sends into.
 //
-// The peer is not asked. The congestion controller on this connection already
-// measures it -- the erasure rate of the direction it sends into is exactly
-// what its own acknowledgements reveal -- so the shared model has the answer
-// before the first symbol is sent, which is when it is needed. Asking the peer
-// instead means the first symbols are sent knowing nothing, and a symbol sent
-// knowing nothing carries no parity.
+// The congestion controller on this connection measures it -- the erasure
+// rate of the direction it sends into is exactly what its own acknowledgements
+// reveal -- so the shared model has the answer before the first symbol is sent
+// when the bidirectional path prewarm completed. The coded layer never infers
+// its outbound direction from packets received in the reverse direction:
+// those observations cannot distinguish physical erasure from congestion the
+// peer caused by its sending rate.
 func (p *Path) channel() lossmodel.Snapshot {
 	floor := 0.0
 	if p.cfg.Path != nil {
 		floor = p.cfg.Path.Current().Floor
-	}
-	if floor <= 0 {
-		floor = p.reverseFloor()
 	}
 	return lossmodel.Snapshot{
 		Loss: floor, Floor: floor, Recent: floor,
 		BurstFactor: 1, ArrivalAfterLoss: 1 - floor,
 	}
 }
-
-// reverseFloor is what this path erases in the direction it receives from.
-//
-// It is a fallback, and it exists because of who can measure what. The
-// congestion controller learns the erasure rate of the direction it sends
-// into, from its own acknowledgements -- but only if it sends enough to have
-// any. A client that asks small questions and receives large answers never
-// sends enough, so nothing measures its direction, and it carries its requests
-// uncoded across a channel it has every reason to know erases: measured on the
-// emulated path, that is a short flow costing 2.56 s where a flow that knew
-// cost 1.06.
-//
-// What it receives, it can always measure, because the gaps in the sequence
-// its peer stamped are visible whatever this end sends. Assuming the direction
-// it sends into resembles the direction it receives from is an assumption, and
-// a weaker one than assuming the path is clean. It also corrects itself: the
-// moment anything measures this direction properly, the shared model has a
-// floor and this is not consulted.
-func (p *Path) reverseFloor() float64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	snapshot := p.estimator.Snapshot()
-	if snapshot.Decided < reverseFloorSamples {
-		return 0
-	}
-	return snapshot.Floor
-}
-
-// reverseFloorSamples is how many packet fates must be decided in the
-// receiving direction before it is worth borrowing from. It is the same order
-// as the controller's own threshold: below it the estimate is noise, and noise
-// applied as a code rate is worse than no code at all.
-const reverseFloorSamples = 100
 
 func (p *Path) params() fec.Params {
 	return fec.Params{

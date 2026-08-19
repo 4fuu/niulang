@@ -56,9 +56,22 @@ import (
 type PathModel struct {
 	mu      sync.Mutex
 	members map[Member]*report
+	// knowledge belongs to the path, not to whichever connection happened to
+	// measure it. Members expire because they stop consuming a bottleneck
+	// share; letting their floor and minimum RTT expire at the same time made a
+	// quiet path become "unknown" five seconds after its prewarm. Forget is the
+	// lifecycle boundary for this state.
+	knowledge pathKnowledge
 	// aggregate is a windowed maximum of the summed delivered rate, which is
 	// the endpoint pair's bottleneck as measured from this side.
 	aggregate []bandwidthSample
+}
+
+type pathKnowledge struct {
+	floor           float64
+	floorKnown      bool
+	observedSamples float64
+	roundTrip       time.Duration
 }
 
 // Member identifies one contributor within a model. Callers allocate these
@@ -68,6 +81,7 @@ type Member uint64
 type report struct {
 	floor     float64
 	samples   float64
+	observed  float64
 	delivered float64
 	roundTrip time.Duration
 	at        time.Time
@@ -79,6 +93,11 @@ type State struct {
 	// Floor is the erasure rate that does not respond to sending more slowly,
 	// pooled across every lane's samples.
 	Floor float64
+	// ObservedSamples is how many packet outcomes contributors have measured,
+	// including outcomes not yet sufficient to establish a non-zero erasure
+	// floor. It distinguishes a measured clean path from an unmeasured one
+	// without giving an untrusted zero any weight in Floor.
+	ObservedSamples float64
 	// Share is this contributor's allowance of the bottleneck in bytes per
 	// second. Zero means the contributor must not cap itself -- either because
 	// the bottleneck is not yet known, or because it is the only one here and
@@ -138,8 +157,10 @@ func NewPathModel() *PathModel {
 }
 
 // Report records what one lane currently believes, and returns what the
-// endpoint pair believes.
-func (m *PathModel) Report(member Member, floor, samples, delivered float64, roundTrip time.Duration) State {
+// endpoint pair believes. floorSamples weights only established floor
+// evidence; observedSamples records measurement progress even while the floor
+// is still unknown.
+func (m *PathModel) Report(member Member, floor, floorSamples, observedSamples, delivered float64, roundTrip time.Duration) State {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -149,13 +170,13 @@ func (m *PathModel) Report(member Member, floor, samples, delivered float64, rou
 		entry = &report{}
 		m.members[member] = entry
 	}
-	entry.floor, entry.samples, entry.delivered, entry.at = floor, samples, delivered, now
+	entry.floor, entry.samples, entry.observed, entry.delivered, entry.at = floor, floorSamples, observedSamples, delivered, now
 	if roundTrip > 0 {
 		entry.roundTrip = roundTrip
 	}
 
 	var state State
-	var weighted, weight, sum float64
+	var weighted, weight, observed, sum float64
 	live := 0
 	for key, other := range m.members {
 		if now.Sub(other.at) > memberIdle {
@@ -168,14 +189,26 @@ func (m *PathModel) Report(member Member, floor, samples, delivered float64, rou
 		// which is also what lets a new lane join without disturbing it.
 		weighted += other.floor * other.samples
 		weight += other.samples
+		observed += other.observed
 		if other.roundTrip > 0 && (state.RoundTrip == 0 || other.roundTrip < state.RoundTrip) {
 			state.RoundTrip = other.roundTrip
 		}
 	}
 	if weight > 0 {
 		state.Floor = weighted / weight
-	} else {
-		state.Floor = floor
+		m.knowledge.floor = state.Floor
+		m.knowledge.floorKnown = true
+	} else if m.knowledge.floorKnown {
+		state.Floor = m.knowledge.floor
+	}
+	if observed > m.knowledge.observedSamples {
+		m.knowledge.observedSamples = observed
+	}
+	state.ObservedSamples = m.knowledge.observedSamples
+	if state.RoundTrip > 0 && (m.knowledge.roundTrip == 0 || state.RoundTrip < m.knowledge.roundTrip) {
+		m.knowledge.roundTrip = state.RoundTrip
+	} else if state.RoundTrip == 0 {
+		state.RoundTrip = m.knowledge.roundTrip
 	}
 
 	if sum > 0 {
@@ -223,7 +256,7 @@ func (m *PathModel) Current() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var state State
-	var weighted, weight, bottleneck float64
+	var weighted, weight, observed, bottleneck float64
 	live := 0
 	for key, entry := range m.members {
 		if now.Sub(entry.at) > memberIdle {
@@ -233,12 +266,26 @@ func (m *PathModel) Current() State {
 		live++
 		weighted += entry.floor * entry.samples
 		weight += entry.samples
+		observed += entry.observed
 		if entry.roundTrip > 0 && (state.RoundTrip == 0 || entry.roundTrip < state.RoundTrip) {
 			state.RoundTrip = entry.roundTrip
 		}
 	}
 	if weight > 0 {
 		state.Floor = weighted / weight
+		m.knowledge.floor = state.Floor
+		m.knowledge.floorKnown = true
+	} else if m.knowledge.floorKnown {
+		state.Floor = m.knowledge.floor
+	}
+	if observed > m.knowledge.observedSamples {
+		m.knowledge.observedSamples = observed
+	}
+	state.ObservedSamples = m.knowledge.observedSamples
+	if state.RoundTrip > 0 && (m.knowledge.roundTrip == 0 || state.RoundTrip < m.knowledge.roundTrip) {
+		m.knowledge.roundTrip = state.RoundTrip
+	} else if state.RoundTrip == 0 {
+		state.RoundTrip = m.knowledge.roundTrip
 	}
 	for _, sample := range m.aggregate {
 		if now.Sub(sample.at) <= bottleneckWindow && sample.rate > bottleneck {

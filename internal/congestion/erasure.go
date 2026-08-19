@@ -149,7 +149,17 @@ func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmo
 		// already occupied takes both, and a lane that is alone takes the
 		// seed only. Sharing one number for the two used to mean that the
 		// only lane on a path capped itself at whatever the last one managed.
-		if state := path.Current(); state.Seed > 0 {
+		state := path.Current()
+		// The floor is path knowledge too, so use it for the replacement's first
+		// pacing decision. Do not call it this connection's own established
+		// evidence, though: a fresh connection is also the safe point at which a
+		// changed physical path may establish a higher floor. The shared model
+		// retains the inherited value while this sender reports zero weight, then
+		// replaces it once this connection has trustworthy evidence of its own.
+		if state.Floor > 0 {
+			e.arrival.Store(uint64((1 - state.Floor) * partsPerMillion))
+		}
+		if state.Seed > 0 {
 			e.arrival.Store(uint64((1 - state.Floor) * partsPerMillion))
 			if state.Share > 0 {
 				e.share.Store(uint64(state.Share))
@@ -274,7 +284,7 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		// together, and the share is what stops their probes compounding. An
 		// untrusted local estimate contributes zero weight rather than diluting
 		// a floor another lane has already established.
-		state := e.path.Report(e.id(), floor, floorSamples,
+		state := e.path.Report(e.id(), floor, floorSamples, float64(snapshot.Decided),
 			float64(e.inner.bandwidth()), e.inner.minRoundTrip())
 		floor = state.Floor
 		e.share.Store(uint64(state.Share))
