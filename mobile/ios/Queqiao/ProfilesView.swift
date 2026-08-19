@@ -131,6 +131,7 @@ private struct ProfileDetailView: View {
                     summarySection(profile)
                     connectionTestSection(profile)
                     ProfileRoutingSection(profile: profile)
+                    ProfileOnDemandSection(profile: profile)
                     actionsSection(profile)
                     identitySection(profile)
                 }

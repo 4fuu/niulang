@@ -110,10 +110,66 @@ extension TunnelModel {
         manager.protocolConfiguration = configuration
         manager.localizedDescription = "Queqiao"
         manager.isEnabled = true
-        manager.isOnDemandEnabled = false
+        apply(record.onDemandPolicy, to: manager)
         try await manager.saveToPreferences()
         try await manager.loadFromPreferences()
         return manager
+    }
+
+    /// Installs a profile's on-demand policy on the saved configuration.
+    ///
+    /// Writing the rules and the flag in one place is deliberate: an enabled
+    /// flag with a stale rule list is a tunnel that comes up on a network the
+    /// user marked trusted, which is the failure this feature must not have.
+    func apply(_ policy: OnDemandPolicy, to manager: NETunnelProviderManager) {
+        let rules = OnDemandRules.rules(for: policy)
+        manager.onDemandRules = rules
+        manager.isOnDemandEnabled = !rules.isEmpty
+    }
+
+    /// Pushes the selected profile's on-demand policy to the saved
+    /// configuration outside a connect.
+    ///
+    /// Without this, turning automatic connection off would not take effect
+    /// until the next manual connect — and in the meantime the rules saved by
+    /// the last connect would still be bringing the tunnel up.
+    func syncOnDemandPolicy() async {
+        guard let manager, manager.protocolConfiguration != nil else { return }
+        let policy = selectedProfile?.onDemandPolicy ?? .off
+        apply(policy, to: manager)
+        do {
+            try await manager.saveToPreferences()
+            try await manager.loadFromPreferences()
+            await recordDiagnostic(
+                level: .info,
+                message: "Automatic connection updated: \(OnDemandRules.summary(for: policy))"
+            )
+        } catch {
+            present(error, title: "Could not update automatic connection")
+        }
+    }
+
+    /// Clears on-demand before a deliberate disconnect.
+    ///
+    /// An enabled connect rule would bring the tunnel straight back up, so a
+    /// button labelled Disconnect would not disconnect. Pressing Connect
+    /// reinstalls the policy from the profile.
+    func suspendOnDemandForManualDisconnect() async {
+        guard let manager, manager.isOnDemandEnabled else { return }
+        manager.isOnDemandEnabled = false
+        do {
+            try await manager.saveToPreferences()
+            try await manager.loadFromPreferences()
+            await recordDiagnostic(
+                level: .info,
+                message: "Automatic connection paused by a manual disconnect; it resumes on the next connect"
+            )
+        } catch {
+            await recordDiagnostic(
+                level: .error,
+                message: "Could not pause automatic connection before disconnecting: \(error.localizedDescription)"
+            )
+        }
     }
 
     func updateStatus() {

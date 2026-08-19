@@ -90,7 +90,7 @@ private struct ConnectionView: View {
 
             Button {
                 if model.isTunnelActive {
-                    model.disconnect()
+                    Task { await model.disconnect() }
                 } else {
                     Task { await model.connect() }
                 }

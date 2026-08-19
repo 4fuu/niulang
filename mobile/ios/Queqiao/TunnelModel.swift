@@ -154,8 +154,12 @@ final class TunnelModel: ObservableObject {
         }
     }
 
-    func disconnect() {
+    /// Asynchronous because an on-demand connect rule has to be cleared, and
+    /// saved, before the tunnel is told to stop — otherwise the system brings
+    /// it straight back up and the button does nothing.
+    func disconnect() async {
         disconnectRequested = true
+        await suspendOnDemandForManualDisconnect()
         manager?.connection.stopVPNTunnel()
         updateStatus()
     }
@@ -165,6 +169,9 @@ final class TunnelModel: ObservableObject {
         do {
             try await Task.detached { try ProfileStore().select(id: id) }.value
             await refreshProfiles()
+            // The saved configuration still carries the previous profile's
+            // automatic-connection rules until this runs.
+            await syncOnDemandPolicy()
         } catch {
             present(error, title: "Could not select profile")
         }
@@ -278,6 +285,28 @@ final class TunnelModel: ObservableObject {
 }
 
 extension TunnelModel {
+    /// Persists the whole automatic-connection policy and pushes it to the
+    /// saved VPN configuration, so turning it off takes effect immediately
+    /// rather than at the next manual connect.
+    func setOnDemandPolicy(_ policy: OnDemandPolicy, for id: String) async {
+        guard canChangeProfile else {
+            present(ModelError.disconnectBeforeEditing, title: "Disconnect first")
+            return
+        }
+        let sanitized = OnDemandPolicy(
+            trustedNetworks: OnDemandRules.sanitizedNetworks(policy.trustedNetworks),
+            connectOnCellular: policy.connectOnCellular,
+            isEnabled: policy.isEnabled
+        )
+        do {
+            try await Task.detached { try ProfileStore().setOnDemandPolicy(sanitized, for: id) }.value
+            await refreshProfiles()
+            if id == selectedProfileID { await syncOnDemandPolicy() }
+        } catch {
+            present(error, title: "Could not update automatic connection")
+        }
+    }
+
     func setBypassChinaDirect(_ enabled: Bool, for id: String) async {
         guard canChangeProfile else {
             present(ModelError.disconnectBeforeEditing, title: "Disconnect first")
