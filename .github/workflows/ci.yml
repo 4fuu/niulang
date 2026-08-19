@@ -215,6 +215,8 @@ jobs:
           if [ -e /dev/kvm ]; then
             sudo chmod 666 /dev/kvm
           fi
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           printf 'no\n' | avdmanager create avd --force \
             --name queqiao_ci \
             --package "system-images;android-${{ matrix.api }};google_apis;x86_64" \
