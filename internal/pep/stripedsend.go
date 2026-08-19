@@ -252,14 +252,15 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 
 	sched := stripe.New(&flowSource{flow: f}, stripe.Config{
 		ChunkSize:      f.chunkSize,
-		LaneWindow:     maxLaneChunkWindow,
-		MaxOutstanding: maxFlowOutstandingChunks,
+		LaneWindow:     min(maxLaneChunkWindow, f.memoryLimits.maxOutstanding),
+		MaxOutstanding: f.memoryLimits.maxOutstanding,
 		// The flow's memory bound is also its read-ahead bound: a chunk is
 		// retained from the moment it is read until the peer acknowledges it,
 		// because a lane that dies may not have delivered what its transport
 		// accepted. Nothing narrower is needed now that a lane's admission is
 		// bounded by what its transport has not yet taken.
-		MaxOutstandingBytes:  maxFlowOutstandingBytes,
+		MaxOutstandingBytes:  f.memoryLimits.maxSendBytes,
+		Memory:               f.sendMemory,
 		Retention:            f.retentionBytes,
 		RetransmitAfter:      f.reissueDelay,
 		ReliableReissueBurst: f.reliableReissueBurst(),
@@ -409,11 +410,31 @@ func (f *multipathFlow) trackChunk(laneID uint64, chunk *stripe.Chunk) {
 		issued = time.Now()
 	}
 	f.chunkMu.Lock()
+	for i := range f.outstandingChunks {
+		pending := &f.outstandingChunks[i]
+		if pending.chunk.Offset != chunk.Offset {
+			continue
+		}
+		// The scheduler tracks transport attempts separately from logical byte
+		// ranges. ACK coverage is about the latter, so one completion record is
+		// sufficient no matter how many unreliable attempts the same range
+		// needed. Keeping one also bounds this list during a prolonged outage.
+		pending.lane = laneID
+		pending.chunk = chunk
+		pending.issued = issued
+		f.chunkMu.Unlock()
+		return
+	}
 	f.outstandingChunks = append(f.outstandingChunks, outstandingChunk{lane: laneID, chunk: chunk, issued: issued})
 	f.chunkMu.Unlock()
-	// An empty final chunk is covered the moment it is tracked, so nudge the
-	// watcher rather than leaving it until the next acknowledgement.
-	if len(chunk.Data) == 0 {
+	// Enqueue and tracking are intentionally separate: the lane writer owns
+	// transport pacing, while this list owns logical ACK completion. On a fast
+	// path the peer can acknowledge between them, and the watcher can consume
+	// that one generation change before this chunk appears in its list. If the
+	// range is already covered now, advance the generation once more so the
+	// watcher reconciles it. This includes an empty final chunk, whose range is
+	// covered by definition.
+	if f.ackTrack.Covered(chunk.Offset, chunk.End()) {
 		f.ackTrack.Touch()
 	}
 }

@@ -9,7 +9,52 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bojieli/queqiao/internal/memlimit"
 )
+
+func TestConcurrentSchedulersShareOneFixedMemoryBudget(t *testing.T) {
+	const (
+		chunkSize = 4 * 1024
+		flows     = 16
+	)
+	memory := memlimit.New(2 * chunkSize)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make(chan error, flows)
+	for range flows {
+		scheduler := New(bytes.NewReader(make([]byte, 8*chunkSize)), Config{
+			ChunkSize: chunkSize, LaneWindow: 8, MaxOutstanding: 32,
+			MaxOutstandingBytes: 8 * chunkSize, Memory: memory,
+		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer scheduler.Close()
+			for {
+				chunk, err := scheduler.Next(ctx, 1, 0)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if chunk == nil {
+					return
+				}
+				scheduler.Complete(1, chunk)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	got := memory.Snapshot()
+	if got.Used != 0 || got.Peak > got.Capacity || got.Peak != 2*chunkSize {
+		t.Fatalf("shared memory = %+v", got)
+	}
+}
 
 // drainLanes runs n lane workers, each taking chunks and completing them after
 // the delay its rate implies. It returns the bytes each lane carried, which is
@@ -817,6 +862,7 @@ func TestAnUnreliableLaneMayCarryAChunkTwice(t *testing.T) {
 	if err != nil || first == nil {
 		t.Fatalf("no chunk offered to the only lane: %v", err)
 	}
+	scheduler.Wrote(1, first)
 	// The lane lost it. Nothing acknowledges, the deadline passes, and the
 	// scheduler re-queues it.
 	now = now.Add(2 * time.Second)
@@ -830,6 +876,24 @@ func TestAnUnreliableLaneMayCarryAChunkTwice(t *testing.T) {
 	}
 	if again.Offset != first.Offset {
 		t.Fatalf("re-offered offset %d, want the lost %d", again.Offset, first.Offset)
+	}
+	if again.attempt == first.attempt {
+		t.Fatal("replacement reused the retired attempt identity")
+	}
+	scheduler.Wrote(1, again)
+
+	// A second erasure is the same state transition as the first, not an
+	// attempt-count boundary. Retry again while retaining only one live copy.
+	now = now.Add(2 * time.Second)
+	if reissued := scheduler.ReissueExpired(); reissued != 1 {
+		t.Fatalf("re-issued %d chunks after the second loss, want one", reissued)
+	}
+	third, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil || third == nil || third.Offset != first.Offset {
+		t.Fatalf("third attempt = %v, %v; want offset %d", third, err, first.Offset)
+	}
+	if chunks, retained, _ := scheduler.LaneOutstanding(1); chunks != 1 || retained != 8 {
+		t.Fatalf("live attempts = %d chunks/%d bytes, want one bounded 8-byte attempt", chunks, retained)
 	}
 }
 
@@ -875,9 +939,11 @@ func TestAChunkTakenUnreliablyStaysReissuableWhenTheLaneChanges(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := scheduler.Next(ctx, 1, 1<<20); err != nil {
+	first, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil {
 		t.Fatalf("no chunk offered while the lane was coding: %v", err)
 	}
+	scheduler.Wrote(1, first)
 	// The flow is now bulk, so the lane carries data on its stream and reports
 	// itself reliable. The chunk it already took is still coded and still gone.
 	coded = false
@@ -885,8 +951,194 @@ func TestAChunkTakenUnreliablyStaysReissuableWhenTheLaneChanges(t *testing.T) {
 	if reissued := scheduler.ReissueExpired(); reissued != 1 {
 		t.Fatalf("re-issued %d chunks, want the one taken unreliably", reissued)
 	}
-	if _, err := scheduler.Next(ctx, 1, 1<<20); err != nil {
+	again, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil {
 		t.Fatalf("the lane refused to resend a chunk it had taken unreliably: %v", err)
+	}
+	scheduler.Wrote(1, again)
+	now = now.Add(2 * time.Second)
+	if reissued := scheduler.ReissueExpired(); reissued != 1 {
+		t.Fatalf("made %d reliable chunks ready for another lane, want one", reissued)
+	}
+	blocked, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stop()
+	if duplicate, err := scheduler.Next(blocked, 1, 1<<20); err == nil {
+		t.Fatalf("reliable replacement was physically duplicated on its own lane: %+v", duplicate)
+	}
+}
+
+func TestLostUnreliableSpeculationDoesNotBlockAReliableOriginal(t *testing.T) {
+	now := time.Now()
+	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
+		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
+		RetransmitAfter: after(time.Second),
+		Reliable:        func(lane uint64) bool { return lane == 1 },
+		Now:             func() time.Time { return now },
+	})
+	defer scheduler.Close()
+	ctx := context.Background()
+
+	original, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler.Wrote(1, original)
+	now = now.Add(2 * time.Second)
+	if got := scheduler.ReissueExpired(); got != 1 {
+		t.Fatalf("queued %d speculative copies, want one", got)
+	}
+	copy1, err := scheduler.Next(ctx, 2, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler.Wrote(2, copy1)
+
+	// The original remains recoverable by its transport, while the coded copy
+	// is terminally lost. Its expiration must free lane 2 and permit a new
+	// bounded speculation instead of leaving two attempts charged forever.
+	now = now.Add(2 * time.Second)
+	if got := scheduler.ReissueExpired(); got != 1 {
+		t.Fatalf("queued %d copies after the speculative loss, want one replacement", got)
+	}
+	if chunks, retained, queued := scheduler.LaneOutstanding(2); chunks != 0 || retained != 0 || queued != 0 {
+		t.Fatalf("expired speculation left lane 2 at %d chunks/%d retained/%d queued", chunks, retained, queued)
+	}
+	copy2, err := scheduler.Next(ctx, 2, 1<<20)
+	if err != nil || copy2 == nil {
+		t.Fatalf("replacement speculation = %v, %v", copy2, err)
+	}
+	if copy2.Offset != original.Offset || copy2.attempt == copy1.attempt {
+		t.Fatalf("replacement speculation offset/attempt = %d/%d, want %d/new", copy2.Offset, copy2.attempt, original.Offset)
+	}
+	if chunks, retained, _ := scheduler.LaneOutstanding(1); chunks != 1 || retained != 8 {
+		t.Fatalf("reliable original changed to %d chunks/%d retained", chunks, retained)
+	}
+}
+
+func TestReliableRecoveryWaitsReadyForALaneThatJoinsLater(t *testing.T) {
+	now := time.Now()
+	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
+		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
+		RetransmitAfter: after(time.Second), Now: func() time.Time { return now },
+	})
+	defer scheduler.Close()
+
+	original, err := scheduler.Next(context.Background(), 1, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler.Wrote(1, original)
+	now = now.Add(2 * time.Second)
+	if got := scheduler.ReissueExpired(); got != 1 {
+		t.Fatalf("queued %d recoveries before another lane joined, want one ready logical chunk", got)
+	}
+
+	// Readiness is logical state, not a count of lanes which happened to have
+	// received earlier work. A newly admitted replacement lane must see the
+	// recovery immediately.
+	replacement, err := scheduler.Next(context.Background(), 2, 1<<20)
+	if err != nil || replacement == nil || replacement.Offset != original.Offset {
+		t.Fatalf("late lane got %v, %v; want offset %d", replacement, err, original.Offset)
+	}
+}
+
+// Attempt identity is what makes replacing unreliable work safe. A callback
+// from an older dispatch can arrive after the same bytes have been dispatched
+// again on the same lane; matching by lane and offset would mutate or fail the
+// replacement.
+func TestRetiredAttemptCallbacksCannotMutateItsReplacement(t *testing.T) {
+	now := time.Now()
+	scheduler := New(bytes.NewReader([]byte("12345678")), Config{
+		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
+		RetransmitAfter: after(time.Second),
+		Reliable:        func(uint64) bool { return false },
+		Now:             func() time.Time { return now },
+	})
+	defer scheduler.Close()
+	ctx := context.Background()
+
+	first, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An unwritten dispatch is queued, not lost, even if its timer passes.
+	now = now.Add(2 * time.Second)
+	if got := scheduler.ReissueExpired(); got != 0 {
+		t.Fatalf("re-issued %d unwritten attempts, want none", got)
+	}
+	scheduler.Wrote(1, first)
+	if got := scheduler.ReissueExpired(); got != 1 {
+		t.Fatalf("re-issued %d written expired attempts, want one", got)
+	}
+	replacement, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A duplicate/late write completion for the retired identity must not mark
+	// the replacement written.
+	scheduler.Wrote(1, first)
+	if _, _, queued := scheduler.LaneOutstanding(1); queued != 8 {
+		t.Fatalf("late Wrote changed replacement queue accounting to %d bytes", queued)
+	}
+	// Nor may a late failure retire that replacement.
+	scheduler.Fail(1, first)
+	if chunks, retained, _ := scheduler.LaneOutstanding(1); chunks != 1 || retained != 8 {
+		t.Fatalf("late Fail changed replacement to %d chunks/%d bytes", chunks, retained)
+	}
+
+	scheduler.Wrote(1, replacement)
+	if _, _, queued := scheduler.LaneOutstanding(1); queued != 0 {
+		t.Fatalf("replacement Wrote left %d queued bytes", queued)
+	}
+	// A late arrival remains useful: ACKs identify logical bytes, so the old
+	// copy completing must complete the replacement too.
+	scheduler.Complete(1, first)
+	if chunks, retained, queued := scheduler.LaneOutstanding(1); chunks != 0 || retained != 0 || queued != 0 {
+		t.Fatalf("late completion left %d chunks/%d retained/%d queued", chunks, retained, queued)
+	}
+}
+
+func TestLaneFailureWhileAReplacementIsPendingDoesNotDuplicateTheChunk(t *testing.T) {
+	now := time.Now()
+	scheduler := New(bytes.NewReader([]byte("12345678abcdefgh")), Config{
+		ChunkSize: 8, LaneWindow: 4, MaxOutstanding: 8,
+		RetransmitAfter: after(time.Second), Now: func() time.Time { return now },
+	})
+	defer scheduler.Close()
+	ctx := context.Background()
+
+	first, err := scheduler.Next(ctx, 1, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := scheduler.Next(ctx, 2, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler.Wrote(1, first)
+	scheduler.Wrote(2, second)
+
+	// Both reliable attempts expire while another lane exists, so each logical
+	// chunk has one speculative replacement waiting in the ready set.
+	now = now.Add(2 * time.Second)
+	if got := scheduler.ReissueExpired(); got != 2 {
+		t.Fatalf("re-issued %d chunks, want two", got)
+	}
+	// The original attempt fails before its waiting replacement is taken. The
+	// failure transition and the timer transition both request a replacement,
+	// but the logical ready state must remain singular.
+	scheduler.Fail(1, first)
+	scheduler.mu.Lock()
+	copies := 0
+	for _, chunk := range scheduler.pending {
+		if chunk.Offset == first.Offset {
+			copies++
+		}
+	}
+	scheduler.mu.Unlock()
+	if copies != 1 {
+		t.Fatalf("ready set contains %d copies of failed offset %d, want one", copies, first.Offset)
 	}
 }
 

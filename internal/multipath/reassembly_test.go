@@ -4,7 +4,29 @@ import (
 	"bytes"
 	"errors"
 	"testing"
+
+	"github.com/bojieli/queqiao/internal/memlimit"
 )
+
+func TestReassemblerSharesHardMemoryBudget(t *testing.T) {
+	budget := memlimit.New(4)
+	first := NewReassembler(Config{MaxBufferedBytes: 64, MaxBufferedFrames: 8, Memory: budget})
+	second := NewReassembler(Config{MaxBufferedBytes: 64, MaxBufferedFrames: 8, Memory: budget})
+	if _, _, err := first.Insert(Segment{Sequence: 4, Payload: []byte("four")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := second.Insert(Segment{Sequence: 4, Payload: []byte("more")}); !errors.Is(err, ErrMemoryBudget) {
+		t.Fatalf("second insert error = %v", err)
+	}
+	first.Close()
+	if got := budget.Snapshot().Used; got != 0 {
+		t.Fatalf("used after close = %d", got)
+	}
+	if _, _, err := second.Insert(Segment{Sequence: 4, Payload: []byte("more")}); err != nil {
+		t.Fatal(err)
+	}
+	second.Close()
+}
 
 func TestReassemblerReordersAndDrains(t *testing.T) {
 	r := NewReassembler(Config{MaxBufferedBytes: 64, MaxBufferedFrames: 8})

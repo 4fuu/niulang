@@ -19,6 +19,7 @@ import (
 	wancongestion "github.com/bojieli/queqiao/internal/congestion"
 	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/limiter"
+	"github.com/bojieli/queqiao/internal/memlimit"
 	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/protocol"
 	"github.com/bojieli/queqiao/internal/session"
@@ -134,7 +135,16 @@ type ClientConfig struct {
 	// receive windows. Zero selects the defaults, which match TUIC.
 	StreamReceiveWindow     uint64
 	ConnectionReceiveWindow uint64
-	Metrics                 *metrics.Registry
+	// Maximum windows disable quic-go's otherwise large receive-window growth.
+	// Zero keeps the high-throughput defaults. Resource-constrained clients set
+	// initial and maximum to the same bounded values.
+	MaxStreamReceiveWindow     uint64
+	MaxConnectionReceiveWindow uint64
+	MaxIncomingStreams         int64
+	// MemoryLimits is required by resource-constrained clients. Nil retains
+	// the throughput-oriented defaults used by servers and desktop clients.
+	MemoryLimits *MemoryLimits
+	Metrics      *metrics.Registry
 	// FallbackDelay is when AUTO starts connecting its warm-standby TCP
 	// candidate. It is not a deadline for QUIC and not a transport-selection
 	// race.
@@ -150,10 +160,13 @@ type ClientConfig struct {
 }
 
 type Client struct {
-	cfg       ClientConfig
-	udpHealth *udpHealth
-	budget    *limiter.Budget
-	metrics   *metrics.Registry
+	cfg           ClientConfig
+	udpHealth     *udpHealth
+	budget        *limiter.Budget
+	sendMemory    *memlimit.Budget
+	receiveMemory *memlimit.Budget
+	memoryLimits  flowMemoryLimits
+	metrics       *metrics.Registry
 
 	credentialsMu sync.RWMutex
 	credentials   identity.ClientCredentials
@@ -370,6 +383,17 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.FallbackGrace <= 0 {
 		cfg.FallbackGrace = defaultFallbackGrace
 	}
+	if err := (flowWindows{
+		stream: cfg.StreamReceiveWindow, connection: cfg.ConnectionReceiveWindow,
+		maxStream: cfg.MaxStreamReceiveWindow, maxConnection: cfg.MaxConnectionReceiveWindow,
+		maxStreams: cfg.MaxIncomingStreams,
+	}).validate(); err != nil {
+		return nil, err
+	}
+	memoryLimits, sendMemory, receiveMemory, err := resolveMemoryLimits(cfg.MemoryLimits, cfg.ChunkSize)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{
 		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
 		credentials: cfg.Credentials,
@@ -377,7 +401,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
 		}),
 		metrics: cfg.Metrics, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
+		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
 	}, nil
+}
+
+func (c *Client) MemoryStats() MemoryStats {
+	return MemoryStats{Send: c.sendMemory.Snapshot(), Receive: c.receiveMemory.Snapshot()}
 }
 
 func (c *Client) currentCredentials() identity.ClientCredentials {
@@ -433,7 +462,11 @@ func (c *Client) fallbackGrace() time.Duration {
 }
 
 func (c *Client) windows() flowWindows {
-	return flowWindows{stream: c.cfg.StreamReceiveWindow, connection: c.cfg.ConnectionReceiveWindow}
+	return flowWindows{
+		stream: c.cfg.StreamReceiveWindow, connection: c.cfg.ConnectionReceiveWindow,
+		maxStream: c.cfg.MaxStreamReceiveWindow, maxConnection: c.cfg.MaxConnectionReceiveWindow,
+		maxStreams: c.cfg.MaxIncomingStreams, codedQueue: c.memoryLimits.eventQueue,
+	}
 }
 
 func (c *Client) Serve(ctx context.Context) error {
@@ -600,7 +633,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		return
 	}
 	c.cfg.Logger.Debug("local flow opened", "transport", flow.kind, "duration", time.Since(flowOpenStarted))
-	flowSession := newMultipathFlow(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics, c.cfg.Logger)
+	flowSession := newMultipathFlowWithMemory(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics, c.cfg.Logger, c.memoryLimits, c.sendMemory, c.receiveMemory)
 	flowSession.ackRanges.Store(true)
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
@@ -1170,7 +1203,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	}
 	outerReady := time.Now()
 	_ = outer.SetDeadline(time.Now().Add(handshakeBound(outer, c.cfg.HandshakeTimeout)))
-	fc := newFrameConn(outer, c.cfg.MaxPayload)
+	fc := newFrameConnLimited(outer, c.cfg.MaxPayload, c.memoryLimits.frameReadBuffer, c.memoryLimits.eventQueue)
 	fc.setPacketsOnStream(c.cfg.UDPOnStream)
 	_ = outer.SetDeadline(time.Time{})
 	c.cfg.Logger.Debug("outer lane authenticated", "transport", kind, "dial_duration", outerReady.Sub(dialStarted), "pooled", pooled)
@@ -1207,7 +1240,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig) 
 	// only worth its cost when there is something to protect.
 	c.quicPoolActive.Add(1)
 	outer := &controlPoolStreamConn{
-		quicStreamConn: &quicStreamConn{stream: stream, conn: generation.conn, controller: generation.controller, closeConn: false, bulk: connBulkPath(generation.conn)},
+		quicStreamConn: &quicStreamConn{stream: stream, conn: generation.conn, controller: generation.controller, closeConn: false, bulk: connBulkPath(generation.conn, c.memoryLimits.eventQueue)},
 		owner:          c, generation: generation,
 	}
 	return outer, nil
@@ -1394,7 +1427,7 @@ func (c *Client) openPooledJoinLane(ctx context.Context, sessionID [16]byte, flo
 	if err != nil {
 		return nil, err
 	}
-	fc := newFrameConn(outer, c.cfg.MaxPayload)
+	fc := newFrameConnLimited(outer, c.cfg.MaxPayload, c.memoryLimits.frameReadBuffer, c.memoryLimits.eventQueue)
 	fc.setPacketsOnStream(c.cfg.UDPOnStream)
 	lane, err := c.completeLaneJoin(&authenticatedLane{
 		fc: fc, outer: outer, sessionID: sessionID, kind: TransportQUIC, laneID: laneID,
@@ -1430,7 +1463,7 @@ func (c *Client) openBulkPoolStream(ctx context.Context) (streamConn, error) {
 	}
 	c.cfg.Logger.Debug("bulk pool stream opened", "duration", time.Since(started), "connections", c.bulkConnCount())
 	return &bulkPoolStreamConn{
-		quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, controller: entry.controller, closeConn: false, bulk: connBulkPath(entry.conn)},
+		quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, controller: entry.controller, closeConn: false, bulk: connBulkPath(entry.conn, c.memoryLimits.eventQueue)},
 		owner:          c, entry: entry,
 	}, nil
 }
@@ -1498,7 +1531,7 @@ func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
 // stays on the pooled connection, which is where it started.
 const isolatedBulkConns = 8
 
-func (c *Client) maxBulkConns() int { return isolatedBulkConns }
+func (c *Client) maxBulkConns() int { return c.memoryLimits.maxBulkConnections }
 
 func (c *Client) bulkConnCount() int {
 	c.bulkMu.Lock()

@@ -20,6 +20,7 @@ import (
 	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/pathsim"
 	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/stripe"
 )
 
 // requestResponse serves a destination that answers each small request with a
@@ -55,6 +56,24 @@ func median(samples []time.Duration) time.Duration {
 	sorted := append([]time.Duration(nil), samples...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 	return sorted[len(sorted)/2]
+}
+
+func TestTrackingReconcilesAnAcknowledgementWhichArrivedFirst(t *testing.T) {
+	flow := &multipathFlow{ackTrack: newAckTracker()}
+	chunk := &stripe.Chunk{Offset: 8, Data: []byte("ack-first")}
+	flow.ackTrack.Add([][2]uint64{{chunk.Offset, chunk.End()}})
+
+	flow.ackTrack.mu.Lock()
+	before := flow.ackTrack.gen
+	flow.ackTrack.mu.Unlock()
+	flow.trackChunk(1, chunk)
+	flow.ackTrack.mu.Lock()
+	after := flow.ackTrack.gen
+	flow.ackTrack.mu.Unlock()
+
+	if after != before+1 {
+		t.Fatalf("tracking an already acknowledged chunk advanced generation %d -> %d, want one reconciliation", before, after)
+	}
 }
 
 // A small request and its small reply are the case an erasure channel treats

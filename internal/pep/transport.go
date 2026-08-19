@@ -457,11 +457,18 @@ const (
 // right answer for the paths this project targets, but a much fatter or much
 // thinner path wants a different one.
 type flowWindows struct {
-	stream     uint64
-	connection uint64
+	stream        uint64
+	connection    uint64
+	maxStream     uint64
+	maxConnection uint64
+	maxStreams    int64
+	// codedQueue is the connection-level coded path's send and receive
+	// mailbox depth. Zero keeps the desktop default; mobile supplies the same
+	// tiny depth as its other frame queues.
+	codedQueue int
 }
 
-func (w flowWindows) resolved() (stream, connection uint64) {
+func (w flowWindows) resolved() (stream, connection, streamMax, connectionMax uint64, streams int64) {
 	stream, connection = w.stream, w.connection
 	if stream == 0 {
 		stream = initialStreamReceiveWindow
@@ -469,11 +476,39 @@ func (w flowWindows) resolved() (stream, connection uint64) {
 	if connection == 0 {
 		connection = initialConnectionReceiveWindow
 	}
-	return stream, connection
+	streamMax, connectionMax = w.maxStream, w.maxConnection
+	if streamMax == 0 {
+		streamMax = maxStreamReceiveWindow
+	}
+	if connectionMax == 0 {
+		connectionMax = maxConnectionReceiveWindow
+	}
+	streams = w.maxStreams
+	if streams == 0 {
+		streams = maxIncomingStreams
+	}
+	return stream, connection, streamMax, connectionMax, streams
+}
+
+func (w flowWindows) validate() error {
+	stream, connection, streamMax, connectionMax, streams := w.resolved()
+	if streamMax < stream {
+		return errors.New("maximum stream receive window is below its initial value")
+	}
+	if connectionMax < connection {
+		return errors.New("maximum connection receive window is below its initial value")
+	}
+	if connection < stream || connectionMax < streamMax {
+		return errors.New("connection receive window must not be smaller than stream receive window")
+	}
+	if streams < 1 || streams > maxIncomingStreams {
+		return fmt.Errorf("maximum incoming streams must be between 1 and %d", maxIncomingStreams)
+	}
+	return nil
 }
 
 func quicConfig(windows flowWindows) *quic.Config {
-	streamWindow, connectionWindow := windows.resolved()
+	streamWindow, connectionWindow, streamMax, connectionMax, incomingStreams := windows.resolved()
 	return &quic.Config{
 		// The handshake gets as long as an erasing path needs.
 		//
@@ -491,10 +526,10 @@ func quicConfig(windows flowWindows) *quic.Config {
 		MaxIdleTimeout:                 15 * time.Second,
 		KeepAlivePeriod:                5 * time.Second,
 		InitialStreamReceiveWindow:     streamWindow,
-		MaxStreamReceiveWindow:         maxStreamReceiveWindow,
+		MaxStreamReceiveWindow:         streamMax,
 		InitialConnectionReceiveWindow: connectionWindow,
-		MaxConnectionReceiveWindow:     maxConnectionReceiveWindow,
-		MaxIncomingStreams:             maxIncomingStreams,
+		MaxConnectionReceiveWindow:     connectionMax,
+		MaxIncomingStreams:             incomingStreams,
 		MaxIncomingUniStreams:          0,
 		// The China path has a smaller effective UDP MTU than this host's
 		// interface. Disable probing until path-specific MTU discovery is
@@ -525,7 +560,7 @@ func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCre
 	}
 	return &quicStreamConn{
 		stream: stream, conn: conn, packet: packetConn, controller: controller,
-		closeConn: true, bulk: connBulkPath(conn),
+		closeConn: true, bulk: connBulkPath(conn, windows.codedQueue),
 	}, nil
 }
 
@@ -815,7 +850,7 @@ func acceptQUICStream(ctx context.Context, conn *quic.Conn, controller wanconges
 	}
 	return &quicStreamConn{
 		stream: stream, conn: conn, controller: controller,
-		closeConn: false, bulk: connBulkPath(conn),
+		closeConn: false, bulk: connBulkPath(conn, 0),
 	}, nil
 }
 

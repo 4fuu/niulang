@@ -473,7 +473,7 @@ func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fast
 }
 
 func (c *Client) runClientUDPUplink(ctx context.Context, udpConn *net.UDPConn, fc *frameConn, sessionID [16]byte, flowID uint64, peerMu *sync.RWMutex, peer **net.UDPAddr, activity chan<- struct{}, counters *udpCounters) error {
-	buf := make([]byte, 65535)
+	buf := make([]byte, c.memoryLimits.maxUDPPacketBytes)
 	var sequence uint64
 	for {
 		if err := ctx.Err(); err != nil {
@@ -536,7 +536,14 @@ func (c *Client) runClientUDPUplink(ctx context.Context, udpConn *net.UDPConn, f
 // That is the same bound the association's other workers have and is closed by
 // the lane's Close on every exit path, which is what actually unblocks it.
 func udpFrames(ctx context.Context, fc *frameConn, flowID uint64) (<-chan protocol.Frame, <-chan error) {
-	frames := make(chan protocol.Frame, 64)
+	queueFrames := 64
+	if fc.bulkQueueFrames > 0 && fc.bulkQueueFrames < queueFrames {
+		queueFrames = fc.bulkQueueFrames
+	}
+	if queueFrames < 2 {
+		queueFrames = 2
+	}
+	frames := make(chan protocol.Frame, queueFrames)
 	errs := make(chan error, 1)
 	go func() {
 		for {

@@ -38,6 +38,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/bojieli/queqiao/internal/memlimit"
 )
 
 // ErrClosed reports that the scheduler has been closed.
@@ -99,6 +101,12 @@ type Config struct {
 	// with a count-only bound, throughput fell across successive transfers in
 	// one process as the heap grew.
 	MaxOutstandingBytes int
+	// Memory is shared by every flow of an endpoint. The producer acquires one
+	// full ChunkSize before allocating a source buffer and holds it until the
+	// logical chunk is acknowledged. This turns aggregate read-ahead into a
+	// hard endpoint limit instead of MaxOutstandingBytes multiplied by flows.
+	// Nil preserves the unbounded server/default profile.
+	Memory *memlimit.Budget
 	// RetransmitAfter is asked how long a chunk may be outstanding before it is
 	// presumed lost and offered again. Re-issuing duplicates bytes the receiver
 	// discards, so this trades a little bandwidth for not waiting on a lane
@@ -121,13 +129,13 @@ type Config struct {
 	// Reliable reports whether a lane retransmits for itself. When nil every
 	// lane is taken to be reliable, which is what a lane on a QUIC stream is.
 	//
-	// It decides whether a chunk may be re-offered to the lane already
-	// carrying it. On a reliable lane it may not: that lane will deliver the
-	// chunk or die, so a second copy is bandwidth spent on the one outcome it
-	// cannot help. On an unreliable lane it must, because there the chunk can
-	// simply be gone -- a coded datagram path repairs most loss and not all --
-	// and with a single lane there is no other lane to offer it to. Without
-	// this a flow whose only lane drops one chunk waits forever.
+	// It decides the lifecycle of an attempt. A reliable one remains active
+	// until delivery or lane failure, and may have one speculative copy on a
+	// different lane. A written unreliable one is terminal after its recovery
+	// deadline or receiver evidence; it is retired before the logical chunk is
+	// offered again, including to the same lane. Without that retirement a
+	// single coded lane accumulates one admission charge per erasure and
+	// eventually cannot retry the bytes which are missing.
 	Reliable func(laneID uint64) bool
 	// Windows supplies admission limits. When nil, only LaneWindow and
 	// MaxOutstanding apply, which is the behaviour of a flow with no
@@ -189,12 +197,22 @@ type Chunk struct {
 	// deadlock the flow with every lane waiting on a chunk none of them is
 	// allowed to carry.
 	urgent bool
+	// attempt identifies one dispatch of this logical byte range. It is not
+	// transmitted: byte offsets identify data to the peer, while this identity
+	// lets local completion callbacks distinguish a retired unreliable attempt
+	// from the replacement carrying the same bytes on the same lane.
+	attempt uint64
+	// reservation is charged once for the backing allocation, not once per
+	// retransmission. Copies handed to lanes clear it; only the scheduler's
+	// canonical chunk releases it.
+	reservation int
 }
 
 // End returns the offset one past this chunk's last byte.
 func (c *Chunk) End() uint64 { return c.Offset + uint64(len(c.Data)) }
 
 type attempt struct {
+	id       uint64
 	lane     uint64
 	deadline time.Time
 	// reliable records whether the lane retransmitted for itself at the moment
@@ -244,33 +262,39 @@ type Scheduler struct {
 	ready    sync.Cond // a lane may have work, or space freed
 	produced sync.Cond // the producer may read more
 
-	src        io.Reader
-	nextOffset uint64
-	pending    []*Chunk
-	live       map[uint64]*outstanding
-	laneLoad   map[uint64]int
-	laneBytes  map[uint64]uint64
-	laneQueued map[uint64]uint64
-	totalBytes uint64
-	eof        bool
-	srcErr     error
-	closed     bool
-	finished   chan struct{}
-	stats      Stats
+	src         io.Reader
+	nextOffset  uint64
+	pending     []*Chunk
+	live        map[uint64]*outstanding
+	laneLoad    map[uint64]int
+	laneBytes   map[uint64]uint64
+	laneQueued  map[uint64]uint64
+	totalBytes  uint64
+	nextAttempt uint64
+	eof         bool
+	srcErr      error
+	closed      bool
+	finished    chan struct{}
+	producerCtx context.Context
+	cancel      context.CancelFunc
+	stats       Stats
 }
 
 // New returns a scheduler that reads src and hands it out in chunks. It starts
 // one goroutine to read ahead; Close stops it.
 func New(src io.Reader, cfg Config) *Scheduler {
 	cfg.applyDefaults()
+	producerCtx, cancel := context.WithCancel(context.Background())
 	s := &Scheduler{
-		cfg:        cfg,
-		src:        src,
-		live:       make(map[uint64]*outstanding),
-		laneLoad:   make(map[uint64]int),
-		laneBytes:  make(map[uint64]uint64),
-		laneQueued: make(map[uint64]uint64),
-		finished:   make(chan struct{}),
+		cfg:         cfg,
+		src:         src,
+		live:        make(map[uint64]*outstanding),
+		laneLoad:    make(map[uint64]int),
+		laneBytes:   make(map[uint64]uint64),
+		laneQueued:  make(map[uint64]uint64),
+		finished:    make(chan struct{}),
+		producerCtx: producerCtx,
+		cancel:      cancel,
 	}
 	s.stats.CompletedByLaneID = make(map[uint64]uint64)
 	s.ready.L = &s.mu
@@ -294,6 +318,16 @@ func (s *Scheduler) produce() {
 		}
 		s.mu.Unlock()
 
+		if err := s.cfg.Memory.Acquire(s.producerCtx, s.cfg.ChunkSize); err != nil {
+			s.mu.Lock()
+			if !s.closed {
+				s.srcErr = err
+				s.eof = true
+				s.ready.Broadcast()
+			}
+			s.mu.Unlock()
+			return
+		}
 		buf := make([]byte, s.cfg.ChunkSize)
 		// One Read rather than ReadFull: a chunk is at most ChunkSize, not
 		// exactly it. Waiting for a full buffer would hold a small write --
@@ -302,11 +336,18 @@ func (s *Scheduler) produce() {
 		n, err := s.src.Read(buf)
 
 		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			s.cfg.Memory.Release(s.cfg.ChunkSize)
+			return
+		}
 		if n > 0 {
-			chunk := &Chunk{Offset: s.nextOffset, Data: buf[:n]}
+			chunk := &Chunk{Offset: s.nextOffset, Data: buf[:n], reservation: s.cfg.ChunkSize}
 			s.nextOffset += uint64(n)
 			s.stats.SourceBytes += uint64(n)
 			s.pending = append(s.pending, chunk)
+		} else {
+			s.cfg.Memory.Release(s.cfg.ChunkSize)
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -445,7 +486,17 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 		if after := s.retransmitAfter(); after > 0 {
 			deadline = s.cfg.Now().Add(after)
 		}
-		out.attempts = append(out.attempts, attempt{lane: laneID, deadline: deadline, reliable: s.laneRetransmits(laneID)})
+		s.nextAttempt++
+		if s.nextAttempt == 0 {
+			// Zero belongs to source chunks which have not been dispatched. A
+			// wrap is not realistic in one flow, but preserving the invariant is
+			// free and keeps stale callbacks unambiguous even there.
+			s.nextAttempt++
+		}
+		id := s.nextAttempt
+		out.attempts = append(out.attempts, attempt{
+			id: id, lane: laneID, deadline: deadline, reliable: s.laneRetransmits(laneID),
+		})
 		chunk.urgent = false
 		s.laneLoad[laneID]++
 		s.laneBytes[laneID] += uint64(len(chunk.Data))
@@ -455,7 +506,10 @@ func (s *Scheduler) takeReadyLocked(laneID uint64, windowBytes int) *Chunk {
 			s.stats.PeakOutstanding = len(s.live)
 		}
 		s.produced.Signal()
-		return chunk
+		issued := *chunk
+		issued.reservation = 0
+		issued.attempt = id
+		return &issued
 	}
 	return nil
 }
@@ -528,8 +582,13 @@ func (s *Scheduler) Complete(laneID uint64, chunk *Chunk) {
 	// counter, because a chunk taken after its completion is no longer live and
 	// counts as a new issue rather than a re-issue.
 	dropped := s.removePendingLocked(chunk.Offset)
-	if !ok && !dropped {
+	if !ok && dropped == nil {
 		return
+	}
+	if ok {
+		s.releaseChunkLocked(live.chunk)
+	} else {
+		s.releaseChunkLocked(dropped)
 	}
 	s.signalIfDoneLocked()
 	s.produced.Signal()
@@ -549,11 +608,19 @@ func (s *Scheduler) Fail(laneID uint64, chunk *Chunk) {
 	if !ok {
 		return
 	}
+	if !s.dropAttemptLocked(out, laneID, chunk.attempt) {
+		// This callback belongs to an unreliable attempt already retired by
+		// timeout or receiver evidence. It must not fail its replacement merely
+		// because both used the same lane and byte range.
+		return
+	}
 	s.stats.LaneFailures++
-	s.dropAttemptLocked(out, laneID)
 	if len(out.attempts) == 0 {
-		delete(s.live, chunk.Offset)
-		s.requeueLocked(chunk)
+		// The logical chunk remains outstanding even though this physical
+		// attempt ended. Keeping that distinction makes a replacement a retry,
+		// preserves late logical completion, and avoids briefly treating the
+		// same retained bytes as new source work.
+		s.requeueLocked(out.chunk)
 	}
 	s.ready.Broadcast()
 }
@@ -563,14 +630,13 @@ func (s *Scheduler) Fail(laneID uint64, chunk *Chunk) {
 func (s *Scheduler) RetireLane(laneID uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for offset, out := range s.live {
+	for _, out := range s.live {
 		if !laneHasAttempt(out, laneID) {
 			continue
 		}
 		s.stats.LaneFailures++
-		s.dropAttemptLocked(out, laneID)
+		s.dropLaneAttemptsLocked(out, laneID)
 		if len(out.attempts) == 0 {
-			delete(s.live, offset)
 			s.requeueLocked(out.chunk)
 		}
 	}
@@ -580,16 +646,29 @@ func (s *Scheduler) RetireLane(laneID uint64) {
 	s.ready.Broadcast()
 }
 
-func (s *Scheduler) dropAttemptLocked(out *outstanding, laneID uint64) {
+func (s *Scheduler) dropAttemptLocked(out *outstanding, laneID, attemptID uint64) bool {
 	for i, a := range out.attempts {
-		if a.lane != laneID {
+		if a.id != attemptID || a.lane != laneID {
 			continue
 		}
 		queued := !a.written
 		out.attempts = append(out.attempts[:i], out.attempts[i+1:]...)
-		s.releaseLaneLocked(laneID, uint64(len(out.chunk.Data)), queued)
-		return
+		s.releaseLaneLocked(a.lane, uint64(len(out.chunk.Data)), queued)
+		return true
 	}
+	return false
+}
+
+func (s *Scheduler) dropLaneAttemptsLocked(out *outstanding, laneID uint64) {
+	kept := out.attempts[:0]
+	for _, a := range out.attempts {
+		if a.lane != laneID {
+			kept = append(kept, a)
+			continue
+		}
+		s.releaseLaneLocked(a.lane, uint64(len(out.chunk.Data)), !a.written)
+	}
+	out.attempts = kept
 }
 
 func (s *Scheduler) releaseLaneLocked(laneID uint64, size uint64, queued bool) {
@@ -674,6 +753,9 @@ func (s *Scheduler) retransmitAfter() time.Duration {
 // requeueLocked returns a chunk to the ready set in offset order, so the
 // receiver's contiguous point is always what the next free lane works on.
 func (s *Scheduler) requeueLocked(chunk *Chunk) {
+	if s.pendingHas(chunk.Offset) {
+		return
+	}
 	// A chunk only returns to the ready set because a lane stalled or failed,
 	// which makes it the work most likely to be blocking delivery.
 	chunk.urgent = true
@@ -712,18 +794,29 @@ func (s *Scheduler) ReissueUnacknowledgedBelow(offset uint64) int {
 		if out.chunk.End() > offset || len(out.attempts) == 0 {
 			continue
 		}
-		reliable := false
-		for _, a := range out.attempts {
-			if a.reliable {
-				reliable = true
-				break
-			}
-		}
-		if reliable || s.pendingHas(out.chunk.Offset) {
+		if s.pendingHas(out.chunk.Offset) {
 			continue
 		}
-		if after := s.retransmitAfter(); after > 0 {
-			out.attempts[0].deadline = s.cfg.Now().Add(after)
+		// The peer has proved that written unreliable copies are gone. Retire
+		// their admission charges before making the replacement; retaining every
+		// lost datagram attempt grows the lane window forever and eventually
+		// makes a single missing tail chunk impossible to retry.
+		s.retireUnreliableAttemptsLocked(out, time.Time{})
+		reliable := false
+		for _, a := range out.attempts {
+			reliable = reliable || a.reliable
+		}
+		if reliable {
+			// A reliable original is still capable of delivering. Retiring a
+			// proven-missing speculative datagram is necessary accounting, but
+			// receiver evidence alone does not justify another copy while that
+			// original has not reached its recovery deadline.
+			continue
+		}
+		if len(out.attempts) != 0 {
+			// A copy not yet taken by its transport is still real work. Its Wrote
+			// callback will make it eligible for the normal timed retry.
+			continue
 		}
 		s.requeueLocked(out.chunk)
 		reissued++
@@ -734,13 +827,16 @@ func (s *Scheduler) ReissueUnacknowledgedBelow(offset uint64) int {
 	return reissued
 }
 
-// ReissueExpired offers any chunk that has been outstanding too long to
-// another lane, without disturbing the attempt already in flight. A caller
-// runs this periodically; it reports how many chunks it re-offered.
+// ReissueExpired advances attempts according to their transport semantics.
 //
-// This is what makes a throttled lane recoverable rather than fatal. The lane
-// keeps its chunk -- it may yet deliver it -- but the chunk stops being that
-// lane's exclusive responsibility.
+// A reliable attempt remains live: its transport will deliver it or fail
+// loudly, so recovery may add one copy on another lane but never replaces it.
+// An unreliable attempt is different. Once its transport accepted the bytes
+// and its recovery deadline passed, that attempt is terminally lost. It is
+// retired before the logical chunk is dispatched again, keeping one active
+// unreliable attempt per chunk no matter how many consecutive copies the path
+// erases. Each dispatch has its own identity, so a late callback from the
+// retired attempt cannot mutate the replacement.
 func (s *Scheduler) ReissueExpired() int {
 	after := s.retransmitAfter()
 	if after <= 0 {
@@ -751,25 +847,38 @@ func (s *Scheduler) ReissueExpired() int {
 	now := s.cfg.Now()
 	candidates := make([]*outstanding, 0)
 	for _, out := range s.live {
-		if len(out.attempts) == 0 || len(out.attempts) > 1 {
-			// Already being carried by more than one lane; adding a third is
-			// unlikely to help and certainly costs bandwidth.
+		if len(out.attempts) == 0 || s.pendingHas(out.chunk.Offset) {
 			continue
 		}
-		if out.attempts[0].deadline.IsZero() || now.Before(out.attempts[0].deadline) {
+		// A reliable original can have one speculative copy on an unreliable
+		// lane. That copy has its own terminal lifecycle: once written and
+		// expired it must release its accounting before the original is
+		// considered for another speculation. Treating the mixed set as simply
+		// "reliable" left the lost copy in the set forever.
+		retired := s.retireUnreliableAttemptsLocked(out, now)
+		if len(out.attempts) == 0 && retired {
+			candidates = append(candidates, out)
 			continue
 		}
-		if s.pendingHas(out.chunk.Offset) {
+		reliable, expired := false, false
+		for _, a := range out.attempts {
+			reliable = reliable || a.reliable
+			expired = expired || (!a.deadline.IsZero() && !now.Before(a.deadline))
+		}
+		if !expired {
 			continue
 		}
-		// Offering a chunk to another lane needs another lane. Where the only
-		// lane holding it will deliver it or die, re-offering it puts a chunk
-		// in the ready set that nothing can ever take: it is skipped by every
-		// scan from then on, it makes the flow look like it has work when it
-		// is waiting, and it hid the tail from the probe that exists to shorten
-		// it.
-		if out.attempts[0].reliable && len(s.laneLoad) <= 1 {
-			continue
+		// Reliable attempts can have one speculative copy on another lane.
+		// Unreliable attempts are terminal after their deadline and are retired
+		// before the same logical bytes are dispatched again.
+		if reliable {
+			if len(out.attempts) > 1 {
+				continue
+			}
+		} else {
+			if len(out.attempts) != 0 {
+				continue
+			}
 		}
 		candidates = append(candidates, out)
 	}
@@ -779,15 +888,19 @@ func (s *Scheduler) ReissueExpired() int {
 	reissued := 0
 	reliableReissued := 0
 	for _, out := range candidates {
-		if out.attempts[0].reliable && s.cfg.ReliableReissueBurst > 0 {
+		reliable := len(out.attempts) > 0 && out.attempts[0].reliable
+		if reliable && s.cfg.ReliableReissueBurst > 0 {
 			if reliableReissued >= s.cfg.ReliableReissueBurst {
 				continue
 			}
 			reliableReissued++
 		}
-		// Push the deadline out so a chunk cannot be re-offered every tick
-		// while both attempts are still in flight.
-		out.attempts[0].deadline = now.Add(after)
+		// Retained reliable attempts get a new deadline so their pending copy
+		// cannot be offered on every supervisor tick. Unreliable replacements
+		// receive a fresh deadline when Next dispatches them.
+		if len(out.attempts) > 0 {
+			out.attempts[0].deadline = now.Add(after)
+		}
 		s.requeueLocked(out.chunk)
 		reissued++
 	}
@@ -797,17 +910,48 @@ func (s *Scheduler) ReissueExpired() int {
 	return reissued
 }
 
+// retireUnreliableAttemptsLocked removes written unreliable attempts. With a
+// non-zero deadline, only attempts expired at that instant are terminal; a
+// zero deadline means receiver range evidence already proved them missing.
+func (s *Scheduler) retireUnreliableAttemptsLocked(out *outstanding, deadline time.Time) bool {
+	kept := out.attempts[:0]
+	retired := false
+	for _, a := range out.attempts {
+		retire := !a.reliable && a.written
+		if retire && !deadline.IsZero() {
+			retire = !a.deadline.IsZero() && !deadline.Before(a.deadline)
+		}
+		if !retire {
+			kept = append(kept, a)
+			continue
+		}
+		s.releaseLaneLocked(a.lane, uint64(len(out.chunk.Data)), false)
+		retired = true
+	}
+	out.attempts = kept
+	return retired
+}
+
 // removePendingLocked drops a chunk from the ready set, for a chunk that has
 // arrived by another route.
-func (s *Scheduler) removePendingLocked(offset uint64) bool {
+func (s *Scheduler) removePendingLocked(offset uint64) *Chunk {
 	for i, chunk := range s.pending {
 		if chunk.Offset != offset {
 			continue
 		}
 		s.pending = append(s.pending[:i], s.pending[i+1:]...)
-		return true
+		return chunk
 	}
-	return false
+	return nil
+}
+
+func (s *Scheduler) releaseChunkLocked(chunk *Chunk) {
+	if chunk == nil || chunk.reservation == 0 {
+		return
+	}
+	reservation := chunk.reservation
+	chunk.reservation = 0
+	s.cfg.Memory.Release(reservation)
 }
 
 func (s *Scheduler) pendingHas(offset uint64) bool {
@@ -876,7 +1020,7 @@ func (s *Scheduler) Wrote(laneID uint64, chunk *Chunk) {
 		return
 	}
 	for i := range out.attempts {
-		if out.attempts[i].lane != laneID || out.attempts[i].written {
+		if out.attempts[i].id != chunk.attempt || out.attempts[i].lane != laneID || out.attempts[i].written {
 			continue
 		}
 		out.attempts[i].written = true
@@ -925,6 +1069,19 @@ func (s *Scheduler) Close() {
 		return
 	}
 	s.closed = true
+	s.cancel()
+	seen := make(map[*Chunk]struct{}, len(s.pending)+len(s.live))
+	for _, chunk := range s.pending {
+		seen[chunk] = struct{}{}
+	}
+	for _, out := range s.live {
+		seen[out.chunk] = struct{}{}
+	}
+	for chunk := range seen {
+		s.releaseChunkLocked(chunk)
+	}
+	s.pending = nil
+	s.live = make(map[uint64]*outstanding)
 	s.ready.Broadcast()
 	s.produced.Broadcast()
 }

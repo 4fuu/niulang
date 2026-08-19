@@ -40,6 +40,19 @@ func newPipes(seed int64, loss float64) (*lossyPipe, *lossyPipe) {
 		}
 }
 
+func TestConfiguredPendingBoundsBothPathMailboxes(t *testing.T) {
+	carrier, _ := newPipes(1, 0)
+	path := New(carrier, Config{Pending: 3})
+	defer path.Close()
+
+	if got := cap(path.pending); got != 3 {
+		t.Fatalf("send mailbox capacity = %d, want 3", got)
+	}
+	if got := cap(path.received); got != 3 {
+		t.Fatalf("receive mailbox capacity = %d, want 3", got)
+	}
+}
+
 func (p *lossyPipe) Send(d []byte) error {
 	p.mu.Lock()
 	if p.closed {

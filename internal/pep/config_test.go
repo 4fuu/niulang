@@ -59,8 +59,10 @@ func TestClientAdmissionDefaultsAndPendingOpenBound(t *testing.T) {
 	}
 
 	client.pendingOpens = make(chan struct{}, 2)
-	if !client.admitPendingOpen() || !client.admitPendingOpen() {
-		t.Fatal("configured pending-open capacity was not admitted")
+	for admitted := 0; admitted < 2; admitted++ {
+		if !client.admitPendingOpen() {
+			t.Fatalf("configured pending-open capacity stopped after %d admissions", admitted)
+		}
 	}
 	if client.admitPendingOpen() {
 		t.Fatal("pending-open capacity was exceeded")

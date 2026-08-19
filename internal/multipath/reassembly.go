@@ -8,16 +8,24 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+
+	"github.com/bojieli/queqiao/internal/memlimit"
 )
 
 var (
 	ErrWindowExceeded = errors.New("reassembly window exceeded")
+	ErrMemoryBudget   = errors.New("shared reassembly memory exhausted")
 	ErrSequence       = errors.New("invalid reassembly sequence")
 )
 
 type Config struct {
 	MaxBufferedBytes  uint64
 	MaxBufferedFrames int
+	// Memory is shared across flows. Out-of-order payloads must acquire it
+	// before being retained. It is non-blocking because pausing a lane can also
+	// pause the missing segment needed to close the gap; overload fails one flow
+	// instead of deadlocking every flow behind a full receiver.
+	Memory *memlimit.Budget
 }
 
 func DefaultConfig() Config {
@@ -28,6 +36,7 @@ type Segment struct {
 	Sequence uint64
 	Payload  []byte
 	Final    bool
+	charged  bool
 }
 
 type Reassembler struct {
@@ -45,13 +54,14 @@ type Reassembler struct {
 	order   []uint64
 	bytes   uint64
 	finalAt *uint64
+	memory  *memlimit.Budget
 }
 
 func NewReassembler(cfg Config) *Reassembler {
 	if cfg.MaxBufferedBytes == 0 || cfg.MaxBufferedFrames <= 0 {
 		cfg = DefaultConfig()
 	}
-	return &Reassembler{cfg: cfg, buffer: make(map[uint64]Segment)}
+	return &Reassembler{cfg: cfg, buffer: make(map[uint64]Segment), memory: cfg.Memory}
 }
 
 func (r *Reassembler) NextSequence() uint64  { return r.next }
@@ -97,7 +107,11 @@ func (r *Reassembler) Insert(segment Segment) ([]byte, bool, error) {
 		if uint64(len(r.buffer))+1 > uint64(r.cfg.MaxBufferedFrames) || r.bytes+uint64(len(segment.Payload)) > r.cfg.MaxBufferedBytes {
 			return nil, false, ErrWindowExceeded
 		}
+		if !r.memory.TryAcquire(len(segment.Payload)) {
+			return nil, false, ErrMemoryBudget
+		}
 		segment.Payload = append([]byte(nil), segment.Payload...)
+		segment.charged = true
 		r.buffer[segment.Sequence] = segment
 		r.insertOrder(segment.Sequence)
 		r.bytes += uint64(len(segment.Payload))
@@ -123,6 +137,10 @@ func (r *Reassembler) consumeContiguous(first Segment) ([]byte, bool, error) {
 			return output, true, nil
 		}
 		output = append(output, current.Payload...)
+		if current.charged {
+			r.memory.Release(len(current.Payload))
+			current.charged = false
+		}
 		r.next += uint64(len(current.Payload))
 		if next, ok := r.buffer[r.next]; ok {
 			delete(r.buffer, r.next)
@@ -136,6 +154,19 @@ func (r *Reassembler) consumeContiguous(first Segment) ([]byte, bool, error) {
 		}
 		return output, false, nil
 	}
+}
+
+// Close releases shared-memory charges for gaps abandoned with the flow. It
+// is idempotent and must be called when a flow ends before becoming contiguous.
+func (r *Reassembler) Close() {
+	for sequence, segment := range r.buffer {
+		if segment.charged {
+			r.memory.Release(len(segment.Payload))
+		}
+		delete(r.buffer, sequence)
+	}
+	r.order = nil
+	r.bytes = 0
 }
 
 // BufferedSequences is intended for diagnostics and deterministic tests.

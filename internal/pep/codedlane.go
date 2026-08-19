@@ -39,8 +39,11 @@ import (
 // So there is one reader, and it demultiplexes on the flow identity the
 // protocol already puts in every frame.
 type bulkDemux struct {
-	path *coded.Path
-	mu   sync.Mutex
+	path        *coded.Path
+	queueFrames int
+	heldFrames  int
+	heldBytes   int
+	mu          sync.Mutex
 	// flows is keyed by flow identity.
 	flows map[uint64]*subscription
 	// held keeps frames that arrived before their flow did, which on a
@@ -61,8 +64,16 @@ type subscription struct {
 	lanes  int
 }
 
-func newBulkDemux(path *coded.Path, maxPayload uint32) *bulkDemux {
-	d := &bulkDemux{path: path, flows: make(map[uint64]*subscription)}
+func newBulkDemux(path *coded.Path, maxPayload uint32, queueFrames int) *bulkDemux {
+	if queueFrames < 1 || queueFrames > maxBulkQueueFrames {
+		queueFrames = maxBulkQueueFrames
+	}
+	heldFrames := min(maxHeldFrames, 2*queueFrames)
+	heldBytes := min(maxHeldBytes, heldFrames*int(maxPayload))
+	d := &bulkDemux{
+		path: path, queueFrames: queueFrames, heldFrames: heldFrames, heldBytes: heldBytes,
+		flows: make(map[uint64]*subscription),
+	}
 	go d.run(maxPayload)
 	return d
 }
@@ -122,6 +133,13 @@ func (d *bulkDemux) holdLocked(frame protocol.Frame) {
 		d.held = make(map[uint64][]heldFrame)
 	}
 	now := time.Now()
+	heldFrameLimit, heldByteLimit := d.heldFrames, d.heldBytes
+	if heldFrameLimit <= 0 {
+		heldFrameLimit = maxHeldFrames
+	}
+	if heldByteLimit <= 0 {
+		heldByteLimit = maxHeldBytes
+	}
 	frames, bytes := 0, 0
 	for id, held := range d.held {
 		kept := held[:0]
@@ -140,7 +158,7 @@ func (d *bulkDemux) holdLocked(frame protocol.Frame) {
 			bytes += len(one.frame.Payload)
 		}
 	}
-	if frames >= maxHeldFrames || bytes+len(frame.Payload) > maxHeldBytes {
+	if frames >= heldFrameLimit || bytes+len(frame.Payload) > heldByteLimit {
 		return
 	}
 	d.held[frame.Header.FlowID] = append(d.held[frame.Header.FlowID], heldFrame{frame: frame, at: now})
@@ -156,8 +174,9 @@ const (
 	// never arrive from costing memory. Both are needed: a data frame carries
 	// up to a chunk, so a count alone would allow several megabytes, and a
 	// byte bound alone would allow a great many empty ones.
-	maxHeldFrames = 256
-	maxHeldBytes  = 1 << 20
+	maxHeldFrames      = 256
+	maxHeldBytes       = 1 << 20
+	maxBulkQueueFrames = 256
 )
 
 // subscribe claims a flow's frames until release is called.
@@ -166,7 +185,11 @@ func (d *bulkDemux) subscribe(flowID uint64) <-chan protocol.Frame {
 	defer d.mu.Unlock()
 	sub, ok := d.flows[flowID]
 	if !ok {
-		sub = &subscription{frames: make(chan protocol.Frame, 256)}
+		queueFrames := d.queueFrames
+		if queueFrames <= 0 {
+			queueFrames = maxBulkQueueFrames
+		}
+		sub = &subscription{frames: make(chan protocol.Frame, queueFrames)}
 		d.flows[flowID] = sub
 		// Whatever arrived before this flow existed is delivered now rather
 		// than waited for again.
@@ -205,51 +228,54 @@ func (d *bulkDemux) release(flowID uint64) {
 // one: a sender that codes into a receiver with no bulk reader loses every
 // data frame it sends.
 var (
-	bulkPaths  sync.Map // *quic.Conn -> *coded.Path
-	bulkDemuxs sync.Map // *coded.Path -> *bulkDemux
+	bulkPaths   sync.Map // *quic.Conn -> *coded.Path
+	bulkDemuxs  sync.Map // *coded.Path -> *bulkDemux
+	bulkPathMu  sync.Mutex
+	bulkDemuxMu sync.Mutex
 )
 
 // connBulkDemux returns the demultiplexer for a connection's coded path.
-func connBulkDemux(path *coded.Path, maxPayload uint32) *bulkDemux {
+func connBulkDemux(path *coded.Path, maxPayload uint32, queueFrames int) *bulkDemux {
 	if path == nil {
 		return nil
 	}
+	bulkDemuxMu.Lock()
+	defer bulkDemuxMu.Unlock()
 	if existing, ok := bulkDemuxs.Load(path); ok {
 		return existing.(*bulkDemux)
 	}
-	created := newBulkDemux(path, maxPayload)
-	actual, loaded := bulkDemuxs.LoadOrStore(path, created)
-	if loaded {
-		return actual.(*bulkDemux)
-	}
+	created := newBulkDemux(path, maxPayload, queueFrames)
+	bulkDemuxs.Store(path, created)
 	return created
 }
 
 // connBulkPath returns the connection's coded path, creating it once. It is
 // closed with the connection, so no caller owns its lifetime.
-func connBulkPath(conn *quic.Conn) *coded.Path {
+func connBulkPath(conn *quic.Conn, queueFrames int) *coded.Path {
+	bulkPathMu.Lock()
+	defer bulkPathMu.Unlock()
 	if existing, ok := bulkPaths.Load(conn); ok {
 		return existing.(*coded.Path)
 	}
-	created := newCodedPath(conn, 0)
+	created := newCodedPath(conn, 0, queueFrames)
 	if created == nil {
 		return nil
 	}
-	actual, loaded := bulkPaths.LoadOrStore(conn, created)
-	if loaded {
-		_ = created.Close()
-		return actual.(*coded.Path)
-	}
+	bulkPaths.Store(conn, created)
 	go func() {
 		<-conn.Context().Done()
+		bulkPathMu.Lock()
 		bulkPaths.Delete(conn)
+		bulkPathMu.Unlock()
+		bulkDemuxMu.Lock()
 		bulkDemuxs.Delete(created)
+		bulkDemuxMu.Unlock()
 		_ = created.Close()
 	}()
 	return created
 }
 
-func newCodedPath(conn *quic.Conn, roundTrip time.Duration) *coded.Path {
+func newCodedPath(conn *quic.Conn, roundTrip time.Duration, queueFrames int) *coded.Path {
 	if support := conn.ConnectionState().SupportsDatagrams; !support.Local || !support.Remote {
 		return nil
 	}
@@ -268,5 +294,8 @@ func newCodedPath(conn *quic.Conn, roundTrip time.Duration) *coded.Path {
 		// What the endpoint pair has already been measured to do, so the first
 		// symbol is coded for the path rather than for a clean one.
 		Path: pathmodel.Shared(peerKey(conn)),
+		// This bounds both the sender and receiver channel in coded.Path.
+		// Zero deliberately preserves the throughput-oriented desktop default.
+		Pending: queueFrames,
 	})
 }

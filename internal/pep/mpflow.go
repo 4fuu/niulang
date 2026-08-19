@@ -14,6 +14,7 @@ import (
 	"github.com/bojieli/queqiao/internal/classifier"
 	"github.com/bojieli/queqiao/internal/coded"
 	"github.com/bojieli/queqiao/internal/limiter"
+	"github.com/bojieli/queqiao/internal/memlimit"
 	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/multipath"
 	"github.com/bojieli/queqiao/internal/protocol"
@@ -187,14 +188,17 @@ type laneFailure struct {
 }
 
 type multipathFlow struct {
-	ctx       context.Context
-	inner     net.Conn
-	sessionID [16]byte
-	flowID    uint64
-	chunkSize int
-	budget    *limiter.Budget
-	metrics   *metrics.Registry
-	logger    *slog.Logger
+	ctx           context.Context
+	inner         net.Conn
+	sessionID     [16]byte
+	flowID        uint64
+	chunkSize     int
+	budget        *limiter.Budget
+	metrics       *metrics.Registry
+	logger        *slog.Logger
+	memoryLimits  flowMemoryLimits
+	sendMemory    *memlimit.Budget
+	receiveMemory *memlimit.Budget
 
 	sendAckFlag uint16
 	recvAckFlag uint16
@@ -325,20 +329,29 @@ type multipathFlow struct {
 }
 
 func newMultipathFlow(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget, registry *metrics.Registry, loggers ...*slog.Logger) *multipathFlow {
+	var logger *slog.Logger
+	if len(loggers) > 0 {
+		logger = loggers[0]
+	}
+	return newMultipathFlowWithMemory(ctx, inner, sessionID, flowID, chunkSize, sendAckFlag, recvAckFlag, budget, registry, logger, defaultFlowMemoryLimits(), nil, nil)
+}
+
+func newMultipathFlowWithMemory(ctx context.Context, inner net.Conn, sessionID [16]byte, flowID uint64, chunkSize int, sendAckFlag, recvAckFlag uint16, budget *limiter.Budget, registry *metrics.Registry, logger *slog.Logger, memoryLimits flowMemoryLimits, sendMemory, receiveMemory *memlimit.Budget) *multipathFlow {
 	if chunkSize <= 0 {
 		chunkSize = defaultChunkSize
 	}
+	if memoryLimits.eventQueue <= 0 {
+		memoryLimits = defaultFlowMemoryLimits()
+	}
 	f := &multipathFlow{
 		ctx: ctx, inner: inner, sessionID: sessionID, flowID: flowID, chunkSize: chunkSize, budget: budget, metrics: registry,
+		logger: logger, memoryLimits: memoryLimits, sendMemory: sendMemory, receiveMemory: receiveMemory,
 		sendAckFlag: sendAckFlag, recvAckFlag: recvAckFlag,
-		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, maxLaneEvents), laneErr: make(chan laneFailure, maxLaneEvents),
+		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, memoryLimits.eventQueue), laneErr: make(chan laneFailure, memoryLimits.eventQueue),
 		finalAck: make(chan struct{}, 1), sendDone: make(chan struct{}),
 		done: make(chan struct{}), localClosedCh: make(chan struct{}), remoteAbortCh: make(chan struct{}),
 		ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1),
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
-	}
-	if len(loggers) > 0 && loggers[0] != nil {
-		f.logger = loggers[0]
 	}
 	f.idleTimeout = defaultFlowIdleTimeout
 	f.maxLifetime = defaultFlowMaxLifetime
@@ -374,14 +387,19 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 		f.lanesMu.Unlock()
 		return errors.New("duplicate lane id")
 	}
+	limits := f.memoryLimits
+	if limits.laneWriteQueue < 2 || limits.laneControlReserve >= limits.laneWriteQueue {
+		limits = defaultFlowMemoryLimits()
+	}
+	bulkQueue := limits.laneWriteQueue - limits.laneControlReserve
 	if lane.writeQ == nil {
-		lane.writeQ = make(chan laneFrame, maxLaneBulkQueue)
+		lane.writeQ = make(chan laneFrame, bulkQueue)
 	}
 	if lane.writeInteractiveQ == nil {
-		lane.writeInteractiveQ = make(chan laneFrame, maxLaneWriteQueue)
+		lane.writeInteractiveQ = make(chan laneFrame, limits.laneWriteQueue)
 	}
 	if lane.writeSlots == nil {
-		lane.writeSlots = make(chan struct{}, maxLaneWriteQueue)
+		lane.writeSlots = make(chan struct{}, limits.laneWriteQueue)
 	}
 	if lane.writeDone == nil {
 		lane.writeDone = make(chan struct{})
@@ -1965,7 +1983,12 @@ func (f *multipathFlow) acknowledgeRemoteFIN(ctx context.Context, sequence uint6
 }
 
 func (f *multipathFlow) receiveInner(ctx context.Context) error {
-	reassembler := multipath.NewReassembler(multipath.Config{MaxBufferedBytes: maxReassemblyBytes, MaxBufferedFrames: maxReassemblyFrames})
+	reassembler := multipath.NewReassembler(multipath.Config{
+		MaxBufferedBytes:  f.memoryLimits.maxReceiveBytes,
+		MaxBufferedFrames: f.memoryLimits.maxReceiveFrames,
+		Memory:            f.receiveMemory,
+	})
+	defer reassembler.Close()
 	remoteFin := false
 	var lastAckSequence uint64
 	var abortTimer *time.Timer
