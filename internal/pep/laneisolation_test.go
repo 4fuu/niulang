@@ -23,7 +23,7 @@ func isolationLaneKind(t *testing.T, id uint64, kind TransportKind) *mpLane {
 	t.Helper()
 	local, remote := net.Pipe()
 	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
-	return &mpLane{id: id, kind: kind, fc: newFrameConn(local, protocol.DefaultMaxPayload)}
+	return &mpLane{id: id, kind: kind, fc: newFrameConn(local)}
 }
 
 func TestServerTCPHandoffRetiresQUICAndExpandsItsAdmissionCeiling(t *testing.T) {
@@ -59,7 +59,7 @@ func TestLaneJoinCannotCrossDevicePrincipal(t *testing.T) {
 	flow := newIsolationTestFlow(t, false)
 	owner := identity.Principal{ProviderID: "provider", AccountID: "account", DeviceID: "owner"}
 	existingFlow := newServerFlow(flow, owner, TransportTCP, 1)
-	server := &Server{cfg: ServerConfig{MaxPayload: protocol.DefaultMaxPayload, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, sessions: map[[16]byte]*serverFlow{flow.sessionID: existingFlow}}
+	server := &Server{cfg: ServerConfig{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, sessions: map[[16]byte]*serverFlow{flow.sessionID: existingFlow}}
 	local, remote := net.Pipe()
 	defer local.Close()
 	defer remote.Close()
@@ -69,8 +69,8 @@ func TestLaneJoinCannotCrossDevicePrincipal(t *testing.T) {
 		Version: protocol.Version, Type: protocol.TypeJoin, SessionID: flow.sessionID,
 		FlowID: flow.flowID, Class: protocol.ClassBulk,
 	}}
-	go server.handleLaneJoinOpen(context.Background(), local, newFrameConn(local, protocol.DefaultMaxPayload), other, flow.sessionID, 1, request)
-	response, err := newFrameConn(remote, protocol.DefaultMaxPayload).Read()
+	go server.handleLaneJoinOpen(context.Background(), local, newFrameConn(local), other, flow.sessionID, 1, request)
+	response, err := newFrameConn(remote).Read()
 	if err != nil {
 		t.Fatal(err)
 	}

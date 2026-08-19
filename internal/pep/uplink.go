@@ -2,6 +2,8 @@ package pep
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"time"
 
@@ -192,32 +194,91 @@ func (c *Client) probePath(lane *authenticatedLane) {
 		}
 		sent++
 	}
-	// A half-close is the probe's delimiter. The authenticated server echoes
+	// A half-close is the probe's delimiter. The authenticated gateway echoes
 	// exactly the bounded padding it received, then closes its send direction;
 	// reading that echo makes the connection carry enough server-to-client
-	// traffic for the server's own controller to measure that direction. Old
-	// servers return EOF without an echo, so this remains wire-compatible.
+	// traffic for the gateway's own controller to measure that direction.
+	//
+	// The echo is required rather than hoped for. Version 1 has no capability
+	// negotiation and no compatibility window: a peer that speaks the ALPN and
+	// completes mutual TLS has agreed to all of protocol 1, so a gateway that
+	// accepts the probe and does not reflect it is not an older build to be
+	// tolerated -- it is a peer whose behaviour this client cannot account for,
+	// on a connection it was about to hand real traffic to.
 	if closer, ok := lane.outer.(interface{ CloseWrite() error }); ok && sent > 0 {
 		if err := closer.CloseWrite(); err == nil {
-			c.readPathProbeEchoes(lane, sent)
+			if err := c.readPathProbeEchoes(lane, sent); err != nil {
+				c.rejectProbePeer(lane, err)
+				return
+			}
 		}
 	}
 	c.awaitMeasurement(lane, deadline)
 }
 
-func (c *Client) readPathProbeEchoes(lane *authenticatedLane, sent int) {
+// probeEchoViolation is a gateway that did not reflect the probe sequence
+// protocol 1 requires it to reflect.
+//
+// It is kept distinct from a slow path because the two call for opposite
+// responses. The probe rides the reliable control stream, so a short echo is
+// never loss: either the budget expired, which is a measurement this client
+// simply does not get, or the peer disagrees about the protocol, which is a
+// connection it must not carry user traffic on.
+type probeEchoViolation struct{ reason string }
+
+func (e probeEchoViolation) Error() string { return e.reason }
+
+// readPathProbeEchoes consumes the gateway's reflection of the probe sequence.
+//
+// Every field is checked against what was sent. A peer that returns the right
+// number of frames with the wrong identity, ordering or size has not echoed
+// the probe; it has sent something else that happens to arrive here, and the
+// measurement drawn from it would describe traffic this client never sent.
+func (c *Client) readPathProbeEchoes(lane *authenticatedLane, sent int) error {
 	for sequence := 0; sequence < sent; sequence++ {
 		frame, err := lane.fc.Read()
 		if err != nil {
-			return
+			// The probe is bounded in time as well as in packets. Running out
+			// of budget on a slow path leaves the measurement incomplete, which
+			// is the cost of bounding it, and says nothing about the peer.
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				return nil
+			}
+			return probeEchoViolation{reason: fmt.Sprintf("gateway ended the probe echo after %d of %d frames: %v", sequence, sent, err)}
 		}
-		if frame.Header.Type != protocol.TypeProbe || frame.Header.SessionID != lane.sessionID ||
-			frame.Header.FlowID != probeFlowID || frame.Header.Sequence != uint64(sequence) ||
-			frame.Header.Flags != 0 || frame.Header.Class != protocol.ClassNew ||
-			len(frame.Payload) != probePayloadBytes {
-			return
+		switch {
+		case frame.Header.Type != protocol.TypeProbe:
+			return probeEchoViolation{reason: fmt.Sprintf("gateway answered probe %d with frame type %d", sequence, frame.Header.Type)}
+		case frame.Header.SessionID != lane.sessionID:
+			return probeEchoViolation{reason: fmt.Sprintf("gateway echoed probe %d under a different session", sequence)}
+		case frame.Header.FlowID != probeFlowID:
+			return probeEchoViolation{reason: fmt.Sprintf("gateway echoed probe %d on flow %d", sequence, frame.Header.FlowID)}
+		case frame.Header.Sequence != uint64(sequence):
+			return probeEchoViolation{reason: fmt.Sprintf("gateway echoed probe sequence %d where %d was due", frame.Header.Sequence, sequence)}
+		case frame.Header.Flags != 0 || frame.Header.Class != protocol.ClassNew:
+			return probeEchoViolation{reason: fmt.Sprintf("gateway echoed probe %d with flags %#x class %d", sequence, frame.Header.Flags, frame.Header.Class)}
+		case len(frame.Payload) != probePayloadBytes:
+			return probeEchoViolation{reason: fmt.Sprintf("gateway echoed probe %d with %d payload bytes, %d were sent", sequence, len(frame.Payload), probePayloadBytes)}
 		}
 	}
+	return nil
+}
+
+// rejectProbePeer discards the connection a non-conforming gateway answered on.
+//
+// The prewarm's whole purpose is to leave a measured, pooled connection behind
+// for the first user flow. Leaving one behind whose peer just disagreed about
+// the protocol would spend that flow on the disagreement instead, and the
+// pooled connection would outlive the evidence that it is unsound. Dropping the
+// pool costs one handshake and is recovered by the next dial.
+func (c *Client) rejectProbePeer(lane *authenticatedLane, err error) {
+	c.cfg.Logger.Warn("gateway violated the protocol-1 path probe contract", "error", err)
+	if c.metrics != nil {
+		c.metrics.PeerProtocolViolation()
+	}
+	_ = lane.fc.Close()
+	c.closeQUICPool()
 }
 
 // awaitMeasurement waits for the answer the probe was asking for.

@@ -11,7 +11,7 @@ func FuzzDecodeHeaderNeverPanics(f *testing.F) {
 	f.Add(seed)
 	f.Add([]byte("malformed"))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _ = DecodeHeader(data, DefaultMaxPayload)
+		_, _ = DecodeHeader(data)
 	})
 }
 
@@ -21,6 +21,6 @@ func FuzzReadFrameIsBounded(f *testing.F) {
 	seed[38], seed[39], seed[40], seed[41] = 0, 0, 0, 3
 	f.Add(seed)
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _ = ReadFrame(bytes.NewReader(data), 1024)
+		_, _ = ReadFrame(bytes.NewReader(data))
 	})
 }

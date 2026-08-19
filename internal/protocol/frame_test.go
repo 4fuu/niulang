@@ -41,7 +41,7 @@ func TestFrameRoundTrip(t *testing.T) {
 	if err := WriteFrame(&b, want); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ReadFrame(&b, DefaultMaxPayload)
+	got, err := ReadFrame(&b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestWriteFrameHandlesShortWrites(t *testing.T) {
 	if err := WriteFrame(&w, f); err != nil {
 		t.Fatalf("WriteFrame: %v", err)
 	}
-	got, err := ReadFrame(bytes.NewReader(w.b.Bytes()), DefaultMaxPayload)
+	got, err := ReadFrame(bytes.NewReader(w.b.Bytes()))
 	if err != nil {
 		t.Fatalf("ReadFrame: %v", err)
 	}
@@ -79,8 +79,63 @@ func TestDecodeRejectsOversizedPayloadBeforeAllocation(t *testing.T) {
 	var raw [HeaderSize]byte
 	raw[0], raw[1], raw[2], raw[3] = Magic0, Magic1, Version, byte(TypeData)
 	raw[38], raw[39], raw[40], raw[41] = 0x7f, 0xff, 0xff, 0xff
-	if _, err := DecodeHeader(raw[:], 1024); err == nil {
+	if _, err := DecodeHeader(raw[:]); err == nil {
 		t.Fatal("expected oversized payload error")
+	}
+}
+
+// The payload limit is a property of protocol 1 rather than of a deployment,
+// so the boundary itself is part of the contract: exactly MaxPayload must be
+// accepted by every receiver, and one byte more must be refused by every
+// receiver. A build that moved either side of this line would be unable to
+// discover the disagreement, because version 1 negotiates nothing.
+func TestPayloadLimitBoundaryIsFixedByTheProtocol(t *testing.T) {
+	if MaxPayload != 128*1024 {
+		t.Fatalf("protocol 1 payload limit changed to %d; this is a wire break", MaxPayload)
+	}
+	for _, tc := range []struct {
+		name   string
+		length uint32
+		accept bool
+	}{
+		{"at the limit", MaxPayload, true},
+		{"one byte over", MaxPayload + 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw [HeaderSize]byte
+			raw[0], raw[1], raw[2], raw[3] = Magic0, Magic1, Version, byte(TypeData)
+			binary.BigEndian.PutUint64(raw[22:30], 1)
+			binary.BigEndian.PutUint32(raw[38:42], tc.length)
+			_, err := DecodeHeader(raw[:])
+			if tc.accept && err != nil {
+				t.Fatalf("receiver refused a legal %d-byte payload: %v", tc.length, err)
+			}
+			if !tc.accept && err == nil {
+				t.Fatalf("receiver accepted an illegal %d-byte payload", tc.length)
+			}
+		})
+	}
+}
+
+// The limit exists to cover the largest frame the protocol can require, which
+// is a PACKET carrying a maximum UDP datagram to a maximum-length destination.
+// A limit below that bound is not a smaller buffer, it is an inability to
+// deliver legal traffic, and that is exactly the failure a configurable limit
+// produced on the mobile profiles.
+func TestPayloadLimitCoversTheLargestLegalFrame(t *testing.T) {
+	// The PACKET payload is a two-byte destination length, the destination,
+	// then the datagram. internal/session owns the encoding; these numbers are
+	// restated rather than imported because the payload limit has to be a
+	// property of the envelope, not of whatever the session layer happens to
+	// put in it. internal/conformance checks the two against each other.
+	const (
+		destinationLengthPrefix = 2
+		maxDestination          = 255
+		maxUDPDatagram          = 65507
+		largestRequired         = destinationLengthPrefix + maxDestination + maxUDPDatagram
+	)
+	if MaxPayload < largestRequired {
+		t.Fatalf("payload limit %d cannot carry the largest legal PACKET (%d bytes)", MaxPayload, largestRequired)
 	}
 }
 
@@ -88,7 +143,7 @@ func TestDecodeRejectsReservedBits(t *testing.T) {
 	var raw [HeaderSize]byte
 	raw[0], raw[1], raw[2], raw[3] = Magic0, Magic1, Version, byte(TypeClose)
 	raw[43] = 1
-	if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err == nil {
+	if _, err := DecodeHeader(raw[:]); err == nil {
 		t.Fatal("expected reserved-bit error")
 	}
 }
@@ -103,7 +158,7 @@ func TestDecodeRejectsUnknownFlags(t *testing.T) {
 	raw[0], raw[1], raw[2], raw[3] = Magic0, Magic1, Version, byte(TypeData)
 	binary.BigEndian.PutUint16(raw[4:6], 1<<15)
 	binary.BigEndian.PutUint64(raw[22:30], 1)
-	if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err == nil {
+	if _, err := DecodeHeader(raw[:]); err == nil {
 		t.Fatal("DecodeHeader accepted unknown flags")
 	}
 }
@@ -213,12 +268,12 @@ func TestAPeerOfAnotherVersionIsRefused(t *testing.T) {
 	if err := header.Encode(raw[:]); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeHeader(raw[:], DefaultMaxPayload); err != nil {
+	if _, err := DecodeHeader(raw[:]); err != nil {
 		t.Fatalf("this build refused its own framing: %v", err)
 	}
 	for _, other := range []byte{Version - 1, Version + 1} {
 		raw[2] = other
-		_, err := DecodeHeader(raw[:], DefaultMaxPayload)
+		_, err := DecodeHeader(raw[:])
 		if err == nil {
 			t.Fatalf("a frame of version %d was accepted by version %d", other, Version)
 		}

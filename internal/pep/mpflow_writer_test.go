@@ -57,7 +57,7 @@ func (c *ackCaptureConn) Write(p []byte) (int, error) {
 	_, _ = c.buf.Write(p)
 	for c.buf.Len() >= protocol.HeaderSize {
 		raw := append([]byte(nil), c.buf.Bytes()[:protocol.HeaderSize]...)
-		h, err := protocol.DecodeHeader(raw, protocol.DefaultMaxPayload)
+		h, err := protocol.DecodeHeader(raw)
 		if err != nil {
 			c.mu.Unlock()
 			return 0, err
@@ -87,7 +87,7 @@ func newAckTestFlow(conn *ackCaptureConn) *multipathFlow {
 		ctx: context.Background(), done: make(chan struct{}), ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1), laneErr: make(chan laneFailure, 1),
 		lanes: make(map[uint64]*mpLane), sessionID: [16]byte{1}, flowID: 7, recvAckFlag: protocol.FlagAckDown,
 	}
-	flow.lanes[0] = &mpLane{id: 0, fc: newFrameConn(conn, protocol.DefaultMaxPayload)}
+	flow.lanes[0] = &mpLane{id: 0, fc: newFrameConn(conn)}
 	return flow
 }
 
@@ -282,7 +282,7 @@ func TestFailedApplicationWriteSendsAbortImmediately(t *testing.T) {
 	flow := newMultipathFlow(context.Background(), &writeFailConn{Conn: pipe, err: syscall.EPIPE},
 		[16]byte{1}, 7, 1024, protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
 	flow.abortDrainGrace = 20 * time.Millisecond
-	flow.lanes[0] = &mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}
+	flow.lanes[0] = &mpLane{id: 0, fc: newFrameConn(outer)}
 
 	result := make(chan error, 1)
 	go func() { result <- flow.receiveInner(context.Background()) }()
@@ -321,7 +321,7 @@ func TestLocalCloseAbortsStalledReceiveAndReleasesRun(t *testing.T) {
 		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
 	flow.abortGrace = 20 * time.Millisecond
 	flow.abortDrainGrace = 100 * time.Millisecond
-	if err := flow.addLane(&mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}); err != nil {
+	if err := flow.addLane(&mpLane{id: 0, fc: newFrameConn(outer)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -331,7 +331,7 @@ func TestLocalCloseAbortsStalledReceiveAndReleasesRun(t *testing.T) {
 	go func() {
 		buffered := false
 		for {
-			frame, err := protocol.ReadFrame(peer, protocol.DefaultMaxPayload)
+			frame, err := protocol.ReadFrame(peer)
 			if err != nil {
 				peerErr <- err
 				return
@@ -434,7 +434,7 @@ func TestRemoteAbortStopsUnacknowledgedSenderAndClosesInner(t *testing.T) {
 	const flowID = uint64(9)
 	flow := newMultipathFlow(context.Background(), inner, sessionID, flowID, 1024,
 		protocol.FlagAckDown, protocol.FlagAckUp, nil, nil)
-	if err := flow.addLane(&mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}); err != nil {
+	if err := flow.addLane(&mpLane{id: 0, fc: newFrameConn(outer)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -501,7 +501,7 @@ func TestLaneFailureCountIsMonotonicAndIdempotent(t *testing.T) {
 		ctx: context.Background(), done: make(chan struct{}), laneErr: make(chan laneFailure, 1),
 		lanes: make(map[uint64]*mpLane),
 	}
-	lane := &mpLane{id: 1, fc: newFrameConn(conn, protocol.DefaultMaxPayload)}
+	lane := &mpLane{id: 1, fc: newFrameConn(conn)}
 	flow.failLane(lane, errors.New("first"))
 	flow.failLane(lane, errors.New("duplicate"))
 	if got := flow.laneFailureCount(); got != 1 {
@@ -523,7 +523,7 @@ func TestLaneWriterPrioritizesInteractiveFrames(t *testing.T) {
 	}
 	lane := &mpLane{
 		id:                1,
-		fc:                newFrameConn(conn, protocol.DefaultMaxPayload),
+		fc:                newFrameConn(conn),
 		writeQ:            make(chan laneFrame, maxLaneWriteQueue),
 		writeInteractiveQ: make(chan laneFrame, maxLaneWriteQueue),
 		writeSlots:        make(chan struct{}, maxLaneWriteQueue),
@@ -821,7 +821,7 @@ func TestReadLaneTreatsEOFAfterRemoteCloseAsHalfClose(t *testing.T) {
 	defer peer.Close()
 	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
 		protocol.FlagAckUp, protocol.FlagAckDown, nil, registry)
-	lane := &mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}
+	lane := &mpLane{id: 0, fc: newFrameConn(outer)}
 	flow.lanes[0] = lane
 	closeFrame := protocol.Frame{Header: protocol.Header{
 		Version: protocol.Version, Type: protocol.TypeClose, Flags: protocol.FlagFin,
@@ -870,7 +870,7 @@ func TestReadLaneTreatsEOFAfterRemoteResetAsProtocolTeardown(t *testing.T) {
 	defer peer.Close()
 	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
 		protocol.FlagAckUp, protocol.FlagAckDown, nil, registry)
-	lane := &mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}
+	lane := &mpLane{id: 0, fc: newFrameConn(outer)}
 	flow.lanes[0] = lane
 	resetFrame := protocol.Frame{Header: protocol.Header{
 		Version: protocol.Version, Type: protocol.TypeReset,
@@ -918,7 +918,7 @@ func TestReadLaneRetiresUnexpectedEOFImmediately(t *testing.T) {
 	outer, peer := net.Pipe()
 	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
 		protocol.FlagAckUp, protocol.FlagAckDown, nil, registry)
-	lane := &mpLane{id: 0, fc: newFrameConn(outer, protocol.DefaultMaxPayload)}
+	lane := &mpLane{id: 0, fc: newFrameConn(outer)}
 	flow.lanes[0] = lane
 	readerDone := make(chan struct{})
 	go func() {

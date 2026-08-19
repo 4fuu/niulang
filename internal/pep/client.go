@@ -76,7 +76,6 @@ type ClientConfig struct {
 	// mode where loopback is shared across every installed app.
 	SOCKSAuth        *socks5.Credentials
 	Credentials      identity.ClientCredentials
-	MaxPayload       uint32
 	ChunkSize        int
 	DialTimeout      time.Duration
 	HandshakeTimeout time.Duration
@@ -303,10 +302,11 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err := cfg.Credentials.Validate(time.Now()); err != nil {
 		return nil, fmt.Errorf("client identity: %w", err)
 	}
-	if cfg.MaxPayload == 0 || cfg.MaxPayload > protocol.DefaultMaxPayload {
-		cfg.MaxPayload = 256 * 1024
-	}
-	if cfg.ChunkSize <= 0 || cfg.ChunkSize > int(cfg.MaxPayload) {
+	// ChunkSize is a sending policy: how much of a byte stream one DATA frame
+	// carries. It is not a receive limit -- protocol.MaxPayload is, and it is
+	// fixed by the wire version -- so an out-of-range value is corrected to the
+	// default rather than allowed to produce frames the peer must reject.
+	if cfg.ChunkSize <= 0 || cfg.ChunkSize > protocol.MaxPayload {
 		cfg.ChunkSize = defaultChunkSize
 	}
 	if cfg.DialTimeout <= 0 {
@@ -1211,7 +1211,7 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	}
 	outerReady := time.Now()
 	_ = outer.SetDeadline(time.Now().Add(handshakeBound(outer, c.cfg.HandshakeTimeout)))
-	fc := newFrameConnLimited(outer, c.cfg.MaxPayload, c.memoryLimits.frameReadBuffer, c.memoryLimits.eventQueue)
+	fc := newFrameConnLimited(outer, c.memoryLimits.frameReadBuffer, c.memoryLimits.eventQueue)
 	fc.setPacketsOnStream(c.cfg.UDPOnStream)
 	_ = outer.SetDeadline(time.Time{})
 	c.cfg.Logger.Debug("outer lane authenticated", "transport", kind, "dial_duration", outerReady.Sub(dialStarted), "pooled", pooled)
@@ -1435,7 +1435,7 @@ func (c *Client) openPooledJoinLane(ctx context.Context, sessionID [16]byte, flo
 	if err != nil {
 		return nil, err
 	}
-	fc := newFrameConnLimited(outer, c.cfg.MaxPayload, c.memoryLimits.frameReadBuffer, c.memoryLimits.eventQueue)
+	fc := newFrameConnLimited(outer, c.memoryLimits.frameReadBuffer, c.memoryLimits.eventQueue)
 	fc.setPacketsOnStream(c.cfg.UDPOnStream)
 	lane, err := c.completeLaneJoin(&authenticatedLane{
 		fc: fc, outer: outer, sessionID: sessionID, kind: TransportQUIC, laneID: laneID,

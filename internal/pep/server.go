@@ -31,7 +31,6 @@ type ServerConfig struct {
 	ListenAddr        string
 	Credentials       identity.ServerCredentials
 	Enrollment        *identity.EnrollmentService
-	MaxPayload        uint32
 	ChunkSize         int
 	HandshakeTimeout  time.Duration
 	FlowIdleTimeout   time.Duration
@@ -177,10 +176,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if err := cfg.Credentials.Validate(); err != nil {
 		return nil, fmt.Errorf("server identity: %w", err)
 	}
-	if cfg.MaxPayload == 0 || cfg.MaxPayload > protocol.DefaultMaxPayload {
-		cfg.MaxPayload = 256 * 1024
-	}
-	if cfg.ChunkSize <= 0 || cfg.ChunkSize > int(cfg.MaxPayload) {
+	// ChunkSize is a sending policy: how much of a byte stream one DATA frame
+	// carries. It is not a receive limit -- protocol.MaxPayload is, and it is
+	// fixed by the wire version -- so an out-of-range value is corrected to the
+	// default rather than allowed to produce frames the peer must reject.
+	if cfg.ChunkSize <= 0 || cfg.ChunkSize > protocol.MaxPayload {
 		cfg.ChunkSize = defaultChunkSize
 	}
 	if cfg.HandshakeTimeout <= 0 {
@@ -568,7 +568,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 	}
 	sessionStarted := time.Now()
 	_ = conn.SetDeadline(time.Now().Add(handshakeBound(conn, s.cfg.HandshakeTimeout)))
-	fc := newFrameConn(conn, s.cfg.MaxPayload)
+	fc := newFrameConn(conn)
 	fc.setPacketsOnStream(s.cfg.UDPOnStream)
 	open, err := fc.Read()
 	if err != nil {
@@ -707,8 +707,8 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 }
 
 const (
-	maxPathProbeFrames = 128
-	maxPathProbeBytes  = 128 * 1024
+	maxPathProbeFrames = protocol.MaxProbeFrames
+	maxPathProbeBytes  = protocol.MaxProbeBytes
 )
 
 // handlePathProbe accepts only a small, destination-free sequence and reflects
@@ -725,7 +725,7 @@ func (s *Server) handlePathProbe(fc *frameConn, first protocol.Frame) {
 		if frame.Header.Type != protocol.TypeProbe || session.IsZeroSessionID(frame.Header.SessionID) ||
 			frame.Header.SessionID != sessionID ||
 			frame.Header.FlowID != 0 || frame.Header.Sequence != uint64(frames) || frame.Header.Flags != 0 ||
-			frame.Header.Class != protocol.ClassNew || len(frame.Payload) == 0 || len(frame.Payload) > 1200 ||
+			frame.Header.Class != protocol.ClassNew || len(frame.Payload) == 0 || len(frame.Payload) > protocol.MaxProbePayload ||
 			bytes+len(frame.Payload) > maxPathProbeBytes {
 			return
 		}

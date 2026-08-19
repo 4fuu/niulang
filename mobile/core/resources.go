@@ -16,7 +16,6 @@ type mobileResourceLimits struct {
 	goMemoryLimit      int64
 	maxSessions        int
 	maxPendingOpens    int
-	maxPayload         uint32
 	chunkSize          int
 	streamWindow       uint64
 	connectionWindow   uint64
@@ -26,7 +25,7 @@ type mobileResourceLimits struct {
 
 var iosResourceLimits = mobileResourceLimits{
 	name: "ios-fixed-40m", goMemoryLimit: 40 * 1024 * 1024,
-	maxSessions: 64, maxPendingOpens: 16, maxPayload: 64 * 1024, chunkSize: 16 * 1024,
+	maxSessions: 64, maxPendingOpens: 16, chunkSize: 16 * 1024,
 	streamWindow: 512 * 1024, connectionWindow: 2 * 1024 * 1024, maxIncomingStreams: 32,
 	memory: pep.MemoryLimits{
 		SendBudgetBytes: 3 * 1024 * 1024, ReceiveBudgetBytes: 3 * 1024 * 1024,
@@ -39,7 +38,7 @@ var iosResourceLimits = mobileResourceLimits{
 
 var androidResourceLimits = mobileResourceLimits{
 	name: "android-fixed-72m", goMemoryLimit: 72 * 1024 * 1024,
-	maxSessions: 128, maxPendingOpens: 32, maxPayload: 64 * 1024, chunkSize: 16 * 1024,
+	maxSessions: 128, maxPendingOpens: 32, chunkSize: 16 * 1024,
 	streamWindow: 1024 * 1024, connectionWindow: 4 * 1024 * 1024, maxIncomingStreams: 64,
 	memory: pep.MemoryLimits{
 		SendBudgetBytes: 8 * 1024 * 1024, ReceiveBudgetBytes: 8 * 1024 * 1024,

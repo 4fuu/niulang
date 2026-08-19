@@ -18,9 +18,43 @@ const (
 	// numbers were never released. Every connection is authenticated by
 	// provider-issued mutual TLS before a frame is accepted, and streams begin
 	// directly with OPEN or JOIN.
-	Version           = byte(1)
-	HeaderSize        = 46
-	DefaultMaxPayload = 1 << 20
+	Version    = byte(1)
+	HeaderSize = 46
+	// DataALPN is the application protocol negotiated for the data plane. It
+	// carries the wire version because that is what makes the versioning
+	// fail-closed: there is no capability exchange to discover a disagreement
+	// after the fact, so two builds that speak different framing must fail to
+	// negotiate rather than connect and then misunderstand each other.
+	DataALPN = "queqiao/1"
+	// MaxPayload is the frame payload limit for protocol 1. It is a constant
+	// of the wire, not a deployment setting: a receiver MUST accept a payload
+	// this large and MUST reject a larger one, in both directions.
+	//
+	// A configurable receive limit was the alternative, and it does not work
+	// without negotiation. Version 1 has no capability exchange, so two peers
+	// configured differently are mutually unintelligible in exactly one
+	// direction, and the symptom -- a frame the sender considers legal being
+	// refused as malformed -- names neither the setting nor the peer that
+	// holds it.
+	//
+	// The value is derived rather than round. The largest frame version 1 can
+	// require is a PACKET carrying a maximum UDP datagram to a maximum-length
+	// destination: 2 + 255 + 65507 = 65764 bytes. Everything else is smaller
+	// by construction (a destination OPEN is at most 255, an ACK at most 256,
+	// a PROBE at most 1200), and DATA is chunked by the sender to whatever it
+	// chooses below this. 128 KiB clears the PACKET bound with room to spare
+	// while staying small enough that a phone can hold one per in-flight
+	// frame without a memory profile of its own.
+	MaxPayload = 128 * 1024
+	// MaxProbePayload, MaxProbeFrames and MaxProbeBytes bound a path-probe
+	// exchange. They are wire constants rather than one side's private policy
+	// because the exchange is an echo: the receiver returns every frame it
+	// accepts, so these limits are the only thing keeping a probe from being
+	// an amplifier, and the sender needs the same numbers to tell a short echo
+	// that hit the budget from a peer that is not conforming.
+	MaxProbePayload = 1200
+	MaxProbeFrames  = 128
+	MaxProbeBytes   = 128 * 1024
 	// FlagFin marks that the sender has reached EOF for one application-byte
 	// direction. It is carried on CLOSE with the final logical byte offset, so
 	// it remains ordered with respect to preceding DATA frames.
@@ -178,8 +212,8 @@ func (h Header) Encode(dst []byte) error {
 	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk || h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !ackRangesFlagValid(h.Type, h.Flags) {
 		return errors.New("invalid frame header")
 	}
-	if uint64(h.PayloadLen) > DefaultMaxPayload {
-		return errors.New("payload exceeds default limit")
+	if h.PayloadLen > MaxPayload {
+		return errors.New("payload exceeds the protocol limit")
 	}
 	dst[0], dst[1], dst[2], dst[3] = Magic0, Magic1, h.Version, byte(h.Type)
 	binary.BigEndian.PutUint16(dst[4:6], h.Flags)
@@ -192,26 +226,23 @@ func (h Header) Encode(dst []byte) error {
 	return nil
 }
 
-// Validate checks fields which are independent of the configured payload
-// limit. Keeping this separate from Encode makes it possible for callers to
-// validate a decoded frame before handing it to a flow state machine.
-func (h Header) Validate(maxPayload uint32) error {
+// Validate checks a decoded header against the version-1 rules. Keeping this
+// separate from Encode makes it possible for callers to validate a decoded
+// frame before handing it to a flow state machine.
+func (h Header) Validate() error {
 	if h.Version != Version || !h.Type.valid() || h.Class > ClassBulk {
 		return errors.New("invalid frame header")
 	}
 	if h.Flags&^knownFlags != 0 || !reserveControlFlagValid(h.Type, h.Flags) || !ackRangesFlagValid(h.Type, h.Flags) {
 		return errors.New("unknown frame flags")
 	}
-	if maxPayload == 0 || maxPayload > DefaultMaxPayload {
-		maxPayload = DefaultMaxPayload
-	}
-	if h.PayloadLen > maxPayload {
-		return fmt.Errorf("payload length %d exceeds limit %d", h.PayloadLen, maxPayload)
+	if h.PayloadLen > MaxPayload {
+		return fmt.Errorf("payload length %d exceeds the protocol limit %d", h.PayloadLen, MaxPayload)
 	}
 	return nil
 }
 
-func DecodeHeader(src []byte, maxPayload uint32) (Header, error) {
+func DecodeHeader(src []byte) (Header, error) {
 	if len(src) < HeaderSize {
 		return Header{}, io.ErrUnexpectedEOF
 	}
@@ -227,7 +258,7 @@ func DecodeHeader(src []byte, maxPayload uint32) (Header, error) {
 		PayloadLen: binary.BigEndian.Uint32(src[38:42]), Class: Class(src[42]),
 	}
 	copy(h.SessionID[:], src[6:22])
-	if err := h.Validate(maxPayload); err != nil {
+	if err := h.Validate(); err != nil {
 		return Header{}, fmt.Errorf("unsupported frame header: %w", err)
 	}
 	if src[43] != 0 || src[44] != 0 || src[45] != 0 {
@@ -236,12 +267,12 @@ func DecodeHeader(src []byte, maxPayload uint32) (Header, error) {
 	return h, nil
 }
 
-func ReadFrame(r io.Reader, maxPayload uint32) (Frame, error) {
+func ReadFrame(r io.Reader) (Frame, error) {
 	var raw [HeaderSize]byte
 	if _, err := io.ReadFull(r, raw[:]); err != nil {
 		return Frame{}, err
 	}
-	h, err := DecodeHeader(raw[:], maxPayload)
+	h, err := DecodeHeader(raw[:])
 	if err != nil {
 		return Frame{}, err
 	}
@@ -261,11 +292,11 @@ func ReadFrame(r io.Reader, maxPayload uint32) (Frame, error) {
 //
 // It is an error for the slice to hold anything after the frame: the caller
 // framed it, so a trailing byte means the framing disagrees with the parse.
-func ParseFrame(b []byte, maxPayload uint32) (Frame, error) {
+func ParseFrame(b []byte) (Frame, error) {
 	if len(b) < HeaderSize {
 		return Frame{}, io.ErrUnexpectedEOF
 	}
-	h, err := DecodeHeader(b[:HeaderSize], maxPayload)
+	h, err := DecodeHeader(b[:HeaderSize])
 	if err != nil {
 		return Frame{}, err
 	}
@@ -286,8 +317,8 @@ func ParseFrame(b []byte, maxPayload uint32) (Frame, error) {
 // packet per data frame on the wire; on a lossy path that inflates both the
 // byte count and the number of packets exposed to loss.
 func AppendFrame(dst []byte, f Frame) ([]byte, error) {
-	if uint64(len(f.Payload)) > DefaultMaxPayload {
-		return dst, errors.New("payload exceeds default limit")
+	if uint64(len(f.Payload)) > MaxPayload {
+		return dst, errors.New("payload exceeds the protocol limit")
 	}
 	f.Header.PayloadLen = uint32(len(f.Payload))
 	start := len(dst)

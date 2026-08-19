@@ -136,16 +136,57 @@ Every logical frame begins with this fixed 46-byte header:
 | 42 | 1 | traffic class | `0`, `1`, or `2` |
 | 43 | 3 | reserved | All zero |
 
-The default absolute payload limit is 1 MiB. A deployment MAY configure a
-smaller limit on both peers; the receiver validates the declared length
-before allocating. The frame header and payload form one record. A datagram
-MUST contain exactly one complete encoded frame after coded-substrate
-reassembly; trailing bytes are invalid.
+The frame header and payload form one record. A datagram MUST contain exactly
+one complete encoded frame after coded-substrate reassembly; trailing bytes are
+invalid.
+
+### 4.1 Payload limit
+
+The payload limit is **131072 bytes (128 KiB)**. It is a constant of the wire,
+not a deployment setting. A receiver MUST accept a frame whose payload length
+is 131072, MUST reject one whose payload length is 131073 or more, and MUST
+apply the same limit in both directions. An implementation MUST NOT expose the
+limit as configuration.
+
+This is a consequence of version 1 having no capability negotiation. Two peers
+holding different limits are mutually intelligible in one direction only, and
+the symptom -- a frame the sender considers legal being refused as malformed --
+names neither the setting nor the peer that holds it. A limit that is not
+negotiated must therefore be fixed.
+
+The value is derived rather than round. The largest frame version 1 can require
+a peer to accept is a PACKET (§13) carrying a maximum-size UDP datagram to a
+maximum-length destination:
+
+| Component | Bytes |
+| --- | ---: |
+| destination length prefix | 2 |
+| destination (§8.1 bound) | 255 |
+| UDP datagram (65535 - 20 IP - 8 UDP) | 65507 |
+| **largest required payload** | **65764** |
+
+Every other frame is smaller by construction: an OPEN destination payload is at
+most 255 bytes, an ACK payload at most 256 (§9.2), a PROBE payload at most 1200
+(§14). DATA is chunked by the sender to any size at or below the limit; the
+chunk size is a sending policy and is the only part of this that a deployment
+may set. A receiver MUST NOT assume any particular chunk size.
+
+An implementation whose receive limit is below 65764 cannot deliver a
+maximum-size UDP reply. That is a functional failure, not a smaller buffer, and
+it is invisible until a specific datagram arrives.
+
+### 4.2 Rejection
 
 The receiver MUST reject bad magic, a version other than 1, an unknown type,
-unknown flags, a class above 2, non-zero reserved bytes, or a payload beyond its
-limit. A version mismatch is reported distinctly from malformed framing so an
-operator can perform a coordinated upgrade.
+unknown flags, a class above 2, non-zero reserved bytes, or a payload length
+above 131072. A version mismatch is reported distinctly from malformed framing
+so an operator can perform a coordinated upgrade.
+
+A receiver that rejects a frame for exceeding the payload limit MUST treat the
+connection as carrying a peer that disagrees about the wire, and MUST NOT
+attempt to resynchronize within it: the declared length is what delimits the
+next frame, so a receiver that skipped the frame would have to trust the number
+it just refused.
 
 ## 5. Frame types
 
@@ -451,13 +492,55 @@ coefficient = (x mod 255) + 1
 ```
 
 The repair vector is the byte-wise XOR sum of each source vector multiplied by
-its coefficient in GF(256). Coefficients are regenerated rather than sent.
-The receiver keeps a bounded linear system and may deliver recovered symbols
-out of order.
+its coefficient in GF(256). Coefficients are regenerated rather than sent. The
+receiver may deliver recovered symbols out of order.
 
-Window size and parity rate are sender policy derived from current path state;
-they are not separately negotiated. Every repair carries the exact source
-window needed to decode it.
+Because the coefficient row is never transmitted, an implementation that
+computes it differently is not detectably wrong on the wire. Its repairs arrive
+intact and simply fail to solve, which is indistinguishable from a lossy path.
+An implementation MUST therefore be checked against the committed coefficient
+rows in §20 before it is used against a peer it did not build.
+
+### 12.4 Repair window bounds
+
+Parity rate is sender policy derived from path state and is not negotiated.
+Window size is **not** sender policy alone: it is what the sender may ask the
+receiver to solve, so version 1 fixes both sides of it.
+
+| Bound | Value | Applies to |
+| --- | ---: | --- |
+| maximum symbols one repair may cover | 256 | sender and receiver |
+| minimum decoder assembly width, in symbols | 512 | receiver |
+
+**Sender: repair span.** A repair MUST cover at least 1 and at most 256 consecutive source
+symbols. 256 is the size of GF(256): a repair over more symbols could not draw
+its coefficients from distinct field elements, so it is not merely
+inconvenient but unrepresentable. A sender MUST NOT emit a repair whose count
+field is 0 or greater than 256, whatever its own window policy is.
+
+**Receiver: repair span.** A receiver MUST reject a repair whose count field is 0 or greater
+than 256, before the symbol reaches its linear system. The count is two bytes
+on the wire and can therefore claim a span of 65535; the rejection has to
+happen at the point that still knows the datagram came from a peer. A rejected
+repair MUST NOT be counted as an erasure: it is a peer disagreeing about the
+wire, and treating it as loss would answer a non-conforming sender by buying
+more parity for a channel that is not erasing anything.
+
+**Receiver: assembly width.** A receiver MUST retain at least 512 source-symbol slots. A repair
+may cover 256 symbols and arrive after further symbols have been sent, so a
+window merely as wide as the widest repair would already have slid past that
+repair's oldest symbol by the time it arrives. A receiver that discards a
+symbol it was obliged to hold produces exactly the failure the code exists to
+prevent: the repair is unsolvable, and the symbol is reported lost.
+
+The floor is a floor. A receiver MAY hold more. It MUST NOT size the window
+reactively in response to what arrives -- growing on demand cannot recover
+values already reclaimed, so a legal full-span repair arriving at a
+narrow-but-growing window still fails to solve.
+
+Every repair carries the exact source window needed to decode it. Nothing else
+about the window is on the wire, so the two numbers above are the whole of what
+a sender may assume about a receiver.
 
 ## 13. UDP PACKET format and replay window
 
@@ -472,6 +555,12 @@ PACKET preserves exactly one UDP datagram boundary. Its payload is:
 The destination follows the same canonical rules as TCP OPEN and is at most
 255 bytes. Client-to-gateway packets may name a DNS host or IP; gateway replies
 encode the numeric source address observed on the relay socket.
+
+A maximum-size PACKET payload is therefore `2 + 255 + 65507 = 65764` bytes, and
+this is the largest payload version 1 can require any peer to accept. It is
+what fixes the frame payload limit in §4.1, and it is why that limit is not
+configurable: a receiver configured below 65764 bytes silently loses
+maximum-size UDP replies while every other flow appears healthy.
 
 PACKET sequence is an independent monotonically increasing packet number in
 each direction. Receivers use a 64-packet bitmap window: a new high sequence
@@ -492,15 +581,56 @@ PROBE is authenticated, names no destination, and uses:
 - class NEW and zero flags; and
 - a non-empty payload of at most 1,200 bytes.
 
-The gateway accepts at most 128 frames and 128 KiB on one probe stream. It
-echoes every valid frame exactly once with the same header and payload. The
-client half-closes its stream to delimit the request, reads the echoes, and
-uses QUIC transport acknowledgements in each sending direction to update that
-direction's endpoint-pair path state.
+### 14.1 The echo
 
-The echo is equal-size and mutually authenticated, so it cannot amplify
-traffic or create an SSRF destination. Invalid ordering, identifiers, flags,
-class, size, or totals terminate the probe.
+A probe exchange runs on one reliable stream and is bounded by:
+
+| Bound | Value |
+| --- | ---: |
+| maximum payload bytes per PROBE frame | 1200 |
+| maximum frames per probe stream | 128 |
+| maximum total payload bytes per probe stream | 131072 |
+
+The gateway MUST echo every frame it accepts, exactly once, with the same
+header and the same payload, and MUST stop accepting frames once either total
+is reached. The client half-closes its stream to delimit the request, reads the
+echoes, and uses QUIC transport acknowledgements in each sending direction to
+update that direction's endpoint-pair path state.
+
+The echo is equal-size and mutually authenticated, so it cannot amplify traffic
+or create an SSRF destination. That property is why the echo is mandatory
+rather than advisory: the bounds above are the only thing standing between a
+probe and an amplifier, and a peer free to answer with anything is not bound by
+them.
+
+### 14.2 The client's obligation
+
+The stream is reliable, so a probe frame cannot be lost in transit. A client
+that sent `n` frames and read `m` echoes therefore faces exactly three cases:
+
+1. `m = n`, every echo matching its frame in type, session ID, flow ID,
+   sequence, flags, class, and payload length. The exchange conformed.
+2. The read budget expired with `m < n`. This is a slow path, not a violation.
+   The client MUST treat it as an unfinished measurement and MUST NOT draw any
+   conclusion about the peer from it.
+3. The stream ended, or an echo did not match, with `m < n`. The peer does not
+   implement §14.1. Because the version byte and the ALPN both said it did,
+   this is a disagreement about the wire and not a path condition.
+
+In case 3 the client MUST NOT continue using the connection. It MUST close the
+lane and MUST NOT reuse the underlying carrier for further flows; it SHOULD
+record the event distinctly from a lane or transport failure, because the two
+call for opposite responses -- a failed lane is retried, and a peer that does
+not implement the protocol is not.
+
+A client MUST NOT tolerate a missing or partial echo as a compatibility
+allowance. Version 1 has no version below it and no capability negotiation, so
+a peer that negotiated `queqiao/1` and then did not echo is not an older build;
+it is a peer this client cannot make correct measurements against, and silently
+degrading to no measurement hides that.
+
+Invalid ordering, identifiers, flags, class, size, or totals terminate the
+probe at the gateway.
 
 ## 15. RESET payloads
 
@@ -603,16 +733,60 @@ Changes to sender-only tuning that preserve every version-1 wire invariant—suc
 as pacing gains, classification thresholds, FEC rate selection, queue limits,
 or fallback timing—do not require a wire increment.
 
+Regenerating the conformance vectors in §20 is a wire change by definition. If
+this build no longer produces them, either the wire moved and this section
+applies, or a regression was introduced; there is no third case.
+
 ## 19. Security and resource invariants
 
 - TLS 1.3 is mandatory and every data carrier is mutually authenticated.
 - Provider-root pinning plus URI identity replaces DNS/WebPKI authentication.
 - Mutable authorization is checked independently of certificate validity.
 - Session, flow, lane, and resume identifiers never grant authority.
-- Payloads, ACK ranges, reassembly, replay, queues, probes, lanes, retained
-  relays, idle time, and flow lifetime are bounded by the implementation.
+- Frame payloads (§4.1), ACK ranges, repair windows (§12.4), and probe
+  exchanges (§14.1) are bounded by this specification, not by configuration:
+  a bound that is not negotiated and not fixed is a bound two peers can
+  disagree about without either being able to say so.
+- Reassembly, replay, queues, lanes, retained relays, idle time, and flow
+  lifetime are bounded by the implementation.
 - Enrollment/renewal are isolated by exact ALPN and bounded strict messages.
 - Malformed or unknown protocol input never selects a legacy parser.
+
+## 20. Conformance vectors
+
+Prose is not sufficient to specify all of version 1. The repair coefficients of
+§12.3 are computed on both endpoints and never transmitted, so an
+implementation that gets one shift or one multiplier wrong is not detectably
+wrong on the wire -- its repairs arrive well-formed and fail to solve, and the
+resulting erasures look exactly like the lossy path the code exists to fix.
+Destination canonicalization has the same shape: two implementations that
+canonicalize differently disagree about the identity of a destination without
+either observing a parse error.
+
+[`testdata/protocol1/vectors.json`](../testdata/protocol1/vectors.json) is
+therefore normative. It is a frozen artifact, not a generated one. It covers:
+
+| Section | What it pins |
+| --- | --- |
+| `limits` | every fixed number in this document, including the §4.1 payload limit and the §12.4 window bounds |
+| `frame_headers` | encoded 46-byte headers a receiver must accept, and headers it must refuse |
+| `ack_ranges` | selective-acknowledgement payloads and the malformed forms that must be refused |
+| `destinations` | canonicalization: which inputs are accepted, what they canonicalize to, which are refused |
+| `udp` | association and resume markers, resume grants, PACKET payloads, and refused PACKET forms |
+| `reset_payloads` | the §15 code byte and message encoding |
+| `fec_coefficients` | the §12.3 coefficient rows for a spread of repair IDs and window widths |
+| `fec_repairs` | complete encode steps: source symbols in, one repair vector out |
+| `coded_datagrams` | §12.1 datagram layouts, the frames each delivers, and the forms a receiver must refuse |
+| `invitation` | a complete §16.1 enrollment URI and the fields it decodes to |
+
+Every credential-shaped value in the file is synthetic. The invitation carries
+fixed timestamps and a `parsed_at` instant to validate it against, because an
+invitation is valid for at most seven days and a vector built against the wall
+clock would be either unbuildable or unverifiable.
+
+An implementation MUST reproduce the accepted vectors byte for byte and MUST
+refuse every vector marked `reject`. Two implementations that agree on this
+document but not on this file do not interoperate.
 
 The broader threat model, credential lifecycle, and residual risks are in
 [`SECURITY.md`](../SECURITY.md). Implementation components are mapped in

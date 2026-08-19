@@ -45,6 +45,35 @@
 // independence, is what determines recovery.
 package fec
 
+// MaxRepairWindow is the widest span protocol 1 allows one repair symbol to
+// cover, and therefore the widest a receiver has to be able to solve over.
+//
+// A sliding window has no block boundary, so nothing in the format itself
+// stops a sender from covering an arbitrarily long span -- and a receiver with
+// no stated bound has two bad options: allocate whatever the wire asks for, or
+// pick a private limit and silently drop the repairs above it. The second is
+// the worse of the two, because a discarded repair is indistinguishable from
+// an erased one: the flow degrades exactly as if the path were worse, on a
+// transport whose entire purpose is to measure how bad the path is.
+//
+// So the bound is stated rather than left to each implementation. 256 is not
+// arbitrary: it is MaxShards, the number of distinct elements GF(256) offers,
+// and it is already the ceiling Choose applies when it sizes the sender's
+// window. A conforming sender therefore never wanted to exceed it, and a
+// receiver can size its linear system once and be right for every peer.
+const MaxRepairWindow = MaxShards
+
+// MinDecoderWidth is the smallest receiver window that can admit every legal
+// repair.
+//
+// It is twice MaxRepairWindow rather than equal to it because a repair names a
+// span that must fit inside the window with the newer symbols that arrived
+// while it was in flight; a window exactly as wide as the widest repair would
+// have slid past the repair's oldest symbol by the time the repair landed, and
+// would discard it for reaching behind the window -- which is precisely when
+// the repair was needed.
+const MinDecoderWidth = 2 * MaxRepairWindow
+
 // RepairSymbol is a linear combination of the source symbols in one window.
 // First and Count name the window so the receiver can regenerate the
 // coefficients; RID seeds them.
@@ -88,6 +117,27 @@ func windowCoefficient(rid uint32, index int) byte {
 	return byte(x%255) + 1
 }
 
+// WindowCoefficients is the coefficient row repair rid applies to the count
+// symbols of its window, lowest index first.
+//
+// This exists because the row is the one part of the wire format that is never
+// on the wire. Two implementations that disagree about it still exchange
+// well-formed datagrams; the repairs simply fail to solve, and the receiver
+// reports the loss it would have reported on a bad path. That failure is
+// indistinguishable from the condition the code exists to fix, so the row has
+// to be pinned by a committed vector rather than by prose. See
+// testdata/protocol1/vectors.json.
+func WindowCoefficients(rid uint32, count int) []byte {
+	if count <= 0 {
+		return nil
+	}
+	row := make([]byte, count)
+	for i := range row {
+		row[i] = windowCoefficient(rid, i)
+	}
+	return row
+}
+
 // WindowEncoder retains the most recent source symbols so that a repair can be
 // built from them at any time.
 type WindowEncoder struct {
@@ -115,6 +165,13 @@ func NewWindowEncoder(capacity int) *WindowEncoder {
 // sliding code's analogue of a block length, and the same round trip and rate
 // that would have sized a block size this.
 func (e *WindowEncoder) SetCapacity(capacity int) {
+	// The span is bounded by what a receiver is required to solve over, not by
+	// what this sender would like. Exceeding it would produce repairs a
+	// conforming peer must discard, which costs the parity and the bandwidth
+	// and delivers neither.
+	if capacity > MaxRepairWindow {
+		capacity = MaxRepairWindow
+	}
 	size := roundUpPowerOfTwo(capacity)
 	if size == len(e.ring) {
 		return
@@ -172,6 +229,9 @@ func (e *WindowEncoder) Repair(rid uint32, count int) (RepairSymbol, bool) {
 	}
 	if count <= 0 || count > e.held {
 		count = e.held
+	}
+	if count > MaxRepairWindow {
+		count = MaxRepairWindow
 	}
 	first := e.next - uint32(count)
 	vlen := 0
@@ -243,13 +303,30 @@ func NewWindowDecoder() *WindowDecoder {
 }
 
 const (
-	// defaultDecoderWidth is where the receiver's window starts. It grows to
-	// twice the largest repair span it sees.
-	defaultDecoderWidth = 64
-	// maxDecoderWidth bounds the memory one decoder can hold: the linear system
-	// is at worst width rows of width coefficients, and every retained symbol
-	// is a buffer.
-	maxDecoderWidth = 1024
+	// decoderWidth is the receiver's window, and it is fixed rather than grown.
+	//
+	// It used to start at 64 and widen to twice the largest span it had seen,
+	// which is too late by construction. A repair covering the sender's whole
+	// window is legal at any moment, including the first repair of a stream --
+	// the emission rate decides when one is sent, and at a few per cent parity
+	// that is tens of symbols apart. By the time such a repair arrives, a
+	// window that narrow has already sledded past the symbols it covers and
+	// discarded their values, so widening on arrival buys slots for symbols the
+	// decoder can no longer name. The equation then has more unknowns than the
+	// repair has terms and recovers nothing.
+	//
+	// The symptom of that is indistinguishable from a worse path: the flow sees
+	// unrepaired erasures, the estimator sees loss, and the answer is more
+	// parity for a channel that was never the problem. So the window is sized
+	// once, from what the protocol permits a sender to cover, and every legal
+	// repair is usable when it lands.
+	decoderWidth        = MinDecoderWidth
+	defaultDecoderWidth = decoderWidth
+	// maxDecoderWidth is the same bound seen from the memory side: the linear
+	// system is at worst width rows of width coefficients and every symbol in
+	// the window is a retained buffer, so a fixed width is also what makes that
+	// footprint a property of this build rather than of what a peer asks for.
+	maxDecoderWidth = decoderWidth
 )
 
 // Source records a source symbol that arrived intact.
@@ -276,7 +353,13 @@ func (d *WindowDecoder) Repair(r RepairSymbol) Delivery {
 	if r.Count <= 0 || len(r.Vector) == 0 {
 		return out
 	}
-	d.ensureWidth(r.Count)
+	if r.Count > MaxRepairWindow {
+		// A span wider than the protocol allows. Counting it as discarded
+		// rather than silently ignoring it is the difference between an
+		// operator seeing a non-conforming peer and seeing a path that erases.
+		d.discarded++
+		return out
+	}
 	// A repair covers symbols that may not have been seen yet, and the newest
 	// of them determines where the window has to reach. It is also proof that
 	// every symbol in its window exists, which is how a symbol erased before
@@ -312,6 +395,11 @@ func (d *WindowDecoder) Lost() uint64 { return d.lost }
 
 // Discarded reports how many unusable symbols or equations were dropped.
 func (d *WindowDecoder) Discarded() uint64 { return d.discarded }
+
+// Width is how many symbol slots the window holds. It is fixed at
+// MinDecoderWidth for the decoder's whole life, so a legal repair is never
+// refused for arriving after the window had reason to be wide.
+func (d *WindowDecoder) Width() int { return len(d.slots) }
 
 // admit brings esi into the window, sliding it forward and reporting whatever
 // falls off the back. It returns false for an identifier already behind the
@@ -506,18 +594,6 @@ func (d *WindowDecoder) leading(coef []byte) (uint32, int) {
 		count++
 	}
 	return pivot, count
-}
-
-// ensureWidth grows the window to twice the largest repair span seen, so that
-// a symbol is only declared lost once no repair could still cover it.
-func (d *WindowDecoder) ensureWidth(count int) {
-	want := roundUpPowerOfTwo(2 * count)
-	if want > maxDecoderWidth {
-		want = maxDecoderWidth
-	}
-	if want > len(d.slots) {
-		d.resize(want)
-	}
 }
 
 // resize re-indexes the window. Rows are carried across rather than dropped:

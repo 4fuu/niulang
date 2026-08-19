@@ -34,9 +34,8 @@ import (
 // overtaking or lagging a control frame is the ordinary multipath case rather
 // than a new one.
 type frameConn struct {
-	control    io.ReadWriteCloser
-	bulk       *coded.Path
-	maxPayload uint32
+	control io.ReadWriteCloser
+	bulk    *coded.Path
 
 	writeMu sync.Mutex
 	// writeBuf is reused under writeMu so that every frame reaches the
@@ -103,6 +102,12 @@ func (c *frameConn) setPacketsOnStream(onStream bool) { c.packetsForcedToStream 
 // and payload are normally satisfied from one underlying stream read.
 const frameReadBuffer = 64 * 1024
 
+// writeBufferRetain bounds the per-lane write buffer that survives a frame.
+// It sits above the largest ordinary DATA chunk and below protocol.MaxPayload,
+// so a lane that once carried a maximum-size PACKET releases that allocation
+// instead of holding it for as long as the lane lives.
+const writeBufferRetain = 64 * 1024
+
 // bulkProvider is a lane transport that also carries coded datagrams. The
 // transport decides whether a lane has one; the framing only has to discover
 // it, which keeps the choice where the connection is and out of every call
@@ -111,36 +116,33 @@ type bulkProvider interface {
 	bulkPath() *coded.Path
 }
 
-func newFrameConn(conn io.ReadWriteCloser, maxPayload uint32) *frameConn {
-	return newFrameConnSized(conn, maxPayload, frameReadBuffer)
+func newFrameConn(conn io.ReadWriteCloser) *frameConn {
+	return newFrameConnSized(conn, frameReadBuffer)
 }
 
-func newFrameConnSized(conn io.ReadWriteCloser, maxPayload uint32, readBuffer int) *frameConn {
-	return newFrameConnLimited(conn, maxPayload, readBuffer, 256)
+func newFrameConnSized(conn io.ReadWriteCloser, readBuffer int) *frameConn {
+	return newFrameConnLimited(conn, readBuffer, 256)
 }
 
-func newFrameConnLimited(conn io.ReadWriteCloser, maxPayload uint32, readBuffer, bulkQueueFrames int) *frameConn {
+func newFrameConnLimited(conn io.ReadWriteCloser, readBuffer, bulkQueueFrames int) *frameConn {
 	var bulk *coded.Path
 	if provider, ok := conn.(bulkProvider); ok {
 		bulk = provider.bulkPath()
 	}
-	return newSplitFrameConnLimited(conn, bulk, maxPayload, readBuffer, bulkQueueFrames)
+	return newSplitFrameConnLimited(conn, bulk, readBuffer, bulkQueueFrames)
 }
 
 // newSplitFrameConn gives a lane a coded substrate for its bulk payload in
 // addition to its control stream.
-func newSplitFrameConn(control io.ReadWriteCloser, bulk *coded.Path, maxPayload uint32) *frameConn {
-	return newSplitFrameConnSized(control, bulk, maxPayload, frameReadBuffer)
+func newSplitFrameConn(control io.ReadWriteCloser, bulk *coded.Path) *frameConn {
+	return newSplitFrameConnSized(control, bulk, frameReadBuffer)
 }
 
-func newSplitFrameConnSized(control io.ReadWriteCloser, bulk *coded.Path, maxPayload uint32, readBuffer int) *frameConn {
-	return newSplitFrameConnLimited(control, bulk, maxPayload, readBuffer, 256)
+func newSplitFrameConnSized(control io.ReadWriteCloser, bulk *coded.Path, readBuffer int) *frameConn {
+	return newSplitFrameConnLimited(control, bulk, readBuffer, 256)
 }
 
-func newSplitFrameConnLimited(control io.ReadWriteCloser, bulk *coded.Path, maxPayload uint32, readBuffer, bulkQueueFrames int) *frameConn {
-	if maxPayload == 0 || maxPayload > protocol.DefaultMaxPayload {
-		maxPayload = protocol.DefaultMaxPayload
-	}
+func newSplitFrameConnLimited(control io.ReadWriteCloser, bulk *coded.Path, readBuffer, bulkQueueFrames int) *frameConn {
 	if readBuffer < 512 || readBuffer > frameReadBuffer {
 		readBuffer = frameReadBuffer
 	}
@@ -148,7 +150,8 @@ func newSplitFrameConnLimited(control io.ReadWriteCloser, bulk *coded.Path, maxP
 		bulkQueueFrames = 256
 	}
 	return &frameConn{
-		control: control, bulk: bulk, maxPayload: maxPayload,
+		control:         control,
+		bulk:            bulk,
 		reader:          bufio.NewReaderSize(control, readBuffer),
 		bulkQueueFrames: bulkQueueFrames,
 		done:            make(chan struct{}),
@@ -241,7 +244,7 @@ func (c *frameConn) codingBulk() bool { return c.bulk != nil && c.bulk.Coding() 
 // are read by ReadBulk, because merging two substrates into one call means
 // giving one of them the other's semantics.
 func (c *frameConn) Read() (protocol.Frame, error) {
-	return protocol.ReadFrame(c.reader, c.maxPayload)
+	return protocol.ReadFrame(c.reader)
 }
 
 // bulkFrames claims this lane's flow's share of the connection's coded
@@ -251,7 +254,7 @@ func (c *frameConn) Read() (protocol.Frame, error) {
 // connection: one stream of them carries every flow multiplexed on it, so a
 // reader per lane would consume frames belonging to other flows.
 func (c *frameConn) bulkFrames(flowID uint64) <-chan protocol.Frame {
-	demux := connBulkDemux(c.bulk, c.maxPayload, c.bulkQueueFrames)
+	demux := connBulkDemux(c.bulk, c.bulkQueueFrames)
 	if demux == nil {
 		return nil
 	}
@@ -259,7 +262,7 @@ func (c *frameConn) bulkFrames(flowID uint64) <-chan protocol.Frame {
 }
 
 func (c *frameConn) releaseBulk(flowID uint64) {
-	if demux := connBulkDemux(c.bulk, c.maxPayload, c.bulkQueueFrames); demux != nil {
+	if demux := connBulkDemux(c.bulk, c.bulkQueueFrames); demux != nil {
 		demux.release(flowID)
 	}
 }
@@ -347,8 +350,14 @@ func (c *frameConn) writeLocked(f protocol.Frame) error {
 		return err
 	}
 	// Retain the grown buffer for the next frame, but do not let one oversized
-	// control payload pin a large allocation for the life of the lane.
-	if cap(buf) <= int(c.maxPayload)+protocol.HeaderSize {
+	// payload pin a large allocation for the life of the lane.
+	//
+	// The bound is a memory policy rather than a wire limit: protocol.MaxPayload
+	// is what a peer may legally send, and retaining that much per lane on every
+	// lane that once carried a maximum-size datagram is not the same question as
+	// whether the frame was legal. Ordinary chunked DATA sits well under this,
+	// so the common path still reuses its buffer.
+	if cap(buf) <= writeBufferRetain {
 		c.writeBuf = buf
 	}
 	return writeFull(c.control, buf)

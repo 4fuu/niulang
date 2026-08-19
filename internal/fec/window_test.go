@@ -345,8 +345,12 @@ func TestSymbolsLeavingTheWindowAreReportedLostOnce(t *testing.T) {
 	decoder := NewWindowDecoder()
 	reported := map[uint32]int{}
 
-	// One symbol is never sent; the rest walk the window past it.
-	for i := uint32(0); i < 400; i++ {
+	// One symbol is never sent; the rest walk the window past it. The distance
+	// is the window's own width rather than a number, because a symbol is only
+	// lost once no legal repair could still reach it -- declaring it earlier
+	// would be giving up while the sender was still entitled to repair it.
+	walk := uint32(decoder.Width() + decoder.Width()/4)
+	for i := uint32(0); i < walk; i++ {
 		if i == 1 {
 			continue
 		}
@@ -492,5 +496,87 @@ func TestASymbolNamedFarAheadDoesNotWalkTheWindowToReachIt(t *testing.T) {
 	}
 	if d.Discarded() != 0 {
 		t.Fatalf("the symbol beside the jump was discarded")
+	}
+}
+
+// The window's bounds are part of the wire contract, not a local tuning
+// choice. A sender that covered more than a receiver is required to solve over
+// would emit repairs that a conforming peer must discard, and a discarded
+// repair looks exactly like an erased one -- so the disagreement would be
+// invisible on a transport whose whole job is measuring erasure.
+func TestRepairWindowBoundsAreTheProtocolsRatherThanTheImplementations(t *testing.T) {
+	if MaxRepairWindow != MaxShards {
+		t.Fatalf("repair window bound %d no longer matches the field's %d", MaxRepairWindow, MaxShards)
+	}
+	if MinDecoderWidth < 2*MaxRepairWindow {
+		t.Fatalf("decoder floor %d cannot admit a %d-symbol repair with newer arrivals behind it", MinDecoderWidth, MaxRepairWindow)
+	}
+	if maxDecoderWidth < MinDecoderWidth {
+		t.Fatalf("decoder ceiling %d is below the required floor %d", maxDecoderWidth, MinDecoderWidth)
+	}
+}
+
+func TestEncoderNeverCoversMoreThanAReceiverMustSolve(t *testing.T) {
+	e := NewWindowEncoder(4 * MaxRepairWindow)
+	if e.Capacity() > MaxRepairWindow {
+		t.Fatalf("encoder capacity %d exceeds the protocol span %d", e.Capacity(), MaxRepairWindow)
+	}
+	for i := 0; i < 2*MaxRepairWindow; i++ {
+		e.Add([]byte{byte(i)})
+	}
+	repair, ok := e.Repair(1, 4*MaxRepairWindow)
+	if !ok {
+		t.Fatal("encoder produced no repair")
+	}
+	if repair.Count > MaxRepairWindow {
+		t.Fatalf("repair spans %d symbols, protocol allows %d", repair.Count, MaxRepairWindow)
+	}
+}
+
+// A peer is not obliged to be honest about the span it claims. The count is
+// two bytes on the wire, so a hostile or broken sender can name 65535 symbols;
+// the receiver must refuse rather than size a linear system from it.
+func TestDecoderRefusesARepairWiderThanTheProtocolAllows(t *testing.T) {
+	d := NewWindowDecoder()
+	d.Source(0, []byte{1})
+	before := d.Discarded()
+	out := d.Repair(RepairSymbol{RID: 1, First: 0, Count: MaxRepairWindow + 1, Vector: []byte{1}})
+	if len(out.Recovered) != 0 {
+		t.Fatalf("over-wide repair recovered %d symbols", len(out.Recovered))
+	}
+	if d.Discarded() == before {
+		t.Fatal("over-wide repair was ignored rather than recorded as discarded")
+	}
+	if got := d.Width(); got > maxDecoderWidth {
+		t.Fatalf("over-wide repair grew the decoder to %d slots", got)
+	}
+}
+
+// The stated floor has to be reachable in practice: a repair covering the full
+// legal span, arriving after the symbols it covers, must still be solvable.
+func TestDecoderSolvesARepairAtTheFullLegalSpan(t *testing.T) {
+	const span = MaxRepairWindow
+	e := NewWindowEncoder(span)
+	symbols := make([][]byte, span)
+	d := NewWindowDecoder()
+	for i := range symbols {
+		symbols[i] = []byte{byte(i), byte(i >> 8), 0x5a}
+		e.Add(symbols[i])
+		// Every symbol but the last arrives; the last is the erasure the
+		// full-span repair has to reconstruct.
+		if i < span-1 {
+			d.Source(uint32(i), symbols[i])
+		}
+	}
+	repair, ok := e.Repair(7, span)
+	if !ok || repair.Count != span {
+		t.Fatalf("encoder produced a %d-symbol repair, wanted %d", repair.Count, span)
+	}
+	out := d.Repair(repair)
+	if len(out.Recovered) != 1 || out.Recovered[0].ESI != span-1 {
+		t.Fatalf("full-span repair recovered %+v, wanted symbol %d", out.Recovered, span-1)
+	}
+	if got := out.Recovered[0].Vector; string(got) != string(symbols[span-1]) {
+		t.Fatalf("recovered %x, wanted %x", got, symbols[span-1])
 	}
 }

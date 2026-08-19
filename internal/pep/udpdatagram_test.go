@@ -87,7 +87,7 @@ func TestUDPFinalACKTakesPrecedenceOverFollowingEOF(t *testing.T) {
 	defer peer.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	frames, errs := udpFrames(ctx, newFrameConn(local, protocol.DefaultMaxPayload), 7)
+	frames, errs := udpFrames(ctx, newFrameConn(local), 7)
 	finalACK := protocol.Frame{Header: protocol.Header{
 		Version: protocol.Version, Type: protocol.TypeAck, Flags: protocol.FlagAckFinal,
 		SessionID: [16]byte{1}, FlowID: 7,
@@ -171,7 +171,7 @@ func TestAPacketTakesTheDatagramSubstrateWhateverTheDataDoes(t *testing.T) {
 	carrier := newPipeCarrier()
 	path := coded.New(carrier, coded.Config{})
 	t.Cleanup(func() { _ = path.Close() })
-	fc := newSplitFrameConn(nopCloser{io.Discard}, path, protocol.DefaultMaxPayload)
+	fc := newSplitFrameConn(nopCloser{io.Discard}, path)
 
 	packet := protocol.Frame{Header: protocol.Header{Type: protocol.TypePacket}}
 	data := protocol.Frame{Header: protocol.Header{Type: protocol.TypeData}}
@@ -198,7 +198,7 @@ func TestAPacketTakesTheDatagramSubstrateWhateverTheDataDoes(t *testing.T) {
 
 	// A lane with no datagram substrate at all -- a TLS/TCP lane -- is
 	// unchanged, which is the fallback the SOCKS contract rests on.
-	plain := newSplitFrameConn(nopCloser{io.Discard}, nil, protocol.DefaultMaxPayload)
+	plain := newSplitFrameConn(nopCloser{io.Discard}, nil)
 	if plain.bulkFrame(packet) {
 		t.Error("a lane without datagrams routed a packet to one")
 	}
@@ -215,7 +215,7 @@ func TestPacketSubstratesAreCounted(t *testing.T) {
 	carrier := newPipeCarrier()
 	path := coded.New(carrier, coded.Config{})
 	t.Cleanup(func() { _ = path.Close() })
-	fc := newSplitFrameConn(nopCloser{io.Discard}, path, protocol.DefaultMaxPayload)
+	fc := newSplitFrameConn(nopCloser{io.Discard}, path)
 
 	packet := protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypePacket}}
 	if err := fc.Write(packet); err != nil {

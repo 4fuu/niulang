@@ -55,8 +55,14 @@ type Registry struct {
 	// was holding up the receiver. A rising count means striping is costing
 	// duplicate capacity to keep the reorder span bounded.
 	reinjections atomic.Uint64
-	telemetryMu  sync.Mutex
-	quicFlows    map[uint64]QUICObservation
+	// peerProtocolViolations counts peers that completed mutual TLS on a
+	// protocol-1 ALPN and then behaved in a way protocol 1 forbids. It is
+	// deliberately separate from lane failures: a lane that dies is a network
+	// event, while this is a peer whose build disagrees about the wire, and the
+	// two need different responses from whoever is on call.
+	peerProtocolViolations atomic.Uint64
+	telemetryMu            sync.Mutex
+	quicFlows              map[uint64]QUICObservation
 }
 
 type Snapshot struct {
@@ -69,6 +75,7 @@ type Snapshot struct {
 	FlowTimeouts                                                  uint64
 	ClassTransitions                                              [3]uint64
 	BulkIsolations, Reinjections                                  uint64
+	PeerProtocolViolations                                        uint64
 	ReplayBytesInUse                                              int64
 	QUICLanes                                                     int64
 	QUICLatestRTT, QUICSmoothedRTT                                time.Duration
@@ -194,6 +201,10 @@ func (r *Registry) BulkIsolated() {
 	r.bulkIsolations.Add(1)
 }
 
+// PeerProtocolViolation records a peer that authenticated as a protocol-1
+// endpoint and then did something protocol 1 forbids.
+func (r *Registry) PeerProtocolViolation() { r.peerProtocolViolations.Add(1) }
+
 func (r *Registry) CompletionTimeout() { r.completionTimeouts.Add(1) }
 func (r *Registry) FlowTimeout()       { r.flowTimeouts.Add(1) }
 func (r *Registry) ClassTransition(class int) {
@@ -247,6 +258,7 @@ func (r *Registry) Snapshot() Snapshot {
 		FlowTimeouts:                  r.flowTimeouts.Load(),
 		BulkIsolations:                r.bulkIsolations.Load(),
 		Reinjections:                  r.reinjections.Load(),
+		PeerProtocolViolations:        r.peerProtocolViolations.Load(),
 		ReplayBytesInUse:              r.replayBytesInUse.Load(),
 	}
 	for i := range s.ClassTransitions {
@@ -394,6 +406,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_replay_bytes_in_use %d\n", s.ReplayBytesInUse)
 	fmt.Fprintf(w, "queqiao_bulk_isolations_total %d\n", s.BulkIsolations)
 	fmt.Fprintf(w, "queqiao_lane_reinjections_total %d\n", s.Reinjections)
+	fmt.Fprintf(w, "queqiao_peer_protocol_violations_total %d\n", s.PeerProtocolViolations)
 	fmt.Fprintf(w, "queqiao_quic_lanes %d\n", s.QUICLanes)
 	fmt.Fprintf(w, "queqiao_quic_latest_rtt_seconds %.9f\n", s.QUICLatestRTT.Seconds())
 	fmt.Fprintf(w, "queqiao_quic_smoothed_rtt_seconds %.9f\n", s.QUICSmoothedRTT.Seconds())

@@ -1,6 +1,7 @@
 package pep
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync/atomic"
@@ -35,8 +36,8 @@ func TestCurrentUplinkAppliesSocketControl(t *testing.T) {
 
 func TestPathProbeEchoIsOneForOneAndDestinationFree(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
-	serverFrames := newFrameConn(serverConn, protocol.DefaultMaxPayload)
-	clientFrames := newFrameConn(clientConn, protocol.DefaultMaxPayload)
+	serverFrames := newFrameConn(serverConn)
+	clientFrames := newFrameConn(clientConn)
 	defer serverFrames.Close()
 	defer clientFrames.Close()
 
@@ -260,4 +261,128 @@ func TestThePrewarmLeavesTheUplinkMeasured(t *testing.T) {
 	if after < 0.2 || after > 0.7 {
 		t.Fatalf("measured floor %.3f on a 42%% erasure channel", after)
 	}
+}
+
+// The probe echo is an obligation, not a courtesy. A gateway that authenticates
+// on a protocol-1 ALPN has agreed to reflect the sequence, so a client that
+// quietly accepted a short or altered echo would be carrying a peer whose
+// disagreement about the wire it never learned about -- and would draw its
+// erasure model from traffic it never sent.
+func TestPathProbeEchoFailuresAreDistinguishedFromASlowPath(t *testing.T) {
+	var sessionID [16]byte
+	sessionID[0] = 7
+	echo := func(sequence uint64) protocol.Frame {
+		return protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeProbe,
+			SessionID: sessionID, FlowID: probeFlowID, Sequence: sequence, Class: protocol.ClassNew,
+		}, Payload: make([]byte, probePayloadBytes)}
+	}
+
+	for _, tc := range []struct {
+		name string
+		// gateway writes whatever this build of a peer would answer with, then
+		// closes its side.
+		gateway   func(t *testing.T, fc *frameConn)
+		violation bool
+	}{
+		{
+			name: "conforming gateway",
+			gateway: func(t *testing.T, fc *frameConn) {
+				for sequence := uint64(0); sequence < 3; sequence++ {
+					if err := fc.Write(echo(sequence)); err != nil {
+						return
+					}
+				}
+			},
+		},
+		{
+			name: "gateway that does not echo at all",
+			gateway: func(t *testing.T, fc *frameConn) {
+			},
+			violation: true,
+		},
+		{
+			name: "gateway that stops early",
+			gateway: func(t *testing.T, fc *frameConn) {
+				_ = fc.Write(echo(0))
+			},
+			violation: true,
+		},
+		{
+			name: "gateway that reorders the sequence",
+			gateway: func(t *testing.T, fc *frameConn) {
+				_ = fc.Write(echo(0))
+				_ = fc.Write(echo(2))
+			},
+			violation: true,
+		},
+		{
+			name: "gateway that changes the payload size",
+			gateway: func(t *testing.T, fc *frameConn) {
+				short := echo(0)
+				short.Payload = short.Payload[:probePayloadBytes-1]
+				_ = fc.Write(short)
+			},
+			violation: true,
+		},
+		{
+			name: "gateway that answers under another session",
+			gateway: func(t *testing.T, fc *frameConn) {
+				other := echo(0)
+				other.Header.SessionID[0] = 9
+				_ = fc.Write(other)
+			},
+			violation: true,
+		},
+		{
+			name: "gateway that answers with a different frame type",
+			gateway: func(t *testing.T, fc *frameConn) {
+				wrong := echo(0)
+				wrong.Header.Type = protocol.TypeData
+				_ = fc.Write(wrong)
+			},
+			violation: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			serverFrames := newFrameConn(serverConn)
+			clientFrames := newFrameConn(clientConn)
+			defer clientFrames.Close()
+
+			go func() {
+				tc.gateway(t, serverFrames)
+				_ = serverFrames.Close()
+			}()
+
+			client := &Client{}
+			lane := &authenticatedLane{fc: clientFrames, sessionID: sessionID}
+			err := client.readPathProbeEchoes(lane, 3)
+			var violation probeEchoViolation
+			switch {
+			case tc.violation && !errors.As(err, &violation):
+				t.Fatalf("non-conforming gateway accepted: err = %v", err)
+			case !tc.violation && err != nil:
+				t.Fatalf("conforming gateway rejected: %v", err)
+			}
+		})
+	}
+
+	// A path too slow to return the echo inside the probe budget is not a
+	// violation. The measurement is simply incomplete, which is what bounding
+	// the probe in time buys.
+	t.Run("slow path is not a violation", func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer serverConn.Close()
+		clientFrames := newFrameConn(clientConn)
+		defer clientFrames.Close()
+		if err := clientConn.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		client := &Client{}
+		lane := &authenticatedLane{fc: clientFrames, sessionID: sessionID}
+		if err := client.readPathProbeEchoes(lane, 3); err != nil {
+			t.Fatalf("expired probe budget reported as a peer violation: %v", err)
+		}
+	})
 }

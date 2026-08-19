@@ -19,6 +19,7 @@ import (
 	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/netbind"
 	"github.com/bojieli/queqiao/internal/pathmodel"
+	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 type TransportKind string
@@ -29,7 +30,10 @@ const (
 	TransportAuto TransportKind = "auto"
 )
 
-const defaultALPN = "queqiao/1"
+// defaultALPN is the data plane's negotiated protocol. It lives with the
+// wire version in internal/protocol, because bumping one without the other is
+// the failure the pairing exists to prevent.
+const defaultALPN = protocol.DataALPN
 
 const (
 	defaultAdaptiveMinBytesPerSec = 64 * 1024

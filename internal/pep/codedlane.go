@@ -64,21 +64,21 @@ type subscription struct {
 	lanes  int
 }
 
-func newBulkDemux(path *coded.Path, maxPayload uint32, queueFrames int) *bulkDemux {
+func newBulkDemux(path *coded.Path, queueFrames int) *bulkDemux {
 	if queueFrames < 1 || queueFrames > maxBulkQueueFrames {
 		queueFrames = maxBulkQueueFrames
 	}
 	heldFrames := min(maxHeldFrames, 2*queueFrames)
-	heldBytes := min(maxHeldBytes, heldFrames*int(maxPayload))
+	heldBytes := min(maxHeldBytes, heldFrames*protocol.MaxPayload)
 	d := &bulkDemux{
 		path: path, queueFrames: queueFrames, heldFrames: heldFrames, heldBytes: heldBytes,
 		flows: make(map[uint64]*subscription),
 	}
-	go d.run(maxPayload)
+	go d.run()
 	return d
 }
 
-func (d *bulkDemux) run(maxPayload uint32) {
+func (d *bulkDemux) run() {
 	for {
 		payload, err := d.path.Receive()
 		if err != nil {
@@ -90,7 +90,7 @@ func (d *bulkDemux) run(maxPayload uint32) {
 			d.mu.Unlock()
 			return
 		}
-		frame, err := protocol.ParseFrame(payload, maxPayload)
+		frame, err := protocol.ParseFrame(payload)
 		if err != nil {
 			// The coded path hands up whole frames or none, so this is a peer
 			// sending something this one cannot parse rather than loss.
@@ -235,7 +235,7 @@ var (
 )
 
 // connBulkDemux returns the demultiplexer for a connection's coded path.
-func connBulkDemux(path *coded.Path, maxPayload uint32, queueFrames int) *bulkDemux {
+func connBulkDemux(path *coded.Path, queueFrames int) *bulkDemux {
 	if path == nil {
 		return nil
 	}
@@ -244,7 +244,7 @@ func connBulkDemux(path *coded.Path, maxPayload uint32, queueFrames int) *bulkDe
 	if existing, ok := bulkDemuxs.Load(path); ok {
 		return existing.(*bulkDemux)
 	}
-	created := newBulkDemux(path, maxPayload, queueFrames)
+	created := newBulkDemux(path, queueFrames)
 	bulkDemuxs.Store(path, created)
 	return created
 }

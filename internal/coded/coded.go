@@ -180,6 +180,12 @@ type Path struct {
 	sent     atomic.Uint64
 	repairs  atomic.Uint64
 	oversize atomic.Uint64
+	// malformed counts datagrams a peer sent that protocol 1 does not permit.
+	// It is kept apart from the erasure estimate on purpose: a rejected
+	// datagram is a peer disagreeing about the wire, and folding it into loss
+	// would have this path answer a non-conforming sender by buying more
+	// parity for a channel that is not erasing anything.
+	malformed atomic.Uint64
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -523,10 +529,21 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		if len(d) < repairHeader {
 			return nil
 		}
+		count := int(binary.BigEndian.Uint16(d[13:]))
+		// The count is two bytes on the wire and so can name a span of 65535,
+		// which is far wider than protocol 1 permits and would ask this
+		// receiver to solve over a system it has no obligation to hold. The
+		// bound belongs here, before the symbol reaches the decoder, because
+		// this is the last point that still knows the datagram came from a
+		// peer rather than from this process.
+		if count <= 0 || count > fec.MaxRepairWindow {
+			p.malformed.Add(1)
+			return nil
+		}
 		delivered = p.decoder.Repair(fec.RepairSymbol{
 			RID:    binary.BigEndian.Uint32(d[5:]),
 			First:  binary.BigEndian.Uint32(d[9:]),
-			Count:  int(binary.BigEndian.Uint16(d[13:])),
+			Count:  count,
 			Vector: d[repairHeader:],
 		})
 	default:
@@ -625,7 +642,11 @@ func (a *assembler) lost(esi uint32) {
 // moment that is certain: when no repair can still reach it. This covers the
 // case it cannot -- a symbol erased before anything had arrived to establish
 // that the stream had started, which the decoder has no evidence ever existed.
-const assemblerSlack = 512
+//
+// It is the decoder's own minimum width rather than a number of its own,
+// because a frame dropped here while the decoder could still repair its
+// symbols would throw away a repair that had already arrived and been solved.
+const assemblerSlack = fec.MinDecoderWidth
 
 func (a *assembler) prune() {
 	for first, group := range a.groups {
@@ -777,7 +798,7 @@ func (p *Path) coding() coding {
 	plan := fec.Choose(channel, params)
 	current := coding{plan: plan, capacity: initialWindow}
 	if plan.Code && plan.K > 0 {
-		current.capacity = plan.K
+		current.capacity = min(plan.K, fec.MaxRepairWindow)
 		current.rate = fec.WindowRate(current.capacity, channel, params)
 	}
 	p.code.Store(&current)
@@ -809,6 +830,9 @@ type Stats struct {
 	Recovered uint64
 	Lost      uint64
 	Oversize  uint64
+	// Malformed is datagrams rejected for breaking the protocol's bounds,
+	// which is a peer problem rather than a path problem.
+	Malformed uint64
 }
 
 // Stats reports what this path has done and what it believes.
@@ -825,6 +849,7 @@ func (p *Path) Stats() Stats {
 		Snapshot: snapshot, Plan: current.plan, Window: current.capacity,
 		Sent: p.sent.Load(), Repairs: p.repairs.Load(),
 		Recovered: recovered, Lost: lost, Oversize: p.oversize.Load(),
+		Malformed: p.malformed.Load(),
 	}
 }
 

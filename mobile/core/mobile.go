@@ -272,7 +272,7 @@ func (s *Session) start(opts sessionOptions) error {
 		ListenAddr: listener.Addr().String(), RemoteAddr: profile.Endpoint, LocalAddress: "",
 		SocketControl: s.socketControl(opts.requireSocketProtection), SOCKSAuth: opts.auth,
 		Credentials: credentials,
-		MaxPayload:  limits.maxPayload, ChunkSize: limits.chunkSize,
+		ChunkSize:   limits.chunkSize,
 		DialTimeout: 10 * time.Second, HandshakeTimeout: 30 * time.Second,
 		FlowIdleTimeout: 10 * time.Minute, FlowMaxLifetime: 6 * time.Hour,
 		MaxSessions: limits.maxSessions, MaxPendingOpens: limits.maxPendingOpens, Transport: pep.TransportAuto,

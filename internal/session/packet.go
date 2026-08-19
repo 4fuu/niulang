@@ -19,6 +19,24 @@ const (
 	maxUDPPayload           = 65507
 )
 
+// These numbers together fix the largest frame protocol 1 can require a
+// receiver to accept, which is why protocol.MaxPayload is the size it is. They
+// are exported so the conformance vectors can state that relationship rather
+// than leave it a coincidence between two packages.
+const (
+	// MaxDestinationLength bounds the canonical host:port a frame may name.
+	MaxDestinationLength = maxDestinationLength
+	// MaxUDPDatagram is the largest datagram a PACKET frame may carry: 65535
+	// less the 20-byte IP and 8-byte UDP headers.
+	MaxUDPDatagram = maxUDPPayload
+	// PacketDestinationPrefix is the width of a PACKET payload's leading
+	// destination-length field.
+	PacketDestinationPrefix = packetDestinationLength
+	// MaxPacketPayload is the largest legal PACKET payload, and therefore the
+	// floor under any receiver's frame payload limit.
+	MaxPacketPayload = PacketDestinationPrefix + MaxDestinationLength + MaxUDPDatagram
+)
+
 func IsUDPAssociation(payload []byte) bool {
 	return string(payload) == string(UDPAssociationMarker)
 }

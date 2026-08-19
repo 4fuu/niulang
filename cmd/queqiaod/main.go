@@ -417,7 +417,6 @@ func runEnroll(args []string) error {
 type runtimeOptions struct {
 	listen, localAddress, transport, tcpCongestion                  string
 	maxSessions, maxPendingOpens, tcpFallbackLanes                  int
-	maxPayload                                                      uint
 	chunkSize                                                       int
 	dialTimeout, handshakeTimeout, flowIdleTimeout, flowMaxLifetime time.Duration
 	quicPool, waitForOpenAck, udpOnStream                           bool
@@ -444,7 +443,6 @@ func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
 	}
 	fs.StringVar(&opts.listen, "listen", defaultListen, "listen address")
 	fs.IntVar(&opts.maxSessions, "max-sessions", defaultMaxSessions, "global concurrent-session limit")
-	fs.UintVar(&opts.maxPayload, "max-payload", 256*1024, "maximum frame payload")
 	fs.IntVar(&opts.chunkSize, "chunk-size", 32*1024, "stream data frame size")
 	fs.DurationVar(&opts.dialTimeout, "dial-timeout", 10*time.Second, "dial timeout")
 	fs.DurationVar(&opts.handshakeTimeout, "handshake-timeout", 10*time.Second, "TLS, protocol, and SOCKS handshake timeout")
@@ -494,8 +492,12 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 			return errors.New("client --listen must use a literal loopback IP; SOCKS has no remote authentication")
 		}
 	}
-	if opts.maxPayload == 0 || opts.maxPayload > 1<<20 || opts.chunkSize <= 0 || uint(opts.chunkSize) > opts.maxPayload {
-		return errors.New("invalid frame payload or chunk size")
+	// The receive limit is protocol.MaxPayload and is not configurable: two
+	// peers that disagree about it are mutually unintelligible in one direction
+	// with no negotiation to discover it. Only the sending chunk is a choice,
+	// and it must stay inside what the wire allows.
+	if opts.chunkSize <= 0 || opts.chunkSize > protocol.MaxPayload {
+		return fmt.Errorf("--chunk-size must be between 1 and %d bytes", protocol.MaxPayload)
 	}
 	if opts.transport != string(pep.TransportAuto) && opts.transport != string(pep.TransportQUIC) && opts.transport != string(pep.TransportTCP) {
 		return errors.New("--transport must be auto, quic, or tcp")
@@ -608,7 +610,7 @@ func runClient(args []string) (returnErr error) {
 	}
 	client, err := pep.NewClient(pep.ClientConfig{
 		ListenAddr: opts.listen, RemoteAddr: profile.Endpoint, LocalAddress: opts.localAddress,
-		Credentials: credentials, MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
+		Credentials: credentials, ChunkSize: opts.chunkSize,
 		DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
 		FlowIdleTimeout: opts.flowIdleTimeout, FlowMaxLifetime: opts.flowMaxLifetime,
 		MaxSessions: opts.maxSessions, MaxPendingOpens: opts.maxPendingOpens, Transport: pep.TransportKind(opts.transport),
@@ -666,7 +668,7 @@ func runServer(args []string) (returnErr error) {
 	service := &identity.EnrollmentService{Provider: provider}
 	server, err := pep.NewServer(pep.ServerConfig{
 		ListenAddr: opts.listen, Credentials: provider.ServerCredentials(), Enrollment: service,
-		MaxPayload: uint32(opts.maxPayload), ChunkSize: opts.chunkSize,
+		ChunkSize:        opts.chunkSize,
 		HandshakeTimeout: opts.handshakeTimeout, FlowIdleTimeout: opts.flowIdleTimeout,
 		FlowMaxLifetime: opts.flowMaxLifetime, MaxSessions: opts.maxSessions,
 		DestinationPolicy: pep.DestinationPolicy{AllowPrivate: opts.allowPrivate, DialTimeout: opts.dialTimeout},
@@ -788,7 +790,7 @@ func logRuntimeConfiguration(logger *slog.Logger, opts runtimeOptions, client bo
 		slog.String("transport", opts.transport),
 		slog.String("congestion", opts.congestion),
 		slog.Int("max_sessions", opts.maxSessions),
-		slog.Uint64("max_payload_bytes", uint64(opts.maxPayload)),
+		slog.Uint64("max_payload_bytes", uint64(protocol.MaxPayload)),
 		slog.Int("chunk_size_bytes", opts.chunkSize),
 		slog.Int("tcp_fallback_lanes", opts.tcpFallbackLanes),
 		slog.Bool("udp_on_stream", opts.udpOnStream),
