@@ -5,9 +5,10 @@
 > **Last reviewed:** 2026-08-19
 
 - Queqiao is a WAN optimization data plane, not an anonymity network. The
-  desktop ingress is SOCKS5 and the native mobile apps provide a full-device
-  VPN adapter; in both cases the provider observes destinations and traffic
-  shape.
+  desktop ingress is SOCKS5, the released Android app exports an authenticated
+  SOCKS5 endpoint to a separate routing client, and the iOS app is a
+  full-device packet tunnel; in every case the provider observes destinations
+  and traffic shape.
 - High loss by itself does not prove Queqiao's erasure model applies. Queue
   overflow, bursty wireless contention, shaping, route capture, and independent
   erasure require different responses and must be distinguished.
@@ -26,8 +27,6 @@
   implementation. They pin the wire and make a silent divergence loud, but no
   independent implementation has been checked against them yet, so protocol 1
   is documented rather than demonstrated interoperable.
-- The SOCKS listener has no password authentication and should remain on
-  loopback or another access-controlled interface.
 - Metrics have no authentication; bind them to loopback or protect them.
 - Provider state is an online high-value secret. Queqiao does not yet integrate
   a hardware security module or operating-system keychain for issuer keys.

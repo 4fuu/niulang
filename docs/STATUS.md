@@ -25,11 +25,12 @@ inside an overlay network. The common requirements are:
   that paired segment.
 
 The current repository packages that data plane as a SOCKS5 client and provider
-gateway, plus native mobile VPN adapters. It does not yet provide peer
-discovery, global route exchange, or a complete multi-egress mesh control
-plane. Those are integration layers, not limits on where the paired transport
-can be used. Queqiao is not an anonymity network, CDN, or universal replacement
-for the Internet's congestion control.
+gateway, plus native mobile clients: an Android app that exports an
+authenticated local SOCKS5 endpoint, and an iOS packet tunnel. It does not yet
+provide peer discovery, global route exchange, or a complete multi-egress mesh
+control plane. Those are integration layers, not limits on where the paired
+transport can be used. Queqiao is not an anonymity network, CDN, or universal
+replacement for the Internet's congestion control.
 
 ## Implemented in the current tree
 
