@@ -61,8 +61,11 @@
   owns the device tunnel supplies rules, per-app policy, and DNS. That client
   must exclude Queqiao's package from its tunnel; if it does not, Queqiao's own
   uplink is captured and the connection loops until it times out instead of
-  failing outright. Automatic detection is not attempted — the in-app
-  connection test is the check, and it is manual.
+  failing outright. The app detects the condition — Android's per-UID default
+  network answers it directly — but the answer is advisory: it names a likely
+  cause in the notification and in the connection test, and never blocks a
+  connection, because a VPN carrying Queqiao's uplink is not by itself proof of
+  a loop.
 - The iOS client is a full-device tunnel with a bounded routing subset, not a
   rule engine. It offers typed CIDR bypass, an experimental bundled registry
   set, and automatic connection rules; it does not offer per-app routing,

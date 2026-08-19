@@ -136,7 +136,9 @@ an authenticated SOCKS5 endpoint on loopback, and by doing nothing else. It
 declares no `VpnService`, holds no routing rules, and answers no DNS. The
 client that owns the device's tunnel decides what reaches Queqiao, and has to
 exclude Queqiao's own package from that tunnel or Queqiao's uplink is captured
-by it and the connection loops rather than failing.
+by it and the connection loops rather than failing. The app watches its own
+default network and says so when that happens, which is advice rather than
+enforcement.
 [Android export mode](ANDROID-EXPORT.md) covers the endpoint, the per-install
 credentials, the bypass step for each consumer client, and the setup snippets
 the app renders with the live values filled in.

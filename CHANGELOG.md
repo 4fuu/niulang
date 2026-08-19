@@ -21,11 +21,19 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   per-app exclusion step stated first because skipping it loops the uplink.
   Routing rules, per-app policy, and DNS stay with that client rather than
   being reimplemented here. See `docs/ANDROID-EXPORT.md`.
+- Detection of the one setup mistake Android export mode cannot survive: if
+  the consumer's tunnel is carrying Queqiao's own uplink, the notification and
+  the connection test name it instead of leaving a silent loop to time out.
+  The check reads the app's own default network, which Android reports per-UID,
+  and is advisory — it never blocks a connection.
 - RFC 1929 username/password authentication for the SOCKS5 listener, required
   in Android export mode because loopback is shared with every other app on
   the device. The desktop listener's behavior is unchanged.
 - Per-profile iOS bypass routes: hand-entered CIDR blocks kept off the tunnel,
-  refused rather than silently dropped when they do not parse.
+  refused rather than silently dropped when they do not parse. A list that
+  takes an entire address family off the tunnel is legal and left alone, but
+  said out loud in the routing screen and in the extension's diagnostics,
+  because otherwise it looks exactly like a broken gateway.
 - An experimental per-profile iOS option to keep APNIC address blocks delegated
   to China off the tunnel, backed by a reproducible, provenance-documented
   bundled route set and strict cross-language format tests.

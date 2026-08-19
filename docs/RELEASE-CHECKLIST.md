@@ -82,16 +82,21 @@ exact commit. Production-ready language has additional gates below.
   and lifecycle matrix on Wi-Fi and cellular, driven through a real consumer
   client — v2rayNG, mihomo, or sing-box — with Queqiao excluded from its
   tunnel.
-- [ ] Removing that exclusion is confirmed to fail loudly: the in-app
-  connection test reports an unreachable provider rather than the loop
-  degrading silently.
+- [ ] Removing that exclusion is confirmed to fail loudly: the notification
+  gains the `VPN not excluded` warning while the session is still up, and the
+  in-app connection test reports an unreachable provider naming the exclusion,
+  rather than the loop degrading silently. Restoring the exclusion clears the
+  warning without a reconnect.
 - [ ] Current physical iPhones pass signing, install, packet-tunnel TCP/UDP,
   IPv4/IPv6, DNS, per-profile probe, permission, revoke, sleep/wake,
   Wi-Fi/cellular transition, and reconnect tests.
 - [ ] Extension memory and `setTunnelNetworkSettings` latency are measured on a
   physical iPhone with the bundled route set enabled, against the profile in
-  [`MOBILE-MEMORY.md`](MOBILE-MEMORY.md). A regression drops the route bound
-  before the feature ships.
+  [`MOBILE-MEMORY.md`](MOBILE-MEMORY.md). The extension times both the plan
+  build and the settings install and records them in its diagnostics, so the
+  latency half is read from an exported log rather than from Instruments;
+  memory still needs the debugger. A regression drops the route bound before
+  the feature ships.
 - [ ] iOS automatic connection rules are exercised on hardware: a trusted Wi-Fi
   network keeps the tunnel down, a manual disconnect is not undone by the
   connect rule, and disabling the feature while disconnected takes effect

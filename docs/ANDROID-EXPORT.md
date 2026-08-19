@@ -19,8 +19,11 @@ The full-device tunnel still exists, in the debug build only. See
 
 ## What the released app declares
 
-- `INTERNET`, `POST_NOTIFICATIONS`, `FOREGROUND_SERVICE`, and
-  `FOREGROUND_SERVICE_SPECIAL_USE`.
+- `INTERNET`, `POST_NOTIFICATIONS`, `FOREGROUND_SERVICE`,
+  `FOREGROUND_SERVICE_SPECIAL_USE`, and `ACCESS_NETWORK_STATE`. The last is
+  read-only and serves one question — whether another app's VPN is carrying
+  Queqiao's own uplink — described under
+  [the exclusion check](#first-exclude-queqiao-from-the-consumers-tunnel).
 - One service, `QueqiaoProxyService`, type `specialUse`, with a subtype
   justification naming what it actually does: it serves a local SOCKS5 endpoint
   for a network client the user configured, and the connection has to outlive
@@ -28,7 +31,9 @@ The full-device tunnel still exists, in the debug build only. See
 - No `BIND_VPN_SERVICE`, no `android.net.VpnService` intent filter, and no
   always-on metadata. CI asserts this against the assembled release APK with
   `aapt2 dump xmltree`, so a stray manifest merge cannot reintroduce them
-  quietly.
+  quietly. The same step pins the permission list above exactly: a permission
+  arriving from a merged library manifest fails the build rather than shipping,
+  and widening the list is a deliberate edit with a reason attached.
 
 Google Play's Organization requirement is scoped to *apps approved to use the
 `VpnService` class*, which a release build declaring no `VpnService` is not.
@@ -74,12 +79,25 @@ own outbound, and that outbound is this listener. Traffic then loops until it
 times out rather than failing outright, which is the worst of both: no error,
 no throughput.
 
-Robust automatic detection is not attempted. What the app offers instead is an
-explicit check: open a profile and run **Test connection** with the consumer's
-tunnel up. The probe measures DNS, transport setup, mutual TLS, device
-authorization, protocol negotiation, and one authenticated control round trip,
-and opens no remote destination. A loop shows there as a provider that cannot
-be reached — loudly, and before any real traffic is affected.
+The app checks whether it happened. Android answers the question directly,
+because the default network it reports is *per-UID*: a VPN that excluded
+Queqiao is not Queqiao's default network, so `TRANSPORT_VPN` on this app's own
+active network means the exclusion was not applied. `VpnExclusion` asks at
+connect time and then keeps a default-network callback registered, because the
+usual ordering is Queqiao first and the consumer's tunnel second.
+
+The answer is advisory and never blocks a connection. A VPN carrying Queqiao's
+uplink is not proof of a loop: a corporate VPN the gateway is reachable through
+is a legitimate setup, and so is a consumer client whose rules send the gateway
+address direct. What the check buys is a named cause instead of a guess — the
+notification reads `VPN not excluded`, the log carries the instruction, and a
+failed connection test leads with the diagnosis rather than a bare timeout.
+
+**Test connection** remains the explicit check, and the one to run after
+configuring a client. The probe measures DNS, transport setup, mutual TLS,
+device authorization, protocol negotiation, and one authenticated control round
+trip, and opens no remote destination. A loop shows there as a provider that
+cannot be reached — loudly, and before any real traffic is affected.
 
 The same reasoning applies in reverse to the debug tunnel: a mode that captures
 the app's own sockets answers no to `allowsProviderTestWhileConnected`, because
@@ -182,5 +200,9 @@ The end-to-end check this mode needs, on hardware:
    notification shows the listen address.
 2. Configure v2rayNG with Queqiao excluded from its tunnel; confirm egress
    through the gateway and that `UDP ASSOCIATE` carries UDP.
-3. Remove the exclusion and confirm the failure is loud — Test connection
-   reports an unreachable provider — rather than a silent slow degrade.
+3. Remove the exclusion and confirm the failure is loud rather than a silent
+   slow degrade: the notification gains `VPN not excluded` while the session is
+   still up, and Test connection reports an unreachable provider with the
+   exclusion named as the likely cause.
+4. Re-apply the exclusion without disconnecting and confirm the warning clears
+   on its own — the default-network callback, not a reconnect, is what notices.
