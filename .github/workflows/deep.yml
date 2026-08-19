@@ -59,7 +59,10 @@ jobs:
   # The race detector costs this tree roughly an order of magnitude in the
   # erasure code -- internal/fec alone takes seven minutes on a 32-core
   # machine -- so it gets its own job and a long timeout rather than sharing
-  # one with the suite above. Go does not support -race on Windows/arm64.
+  # one with the suite above. Packages are serialized because that CPU-bound
+  # work otherwise runs beside the wall-clock network emulators and can make a
+  # healthy 300 ms path consume a production-sized transport deadline. Go does
+  # not support -race on Windows/arm64.
   race:
     timeout-minutes: 120
     strategy:
@@ -77,7 +80,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - run: go test -race -timeout 110m ./...
+      - run: go test -p=1 -race -timeout 110m ./...
 
   # Reachability-aware scanning against Go's official vulnerability database.
   # The tool version is pinned so a scanner release cannot change a campaign
