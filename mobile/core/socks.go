@@ -249,7 +249,10 @@ func (a *socksUDPAssociation) WriteTo(payload []byte, destination netip.AddrPort
 }
 
 func (a *socksUDPAssociation) ReadFrom(payload []byte, expected netip.AddrPort) (int, error) {
-	packet := make([]byte, maxUDPPacket+22)
+	// The caller chooses its bounded datagram capacity. Reserving 64 KiB here
+	// for every active UDP flow multiplied memory even though a 1,280-byte TUN
+	// normally carries sub-1,232-byte payloads.
+	packet := make([]byte, len(payload)+22)
 	n, err := a.packet.Read(packet)
 	if err != nil {
 		return 0, err

@@ -43,8 +43,7 @@ func (d *callbackPacketDevice) Write(packet []byte) (n int, err error) {
 			n, err = 0, errors.New("platform packet writer panicked")
 		}
 	}()
-	copyForPlatform := append([]byte(nil), packet...)
-	if !d.packetIO.WritePacket(copyForPlatform) {
+	if !d.packetIO.WritePacket(packet) {
 		return 0, io.ErrClosedPipe
 	}
 	return len(packet), nil

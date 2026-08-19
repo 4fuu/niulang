@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"syscall"
@@ -61,6 +62,7 @@ type Session struct {
 	metrics   *metrics.Registry
 	done      chan struct{}
 	runErr    error
+	resources mobileResourceLimits
 }
 
 func NewSession(observer Observer, protector Protector) *Session {
@@ -76,9 +78,10 @@ func (s *Session) Start(profileJSON string, tunFD, packetOffset, mtu int64, requ
 	if tunFD < 0 || packetOffset < 0 || packetOffset > 4 || mtu < 0 || mtu > maximumMTU {
 		return errors.New("invalid tunnel descriptor configuration")
 	}
-	return s.start(profileJSON, requireSocketProtection,
+	limits := androidResourceLimits
+	return s.start(profileJSON, requireSocketProtection, limits,
 		func(ctx context.Context, proxy socksClient, log func(string, string)) (*packetStack, error) {
-			return newPacketStack(ctx, int(tunFD), int(packetOffset), int(mtu), defaultMaxSessions, proxy, log)
+			return newPacketStack(ctx, int(tunFD), int(packetOffset), int(mtu), limits.maxSessions, proxy, log)
 		})
 }
 
@@ -91,15 +94,16 @@ func (s *Session) StartPacketFlow(profileJSON string, packetIO PacketIO, mtu int
 	if packetIO == nil || mtu < 0 || mtu > maximumMTU {
 		return errors.New("invalid packet-flow configuration")
 	}
-	return s.start(profileJSON, false,
+	limits := iosResourceLimits
+	return s.start(profileJSON, false, limits,
 		func(ctx context.Context, proxy socksClient, log func(string, string)) (*packetStack, error) {
-			return newPacketStackWithDevice(ctx, &callbackPacketDevice{packetIO: packetIO}, 0, int(mtu), defaultMaxSessions, proxy, log)
+			return newPacketStackWithDevice(ctx, &callbackPacketDevice{packetIO: packetIO}, 0, int(mtu), limits.maxSessions, proxy, log)
 		})
 }
 
 type packetStackFactory func(context.Context, socksClient, func(string, string)) (*packetStack, error)
 
-func (s *Session) start(profileJSON string, requireSocketProtection bool, makePacketStack packetStackFactory) error {
+func (s *Session) start(profileJSON string, requireSocketProtection bool, limits mobileResourceLimits, makePacketStack packetStackFactory) error {
 	s.mu.Lock()
 	if s.state != StateStopped {
 		state := s.state
@@ -114,6 +118,7 @@ func (s *Session) start(profileJSON string, requireSocketProtection bool, makePa
 	s.runErr = nil
 	s.mu.Unlock()
 	s.notifyState(StateStarting)
+	applyRuntimeLimits(limits)
 
 	profile, err := decodeProfile(profileJSON)
 	if err != nil {
@@ -137,15 +142,18 @@ func (s *Session) start(profileJSON string, requireSocketProtection bool, makePa
 		// VPN itself after its default route is installed.
 		ListenAddr: listener.Addr().String(), RemoteAddr: profile.Endpoint, LocalAddress: "",
 		SocketControl: s.socketControl(requireSocketProtection), Credentials: credentials,
-		MaxPayload: 256 * 1024, ChunkSize: 32 * 1024,
+		MaxPayload: limits.maxPayload, ChunkSize: limits.chunkSize,
 		DialTimeout: 10 * time.Second, HandshakeTimeout: 30 * time.Second,
-		FlowIdleTimeout: 30 * time.Minute, FlowMaxLifetime: 24 * time.Hour,
-		MaxSessions: defaultMaxSessions, Transport: pep.TransportAuto,
+		FlowIdleTimeout: 10 * time.Minute, FlowMaxLifetime: 6 * time.Hour,
+		MaxSessions: limits.maxSessions, MaxPendingOpens: limits.maxPendingOpens, Transport: pep.TransportAuto,
 		TCPFallbackLanes: 0, EnableQUICPool: true, WaitForOpenAcknowledgement: false,
 		UDPOnStream: false, Congestion: pep.CongestionErasure,
 		AdaptiveMinBytesSec: 64 * 1024, AdaptiveMaxBytesSec: 200 * 1024 * 1024,
 		FallbackDelay: 300 * time.Millisecond, FallbackGrace: 2 * time.Second,
 		UDPFailureThreshold: 3, UDPCooldown: 30 * time.Second,
+		StreamReceiveWindow: limits.streamWindow, ConnectionReceiveWindow: limits.connectionWindow,
+		MaxStreamReceiveWindow: limits.streamWindow, MaxConnectionReceiveWindow: limits.connectionWindow,
+		MaxIncomingStreams: limits.maxIncomingStreams, MemoryLimits: &limits.memory,
 		Metrics: registry, Logger: logger,
 	})
 	if err != nil {
@@ -170,6 +178,7 @@ func (s *Session) start(profileJSON string, requireSocketProtection bool, makePa
 		return errors.New("tunnel start was interrupted")
 	}
 	s.cancel, s.listener, s.packet, s.client, s.metrics, s.done = cancel, listener, packet, client, registry, done
+	s.resources = limits
 	s.state = StateRunning
 	s.mu.Unlock()
 
@@ -255,6 +264,7 @@ func (s *Session) run(ctx context.Context, cancel context.CancelFunc, client *pe
 	cancel()
 	_ = listener.Close()
 	packetErr := packet.Close()
+	debug.FreeOSMemory()
 	if packetErr != nil && unexpected {
 		err = packetErr
 	}
@@ -323,7 +333,7 @@ func (s *Session) State() string {
 
 func (s *Session) MetricsJSON() string {
 	s.mu.Lock()
-	state, registry, packet := s.state, s.metrics, s.packet
+	state, registry, packet, client, resources := s.state, s.metrics, s.packet, s.client, s.resources
 	s.mu.Unlock()
 	var transport any = struct{}{}
 	if registry != nil {
@@ -333,14 +343,30 @@ func (s *Session) MetricsJSON() string {
 	if packet != nil {
 		packets = packet.snapshot()
 	}
+	var memoryStats runtime.MemStats
+	runtime.ReadMemStats(&memoryStats)
+	var payload any = struct{}{}
+	if client != nil {
+		payload = client.MemoryStats()
+	}
 	encoded, err := json.Marshal(struct {
 		Version   int    `json:"version"`
 		State     string `json:"state"`
 		Packets   any    `json:"packets"`
 		Transport any    `json:"transport"`
-	}{Version: 1, State: state, Packets: packets, Transport: transport})
+		Memory    any    `json:"memory"`
+	}{Version: 2, State: state, Packets: packets, Transport: transport, Memory: struct {
+		Profile   string `json:"profile"`
+		GoLimit   int64  `json:"go_limit_bytes"`
+		HeapAlloc uint64 `json:"heap_alloc_bytes"`
+		HeapInuse uint64 `json:"heap_inuse_bytes"`
+		Payload   any    `json:"payload"`
+	}{
+		Profile: resources.name, GoLimit: resources.goMemoryLimit,
+		HeapAlloc: memoryStats.HeapAlloc, HeapInuse: memoryStats.HeapInuse, Payload: payload,
+	}})
 	if err != nil {
-		return `{"version":1,"state":"failed"}`
+		return `{"version":2,"state":"failed"}`
 	}
 	return string(encoded)
 }
@@ -588,6 +614,13 @@ func Version() string {
 		return info.Main.Version
 	}
 	return "development"
+}
+
+// ReleaseMemory asks the Go runtime to return idle pages to the operating
+// system. Platform memory-pressure callbacks use it as a best-effort response;
+// correctness never depends on it because retained payloads have hard budgets.
+func ReleaseMemory() {
+	debug.FreeOSMemory()
 }
 
 func decodeProfile(encoded string) (identity.ClientProfile, error) {

@@ -28,12 +28,19 @@ import (
 )
 
 const (
-	defaultMTU         = 1280
-	maximumMTU         = 9000
-	defaultMaxSessions = 2048
-	linkQueueLength    = 1024
-	copyBufferSize     = 32 * 1024
-	udpIdleTimeout     = 2 * time.Minute
+	defaultMTU          = 1280
+	maximumMTU          = 9000
+	defaultMaxSessions  = 128
+	linkQueueLength     = 64
+	copyBufferSize      = 8 * 1024
+	udpPacketBufferSize = 4 * 1024
+	udpIdleTimeout      = 2 * time.Minute
+)
+
+const (
+	endpointBufferMinimum = 4 * 1024
+	endpointBufferDefault = 32 * 1024
+	endpointBufferMaximum = 64 * 1024
 )
 
 type packetStack struct {
@@ -135,6 +142,35 @@ func (p *packetStack) initialize() error {
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
+	// gVisor's desktop defaults are generous per endpoint. With dozens of
+	// mobile flows they become the dominant multiplicative allocation, so keep
+	// TCP and generic socket buffers within a small, explicit range. Full
+	// buffers naturally advertise a smaller TCP receive window and backpressure
+	// the application instead of growing the process.
+	if err := p.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPSendBufferSizeRangeOption{
+		Min: endpointBufferMinimum, Default: endpointBufferDefault, Max: endpointBufferMaximum,
+	}); err != nil {
+		return fmt.Errorf("bound TCP send buffers: %s", err)
+	}
+	if err := p.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpip.TCPReceiveBufferSizeRangeOption{
+		Min: endpointBufferMinimum, Default: endpointBufferDefault, Max: endpointBufferMaximum,
+	}); err != nil {
+		return fmt.Errorf("bound TCP receive buffers: %s", err)
+	}
+	moderateReceive := tcpip.TCPModerateReceiveBufferOption(false)
+	if err := p.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &moderateReceive); err != nil {
+		return fmt.Errorf("disable TCP receive-buffer growth: %s", err)
+	}
+	if err := p.stack.SetOption(tcpip.SendBufferSizeOption{
+		Min: endpointBufferMinimum, Default: endpointBufferDefault, Max: endpointBufferMaximum,
+	}); err != nil {
+		return fmt.Errorf("bound socket send buffers: %s", err)
+	}
+	if err := p.stack.SetOption(tcpip.ReceiveBufferSizeOption{
+		Min: endpointBufferMinimum, Default: endpointBufferDefault, Max: endpointBufferMaximum,
+	}); err != nil {
+		return fmt.Errorf("bound socket receive buffers: %s", err)
+	}
 	nicID := p.stack.NextNICID()
 	if err := p.stack.CreateNIC(nicID, p.link); err != nil {
 		return fmt.Errorf("create virtual network interface: %s", err)
@@ -201,8 +237,8 @@ func (p *packetStack) snapshot() packetStackSnapshot {
 
 func (p *packetStack) pumpTUNToStack() {
 	defer p.wg.Done()
+	packet := make([]byte, p.offset+p.mtu)
 	for {
-		packet := make([]byte, p.offset+p.mtu)
 		n, err := p.tun.Read(packet)
 		if err != nil {
 			if p.ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
@@ -231,6 +267,7 @@ func (p *packetStack) pumpTUNToStack() {
 
 func (p *packetStack) pumpStackToTUN() {
 	defer p.wg.Done()
+	packet := make([]byte, p.offset+p.mtu)
 	for {
 		pkt := p.link.ReadContext(p.ctx)
 		if pkt == nil {
@@ -245,18 +282,24 @@ func (p *packetStack) pumpStackToTUN() {
 			pkt.DecRef()
 			continue
 		}
-		packet := make([]byte, p.offset+len(payload))
+		if len(payload) > p.mtu {
+			p.malformed.Add(1)
+			view.Release()
+			pkt.DecRef()
+			continue
+		}
+		out := packet[:p.offset+len(payload)]
 		if p.offset == 4 {
 			family := uint32(unix.AF_INET)
 			if protocol == ipv6.ProtocolNumber {
 				family = unix.AF_INET6
 			}
-			binary.BigEndian.PutUint32(packet[:4], family)
+			binary.BigEndian.PutUint32(out[:4], family)
 		}
-		copy(packet[p.offset:], payload)
+		copy(out[p.offset:], payload)
 		view.Release()
 		pkt.DecRef()
-		if err := writeFull(p.tun, packet); err != nil {
+		if err := writeFull(p.tun, out); err != nil {
 			if p.ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
 				return
 			}
@@ -421,7 +464,7 @@ func bridgeUDP(parent context.Context, inner *gonet.UDPConn, outer *socksUDPAsso
 	refresh()
 	go func() {
 		defer func() { done <- struct{}{} }()
-		buffer := make([]byte, maxUDPPacket)
+		buffer := make([]byte, udpPacketBufferSize)
 		for {
 			n, err := inner.Read(buffer)
 			if err != nil || outer.WriteTo(buffer[:n], destination) != nil {
@@ -432,7 +475,7 @@ func bridgeUDP(parent context.Context, inner *gonet.UDPConn, outer *socksUDPAsso
 	}()
 	go func() {
 		defer func() { done <- struct{}{} }()
-		buffer := make([]byte, maxUDPPacket)
+		buffer := make([]byte, udpPacketBufferSize)
 		for {
 			n, err := outer.ReadFrom(buffer, destination)
 			if err != nil || writeFull(inner, buffer[:n]) != nil {

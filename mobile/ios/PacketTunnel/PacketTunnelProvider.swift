@@ -83,7 +83,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
-        let metrics = lifecycle.currentSession?.metricsJSON() ?? "{\"version\":1,\"state\":\"stopped\"}"
+        let metrics = lifecycle.currentSession?.metricsJSON() ?? "{\"version\":2,\"state\":\"stopped\"}"
         completionHandler?(metrics.data(using: .utf8))
     }
 

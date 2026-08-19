@@ -14,6 +14,7 @@ import android.os.ParcelFileDescriptor;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import mobilecore.Mobilecore;
 import mobilecore.Observer;
@@ -33,10 +34,12 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
     private static final String NOTIFICATION_CHANNEL = "queqiao_vpn";
     private static final int NOTIFICATION_ID = 1001;
     private static final int MTU = 1280;
-    private static final long METRICS_INTERVAL_MILLIS = 1000;
+    private static final long METRICS_INTERVAL_MILLIS = 5000;
 
     private final Object lifecycleLock = new Object();
     private final AtomicBoolean stopping = new AtomicBoolean();
+    private final AtomicBoolean releasingMemory = new AtomicBoolean();
+    private final AtomicLong lifecycleGeneration = new AtomicLong();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private boolean startInProgress;
     private Session session;
@@ -98,6 +101,7 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
         }
 
         startForeground(NOTIFICATION_ID, notification("Starting", false));
+        long generation;
         synchronized (lifecycleLock) {
             if (session != null) {
                 if (!requestedProfileId.equals(activeProfileId)) {
@@ -115,16 +119,20 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
                 return START_STICKY;
             }
             startInProgress = true;
+            generation = lifecycleGeneration.incrementAndGet();
             activeProfileId = requestedProfileId;
         }
         Thread worker = new Thread(
-                () -> startTunnel(requestedProfileId),
+                () -> startTunnel(requestedProfileId, generation),
                 "queqiao-vpn-start");
         worker.start();
         return START_STICKY;
     }
 
-    private void startTunnel(String profileId) {
+    private void startTunnel(String profileId, long generation) {
+        ParcelFileDescriptor established = null;
+        Session newSession = null;
+        boolean installed = false;
         try {
             ProfileRepository repository = new ProfileRepository(this);
             ProfileRepository.ActiveProfile active = repository.profile(profileId);
@@ -141,9 +149,9 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
                     throw new GeneralSecurityException("The renewed Queqiao profile is unavailable");
                 }
             }
-            activeProfileName = active.record.displayName;
+            String profileName = active.record.displayName;
             Builder builder = new Builder()
-                    .setSession("Queqiao — " + active.record.displayName)
+                    .setSession("Queqiao — " + profileName)
                     .setMtu(MTU)
                     // Excluding our UID ensures identity renewal cannot re-enter the VPN.
                     // Individual outer sockets are protected as an independent boundary.
@@ -154,27 +162,102 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
                     .addDnsServer("2606:4700:4700::1111")
                     .setBlocking(false);
             RoutePolicy.apply(builder, active.record.trafficPolicy);
-            ParcelFileDescriptor established = builder.establish();
+            if (!isCurrentStart(generation)) {
+                return;
+            }
+            established = builder.establish();
             if (established == null) {
                 throw new IOException("Android refused to establish the VPN interface");
             }
-            Session newSession = Mobilecore.newSession(this, this);
+            newSession = Mobilecore.newSession(new GenerationObserver(generation), this);
             synchronized (lifecycleLock) {
-                if (stopping.get()) {
+                if (generation != lifecycleGeneration.get() || stopping.get()) {
                     established.close();
                     return;
                 }
+                activeProfileName = profileName;
                 tunnel = established;
-                session = newSession;
             }
             newSession.start(profile, established.getFd(), 0, MTU, true);
-        } catch (Exception exception) {
-            publishState(Mobilecore.StateFailed, safeMessage(exception), null);
-            stopTunnel("Connection failed");
-        } finally {
             synchronized (lifecycleLock) {
-                startInProgress = false;
+                installed = generation == lifecycleGeneration.get()
+                        && !stopping.get() && tunnel == established;
+                if (installed) {
+                    session = newSession;
+                }
             }
+            if (installed) {
+                mainHandler.post(metricsPublisher);
+            }
+        } catch (Exception exception) {
+            if (generation == lifecycleGeneration.get() && !stopping.get()) {
+                publishState(Mobilecore.StateFailed, safeMessage(exception), null);
+                stopTunnel("Connection failed");
+            }
+        } finally {
+            if (!installed) {
+                if (newSession != null) {
+                    try {
+                        newSession.stop();
+                    } catch (Exception ignored) {
+                        // A superseded startup owns no observable tunnel state.
+                    }
+                }
+                synchronized (lifecycleLock) {
+                    if (tunnel == established) {
+                        tunnel = null;
+                    }
+                }
+                if (established != null) {
+                    try {
+                        established.close();
+                    } catch (IOException ignored) {
+                        // The stop path may already have closed it.
+                    }
+                }
+            }
+            synchronized (lifecycleLock) {
+                if (generation == lifecycleGeneration.get()) {
+                    startInProgress = false;
+                }
+            }
+        }
+    }
+
+    private boolean isCurrentStart(long generation) {
+        synchronized (lifecycleLock) {
+            return generation == lifecycleGeneration.get() && startInProgress && !stopping.get();
+        }
+    }
+
+    private final class GenerationObserver implements Observer {
+        private final long generation;
+
+        GenerationObserver(long generation) {
+            this.generation = generation;
+        }
+
+        private boolean current() {
+            return generation == lifecycleGeneration.get() && !stopping.get();
+        }
+
+        @Override
+        public void onStateChanged(String state) {
+            if (current()) {
+                QueqiaoVpnService.this.onStateChanged(state);
+            }
+        }
+
+        @Override
+        public void onLog(String level, String message) {
+            if (current()) {
+                QueqiaoVpnService.this.onLog(level, message);
+            }
+        }
+
+        @Override
+        public boolean onProfileUpdated(String profileJson) {
+            return current() && QueqiaoVpnService.this.onProfileUpdated(profileJson);
         }
     }
 
@@ -249,6 +332,33 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
     }
 
     @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            releaseIdleMemory();
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        releaseIdleMemory();
+    }
+
+    private void releaseIdleMemory() {
+        if (!releasingMemory.compareAndSet(false, true)) {
+            return;
+        }
+        new Thread(() -> {
+            try {
+                Mobilecore.releaseMemory();
+            } finally {
+                releasingMemory.set(false);
+            }
+        }, "queqiao-memory-release").start();
+    }
+
+    @Override
     public IBinder onBind(Intent intent) {
         return super.onBind(intent);
     }
@@ -257,6 +367,7 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
         if (!stopping.compareAndSet(false, true)) {
             return;
         }
+        lifecycleGeneration.incrementAndGet();
         mainHandler.removeCallbacks(metricsPublisher);
         Session oldSession;
         ParcelFileDescriptor oldTunnel;
@@ -265,6 +376,7 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
             oldTunnel = tunnel;
             session = null;
             tunnel = null;
+            startInProgress = false;
         }
         if (oldSession != null) {
             try {
@@ -327,6 +439,10 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
     }
 
     private Notification notification(String state, boolean connected) {
+        String profileName;
+        synchronized (lifecycleLock) {
+            profileName = activeProfileName;
+        }
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent contentIntent = PendingIntent.getActivity(
                 this,
@@ -340,7 +456,7 @@ public final class QueqiaoVpnService extends VpnService implements Observer, Pro
                 1,
                 disconnect,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        String detail = activeProfileName == null ? state : activeProfileName + " · " + state;
+        String detail = profileName == null ? state : profileName + " · " + state;
         Notification.Builder builder = new Notification.Builder(this, NOTIFICATION_CHANNEL)
                 .setSmallIcon(R.drawable.ic_queqiao)
                 .setContentTitle("Queqiao")
