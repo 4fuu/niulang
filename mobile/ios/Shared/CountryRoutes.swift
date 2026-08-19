@@ -51,18 +51,28 @@ enum CountryRoutes {
         return try decode(Data(contentsOf: url, options: .mappedIfSafe))
     }
 
+    /// How many blocks the bundled set holds, without parsing it.
+    ///
+    /// The counts sit in the header, so a screen can say how heavy the toggle
+    /// is — several thousand routes, not a handful — without building or
+    /// holding the prefixes. A claim the UI cannot substantiate is worse than
+    /// no claim, and this one costs sixteen bytes.
+    static func blockCount(in bundle: Bundle = .main) throws -> Int {
+        guard let url = bundle.url(forResource: chinaResource, withExtension: "bin") else {
+            throw Failure.resourceMissing(chinaResource)
+        }
+        let mapped = try Data(contentsOf: url, options: .mappedIfSafe)
+        let counted = try counts(in: [UInt8](mapped.prefix(headerSize)))
+        return counted.ipv4 + counted.ipv6
+    }
+
     /// Reads the packed form. The layout is fixed-width and little else: a
     /// 16-byte header, then 5 bytes per IPv4 block and 17 per IPv6 block, all
     /// big-endian. scripts/test_cn_geoip.py holds the other half of this
     /// contract.
     static func decode(_ data: Data) throws -> [IPPrefix] {
         let bytes = [UInt8](data)
-        guard bytes.count >= headerSize, Array(bytes[0..<4]) == magic else {
-            throw Failure.notARouteSet
-        }
-        guard bytes[4] == formatVersion else { throw Failure.unsupportedVersion(bytes[4]) }
-        let ipv4Count = Int(readBigEndian32(bytes, at: 8))
-        let ipv6Count = Int(readBigEndian32(bytes, at: 12))
+        let (ipv4Count, ipv6Count) = try counts(in: bytes)
         let expected = headerSize + ipv4EntrySize * ipv4Count + ipv6EntrySize * ipv6Count
         guard bytes.count == expected else {
             throw Failure.truncated(expected: expected, found: bytes.count)
@@ -87,6 +97,15 @@ enum CountryRoutes {
             offset += ipv6EntrySize
         }
         return prefixes
+    }
+
+    /// Validates the header and returns the two block counts it carries.
+    private static func counts(in bytes: [UInt8]) throws -> (ipv4: Int, ipv6: Int) {
+        guard bytes.count >= headerSize, Array(bytes[0..<4]) == magic else {
+            throw Failure.notARouteSet
+        }
+        guard bytes[4] == formatVersion else { throw Failure.unsupportedVersion(bytes[4]) }
+        return (Int(readBigEndian32(bytes, at: 8)), Int(readBigEndian32(bytes, at: 12)))
     }
 
     private static func readBigEndian32(_ bytes: [UInt8], at offset: Int) -> UInt32 {

@@ -31,6 +31,11 @@ targets:
       - path: Shared
       - path: ../legal/THIRD_PARTY_NOTICES.txt
         buildPhase: resources
+      # The app reads the country set's header so the routing screen can say
+      # how many routes the toggle installs. The extension carries its own copy
+      # because an app extension cannot read the containing app's bundle.
+      - path: PacketTunnel/Resources
+        buildPhase: resources
     dependencies:
       - target: PacketTunnel
         embed: true

@@ -106,6 +106,16 @@ struct RoutePlan: Sendable, Equatable {
             }
     }
 
+    /// Whether some entry takes an entire address family off the tunnel.
+    ///
+    /// A zero-length prefix is legal, occasionally deliberate, and almost never
+    /// what someone meant: the tunnel connects and then carries nothing, which
+    /// looks exactly like a broken gateway. Callers surface it; RoutePlan does
+    /// not silently drop it, because a user who typed it may have meant it.
+    var excludesDefaultRoute: Bool {
+        excluded.contains { $0.length == 0 }
+    }
+
     /// A single line for the diagnostic ring, so a truncated or partly rejected
     /// plan leaves a trace the user can find later.
     var diagnosticSummary: String {

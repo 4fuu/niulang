@@ -201,6 +201,27 @@ final class RoutePlanTests: XCTestCase {
         XCTAssertTrue(plan.diagnosticSummary.contains("1 dropped at the route limit"))
     }
 
+    // MARK: the whole-family footgun
+
+    func testAZeroLengthEntryIsReportedRatherThanDroppedOrIgnored() {
+        // Legal, occasionally deliberate, and almost never meant: the tunnel
+        // connects and then carries nothing. RoutePlan keeps it and says so;
+        // silently dropping it would override someone who meant it, and
+        // silently keeping it would look like a broken gateway.
+        let plan = RoutePlan.make(userRoutes: ["0.0.0.0/0"])
+        XCTAssertTrue(plan.excludesDefaultRoute)
+        XCTAssertEqual(plan.excluded.map(\.cidrText), ["0.0.0.0/0"])
+
+        XCTAssertTrue(RoutePlan.make(userRoutes: ["::/0"]).excludesDefaultRoute)
+        XCTAssertTrue(RoutePlan.make(userRoutes: ["10.0.0.0/8", "::/0"]).excludesDefaultRoute)
+    }
+
+    func testAnOrdinaryPlanDoesNotClaimToCoverAFamily() {
+        XCTAssertFalse(RoutePlan.make(userRoutes: ["10.0.0.0/8", "2001:db8::/32"]).excludesDefaultRoute)
+        XCTAssertFalse(RoutePlan.localNetworkPlan().excludesDefaultRoute)
+        XCTAssertFalse(RoutePlan.empty.excludesDefaultRoute)
+    }
+
     func testUserRoutesKeepTheirPlaceWhenTheBuiltInSetIsTooLarge() throws {
         // Spaced two apart so no pair is a sibling: the point of this test is
         // the limit, not coalescing.

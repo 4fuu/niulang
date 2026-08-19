@@ -124,6 +124,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         try? DiagnosticStore().append(level: level, component: "Packet tunnel", message: message)
     }
 
+    private func elapsedMilliseconds(since start: UInt64) -> UInt64 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        return now >= start ? (now - start) / 1_000_000 : 0
+    }
+
     private func configureTunnel(
         profile: String,
         routing: TunnelRouting,
@@ -131,11 +136,29 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         startup: StartupAttempt,
         completion: OneShotErrorCompletion
     ) {
+        let planStartedAt = DispatchTime.now().uptimeNanoseconds
         let plan = routePlan(for: routing)
-        recordDiagnostic(level: .info, "Route plan: \(plan.diagnosticSummary)")
-        setTunnelNetworkSettings(
-            makeNetworkSettings(plan: plan, remoteAddress: remoteAddress)
-        ) { [self] error in
+        let settings = TunnelNetworkSettings.make(plan: plan, remoteAddress: remoteAddress)
+        recordDiagnostic(
+            level: .info,
+            "Route plan: \(plan.diagnosticSummary), built in \(elapsedMilliseconds(since: planStartedAt)) ms"
+        )
+        if plan.excludesDefaultRoute {
+            // Not an error — someone may want exactly this while testing — but
+            // it means the tunnel connects and then carries nothing, which is
+            // indistinguishable from a broken gateway unless it is said here.
+            recordDiagnostic(
+                level: .warning,
+                "A bypass route covers an entire address family, so that traffic will not use the tunnel"
+            )
+        }
+        // Installing several thousand exclusions is the one part of startup that
+        // scales with configuration, and docs/RELEASE-CHECKLIST.md gates the
+        // bundled country set on measuring it. Timing it here means the number
+        // comes out of a device's own diagnostics rather than out of Instruments.
+        let settingsStartedAt = DispatchTime.now().uptimeNanoseconds
+        setTunnelNetworkSettings(settings) { [self] error in
+            let settingsMilliseconds = elapsedMilliseconds(since: settingsStartedAt)
             if let error {
                 recordDiagnostic(
                     level: .error,
@@ -145,6 +168,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
                 lifecycle.invalidate(startup)
                 return
             }
+            recordDiagnostic(
+                level: .info,
+                "Applied \(plan.excluded.count) bypass routes in \(settingsMilliseconds) ms"
+            )
             // Returning from Apple's settings callback promptly is important:
             // cold initialization of the statically linked Go/gVisor runtime
             // must not block NetworkExtension's internal callback queue.
@@ -200,7 +227,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
                 throw TunnelError.coreStopped
             }
             packetBridge.start()
-            try newSession.startChecked(profile: profile, packetIO: packetBridge, mtu: 1_280)
+            try newSession.startChecked(
+                profile: profile,
+                packetIO: packetBridge,
+                mtu: TunnelNetworkSettings.mtu
+            )
             guard lifecycle.install(
                 session: newSession,
                 bridge: packetBridge,
@@ -239,34 +270,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, MobilecoreObserverProt
         }
     }
 
-    private func makeNetworkSettings(
-        plan: RoutePlan,
-        remoteAddress: String
-    ) -> NEPacketTunnelNetworkSettings {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
-        settings.mtu = 1_280
-
-        let ipv4 = NEIPv4Settings(addresses: ["10.77.0.2"], subnetMasks: ["255.255.255.255"])
-        ipv4.includedRoutes = [.default()]
-        let ipv4Excluded = plan.ipv4Routes
-        if !ipv4Excluded.isEmpty {
-            ipv4.excludedRoutes = ipv4Excluded
-        }
-        settings.ipv4Settings = ipv4
-
-        let ipv6 = NEIPv6Settings(addresses: ["fd77:7171:6f::2"], networkPrefixLengths: [128])
-        ipv6.includedRoutes = [.default()]
-        let ipv6Excluded = plan.ipv6Routes
-        if !ipv6Excluded.isEmpty {
-            ipv6.excludedRoutes = ipv6Excluded
-        }
-        settings.ipv6Settings = ipv6
-
-        let dns = NEDNSSettings(servers: ["1.1.1.1", "2606:4700:4700::1111"])
-        dns.matchDomains = [""]
-        settings.dnsSettings = dns
-        return settings
-    }
 }
 
 private extension PacketTunnelProvider {

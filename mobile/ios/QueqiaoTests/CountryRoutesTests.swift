@@ -131,6 +131,25 @@ final class CountryRoutesTests: XCTestCase {
         }
     }
 
+    /// The header count is what the routing screen shows. If it could drift
+    /// from what the tunnel installs, the screen would be quoting a number the
+    /// device does not honour.
+    func testTheHeaderCountAgreesWithTheSetItDescribes() throws {
+        let bundle = Bundle(for: Self.self)
+        XCTAssertEqual(
+            try CountryRoutes.blockCount(in: bundle),
+            try CountryRoutes.chinaDirect(in: bundle).count
+        )
+    }
+
+    func testTheHeaderCountRejectsWhatTheParserRejects() {
+        XCTAssertThrowsError(try CountryRoutes.blockCount(in: Bundle(for: XCTestCase.self))) { error in
+            guard case CountryRoutes.Failure.resourceMissing = error else {
+                return XCTFail("wrong failure: \(error)")
+            }
+        }
+    }
+
     func testTheShippedSetParsesToTheBlockCountsItWasGeneratedWith() throws {
         let prefixes = try shippedSet()
         XCTAssertEqual(prefixes.filter { $0.family == .ipv4 }.count, 5_492)

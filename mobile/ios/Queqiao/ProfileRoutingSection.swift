@@ -10,6 +10,10 @@ struct ProfileRoutingSection: View {
     @EnvironmentObject private var model: TunnelModel
     let profile: StoredProfile
     @State private var bypassDraft = ""
+    /// How many blocks the bundled set holds, read from its header once. nil
+    /// until it is read, and stays nil if the resource is missing — in which
+    /// case the screen says nothing rather than guessing a number.
+    @State private var bundledBlocks: Int?
 
     var body: some View {
         Group {
@@ -17,7 +21,10 @@ struct ProfileRoutingSection: View {
             bypassSection
             countrySetSection
         }
-        .task(id: profile.id) { bypassDraft = storedBypassText }
+        .task(id: profile.id) {
+            bypassDraft = storedBypassText
+            bundledBlocks = try? CountryRoutes.blockCount()
+        }
         .onChange(of: profile.bypassRoutes) { _, _ in bypassDraft = storedBypassText }
     }
 
@@ -70,6 +77,16 @@ struct ProfileRoutingSection: View {
                 "In use",
                 value: "\(profile.bypassRoutes.count) of \(StoredProfile.maximumBypassRoutes)"
             )
+
+            if coversWholeFamily {
+                Label(
+                    "A route here covers an entire address family, so that traffic will "
+                        + "not use the tunnel at all.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.footnote)
+                .foregroundStyle(.orange)
+            }
         } header: {
             Text("Bypass routes")
         } footer: {
@@ -86,6 +103,10 @@ struct ProfileRoutingSection: View {
         Section {
             Toggle("Keep Chinese addresses direct", isOn: chinaDirectBinding)
                 .disabled(!model.canChangeProfile)
+
+            if let bundledBlocks {
+                LabeledContent("Blocks in the set", value: bundledBlocks.formatted(.number))
+            }
         } header: {
             Text("Bundled route set · experimental")
         } footer: {
@@ -109,6 +130,13 @@ struct ProfileRoutingSection: View {
                 Task { await model.setBypassChinaDirect(enabled, for: profile.id) }
             }
         )
+    }
+
+    /// Whether the stored list takes all of IPv4 or all of IPv6 off the tunnel.
+    /// Built through RoutePlan so the screen and the tunnel agree on what a
+    /// default route is.
+    private var coversWholeFamily: Bool {
+        RoutePlan.make(userRoutes: profile.bypassRoutes).excludesDefaultRoute
     }
 
     private var storedBypassText: String {
