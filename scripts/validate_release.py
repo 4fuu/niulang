@@ -322,7 +322,9 @@ def validate_sbom(
     return module_components
 
 
-def validate_release(directory: pathlib.Path) -> None:
+def validate_release(
+    directory: pathlib.Path, expected_targets: set[str] = EXPECTED_TARGETS
+) -> None:
     invalid_entries = sorted(
         path.name
         for path in directory.iterdir()
@@ -385,7 +387,7 @@ def validate_release(directory: pathlib.Path) -> None:
     archives = list(directory.glob("*.tar.gz")) + list(directory.glob("*.zip"))
     if len(archives) != len(sboms):
         raise ValueError(f"archive/SBOM count differs: {len(archives)} != {len(sboms)}")
-    validate_release_cohort(buildinfos)
+    validate_release_cohort(buildinfos, expected_targets)
     # The public notice is shared by every target and conservatively covers the
     # union of modules linked across the release. Platform-specific dependency
     # pruning (for example, x/net on Windows) therefore cannot be checked one
@@ -395,15 +397,19 @@ def validate_release(directory: pathlib.Path) -> None:
         validate_notice_summary(notice, module_components, archive_name)
 
 
-def validate_release_cohort(buildinfos: list[dict[str, str]]) -> None:
+def validate_release_cohort(
+    buildinfos: list[dict[str, str]], expected_targets: set[str] = EXPECTED_TARGETS
+) -> None:
+    if not expected_targets or not expected_targets.issubset(EXPECTED_TARGETS):
+        raise ValueError("expected targets must be a nonempty canonical release subset")
     targets = [item["target"] for item in buildinfos]
     if len(targets) != len(set(targets)):
         raise ValueError("release contains a duplicate target")
-    if set(targets) != EXPECTED_TARGETS:
+    if set(targets) != expected_targets:
         raise ValueError(
             "release target matrix differs: "
-            f"missing={sorted(EXPECTED_TARGETS - set(targets))} "
-            f"unexpected={sorted(set(targets) - EXPECTED_TARGETS)}"
+            f"missing={sorted(expected_targets - set(targets))} "
+            f"unexpected={sorted(set(targets) - expected_targets)}"
         )
     identity_fields = ("version", "commit", "build_date", "go", "wire_protocol")
     identities = {tuple(item[field] for field in identity_fields) for item in buildinfos}
@@ -413,9 +419,21 @@ def validate_release_cohort(buildinfos: list[dict[str, str]]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--expected-targets",
+        default=",".join(sorted(EXPECTED_TARGETS)),
+        help="comma-separated canonical target matrix (default: all six release targets)",
+    )
     parser.add_argument("directory", type=pathlib.Path)
     args = parser.parse_args()
-    validate_release(args.directory.resolve())
+    target_values = args.expected_targets.split(",")
+    expected_targets = set(target_values)
+    if "" in expected_targets or len(expected_targets) != len(target_values):
+        parser.error("--expected-targets must contain unique, nonempty values")
+    try:
+        validate_release(args.directory.resolve(), expected_targets)
+    except ValueError as error:
+        parser.error(str(error))
     print(f"validated release artifacts in {args.directory}")
 
 

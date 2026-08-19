@@ -274,7 +274,7 @@ jobs:
           cd dist
           sha256sum -c SHA256SUMS
           cd ..
-          ./scripts/validate_release.py dist
+          ./scripts/validate_release.py --expected-targets linux/amd64 dist
           cd dist
           tar -xzf queqiaod_v0.0.0-ci_linux_amd64.tar.gz
           ./queqiaod_v0.0.0-ci_linux_amd64/queqiaod --version |

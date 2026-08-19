@@ -83,6 +83,9 @@ class ValidateReleaseTests(unittest.TestCase):
         ]
         MODULE.validate_release_cohort(buildinfos)
 
+        linux = [item for item in buildinfos if item["target"] == "linux/amd64"]
+        MODULE.validate_release_cohort(linux, {"linux/amd64"})
+
         with self.assertRaisesRegex(ValueError, "target matrix"):
             MODULE.validate_release_cohort(buildinfos[:-1])
 
@@ -95,6 +98,9 @@ class ValidateReleaseTests(unittest.TestCase):
         mixed[-1]["commit"] = "b" * 40
         with self.assertRaisesRegex(ValueError, "provenance identity"):
             MODULE.validate_release_cohort(mixed)
+
+        with self.assertRaisesRegex(ValueError, "canonical release subset"):
+            MODULE.validate_release_cohort(linux, {"plan9/amd64"})
 
     def test_sbom_properties_reject_duplicates(self):
         component = {
