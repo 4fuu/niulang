@@ -36,6 +36,13 @@ JSON with `scripts/check_gosec.py` as documented in
 silence a rule globally. That audit is a historical baseline; a release
 candidate requires a fresh report for its exact commit.
 
+`govulncheck` reports no vulnerability that this code calls, and one advisory
+against a module the build requires: GO-2026-5932, the unmaintained
+`golang.org/x/crypto/openpgp` package, which Queqiao never imports and which
+has no fixed version to move to. Expect it in scanner output for as long as
+`golang.org/x/crypto` is in the graph. A finding that names a symbol this code
+actually calls is a different matter and blocks a release candidate.
+
 Measurements must record the commit, toolchain, module graph, exact command,
 path parameters, trial order, and raw output. Use alternating or shared-path
 controls for live comparisons; do not compare transports in separate time
