@@ -164,7 +164,7 @@ jobs:
           lintDebug lintRelease
           assembleDebug assembleDebugAndroidTest
           assembleRelease bundleRelease
-      - name: assert the released app declares no VPN interface
+      - name: assert the released manifest stays export-only
         run: |
           set -euo pipefail
           aapt2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
@@ -180,6 +180,24 @@ jobs:
             exit 1
           fi
           grep -q 'QueqiaoProxyService' <<<"$manifest"
+          # The denylist above catches the one permission we can name today.
+          # This catches the ones we cannot: an app that routes nothing and
+          # talks to one gateway has a small, enumerable set of things to ask
+          # for, and anything outside it arrived by accident or by a merged
+          # library manifest. Update the list deliberately, with a reason.
+          expected=$(printf '%s\n' \
+            android.permission.ACCESS_NETWORK_STATE \
+            android.permission.FOREGROUND_SERVICE \
+            android.permission.FOREGROUND_SERVICE_SPECIAL_USE \
+            android.permission.INTERNET \
+            android.permission.POST_NOTIFICATIONS | sort)
+          declared=$("$aapt2" dump permissions "$apk" |
+            sed -n "s/^uses-permission: name='\\(.*\\)'$/\\1/p" | sort -u)
+          if [ "$declared" != "$expected" ]; then
+            echo "the release permission set changed:" >&2
+            diff <(echo "$expected") <(echo "$declared") >&2 || true
+            exit 1
+          fi
 
   android-instrumentation:
     name: Android Keystore API ${{ matrix.api }}
