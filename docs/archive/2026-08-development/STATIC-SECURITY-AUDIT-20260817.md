@@ -1,9 +1,13 @@
 # Static security audit — 2026-08-17
 
+> [!WARNING]
+> **Historical candidate audit.** Findings apply to the named protocol-3
+> commit. Every public protocol-1 candidate requires a fresh run and review.
+
 This is the maintainer's pre-release static-analysis record for exact candidate
 commit `c24fa15937f081e699016c6b482752c4c621f2ba`. It is not an
 independent security assessment; independent review of the current
-[`SECURITY.md`](../SECURITY.md) design remains a release gate.
+[`SECURITY.md`](../../../SECURITY.md) design remains a release gate.
 
 ## Scope and results
 
@@ -49,7 +53,7 @@ The gosec total comprises G115 (95), G204 (2), G301 (3), G302 (2), G304
   is the requirement and no random value protects a secret or authorization
   decision.
 
-[`check_gosec.py`](../scripts/check_gosec.py) records a maximum count for each
+[`check_gosec.py`](../../../scripts/check_gosec.py) records a maximum count for each
 reviewed rule/file bucket. CI runs the full scanner and fails if a new rule,
 new file, or increased bucket appears; findings are not globally hidden with a
 rule exclusion.

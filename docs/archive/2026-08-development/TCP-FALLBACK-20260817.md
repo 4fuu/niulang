@@ -1,8 +1,13 @@
 # TCP fallback striping measurement — 2026-08-17
 
+> [!WARNING]
+> **Historical development measurement.** The bounded mechanism remains in the
+> current tree, but this run predates public protocol 1 and is not current
+> release qualification.
+
 ## Outcome
 
-Queqiao can maintain a capability-gated, TCP-only bundle of up to 16
+Queqiao can maintain an opt-in, TCP-only bundle of up to 16
 independent TLS/TCP lanes for one fallback flow. The client remains at one lane
 by default, the server admits up to 16, and QUIC remains one data lane per flow.
 Eight TCP lanes are the recommended opt-in fallback setting: they reduced the

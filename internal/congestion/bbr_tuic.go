@@ -245,7 +245,7 @@ func (b *TUICBBRSender) bandwidth() quiccongestion.ByteCount {
 // small and holds around 1 Mbit/s forever. Measured on the emulator, that was
 // one trial at 37 Mbit/s followed by every later trial in the same process at
 // 0.7 to 1.5, and it is the shape of the live stall in
-// docs/MEASUREMENTS-20260816.md. This sender measures its own round trip
+// docs/archive/2026-08-development/MEASUREMENTS-20260816.md. This sender measures its own round trip
 // within one round; the seeded window carries it until then.
 //
 // The rate is only ever raised, so a seed below what this sender has already

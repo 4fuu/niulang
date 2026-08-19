@@ -1,5 +1,9 @@
 # Public-history baseline audit — 2026-08-17
 
+> [!WARNING]
+> **Historical candidate audit.** This result applies only to the recorded
+> commit. A public protocol-1 candidate requires a new full-history scan.
+
 ## Scope and result
 
 The pre-release repository history was scanned before adding the public-release

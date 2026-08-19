@@ -1,5 +1,9 @@
 # Live-path comparison against deployed proxies — 2026-08-16
 
+> [!WARNING]
+> **Historical protocol-3 comparison.** Its parity result and negative findings
+> informed the current design, but they do not qualify public protocol 1.
+
 > Historical protocol-3 record. Its shared-secret commands are not valid for
 > the clean-slate protocol-4 implementation.
 
@@ -18,7 +22,7 @@ before every round.
 
 ## The path is not the one this project is designed for
 
-`docs/DESIGN.md` builds on a channel that erases about 45% of packets at any
+[`DESIGN.md`](../../DESIGN.md) builds on a channel that erases about 45% of packets at any
 offered rate and polices above a knee near 14.5 Mbit/s. **The path measured
 here is a different animal**, and that has to be said before any number is
 read: the erasure code and the loss-insensitive controller were never under the
@@ -61,7 +65,7 @@ physical NIC during a simultaneous transfer through all four sing-box stacks
 recorded 516 inbound packets, every one from `<CLIENT-PUBLIC-IP>`.
 
 This is the third time a variant of this mistake has cost a campaign; see the
-list in [`BENCHMARKING.md`](BENCHMARKING.md).
+list in [`BENCHMARKING.md`](../../BENCHMARKING.md).
 
 ## Throughput
 

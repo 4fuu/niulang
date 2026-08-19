@@ -5,7 +5,7 @@
 # same block is attributable to the transports rather than to a path window.
 #
 # This is the fast inner loop. It does not replace a live China-US campaign;
-# see docs/MEASUREMENTS-*.md for those.
+# see docs/archive/2026-08-development/MEASUREMENTS-*.md for those.
 set -Euo pipefail
 
 invocation=("$0" "$@")

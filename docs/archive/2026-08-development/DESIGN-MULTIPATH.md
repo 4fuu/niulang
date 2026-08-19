@@ -1,7 +1,12 @@
 # Multipath transport: design
 
+> [!WARNING]
+> **Historical design record.** The multipath thesis was retired. This file is
+> preserved to explain the evidence and rejected approach; it is not the
+> current architecture. See the [current design](../../DESIGN.md).
+
 **Status: superseded. This describes a thesis the project has abandoned.**
-See [`DESIGN.md`](DESIGN.md) for what queqiao is now.
+See [`DESIGN.md`](../../DESIGN.md) for what Queqiao is now.
 
 Striping one flow over several connections has been deleted. The reason is not
 that it worked badly here but that the premise was never true of this path: an

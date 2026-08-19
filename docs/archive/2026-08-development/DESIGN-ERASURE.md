@@ -1,14 +1,19 @@
 # Transport for an erasure channel (2026-08-15)
 
+> [!WARNING]
+> **Historical development record.** This notebook explains how the erasure
+> design emerged. Mechanisms, commands, and results may not match public
+> protocol 1. See the [current design](../../DESIGN.md).
+
 **Status: a dated findings log, not the design of record.** See
-[`DESIGN.md`](DESIGN.md) for the current thesis, which this campaign is what
+[`DESIGN.md`](../../DESIGN.md) for the current thesis, which this campaign is what
 produced. Sections here are in the order they were found rather than the order
 they should be read.
 
 The path this project targets is not congested. It erases. About 42% of packets
 are dropped independently of the sending rate — at 1 Mbit/s as readily as at 12,
 and ICMP loses 37% at five packets a second. The measurement and its method are
-in `docs/PATH-CHARACTER-20260813.md`; this document is what follows from it.
+in [`PATH-CHARACTER-20260813.md`](../../PATH-CHARACTER-20260813.md); this document is what follows from it.
 
 Three layers changed, and only one of them is the erasure code. The largest
 single gain is the congestion controller, and the code's contribution is
@@ -212,7 +217,7 @@ The same comparison at four lanes:
 Four lanes are worse than one — about 8 Mbit/s against the single lane's 11 —
 and the controller no longer matters, because both land in the same place.
 This is consistent with what the open-loop probe found in
-`docs/PATH-CHARACTER-20260813.md`: the bottleneck is per endpoint pair, not per
+[`PATH-CHARACTER-20260813.md`](../../PATH-CHARACTER-20260813.md): the bottleneck is per endpoint pair, not per
 4-tuple, so lanes do not multiply the share. They do multiply the offered rate
 into one policer, which pushes the aggregate past the knee where loss turns
 correlated and wasteful, and each lane's controller applies the erasure

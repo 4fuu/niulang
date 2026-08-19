@@ -1,5 +1,9 @@
 # Development measurements — 2026-08-09
 
+> [!WARNING]
+> **Historical measurement notebook.** It predates the corrected route
+> isolation and public protocol 1. Do not use its numbers as current evidence.
+
 These are development results, not a claim of production readiness.
 
 ## Controls and route isolation

@@ -134,7 +134,7 @@ func TestASingleSharedLaneIsNotPenalised(t *testing.T) {
 //
 // Live, that was a transport that ran at 143 Mbit/s for six 20-second windows
 // and then moved no bytes at all until its process was restarted
-// (docs/MEASUREMENTS-20260816.md). On the emulator it is one trial at 37
+// (docs/archive/2026-08-development/MEASUREMENTS-20260816.md). On the emulator it is one trial at 37
 // Mbit/s followed by four at 0.8.
 func TestTheShareDoesNotRatchetDown(t *testing.T) {
 	const capacity = 8e6 // what the path would actually carry, bytes/second

@@ -1,5 +1,9 @@
 # Public-preview candidate report — 2026-08-17
 
+> [!WARNING]
+> **Historical wire-3 candidate.** This candidate predates the public
+> protocol-1 contract and cannot authorize or qualify its release.
+
 ## Decision
 
 The repository-side implementation and documentation work for the v0.1 public
@@ -81,9 +85,9 @@ the implementation author alone:
   candidate artifacts.
 - A production-ready claim additionally requires the independent access-network,
   egress-provider, port, OS, and impairment matrix plus two 24–72-hour soaks
-  defined in [`FIELD-VALIDATION.md`](FIELD-VALIDATION.md).
+  defined in [`FIELD-VALIDATION.md`](../../FIELD-VALIDATION.md).
 - An independent human or third-party reviewer must assess the current
-  [`SECURITY.md`](../SECURITY.md) design, with all critical/high
+  [`SECURITY.md`](../../../SECURITY.md) design, with all critical/high
   findings remediated and lower-severity dispositions published.
 - Production monitoring, incident response, supported-version lifetime, and
   credential-rotation ownership still need named maintainers.
@@ -91,4 +95,4 @@ the implementation author alone:
 After any documentation reconciliation commit, run the complete non-publishing
 candidate workflow again and select that exact successful commit for review.
 Do not create a tag or invoke the publishing workflow until every public-preview
-checkbox in [`RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md) is complete.
+checkbox in [`RELEASE-CHECKLIST.md`](../../RELEASE-CHECKLIST.md) is complete.

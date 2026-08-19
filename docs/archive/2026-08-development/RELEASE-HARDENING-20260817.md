@@ -1,5 +1,9 @@
 # Release-hardening and live fallback report — 2026-08-17
 
+> [!WARNING]
+> **Historical protocol-3 release record.** It is preserved as engineering
+> provenance and does not qualify the public protocol-1 tree.
+
 This report closes the repository-actionable Stage 4/5 work after merge commit
 `1a0ba07`. Tests used an isolated server on `<EGRESS-IP>:12541` and local
 SOCKS/metrics listeners on `127.0.0.1:12180/12190`; production remained on

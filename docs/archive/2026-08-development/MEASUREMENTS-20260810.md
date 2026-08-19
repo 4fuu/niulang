@@ -1,5 +1,9 @@
 # Real-path measurements — 2026-08-10
 
+> [!WARNING]
+> **Historical protocol-3 measurement notebook.** It predates the first public
+> protocol and contains development-time conclusions, not release claims.
+
 > Historical protocol-3 record. HELLO/OPEN_FAST and its CLI configuration were
 > removed by the clean-slate protocol-4 identity design.
 
@@ -567,7 +571,7 @@ exactly 10,485,760 zero bytes from China through one QUIC lane.
 The sink confirms that the upload direction is also materially weaker than
 TUIC in this measurement window. BBR completed the logical request but was
 slower and more variable; it remains experimental. The script is
-[`scripts/upload_sink.py`](../scripts/upload_sink.py), deliberately bounded
+[`scripts/upload_sink.py`](../../../scripts/upload_sink.py), deliberately bounded
 and intended only for a temporary operator-controlled listener.
 
 ## Interactive requests during eight-flow bulk

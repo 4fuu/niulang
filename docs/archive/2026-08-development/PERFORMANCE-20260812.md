@@ -1,5 +1,10 @@
 # Transport performance recovery — 2026-08-12
 
+> [!WARNING]
+> **Historical protocol-3 development record.** Several mechanisms and
+> measurements were later corrected or retired. Use current documentation for
+> release claims.
+
 > Historical protocol-3 record. HELLO/OPEN_FAST was removed; current
 > connections authenticate once with mutual TLS.
 
@@ -604,4 +609,4 @@ a user would rather have a slow transfer or no transfer.
 
 None of these results say anything about correctness under lane failure, UDP
 blocking, or restart. Those gates remain as stated in
-[`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md).
+[`PRODUCTION-DESIGN.md`](../../PRODUCTION-DESIGN.md).
