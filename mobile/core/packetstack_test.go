@@ -103,8 +103,16 @@ func TestPacketStackForwardsIPv4UDPThroughOwnedSocksClient(t *testing.T) {
 	if string(response[headerLength+8:]) != "queqiao-mobile-udp" {
 		t.Fatalf("UDP response payload = %q", response[headerLength+8:])
 	}
-	if got := engine.snapshot(); got.PacketsIn == 0 || got.PacketsOut == 0 {
-		t.Fatalf("packet counters = %+v", got)
+	deadline := time.Now().Add(time.Second)
+	for {
+		got := engine.snapshot()
+		if got.PacketsIn > 0 && got.PacketsOut > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("packet counters = %+v", got)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
