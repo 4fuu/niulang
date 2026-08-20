@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/bojieli/queqiao/internal/lossmodel"
+	"github.com/bojieli/queqiao/internal/udperr"
 )
 
 const (
@@ -174,6 +175,14 @@ func serve(listen string) error {
 	for {
 		n, from, err := conn.ReadFrom(buf)
 		if err != nil {
+			// A blast to a client that has stopped listening draws an ICMP
+			// port-unreachable, and the host reports it here on a later read
+			// -- on Windows even for an unconnected socket. That describes one
+			// datagram, so the server must not exit on it: this is the one
+			// process whose whole job is sending to peers that may go away.
+			if udperr.Transient(err) {
+				continue
+			}
 			return err
 		}
 		req, ok := decodeRequest(buf[:n])

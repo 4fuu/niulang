@@ -567,7 +567,12 @@ func (r *Relay) readClient() {
 	for {
 		n, addr, err := r.local.ReadFrom(buf)
 		if err != nil {
-			return
+			if fatalReadError(err) {
+				return
+			}
+			// One datagram's problem, not the socket's. Returning here would
+			// stop emulating the path without saying so.
+			continue
 		}
 		p, err := r.peerFor(addr)
 		if err != nil {
@@ -623,7 +628,10 @@ func (r *Relay) readServer(p *peer) {
 	for {
 		n, err := p.conn.Read(buf)
 		if err != nil {
-			return
+			if fatalReadError(err) {
+				return
+			}
+			continue
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])

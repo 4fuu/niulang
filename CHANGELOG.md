@@ -92,6 +92,13 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
 ### Fixed
 
+- SOCKS5 UDP associations survive an unreachable destination. Sending to a
+  closed UDP port draws an ICMP port-unreachable that the host reports to the
+  sender on a later read, and Windows reports it even for an unconnected
+  socket; the relay loops treated that as fatal, so one destination going away
+  ended the whole association and every other destination it carried. Nothing
+  errored -- traffic simply stopped -- which is why it took a Windows CI
+  runner to find. The measurement server in `cmd/pathprobe` had the same gap.
 - CI now installs a commit-pinned Android command-line toolchain and runs a
   checksum-verified, version-pinned SwiftLint binary instead of depending on
   mutable hosted-runner contents.

@@ -33,6 +33,7 @@ import (
 	"github.com/bojieli/queqiao/internal/protocol"
 	"github.com/bojieli/queqiao/internal/session"
 	"github.com/bojieli/queqiao/internal/socks5"
+	"github.com/bojieli/queqiao/internal/udperr"
 )
 
 const (
@@ -488,6 +489,14 @@ func (c *Client) runClientUDPUplink(ctx context.Context, udpConn *net.UDPConn, f
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			// One datagram's problem is not the association's. A send to a
+			// peer that has gone away draws an ICMP port-unreachable, which
+			// the host reports on a later read -- on Windows even for an
+			// unconnected socket. Returning here would end a live SOCKS5 UDP
+			// association because one destination stopped listening.
+			if udperr.Transient(err) {
+				continue
+			}
 			return err
 		}
 		// Zero-length UDP datagrams are valid and continue through the same
@@ -776,6 +785,11 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 						packetErr <- assocCtx.Err()
 						return
 					}
+					continue
+				}
+				// As on the uplink: an unreachable peer describes one
+				// datagram, not this association.
+				if udperr.Transient(readErr) {
 					continue
 				}
 				packetErr <- readErr
