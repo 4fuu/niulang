@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"syscall"
 	"time"
 )
 
@@ -36,10 +35,12 @@ type closeWriter interface {
 // its local socket immediately after consuming the complete response, before
 // the proxy's read or best-effort CloseWrite observes an orderly EOF. Windows
 // reports a full local close as WSAECONNRESET or WSAECONNABORTED; that is an
-// application cancellation, not evidence that the outer tunnel failed.
+// application cancellation, not evidence that the outer tunnel failed. The
+// codes themselves are per-platform -- the Windows ones are not the syscall
+// constants of the same name -- so they live in sockerr_windows.go and
+// sockerr_other.go.
 func expectedHalfCloseError(err error) bool {
-	return errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ENOTCONN) || errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED)
+	return errors.Is(err, net.ErrClosed) || halfCloseErrno(err)
 }
 
 // expectedDestinationCloseError covers the peer-side destination reset that
@@ -47,7 +48,7 @@ func expectedHalfCloseError(err error) bool {
 // server has already observed the client's FIN in this case, so no logical
 // application bytes remain to deliver.
 func expectedDestinationCloseError(err error) bool {
-	return errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ENOTCONN)
+	return errors.Is(err, net.ErrClosed) || destinationCloseErrno(err)
 }
 
 func writeFull(w io.Writer, p []byte) error {

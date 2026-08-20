@@ -153,8 +153,7 @@ func classifyQUICPathEvidence(err error) quicPathEvidence {
 		errors.Is(err, context.DeadlineExceeded) {
 		return quicPathUnavailable
 	}
-	if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) ||
-		errors.Is(err, syscall.ENETDOWN) || errors.Is(err, syscall.EHOSTDOWN) {
+	if unreachableRouteErrno(err) {
 		return quicPathUnavailable
 	}
 	var networkError net.Error
@@ -659,13 +658,12 @@ func tolerateTransientRouteErrors(conn net.PacketConn, observe func(error)) net.
 	return base
 }
 
+// transientRouteWriteError reports a local send failure that a QUIC connection
+// should see as one lost packet rather than a dead socket. The codes it names
+// are per-platform, because the constants that spell them are: see
+// sockerr_windows.go.
 func transientRouteWriteError(err error) bool {
-	return errors.Is(err, syscall.ENETDOWN) ||
-		errors.Is(err, syscall.ENETUNREACH) ||
-		errors.Is(err, syscall.EHOSTDOWN) ||
-		errors.Is(err, syscall.EHOSTUNREACH) ||
-		errors.Is(err, syscall.EADDRNOTAVAIL) ||
-		errors.Is(err, syscall.ENOBUFS)
+	return transientRouteWriteErrno(err)
 }
 
 // dialQUICConnection establishes only the QUIC connection. Keeping this

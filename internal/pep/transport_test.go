@@ -8,7 +8,6 @@ import (
 	"net"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -40,14 +39,14 @@ type switchableRouteConn struct {
 
 func (c *switchableRouteConn) WriteTo(payload []byte, addr net.Addr) (int, error) {
 	if c.failing.Load() {
-		return 0, syscall.ENETUNREACH
+		return 0, injectedRouteError
 	}
 	return c.UDPConn.WriteTo(payload, addr)
 }
 
 func (c *switchableRouteConn) WriteMsgUDP(payload, oob []byte, addr *net.UDPAddr) (int, int, error) {
 	if c.failing.Load() {
-		return 0, 0, syscall.ENETUNREACH
+		return 0, 0, injectedRouteError
 	}
 	return c.UDPConn.WriteMsgUDP(payload, oob, addr)
 }
@@ -57,13 +56,13 @@ func (c *routeErrorOOBConn) WriteMsgUDP([]byte, []byte, *net.UDPAddr) (int, int,
 	return 0, 0, c.err
 }
 
+// The codes come from this platform's sample list rather than being spelled
+// inline: syscall.ENETDOWN and its neighbours are synthetic on Windows, so a
+// table of them would assert only that the classifier agrees with itself.
 func TestTransientLocalRouteErrorsBecomeQUICPacketLoss(t *testing.T) {
-	transient := []error{
-		syscall.ENETDOWN, syscall.ENETUNREACH, syscall.EHOSTDOWN,
-		syscall.EHOSTUNREACH, syscall.EADDRNOTAVAIL, syscall.ENOBUFS,
-	}
-	for _, writeErr := range transient {
-		t.Run(writeErr.Error(), func(t *testing.T) {
+	for _, sample := range transientRouteWriteSamples {
+		writeErr := sample.err
+		t.Run(sample.name, func(t *testing.T) {
 			observed := 0
 			conn := tolerateTransientRouteErrors(&routeErrorPacketConn{err: &net.OpError{Op: "write", Net: "udp", Err: writeErr}}, func(error) {
 				observed++
@@ -81,10 +80,10 @@ func TestTransientLocalRouteErrorsBecomeQUICPacketLoss(t *testing.T) {
 }
 
 func TestPermanentUDPSocketErrorsRemainFatal(t *testing.T) {
-	want := &net.OpError{Op: "write", Net: "udp", Err: syscall.EBADF}
+	want := &net.OpError{Op: "write", Net: "udp", Err: permanentSocketError}
 	conn := tolerateTransientRouteErrors(&routeErrorPacketConn{err: want}, nil)
-	if _, err := conn.WriteTo([]byte("packet"), &net.UDPAddr{}); !errors.Is(err, syscall.EBADF) {
-		t.Fatalf("permanent socket error = %v, want EBADF", err)
+	if _, err := conn.WriteTo([]byte("packet"), &net.UDPAddr{}); !errors.Is(err, permanentSocketError) {
+		t.Fatalf("permanent socket error = %v, want %v", err, permanentSocketError)
 	}
 }
 
@@ -95,7 +94,7 @@ func TestTransientRouteWrapperPreservesAndProtectsQUICFastPath(t *testing.T) {
 	}
 	defer udp.Close()
 	observed := 0
-	wrapped := tolerateTransientRouteErrors(&routeErrorOOBConn{UDPConn: udp, err: syscall.ENETUNREACH}, func(error) {
+	wrapped := tolerateTransientRouteErrors(&routeErrorOOBConn{UDPConn: udp, err: injectedRouteError}, func(error) {
 		observed++
 	})
 	oob, ok := wrapped.(quic.OOBCapablePacketConn)
