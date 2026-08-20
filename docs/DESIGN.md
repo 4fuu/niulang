@@ -95,7 +95,7 @@ floor separately from excess loss and delivery behavior.
 
 ## Network design principles
 
-### 1. The endpoint pair is one congestion domain
+### 1. Treat the endpoint pair as one congestion domain
 
 Connections sharing the client uplink and gateway read a shared path model.
 Per-flow byte progress remains separate, but path loss, RTT, delivery rate, and
@@ -105,7 +105,7 @@ The path key includes the local uplink as well as the remote gateway. A switch
 from Wi-Fi to cellular creates a new model because it changes the path, even
 though the gateway address remains the same.
 
-### 2. Congestion is excess over the erasure floor
+### 2. Separate congestion from the erasure floor
 
 The erasure controller corrects its loss response for the measured
 rate-independent floor. Congestive behavior is the delivery/queue regime above
@@ -113,7 +113,7 @@ that floor, not a count of individual lost packets. Coding is sized from the
 floor; adding parity to loss created by an overflowing bottleneck would only
 add more offered load to that bottleneck.
 
-### 3. The aggregate offered rate must fit the bottleneck
+### 3. Keep total traffic within the bottleneck
 
 On an erasure channel with probability `p`, application-useful delivery cannot
 exceed `(1-p)` times the wire rate. Data, parity, and retransmissions all consume
@@ -126,7 +126,7 @@ permits aggressive recovery through non-congestive erasure, but it does not
 remove congestion control: aggregate overload at the measured knee still
 requires restraint.
 
-### 4. Recovery is selected against the WAN RTT
+### 4. Choose recovery for the WAN RTT
 
 Automatic repeat request (ARQ) resends only what was lost and is therefore
 byte-efficient. On a long path it may also add one or more complete round trips
@@ -139,7 +139,7 @@ policy decision inside the same logical flow, not a separate “short-flow
 protocol” and “bulk protocol.” Residual coded loss is handled by the byte-offset
 replay machinery already required for carrier failure.
 
-### 5. Feedback cannot be queued behind the data it releases
+### 5. Keep feedback from waiting behind data
 
 A QUIC stream is reliable but ordered: one missing transport packet can hold
 later stream bytes. Queqiao keeps OPEN, ACK, CLOSE, RESET, and recovery control
@@ -150,7 +150,7 @@ The same rule applies across contending flows. Priority queueing and reactive
 isolation keep a growing data stream from trapping new work and feedback in its
 connection congestion window.
 
-### 6. Downstream and upstream are different channels
+### 6. Measure upstream and downstream separately
 
 Each direction has its own logical ACK flag, delivery state, loss estimate,
 coding decision, and congestion behavior. Queqiao does not copy a downstream

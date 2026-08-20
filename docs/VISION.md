@@ -40,46 +40,46 @@ hold automatically. Measure the deployment again before relying on the policy.
 
 ## Principles that guide the implementation
 
-### Share the path model across the endpoint pair
+### Share one path model across flows
 
 Per-flow byte progress remains separate, but loss, delivery rate, RTT, pacing,
 and latency reserve belong to the shared client-to-gateway path. A change from
 Wi-Fi to cellular creates a new path model because it changes the bottleneck.
 
-### Treat loss as a process
+### Separate random loss from congestion
 
 Rate-independent erasure below a capacity knee is not relieved by backing off.
 Loss that appears or becomes clustered as offered rate crosses the knee is
 congestion. The controller estimates the erasure floor separately from excess
 loss instead of giving every missing packet the same meaning.
 
-### Control the aggregate offered rate
+### Control total traffic at the bottleneck
 
 Data, parity, and retransmissions all consume the same physical bottleneck. The
 sender budgets them together and reserves room for control and interactive
 traffic. Aggressive recovery against non-congestive erasure does not excuse
 overrunning the real congestion knee.
 
-### Choose recovery against the WAN round trip
+### Choose recovery for the path's RTT
 
 Retransmission is byte-efficient but may add a full RTT before useful data can
 continue. Sliding-window coding spends extra wire bytes to repair some gaps
 without waiting. Queqiao can use coding while the RTT is more expensive than
 the parity, then return to retransmission as byte efficiency becomes dominant.
 
-### Keep feedback independent of blocked data
+### Keep acknowledgements and control traffic moving
 
 Acknowledgements and recovery control must reach the sender even when coded
 data is missing. Reliable control, priority scheduling, and reactive isolation
 keep bulk traffic from trapping the feedback or new work that releases it.
 
-### Model upstream and downstream independently
+### Measure upstream and downstream separately
 
 The two directions can have different capacity, shaping, RTT contribution, and
 loss behavior. Queqiao keeps direction-specific estimates and recovery policy
 instead of copying a downstream model onto the upstream.
 
-### Keep one flow architecture across workloads
+### Use one flow design for all workloads
 
 Short requests, interactive sessions, and bulk transfers are evaluation views,
 not application-selected protocols. Every flow keeps the same logical framing,

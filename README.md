@@ -48,19 +48,19 @@ ignoring overload only makes it worse. See the full
 
 Queqiao is built around a few practical observations:
 
-- **A shared bottleneck deserves a shared model.** Flows to different final
+- **Flows sharing one bottleneck should share one model.** Flows to different final
   destinations can still share one client-to-gateway path, so Queqiao shares
   delivery, loss, RTT, pacing, and latency-reserve state across them.
-- **Loss is a process, not a verdict.** The controller distinguishes a measured
+- **Not all packet loss means congestion.** The controller distinguishes a measured
   erasure floor from loss caused by an overloaded bottleneck instead of treating
   every missing packet as congestion.
-- **Recovery should match the WAN.** On a long-RTT path, forward-error
+- **Choose recovery for the path.** On a long-RTT path, forward-error
   correction can recover a gap sooner than another round trip; as a flow grows,
   retransmission can become the more efficient choice.
-- **Interactive traffic needs room to breathe.** Control and new interactive
+- **Protect interactive traffic from bulk transfers.** Control and new interactive
   work must not wait behind a bulk transfer, so aggregate pacing, priority, and
   reactive isolation protect latency while the pipe is used.
-- **The two directions are different.** Upstream and downstream can have very
+- **Upstream and downstream are different.** Upstream and downstream can have very
   different capacity and loss behavior, so they are measured and controlled
   independently.
 
