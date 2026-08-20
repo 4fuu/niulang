@@ -16,15 +16,18 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-Queqiao started from a problem I experienced firsthand. While working at
-Microsoft Research Asia, I used Microsoft's dedicated link from China and saw,
-for the first time, how fast access to Google and other websites could be. That
-made the public China–US path feel less like an unavoidable limit and more like
-a transport problem.
+During my internship at Microsoft Research Asia in 2013,
+I used Microsoft's dedicated link from China and saw,
+for the first time, how fast access to Google and YouTube could be.
 
-Later, I built an egress gateway in Hong Kong to improve the route. It worked,
-but it added infrastructure, doubled the network bandwidth cost, and increased
-latency. Today, Queqiao is a ready-to-use, self-hosted protocol for supported
+Later, I built a detour gateway in Hong Kong to improve the China-US route when I'm back home.
+It worked, but it added infrastructure, doubled the network bandwidth cost, and increased
+latency. Is it possible to directly connect China to US while
+enjoying the same latency and bandwidth with dedicated links?
+
+Although I did networking research for 10 years, I did not have the time to build it.
+It is finally possible with help from Kimi K3, Claude Opus 5 and GPT-5.6 Sol.
+Today, Queqiao is a ready-to-use, self-hosted protocol for supported
 client-to-gateway deployments. It carries TCP and UDP through a local proxy over
 an authenticated transport, and keeps evolving as we measure more paths,
 improve the transport, and learn from users.

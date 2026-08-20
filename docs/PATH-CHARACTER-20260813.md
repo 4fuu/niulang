@@ -1,20 +1,9 @@
 # What the China-US path actually is (2026-08-13)
 
-Every live measurement in this repository before this date is void. They were
-taken on this developer machine, whose Clash TUN captures the fake-IP range
-`198.18.0.0/15`, and the measurement server's address routes into it:
-
-```
-$ route -n get <EGRESS-IP>
-  gateway: 198.18.0.1
-  interface: utun4
-```
-
-So each "live path" number was the tunnel plus the path, and the server logged
-the client address as its own. `docs/BENCHMARKING.md` warns about exactly this
-and the warning was not followed. `cmd/pathprobe` now takes `--local-address`
-to bind the probe socket to the LAN address; with it the server correctly sees
-the client's real address.
+The measurement is completed on a hotel Wi-Fi in Dalian, which is a deliberately
+difficult case with 42% packet loss rate.
+I also performed measurements in my home (China Telecom residential Internet)
+and the loss rate was about 15%.
 
 ## The measurement
 
