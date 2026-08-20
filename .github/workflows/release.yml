@@ -278,8 +278,84 @@ jobs:
           subject-path: ${{ steps.subject.outputs.binary }}
           sbom-path: ${{ steps.subject.outputs.sbom }}
 
+  # Signing is additive on purpose. A Developer ID signature embeds a
+  # certificate chain and an RFC 3161 timestamp, so a signed binary can never be
+  # rebuilt byte-for-byte by a third party. The reproducible tar.gz archives are
+  # therefore left untouched and remain the artifacts a verifier checks; the
+  # signed zips exist for users whose download carries Gatekeeper quarantine.
+  macos-signing:
+    needs: [authorize, build, native-smoke]
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: public-release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.version }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: queqiaod-${{ needs.authorize.outputs.version }}
+          path: dist
+      - name: Sign and notarize the macOS binaries
+        id: sign
+        env:
+          VERSION: ${{ needs.authorize.outputs.version }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          # A missing credential must never look like a signed release. The
+          # release still completes, but it says plainly that it is unsigned.
+          missing=
+          for name in APPLE_CERTIFICATE_P12 APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY APPLE_API_KEY_P8 APPLE_API_KEY_ID \
+            APPLE_API_ISSUER_ID; do
+            test -n "${!name}" || missing="$missing $name"
+          done
+          if test -n "$missing"; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### macOS assets are UNSIGNED"
+              echo
+              echo "Apple signing is not configured. Missing secrets:$missing"
+              echo
+              echo "The reproducible archives are unaffected and remain verifiable."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          ./scripts/sign_macos_release.sh dist "$VERSION"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "### macOS assets signed and notarized"
+            echo
+            echo "Developer ID signature and an accepted Apple notarization ticket"
+            echo "cover the darwin binaries published as \`*_signed.zip\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Attest the signed macOS assets
+        if: steps.sign.outputs.signed == 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/signed/*_signed.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: steps.sign.outputs.signed == 'true'
+        with:
+          name: queqiaod-${{ needs.authorize.outputs.version }}-macos-signed
+          path: dist/signed/
+          if-no-files-found: error
+          retention-days: 30
+
   publish:
-    needs: [authorize, build, native-smoke, provenance, sbom-attestation]
+    needs: [authorize, build, native-smoke, provenance, sbom-attestation, macos-signing]
     runs-on: ubuntu-24.04
     environment: public-release
     permissions:
@@ -289,8 +365,21 @@ jobs:
         with:
           name: queqiaod-${{ needs.authorize.outputs.version }}
           path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: needs.macos-signing.outputs.signed == 'true'
+        with:
+          name: queqiaod-${{ needs.authorize.outputs.version }}-macos-signed
+          path: signed
       - name: Publish reviewed GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.authorize.outputs.version }}
-        run: gh release create "$VERSION" dist/* --repo '${{ github.repository }}' --verify-tag --generate-notes
+          SIGNED: ${{ needs.macos-signing.outputs.signed }}
+        run: |
+          set -euo pipefail
+          assets=(dist/*)
+          if test "$SIGNED" = true; then
+            assets+=(signed/*)
+          fi
+          gh release create "$VERSION" "${assets[@]}" \
+            --repo '${{ github.repository }}' --verify-tag --generate-notes

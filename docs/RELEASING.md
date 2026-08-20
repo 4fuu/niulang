@@ -170,3 +170,69 @@ Verify provenance after downloading:
 gh attestation verify ./queqiaod_v0.1.0_linux_amd64.tar.gz \
   --repo bojieli/queqiao
 ```
+
+## macOS signing and notarization
+
+The reproducible `tar.gz` archives are never signed. A Developer ID signature
+embeds a certificate chain and an RFC 3161 timestamp, so a signed binary cannot
+be rebuilt byte-for-byte by anyone who does not hold the private key, and the
+repository's central claim is that anybody can rebuild a release and get the
+same bytes. Signing the primary archives would trade that for Gatekeeper
+convenience.
+
+Signing is therefore additive. `scripts/sign_macos_release.sh` extracts each
+`darwin` binary from its reproducible archive, signs it with hardened runtime
+and a secure timestamp, notarizes it with Apple, and publishes it as a separate
+`queqiaod_<version>_darwin_<arch>_signed.zip`. Verifiers keep using the
+unsigned archives and their attestations; the signed zips exist for users who
+download through a browser, where macOS applies quarantine and Gatekeeper
+blocks an unsigned binary.
+
+A bare Mach-O executable cannot carry a stapled notarization ticket, since
+stapling is defined for `.app`, `.dmg`, `.pkg`, and `.kext` only. The ticket is
+published to Apple and resolved online at first launch, which is the normal
+outcome for a notarized command-line tool shipped in an archive. Verify a
+signed download:
+
+```sh
+unzip queqiaod_v0.1.0_darwin_arm64_signed.zip
+codesign --verify --strict --verbose=2 queqiaod
+spctl --assess --type exec --verbose=4 queqiaod
+```
+
+Both must report the `Developer ID Application` authority and an accepted
+assessment. The signed zips also carry build-provenance attestations.
+
+Signing runs in the `public-release` environment and needs six secrets there:
+
+| Secret | Contents |
+| --- | --- |
+| `APPLE_CERTIFICATE_P12` | base64 of a `.p12` holding the Developer ID Application identity and its chain |
+| `APPLE_CERTIFICATE_PASSWORD` | export password for that `.p12` |
+| `APPLE_SIGNING_IDENTITY` | identity common name, e.g. `Developer ID Application: NAME (TEAMID)` |
+| `APPLE_API_KEY_P8` | base64 of the App Store Connect `AuthKey_<KEYID>.p8` |
+| `APPLE_API_KEY_ID` | App Store Connect key ID |
+| `APPLE_API_ISSUER_ID` | App Store Connect issuer UUID |
+
+Export the certificate without exporting unrelated identities from the same
+keychain:
+
+```sh
+security find-identity -v -p codesigning
+# Export only the Developer ID identity, then confirm what the file contains:
+openssl pkcs12 -in devid.p12 -nokeys -legacy | grep -E 'friendlyName|subject='
+base64 -i devid.p12 | tr -d '\n' | gh secret set APPLE_CERTIFICATE_P12 \
+  --env public-release
+base64 -i AuthKey_XXXXXXXXXX.p8 | tr -d '\n' | gh secret set APPLE_API_KEY_P8 \
+  --env public-release
+```
+
+The App Store Connect key must hold the Developer ID role; a key limited to
+App Store distribution cannot notarize. Apple issues the `.p8` exactly once at
+creation and it cannot be re-downloaded, so a lost key is replaced by revoking
+it and issuing a new one.
+
+If any of the six secrets is absent the release still completes, the signing
+job publishes no signed assets, and the run summary states plainly that the
+macOS assets are unsigned. Missing credentials never silently produce a release
+that looks signed.
