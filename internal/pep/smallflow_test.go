@@ -89,6 +89,7 @@ func TestSmallExchangesAreRepairedOnceThePathIsKnown(t *testing.T) {
 	if testing.Short() {
 		t.Skip("brings up QUIC across an emulated 300 ms path")
 	}
+	requireStableImpairmentClock(t)
 	const oneWay = 150 * time.Millisecond
 	loopback := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
 	key := pathKey(loopback, loopback)
@@ -786,6 +787,7 @@ func TestAShortFlowCostsARoundTrip(t *testing.T) {
 	if testing.Short() {
 		t.Skip("brings up QUIC across an emulated 300 ms path")
 	}
+	requireStableImpairmentClock(t)
 	const oneWay = 150 * time.Millisecond
 	path := pathsim.Config{
 		OneWayDelay: oneWay, RateBytesPerSec: uint64(25e6 / 8),

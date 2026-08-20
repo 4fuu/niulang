@@ -33,9 +33,10 @@ jobs:
           test "$scanner_status" -eq 0 || test "$scanner_status" -eq 1
           ./scripts/check_gosec.py gosec.json .
 
-  # Exercise every test, including the long impairment cases, on every native
-  # platform shipped in release archives. This is intentionally separate from
-  # the Linux analysis job above so platform results stay independently visible.
+  # Exercise every portable test on every native platform shipped in release
+  # archives. The long wall-clock impairment cases run on Linux and macOS; the
+  # hosted Windows timer stretches their configured path instead of preserving
+  # it, so Windows covers the coded path without claiming that timing evidence.
   native-test:
     timeout-minutes: 70
     strategy:

@@ -208,6 +208,7 @@ func TestACodedLaneCarriesAFlowAcrossAnErasureChannel(t *testing.T) {
 	if testing.Short() {
 		t.Skip("brings up QUIC across an emulated 300 ms path")
 	}
+	requireStableImpairmentClock(t)
 	path := pathsim.Config{
 		OneWayDelay:         150 * time.Millisecond,
 		RateBytesPerSec:     uint64(25e6 / 8),
@@ -257,6 +258,7 @@ func TestOneBuildServesACleanPathAndAnErasureChannel(t *testing.T) {
 	if testing.Short() {
 		t.Skip("brings up QUIC across an emulated 300 ms path")
 	}
+	requireStableImpairmentClock(t)
 	clean := pathsim.Config{OneWayDelay: 5 * time.Millisecond, Seed: 21}
 	erasing := pathsim.Config{
 		OneWayDelay: 150 * time.Millisecond, RateBytesPerSec: uint64(25e6 / 8),

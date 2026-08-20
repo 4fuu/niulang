@@ -114,10 +114,15 @@ node and rule.
 
 Run `.github/workflows/release-candidate.yml` manually on the exact commit under
 review with a version such as `v0.1.0-rc.1`. It runs the full, race, fuzz,
-vulnerability, fallback, history-secret, and reproducibility gates. The full
-Go suite runs natively on Linux, macOS, and Windows for amd64 and arm64; the
-race suite runs on every one of those targets supported by Go (all except
-Windows/arm64). A separate six-native-runner gate executes each packaged
+vulnerability, fallback, history-secret, and reproducibility gates. The
+portable Go suite runs natively on Linux, macOS, and Windows for amd64 and
+arm64. The high-erasure wall-clock emulator campaigns run on Linux and macOS,
+where the configured path timing is preserved; hosted Windows timers can
+stretch a configured 300 ms RTT into seconds and therefore do not provide
+valid path evidence. Windows still runs coded-path correctness, conformance,
+socket-error, and packaged-binary checks. The race suite runs on every
+supported target (all except Windows/arm64), with the same timing distinction.
+A separate six-native-runner gate executes each packaged
 archive. It also refuses to qualify a commit unless an exact-SHA push or manual
 run of the normal CI workflow succeeded, binding the Android, iOS, emulator,
 and short native-suite evidence into the candidate decision. The fail-closed
