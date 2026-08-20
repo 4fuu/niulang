@@ -1,12 +1,13 @@
 # Queqiao architecture
 
 > [!NOTE]
-> **Status:** Current implementation architecture
+> **Status:** Current implementation reference
 >
 > **Applies to:** Public protocol 1
-> **Last reviewed:** 2026-08-19
+> **Last reviewed:** 2026-08-20
 
-Queqiao is a paired WAN optimization system: a client accepts local SOCKS5
+This document describes the implementation behind the [How it works](../README.md#how-it-works)
+overview. Queqiao is a paired WAN optimization system: a client accepts local SOCKS5
 traffic, transports it across a known endpoint-pair segment, and a provider
 gateway opens the final Internet destination. The architecture treats that
 segment as a shared congestion domain even when application flows continue to

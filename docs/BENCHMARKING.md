@@ -2,13 +2,18 @@
 
 > [!NOTE]
 > **Status:** Current benchmark methodology for public protocol 1
-> **Last reviewed:** 2026-08-19
+> **Last reviewed:** 2026-08-20
 
-This is the reference for the measurement rig. It exists because the motivating
+This is the reproducibility guide for the measurement rig. It exists because the motivating
 link moved between roughly 0% and 50% packet loss within minutes, so
 running one transport's trials and then another's compares two path windows
 rather than two transports. Every performance claim in this repository should
 be reproducible with the commands here.
+
+Read the [project status](STATUS.md) before interpreting a result. The harness
+can establish correctness, behavior under controlled impairment, and a fair
+same-window comparison; it cannot turn one path into a universal performance
+claim.
 
 ## One protocol, three workload views
 

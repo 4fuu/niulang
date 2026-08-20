@@ -2,12 +2,17 @@
 
 > [!NOTE]
 > **Status:** Current operational guide for public protocol 1
-> **Last reviewed:** 2026-08-19
+> **Last reviewed:** 2026-08-20
 
-This guide covers a provider gateway, individual user enrollment, a desktop
-SOCKS client, Clash/mihomo integration, and replacement of an earlier
-development tunnel. Protocol 1 is the only supported wire protocol. Client and
-server must therefore be upgraded together.
+This guide takes you from an empty host to a working paired deployment: a
+provider gateway, one-time user enrollment, a desktop SOCKS client, and
+Clash/mihomo integration. It also covers service operation, upgrades, and
+rollback. Protocol 1 is the only supported wire protocol, so client and server
+must be upgraded together.
+
+For a quick overview, start with the [repository README](../README.md). Use
+[known limitations](KNOWN-LIMITATIONS.md) to check whether the paired-gateway
+assumption fits your network before exposing a service.
 
 ## What is configured where
 
@@ -252,10 +257,10 @@ bypass even an explicitly supplied curl proxy and can produce a convincing but
 irrelevant result. Confirm that client and server `flows_started_total`
 counters increase during the request.
 
-## Replace an earlier development tunnel
+## Upgrade an existing deployment
 
-Protocol 4 deliberately has no shared-secret or wire-compatibility mode. An
-old client cannot use a new server, and a new client cannot use an old server.
+Protocol 1 deliberately has no shared-secret or wire-compatibility mode. An old
+client cannot use a new server, and a new client cannot use an old server.
 Replacing a service on the same endpoint therefore requires a brief coordinated
 restart; existing flows cannot survive the protocol boundary.
 

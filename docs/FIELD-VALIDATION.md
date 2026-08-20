@@ -2,7 +2,12 @@
 
 > [!NOTE]
 > **Status:** Current qualification matrix for public protocol 1
-> **Last reviewed:** 2026-08-19
+> **Last reviewed:** 2026-08-20
+
+This is the real-network qualification plan for the public preview. It is not
+required to try Queqiao on your own path: for that, follow the [deployment
+guide](DEPLOYING.md) and [benchmarking guide](BENCHMARKING.md). Use this matrix
+when a result should become release evidence.
 
 ## Purpose
 

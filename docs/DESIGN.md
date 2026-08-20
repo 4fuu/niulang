@@ -1,12 +1,14 @@
 # Queqiao design
 
 > [!NOTE]
-> **Status:** Current design of record
+> **Status:** Current technical design reference
 >
 > **Applies to:** Public protocol 1
-> **Last reviewed:** 2026-08-19
+> **Last reviewed:** 2026-08-20
 
-Queqiao is a WAN optimization protocol for two known tunnel endpoints
+This is the technical deep dive behind the user-facing explanation in the
+[repository README](../README.md) and [vision](VISION.md). Queqiao is a WAN
+optimization protocol for two known tunnel endpoints
 whose shared long-haul segment is the dominant bottleneck for many application
 flows. It combines a shared directional path model, erasure-aware congestion
 control, selective forward-error correction, byte-offset recovery, and

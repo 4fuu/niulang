@@ -1,5 +1,9 @@
 # Mobile clients
 
+> This page is for people building or qualifying the mobile clients. For the
+> user-facing product boundary, start with [the repository README](../README.md)
+> and [known limitations](KNOWN-LIMITATIONS.md).
+
 Queqiao has native Android and iOS applications backed by one shared Go core.
 Neither is a wrapper around the desktop user interface, and the two are
 deliberately different products:

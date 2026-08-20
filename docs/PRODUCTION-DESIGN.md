@@ -6,9 +6,9 @@
 > **Applies to:** Public protocol 1
 > **Last reviewed:** 2026-08-19
 
-Queqiao is being prepared for a public preview. A production-ready claim
-requires evidence for both the transport and the multi-user security system;
-passing unit tests alone is not sufficient.
+Queqiao is usable as a public preview for the supported paired topology. A
+production-ready claim requires evidence for both the transport and the
+multi-user security system; passing unit tests alone is not sufficient.
 
 ## Security criteria
 

@@ -4,117 +4,104 @@
 > **Status:** Current project direction
 >
 > **Applies to:** Protocol 1 and future explicitly versioned successors
-> **Last reviewed:** 2026-08-19
+> **Last reviewed:** 2026-08-20
 
-Queqiao's goal is to be an evolving WAN optimization protocol for difficult,
-known long-haul links. It should be useful now, measurable in operation, and
-able to change when evidence from a new network contradicts the current
-design.
+Queqiao exists to make a difficult, known long-haul link useful today. It is a
+ready-to-use transport for a client and a trusted gateway, and it keeps
+evolving as measurements from more networks teach us where the current design
+works, where it fails, and what should replace it.
 
-It is not an attempt to invent one universal congestion controller or to claim
-that conventional transports are wrong on the paths they were designed for.
+This is a focused promise, not a claim to replace the Internet's general
+congestion control. Queqiao is most useful when many application flows first
+cross the same client-to-gateway segment and that segment is the dominant
+bottleneck.
 
 ## The deployment insight
 
-General-purpose congestion control has to work when connections go to unrelated
-destinations through unrelated bottlenecks. A controller therefore usually
-learns and acts per connection.
+General-purpose transports cannot assume that two connections share a path.
+They therefore learn and act independently for each connection. Queqiao knows
+more about its deployment: web, SSH, voice/video, and transfer flows may have
+different final destinations, but they first cross the same endpoint pair.
 
-Queqiao is deployed between two known tunnel endpoints; the current product
-roles call them a client and provider gateway. Web, SSH, voice/video, and
-transfer flows may continue to many destinations after that gateway, but they
-first cross the same endpoint-pair WAN segment. When that segment is the
-dominant bottleneck, the system can share a path model and an aggregate policy
-across flows.
+That shared segment becomes the optimization unit. Queqiao can coordinate its
+aggregate offered load, share loss/RTT/capacity evidence, and protect latency
+headroom across flows instead of asking every connection to rediscover the same
+bottleneck.
 
-This pattern is widely useful: an intercontinental proxy or branch tunnel, a
-remote employee reaching a corporate gateway, a device on a poor hotel/mobile/
-residential link reaching a stable relay, or one long-haul leg of a
-Tailscale-like overlay. Queqiao supplies the optimized paired data plane; a
-larger overlay may supply discovery, routing, policy, and mesh coordination.
+This shape appears in intercontinental proxies and branch tunnels, remote
+corporate access, poor hotel/mobile/residential links to a stable relay, and
+individual long-haul legs inside an overlay. The repository supplies the
+paired data plane; discovery, global routing, and mesh coordination can be
+provided by a larger product around it.
 
-This is an explicit operating assumption, not a universal truth. If the
-dominant bottleneck is elsewhere, changes rapidly, or is shared with traffic
-outside the operator's control, the policy and its safety limits need to be
-reevaluated.
+If the dominant bottleneck is beyond the gateway, differs by destination, or is
+a public resource outside the operator's authority, the assumption does not
+hold automatically. Measure the deployment again before relying on the policy.
 
-## Network design principles
+## Principles that guide the implementation
 
-### Treat the endpoint pair as one congestion domain
+### Share the path model across the endpoint pair
 
-The application destinations differ, but traffic first crosses the same
-client–gateway segment. Loss state, delivered rate, pacing, and latency reserve
-therefore belong to the endpoint-pair aggregate. Per-flow state still describes
-flow progress; it does not pretend each flow has an independent bottleneck.
+Per-flow byte progress remains separate, but loss, delivery rate, RTT, pacing,
+and latency reserve belong to the shared client-to-gateway path. A change from
+Wi-Fi to cellular creates a new path model because it changes the bottleneck.
 
-### Classify the loss process, not each lost packet
+### Treat loss as a process
 
-Rate-independent random erasure below a capacity knee is not relieved by
-backing off. Loss that appears or becomes clustered as offered load crosses the
-knee is congestion. The controller uses delivery rate and loss correlation to
-separate these regimes rather than giving every loss the same meaning.
+Rate-independent erasure below a capacity knee is not relieved by backing off.
+Loss that appears or becomes clustered as offered rate crosses the knee is
+congestion. The controller estimates the erasure floor separately from excess
+loss instead of giving every missing packet the same meaning.
 
-### Control aggregate offered load
+### Control the aggregate offered rate
 
-On a high-erasure path, wire rate and application-useful delivery rate differ
-substantially. The sender must budget parity and retransmission against the
-shared physical bottleneck, not let each logical flow independently chase a
-rate. Queqiao has no TCP-friendliness obligation on an operator-controlled
-paired segment, but it still paces the aggregate at real congestion.
+Data, parity, and retransmissions all consume the same physical bottleneck. The
+sender budgets them together and reserves room for control and interactive
+traffic. Aggressive recovery against non-congestive erasure does not excuse
+overrunning the real congestion knee.
 
-### Choose recovery against bandwidth–delay product
+### Choose recovery against the WAN round trip
 
-With a long RTT, a missing packet recovered by ARQ can delay useful bytes by a
-full additional round trip. FEC can remove that wait but consumes capacity even
-when its parity is not needed. Queqiao uses sliding-window coding while avoiding
-an RTT is more valuable, then favors retransmission as flow progress makes byte
-efficiency dominant. This changes policy inside one logical flow; it does not
-select another transport architecture.
+Retransmission is byte-efficient but may add a full RTT before useful data can
+continue. Sliding-window coding spends extra wire bytes to repair some gaps
+without waiting. Queqiao can use coding while the RTT is more expensive than
+the parity, then return to retransmission as byte efficiency becomes dominant.
 
 ### Keep feedback independent of blocked data
 
-An ordered stream gap must not hold the ACK or recovery signal needed to release
-the sender. Queqiao separates reliable control from coded data within a
-connection. Under cross-flow contention, priority and reactive isolation keep a
-bulk congestion window from trapping new interactive work or its control
-traffic.
+Acknowledgements and recovery control must reach the sender even when coded
+data is missing. Reliable control, priority scheduling, and reactive isolation
+keep bulk traffic from trapping the feedback or new work that releases it.
 
-### Model each direction independently
+### Model upstream and downstream independently
 
-The downstream and upstream may traverse different capacity, shaping, and loss
-regimes. Queqiao keeps direction-specific estimates and recovery decisions; it
-does not infer upstream behavior from a downstream erasure floor.
+The two directions can have different capacity, shaping, RTT contribution, and
+loss behavior. Queqiao keeps direction-specific estimates and recovery policy
+instead of copying a downstream model onto the upstream.
 
-### Use one flow architecture across workloads
+### Keep one flow architecture across workloads
 
-Short requests, interactive sessions, and bulk transfers are evaluation
-families, not separate protocols. Every TCP flow starts with the same logical
-framing and can evolve as its observed byte count, rate, directionality, age,
-and idle gaps change. Classification only supplies cross-cutting policy signals.
+Short requests, interactive sessions, and bulk transfers are evaluation views,
+not application-selected protocols. Every flow keeps the same logical framing,
+byte offsets, acknowledgement semantics, and recovery state while its policy
+changes with observed bytes, rate, direction, age, and idle gaps.
 
-## What may evolve
+## What can change
 
-The current mechanisms—shared path estimation, erasure-aware control,
-sliding-window coding, aggregate pacing, behavioral classification, reactive
-isolation, and TCP fallback striping—are an implementation, not the project's
-identity. They may be replaced when a better measured design preserves the
-principles above.
+The current mechanisms—path estimation, erasure-aware control, coding,
+aggregate pacing, behavioral classification, isolation, and carrier fallback—
+are replaceable implementation choices. A new mechanism should preserve the
+principles above, carry evidence from the target path, and make its limits
+explicit.
 
-Wire evolution is explicit. A wire-incompatible change increments the protocol
-version, documents its migration story, and fails closed rather than silently
-negotiating an unsafe legacy mode.
+Wire evolution is never implicit. A wire-incompatible change increments the
+protocol version, updates the [protocol specification](PROTOCOL.md), documents
+the migration path, and fails closed instead of silently accepting an unsafe
+legacy mode.
 
-Parity, regressions, rejected designs, invalid measurements, and path-specific
-counterexamples remain part of the public record. Claims should shrink when the
-available evidence is narrow.
-
-## The community's role
+## Build the project with us
 
 The maintainers cannot reproduce every carrier, residential ISP, hotel,
-enterprise firewall, route, or long-fat network. Reports from those networks
-are necessary to discover where the shared-bottleneck or loss-model assumptions
-hold and where they fail.
-
-The most valuable contributions are reproducible measurements and
-counterexamples, including cases where Queqiao is worse than a conventional
-proxy. See [Contributing network evidence](CONTRIBUTING-NETWORK-EVIDENCE.md).
+enterprise firewall, route, or long-fat network. A reproducible counterexample
+is as valuable as a performance win. See [contributing network evidence](CONTRIBUTING-NETWORK-EVIDENCE.md)
+and the [general contribution guide](../CONTRIBUTING.md).

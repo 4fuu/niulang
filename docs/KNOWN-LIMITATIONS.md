@@ -2,7 +2,12 @@
 
 > [!NOTE]
 > **Status:** Current limitations for public protocol 1
-> **Last reviewed:** 2026-08-19
+> **Last reviewed:** 2026-08-20
+
+These are the boundaries of the ready-to-use public-preview deployment. Read
+them before treating a successful local test as evidence that a different
+network will behave the same way. The [project status](STATUS.md) tracks which
+qualification items are still open.
 
 - Queqiao is a WAN optimization data plane, not an anonymity network. The
   desktop ingress is SOCKS5, the released Android app exports an authenticated

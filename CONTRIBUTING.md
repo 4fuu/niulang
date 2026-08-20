@@ -1,13 +1,28 @@
-# Contributing
+# Contributing to Queqiao
 
-Queqiao is an evolving WAN optimization protocol with broad applicability to
-intercontinental tunnels, remote corporate access, weak access networks, and
-WAN overlay links. Its optimization unit is precise: an endpoint pair whose
-shared WAN segment is the dominant bottleneck. Before proposing a large
-feature, open a design issue that explains the
-measured problem, the supported topology it affects, and how the change will
-be evaluated. Do not submit protocol or congestion-control changes justified
-only by an emulated benchmark.
+Queqiao is a ready-to-use, open-source transport that keeps evolving from
+evidence on real networks. Code matters, but so do documentation, deployment
+experience, measurements, and reports that show where the current design is
+wrong.
+
+The project has a precise optimization unit: a known client and gateway whose
+shared WAN segment is the dominant bottleneck. Before proposing a large feature,
+explain the problem, the supported topology it affects, and how you will
+evaluate it. Do not justify protocol or congestion-control changes only with an
+emulated benchmark.
+
+## Ways to help
+
+- **Use it.** Deploy the paired client and gateway, try TCP and UDP workloads,
+  and report setup friction or failures.
+- **Measure it.** Compare short-lived, interactive, and bulk behavior on the
+  same path window; [the network-evidence guide](docs/CONTRIBUTING-NETWORK-EVIDENCE.md)
+  explains how to make the result useful and safe.
+- **Improve the project.** Fix bugs, add tests, improve deployment examples,
+  update the mobile clients, or make the local tools easier to use.
+- **Change the protocol carefully.** Include a measured problem, a compatibility
+  story, resource bounds, and an evaluation plan. Wire changes must be explicit
+  and fail closed.
 
 ## Development checks
 
@@ -21,42 +36,34 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -checks=all,-U1000 ./...
 ```
 
-Changes to framing, authentication, resource admission, recovery, concurrency,
-or packaging should also run the relevant full/race/fuzz/fallback checks from
-`.github/workflows/deep.yml`. Normal CI runs the short Go suite natively on
-Linux, macOS, and Windows for amd64 and arm64; deep and release-candidate runs
-exercise the full suite on all six targets and the race suite on every target
-supported by Go (all except Windows/arm64). A wire change must increment
-`internal/protocol.Version`, update `docs/PROTOCOL.md`, document its upgrade
-path, and add fail-closed compatibility tests.
+Changes to framing, authentication, resource admission, recovery,
+concurrency, or packaging should also run the relevant full, race, fuzz, and
+fallback checks from `.github/workflows/deep.yml`. Normal CI runs the short Go
+suite on Linux, macOS, and Windows for amd64 and arm64; deep and release
+candidate runs exercise the broader supported matrix.
 
-The full gosec invocation intentionally reports reviewed findings. Validate its
-JSON with `scripts/check_gosec.py` as documented in
-`docs/archive/2026-08-development/STATIC-SECURITY-AUDIT-20260817.md`; do not
-silence a rule globally. That audit is a historical baseline; a release
-candidate requires a fresh report for its exact commit.
-
-`govulncheck` reports no vulnerability that this code calls, and one advisory
-against a module the build requires: GO-2026-5932, the unmaintained
-`golang.org/x/crypto/openpgp` package, which Queqiao never imports and which
-has no fixed version to move to. Expect it in scanner output for as long as
-`golang.org/x/crypto` is in the graph. A finding that names a symbol this code
-actually calls is a different matter and blocks a release candidate.
+A wire change must increment `internal/protocol.Version`, update
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md), document its upgrade path, and add
+fail-closed compatibility tests. Keep the [current design](docs/DESIGN.md),
+[architecture](docs/ARCHITECTURE.md), and [known limitations](docs/KNOWN-LIMITATIONS.md)
+consistent with any guarantee that changes.
 
 Measurements must record the commit, toolchain, module graph, exact command,
-path parameters, trial order, and raw output. Use alternating or shared-path
-controls for live comparisons; do not compare transports in separate time
-windows and attribute path movement to code.
+path parameters, trial order, and raw output. Alternate candidates or use a
+shared path window; do not run transports in separate time windows and
+attribute route movement to code.
 
-Network reports should follow
-[`docs/CONTRIBUTING-NETWORK-EVIDENCE.md`](docs/CONTRIBUTING-NETWORK-EVIDENCE.md).
-Short-lived, interactive, and bulk traffic are evaluation families for the same
-unified protocol, not separate architectures to implement or select.
+The full gosec invocation intentionally reports reviewed findings. Validate its
+JSON with `scripts/check_gosec.py` as documented in the archived static-security
+audit; do not silence a rule globally. A release candidate requires fresh
+security and dependency evidence for its exact commit.
 
 ## Pull requests
 
-Keep changes scoped, include regression tests, and update the design or
-operations documents whose guarantees change. Never commit credentials,
-private keys, active host configuration, packet captures with user traffic, or
-reports containing private infrastructure details. Report vulnerabilities as
-described in `SECURITY.md`, not in a public issue or pull request.
+Keep changes scoped and explain how they were checked. Preserve failed and
+incomplete measurements rather than silently dropping them. Never commit
+credentials, private keys, active host configuration, packet captures with user
+traffic, or reports containing private infrastructure details.
+
+For security vulnerabilities, follow [`SECURITY.md`](SECURITY.md) and report
+privately instead of opening a public issue or pull request.

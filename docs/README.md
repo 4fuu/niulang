@@ -1,84 +1,78 @@
 # Queqiao documentation
 
-> [!NOTE]
-> This index is the public entry point for Queqiao documentation. Files linked
-> under **Current documentation** describe protocol version 1 and the current
-> source tree. Dated development notebooks live under [`archive/`](archive/)
-> and must not be used as current operational guidance.
+This is the documentation home for Queqiao, an open-source transport for
+making difficult, known long-haul links faster and more reliable. The
+[repository README](../README.md) is the best introduction; this index helps
+you choose the next document based on what you want to do.
 
 ## Start here
 
 | If you want to… | Read |
 | --- | --- |
-| Understand why the project exists | [Vision and design principles](VISION.md) |
-| Check maturity and supported scope | [Project status](STATUS.md) |
-| Install a provider and client | [Deployment guide](DEPLOYING.md) |
-| Understand the transport | [Current design](DESIGN.md), then [architecture](ARCHITECTURE.md) |
-| Measure a path or compare transports | [Benchmarking](BENCHMARKING.md) |
-| Contribute observations from another network | [Contributing network evidence](CONTRIBUTING-NETWORK-EVIDENCE.md) |
+| Understand the problem and the design principles | [Vision and principles](VISION.md) |
+| Decide whether Queqiao fits your network | [Project status](STATUS.md) and [known limitations](KNOWN-LIMITATIONS.md) |
+| Use a provider and client | [Deployment guide](DEPLOYING.md) |
+| Understand the transport in depth | [Current design](DESIGN.md), then [architecture](ARCHITECTURE.md) |
+| Measure a path or compare a baseline | [Benchmarking](BENCHMARKING.md) |
+| Contribute code, documentation, or network results | [Contributing](../CONTRIBUTING.md) |
 
-## Current documentation
+## Use and operate Queqiao
 
-### Concepts and protocol
+- [Deployment guide](DEPLOYING.md) — provider setup, invitations, desktop
+  enrollment, Clash/mihomo, service installation, monitoring, upgrades, and
+  rollback.
+- [Runtime logging](LOGGING.md) — log locations, rotation, telemetry, and safe
+  evidence collection.
+- [Mobile clients](MOBILE.md) — Android and iOS builds, product boundaries,
+  and release requirements.
+- [Android export mode](ANDROID-EXPORT.md) — how the released Android app
+  provides a local SOCKS5 endpoint to an existing routing client.
+- [Known limitations](KNOWN-LIMITATIONS.md) — scope, privacy, topology,
+  platform, and operational limits to check before deployment.
 
-- [Vision and design principles](VISION.md) — the durable problem statement,
-  assumptions, and rules that should survive mechanism changes.
-- [Current design](DESIGN.md) — why the present controller, recovery, pacing,
-  and isolation mechanisms follow from measured path behavior.
-- [Architecture](ARCHITECTURE.md) — components, unified flow path, trust
-  boundaries, fallback, and resource bounds.
-- [Protocol version 1](PROTOCOL.md) — current wire framing and security
-  invariants.
-- [Known limitations](KNOWN-LIMITATIONS.md) — product, topology, privacy, and
-  operational limits.
+## Understand the design
 
-### Use and operation
+- [Vision and principles](VISION.md) — the durable problem statement and the
+  assumptions that should survive mechanism changes.
+- [Current design](DESIGN.md) — the measured loss model, recovery, pacing,
+  pooling, fallback, and rejected alternatives behind protocol 1.
+- [Architecture](ARCHITECTURE.md) — components, flow lifecycle, trust
+  boundaries, resource limits, and carrier behavior.
+- [Protocol version 1](PROTOCOL.md) — the normative wire contract, framing,
+  authentication, recovery, and conformance rules.
+- [Path characterization](PATH-CHARACTER-20260813.md) — the open-loop
+  measurement that exposed the motivating path's erasure floor and congestion
+  knee.
 
-- [Deployment guide](DEPLOYING.md) — provider setup, enrollment, Clash/mihomo,
-  service installation, upgrades, and troubleshooting.
-- [Runtime logging](LOGGING.md) — log locations, retention, telemetry, and
-  operational controls.
-- [Mobile clients](MOBILE.md) — Android/iOS build, distribution, and release
-  constraints.
-- [Android export mode](ANDROID-EXPORT.md) — the released Android app as a
-  local SOCKS5 endpoint, the per-app bypass every consumer client must apply,
-  and v2rayNG/mihomo/sing-box configuration.
-- [Releasing](RELEASING.md) — local packages, candidate workflows, installation,
-  and rollback.
+## Measure and qualify
 
-### Evaluation and qualification
+- [Benchmarking](BENCHMARKING.md) — reproducible short-lived, interactive, and
+  bulk workload measurements.
+- [Field validation](FIELD-VALIDATION.md) — the real-network matrix for NAT,
+  middleboxes, access diversity, and release qualification.
+- [Field-result index](field-results/README.md) — current protocol-1 records;
+  historical records are kept separate until they qualify the current wire.
+- [Production design criteria](PRODUCTION-DESIGN.md) — the stronger bar for a
+  production-ready claim.
+- [Public release checklist](RELEASE-CHECKLIST.md) — the authority for preview
+  publication and release evidence.
 
-- [Project status](STATUS.md) — what is implemented, what the evidence supports,
-  and what remains open.
-- [Benchmarking](BENCHMARKING.md) — reproducible path and workload measurement.
-- [Field validation](FIELD-VALIDATION.md) — required real-network diversity
-  matrix and acceptance criteria.
-- [Field-result index](field-results/README.md) — current protocol-1 field
-  evidence; currently awaiting a complete campaign.
-- [Path characterization, 2026-08-13](PATH-CHARACTER-20260813.md) — the
-  open-loop measurement that exposed the erasure floor and congestion knee on
-  the motivating path.
+## Contribute and maintain
 
-### Project governance
-
-- [Roadmap](ROADMAP.md) — implemented stages and remaining external
-  qualification.
-- [Public-release checklist](RELEASE-CHECKLIST.md) — authority for preview and
-  production-ready claims.
-- [Production design criteria](PRODUCTION-DESIGN.md) — security, operational,
-  and transport gates.
-- [Contributing guide](../CONTRIBUTING.md), [security model](../SECURITY.md), and
-  [privacy statement](../PRIVACY.md).
+- [Contributing guide](../CONTRIBUTING.md) — development checks, pull requests,
+  protocol changes, and safe reporting.
+- [Contributing network evidence](CONTRIBUTING-NETWORK-EVIDENCE.md) — how to
+  share measurements and counterexamples without exposing private data.
+- [Roadmap](ROADMAP.md) — what is implemented, what was retired, and what
+  qualification work remains.
+- [Releasing](RELEASING.md) — reproducible archives, installation, and rollback.
+- [Mobile memory](MOBILE-MEMORY.md) — resource budgets for the packet-tunnel
+  extension.
 
 ## Historical records
 
-[`archive/2026-08-development/`](archive/2026-08-development/) preserves the
-superseded multipath/erasure notebooks, protocol-3 measurements, profiles,
-  candidate reports, fallback measurements, and audits that explain how the
-  current design was reached.
-They remain useful provenance, but their commands, wire format, conclusions,
-and performance numbers are not current release claims.
-
-When current documentation disagrees with an archived record, current
-documentation wins. Historical mistakes and negative results remain visible so
-future work does not repeat them.
+The [archive](archive/README.md) preserves dated measurements, rejected
+designs, audits, and release experiments. Archive documents may describe old
+wire versions, invalid measurements, or removed commands. They are useful
+provenance, not current operational guidance; when an archived record differs
+from a current document, the current document wins.
