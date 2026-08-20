@@ -36,6 +36,8 @@ you choose the next document based on what you want to do.
   assumptions that should survive mechanism changes.
 - [Current design](DESIGN.md) — the measured loss model, recovery, pacing,
   pooling, fallback, and rejected alternatives behind protocol 1.
+- [Comparing transports](COMPARISON.md) — architectural differences and a
+  clearly labeled historical TUIC/Hysteria2 comparison.
 - [Architecture](ARCHITECTURE.md) — components, flow lifecycle, trust
   boundaries, resource limits, and carrier behavior.
 - [Protocol version 1](PROTOCOL.md) — the normative wire contract, framing,

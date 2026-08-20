@@ -41,7 +41,7 @@ limitations](KNOWN-LIMITATIONS.md) before deploying it.
 | Contention | behavioral flow state, priority queues, reactive bulk isolation, and bounded opt-in TCP fallback striping |
 | Identity | one-time invitations, provider-pinned gateway identity, per-device mutual TLS, renewal, revocation, and per-user limits |
 | Operations | bounded JSON logs, metrics, local visualizer, service examples, release packaging, SBOMs, and rollback procedure |
-| Clients | command-line desktop client, Android SOCKS export mode, and iOS packet tunnel using the same protocol-1 core |
+| Clients | macOS/Linux desktop and gateway builds available from source; Windows targets built but under testing; Android SOCKS export and iOS packet-tunnel clients under testing, all using the protocol-1 core |
 | Conformance | committed protocol-1 vectors for framing, acknowledgement, destinations, UDP, coding, and enrollment, replayed by the test suite |
 
 ## Evidence and open work

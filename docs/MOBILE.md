@@ -4,6 +4,11 @@
 > user-facing product boundary, start with [the repository README](../README.md)
 > and [known limitations](KNOWN-LIMITATIONS.md).
 
+The Android and iOS clients are under testing. They share the protocol-1 core,
+but their platform-specific routing, lifecycle, store, and physical-device
+qualification remains open; do not read their source availability as a
+production-ready mobile release.
+
 Queqiao has native Android and iOS applications backed by one shared Go core.
 Neither is a wrapper around the desktop user interface, and the two are
 deliberately different products:

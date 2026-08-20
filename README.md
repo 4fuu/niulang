@@ -90,6 +90,21 @@ The application does not have to choose a “short-flow,” “interactive,” o
 the same architecture. HTTPS remains end-to-end; the gateway sees the
 destination and traffic shape, but Queqiao does not inspect application content.
 
+## How Queqiao compares
+
+| | Queqiao | TUIC v5 | Hysteria 2 |
+| --- | --- | --- | --- |
+| Shared endpoint-pair path model | Yes | Usually per connection | Usually per connection |
+| Erasure-aware FEC and retransmission | Yes | QUIC recovery | Protocol-specific UDP/QUIC recovery |
+| Historical bulk median | **143.1 Mbit/s** | 76.8 Mbit/s | 90.2 Mbit/s |
+| Historical SSH p99 under bulk load | 940 ms | **662 ms** | **526 ms** |
+
+The numbers are from a six-round, real-path campaign using historical wire
+protocol 3—not the current protocol-1 qualification set. They show why
+Queqiao's path model is promising, and why we publish the interactive tail
+alongside bulk goodput rather than claiming a universal win. See the full
+[comparison and methodology](docs/COMPARISON.md).
+
 ## What you can use today
 
 - A desktop/server client and provider gateway for TCP CONNECT and UDP
