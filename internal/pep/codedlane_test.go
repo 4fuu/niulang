@@ -230,7 +230,7 @@ func TestACodedLaneCarriesAFlowAcrossAnErasureChannel(t *testing.T) {
 	// 14 KB, received 8 KB, lost one packet and had a 307 ms smoothed round
 	// trip.
 	socks, destination := codedPair(t, true, &path)
-	conn := socksDial(t, socks, destination, 120*time.Second)
+	conn := socksDial(t, socks, destination, erasureChannelBudget(120*time.Second))
 	defer conn.Close()
 
 	payload := make([]byte, 48*1024)
@@ -352,4 +352,24 @@ func TestADatagramWaitsForTheFlowThatOwnsIt(t *testing.T) {
 	if held > maxHeldFrames {
 		t.Fatalf("held %d frames for flows that do not exist, want at most %d", held, maxHeldFrames)
 	}
+}
+
+// erasureChannelBudget scales a wall-clock deadline for race instrumentation.
+//
+// The budget here bounds a transfer across an emulated 42% erasure channel,
+// which is retransmission-bound rather than CPU-bound, so it is written for
+// how long the path takes and not for how fast the host is. Race
+// instrumentation breaks that: it multiplies the CPU cost of every frame the
+// repair path touches, and on the two-core hosted Windows runner this test
+// spent its whole 120 s and failed on the read deadline while internal/fec in
+// the same job took 1,338 s under -race against 66 s without it.
+//
+// Scaling rather than skipping, because the erasure channel is the case this
+// lane exists for and -race is where a repair-path data race would show up:
+// skipping would drop that coverage on the one configuration able to find it.
+func erasureChannelBudget(budget time.Duration) time.Duration {
+	if raceDetectorEnabled {
+		return 4 * budget
+	}
+	return budget
 }
