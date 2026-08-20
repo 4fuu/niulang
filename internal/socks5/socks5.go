@@ -42,6 +42,15 @@ const (
 	ReplyAddressTypeUnsupported = 8
 )
 
+// WriteMethodUnavailable sends the RFC 1928 method-selection response used
+// when a listener cannot admit a new client. It must be sent during greeting
+// negotiation, before a request reply; writing ReplyGeneralFailure here would
+// make the first request byte look like an authentication method (0x01) to a
+// client that is still waiting for the two-byte method response.
+func WriteMethodUnavailable(w io.Writer) error {
+	return writeFull(w, []byte{version5, methodNoneAcceptable})
+}
+
 type Request struct {
 	Command     byte
 	Destination string

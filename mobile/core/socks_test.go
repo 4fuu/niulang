@@ -3,6 +3,7 @@ package mobilecore
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -118,6 +119,28 @@ func TestSocksRequestSupportsIPv6(t *testing.T) {
 	}
 	if request[3] != socksIPv6 || len(request) != 22 {
 		t.Fatalf("IPv6 request length/type = %d/%d", len(request), request[3])
+	}
+}
+
+func TestSocksHandshakeReportsMethodMismatch(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		greeting := make([]byte, 3)
+		_, _ = io.ReadFull(conn, greeting)
+		_, _ = conn.Write([]byte{socksVersion, 0xff})
+	}()
+	_, err = (socksClient{address: listener.Addr().String(), handshakeTimeout: time.Second}).dialTCP(context.Background(), netip.MustParseAddrPort("203.0.113.8:443"))
+	if err == nil || !errors.Is(err, errSocksMethodUnavailable) {
+		t.Fatalf("handshake error = %v, want method mismatch", err)
 	}
 }
 

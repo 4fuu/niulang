@@ -28,19 +28,27 @@ import (
 )
 
 const (
-	defaultMTU          = 1280
-	maximumMTU          = 9000
-	defaultMaxSessions  = 128
-	linkQueueLength     = 64
-	copyBufferSize      = 8 * 1024
+	defaultMTU         = 1280
+	maximumMTU         = 9000
+	defaultMaxSessions = 1024
+	linkQueueLength    = 64
+	// A bridge has two copy workers. Keeping each worker at 4 KiB means the
+	// bridge contributes at most about 8 MiB for 1,024 active TCP sessions,
+	// while the bounded transport and flow budgets provide backpressure for
+	// larger transfers.
+	copyBufferSize      = 4 * 1024
 	udpPacketBufferSize = 4 * 1024
 	udpIdleTimeout      = 2 * time.Minute
 )
 
 const (
 	endpointBufferMinimum = 4 * 1024
-	endpointBufferDefault = 32 * 1024
-	endpointBufferMaximum = 64 * 1024
+	// gVisor allocates endpoint buffers per active socket. Small defaults keep
+	// a large session count cheap. The endpoint is the sub-millisecond local
+	// half of the bridge, so a fixed 8 KiB window still backpressures cleanly
+	// without becoming the WAN flow's retained-data arena.
+	endpointBufferDefault = 8 * 1024
+	endpointBufferMaximum = 8 * 1024
 )
 
 type packetStack struct {
@@ -58,6 +66,12 @@ type packetStack struct {
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 	firstErr  chan error
+	// wg covers the two packet pumps; sessionWG covers forwarding callbacks.
+	// Closing the packet engine must not return while a proxy socket or a gVisor
+	// endpoint is still owned by an in-flight session.
+	sessionWG sync.WaitGroup
+	sessionMu sync.Mutex
+	closing   atomic.Bool
 
 	packetsIn       atomic.Uint64
 	packetsOut      atomic.Uint64
@@ -200,6 +214,9 @@ func (p *packetStack) start() {
 
 func (p *packetStack) Close() error {
 	p.closeOnce.Do(func() {
+		p.sessionMu.Lock()
+		p.closing.Store(true)
+		p.sessionMu.Unlock()
 		p.cancel()
 		_ = p.tun.Close()
 		p.link.Close()
@@ -207,6 +224,7 @@ func (p *packetStack) Close() error {
 	})
 	p.wg.Wait()
 	p.stack.Wait()
+	p.sessionWG.Wait()
 	select {
 	case err := <-p.firstErr:
 		return err
@@ -345,8 +363,18 @@ func (p *packetStack) validPlatformHeader(platform []byte, protocol tcpip.Networ
 }
 
 func (p *packetStack) acquire() bool {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if p.closing.Load() || p.ctx.Err() != nil {
+		return false
+	}
 	select {
 	case p.admission <- struct{}{}:
+		if p.closing.Load() || p.ctx.Err() != nil {
+			<-p.admission
+			return false
+		}
+		p.sessionWG.Add(1)
 		return true
 	default:
 		p.sessionRejected.Add(1)
@@ -361,6 +389,7 @@ func (p *packetStack) forwardTCP(request *tcp.ForwarderRequest) {
 		request.Complete(true)
 		return
 	}
+	defer p.sessionWG.Done()
 	defer p.release()
 	id := request.ID()
 	destination, err := endpointAddress(id.LocalAddress, id.LocalPort)
@@ -371,7 +400,11 @@ func (p *packetStack) forwardTCP(request *tcp.ForwarderRequest) {
 	outer, err := p.proxy.dialTCP(p.ctx, destination)
 	if err != nil {
 		request.Complete(true)
-		p.log("warning", fmt.Sprintf("TCP proxy connection failed: %v", err))
+		level := "warning"
+		if errors.Is(err, errSocksMethodUnavailable) {
+			level = "debug"
+		}
+		p.log(level, fmt.Sprintf("TCP proxy connection failed: %v", err))
 		return
 	}
 	var queue waiter.Queue
@@ -391,6 +424,7 @@ func (p *packetStack) forwardUDP(request *udp.ForwarderRequest) bool {
 		return false
 	}
 	go func() {
+		defer p.sessionWG.Done()
 		defer p.release()
 		id := request.ID()
 		destination, err := endpointAddress(id.LocalAddress, id.LocalPort)
@@ -406,7 +440,11 @@ func (p *packetStack) forwardUDP(request *udp.ForwarderRequest) bool {
 		defer inner.Close()
 		outer, err := p.proxy.dialUDP(p.ctx)
 		if err != nil {
-			p.log("warning", fmt.Sprintf("UDP proxy association failed: %v", err))
+			level := "warning"
+			if errors.Is(err, errSocksMethodUnavailable) {
+				level = "debug"
+			}
+			p.log(level, fmt.Sprintf("UDP proxy association failed: %v", err))
 			return
 		}
 		defer outer.Close()
@@ -427,8 +465,6 @@ func endpointAddress(address tcpip.Address, port uint16) (netip.AddrPort, error)
 func bridgeTCP(parent context.Context, left *gonet.TCPConn, right net.Conn) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	defer left.Close()
-	defer right.Close()
 	done := make(chan struct{}, 2)
 	copySide := func(destination io.Writer, source io.Reader, closeDestination func() error, closeSource func() error) {
 		_, _ = io.CopyBuffer(destination, source, make([]byte, copyBufferSize))
@@ -448,16 +484,10 @@ func bridgeTCP(parent context.Context, left *gonet.TCPConn, right net.Conn) {
 		}
 		return nil
 	})
-	select {
-	case <-ctx.Done():
-	case <-done:
-	}
-	_ = left.Close()
-	_ = right.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-	}
+	waitForBridgeWorkers(ctx, done, 2, func() {
+		_ = left.Close()
+		_ = right.Close()
+	})
 }
 
 func bridgeUDP(parent context.Context, inner *gonet.UDPConn, outer *socksUDPAssociation, destination netip.AddrPort) {
@@ -492,10 +522,36 @@ func bridgeUDP(parent context.Context, inner *gonet.UDPConn, outer *socksUDPAsso
 			refresh()
 		}
 	}()
+	waitForBridgeWorkers(ctx, done, 2, func() {
+		_ = inner.Close()
+		_ = outer.Close()
+	})
+}
+
+// waitForBridgeWorkers closes both sides after the first EOF/error or upper
+// layer cancellation, then gives every copy worker a chance to release its
+// stack, socket, and working buffer before the session returns its admission
+// slot. Network connections unblock on Close; the timeout is only a guard
+// against a broken implementation supplied across a platform boundary.
+func waitForBridgeWorkers(ctx context.Context, done <-chan struct{}, workers int, closeBoth func()) {
+	completed := 0
 	select {
 	case <-ctx.Done():
 	case <-done:
+		completed++
 	}
-	_ = inner.Close()
-	_ = outer.Close()
+	closeBoth()
+	if completed >= workers {
+		return
+	}
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for completed < workers {
+		select {
+		case <-done:
+			completed++
+		case <-timer.C:
+			return
+		}
+	}
 }

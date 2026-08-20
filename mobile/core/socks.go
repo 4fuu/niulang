@@ -28,6 +28,8 @@ const (
 	maxUDPPacket      = 64 * 1024
 )
 
+var errSocksMethodUnavailable = errors.New("local SOCKS server rejected authentication methods")
+
 type socksClient struct {
 	address          string
 	handshakeTimeout time.Duration
@@ -123,8 +125,19 @@ func (c socksClient) dialControl(ctx context.Context) (net.Conn, *bufio.Reader, 
 	if _, err := io.ReadFull(conn, response[:]); err != nil {
 		return fail(fmt.Errorf("read SOCKS greeting: %w", err))
 	}
-	if response != [2]byte{socksVersion, socksNoAuth} {
-		return fail(fmt.Errorf("SOCKS server selected unsupported authentication method %#x", response[1]))
+	if response[0] != socksVersion {
+		return fail(fmt.Errorf("SOCKS server returned version %#02x", response[0]))
+	}
+	if response[1] == 0xff {
+		return fail(fmt.Errorf("%w: no offered method was accepted", errSocksMethodUnavailable))
+	}
+	if response[1] != socksNoAuth {
+		// The packet engine owns the listener it is dialing and deliberately
+		// offers no authentication. In particular, do not pretend that GSSAPI
+		// (0x01) or username/password (0x02) succeeded: proceeding would leave
+		// the connection positioned at the wrong protocol boundary and the next
+		// error would be reported as a misleading TCP/UDP proxy failure.
+		return fail(fmt.Errorf("SOCKS server selected unsupported authentication method %#02x", response[1]))
 	}
 	return conn, bufio.NewReaderSize(conn, 512), nil
 }

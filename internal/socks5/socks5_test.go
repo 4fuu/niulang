@@ -47,6 +47,16 @@ func TestReadDomainConnect(t *testing.T) {
 	}
 }
 
+func TestWriteMethodUnavailableUsesGreetingResponse(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteMethodUnavailable(&out); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := out.Bytes(), []byte{version5, methodNoneAcceptable}; !bytes.Equal(got, want) {
+		t.Fatalf("method rejection = %v, want %v", got, want)
+	}
+}
+
 func TestRejectUnsupportedCommand(t *testing.T) {
 	b := []byte{5, 1, 0, 5, 2, 0, 1, 127, 0, 0, 1, 0, 53}
 	rw := bytes.NewBuffer(b)

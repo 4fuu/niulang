@@ -56,6 +56,48 @@ func TestEndpointAddress(t *testing.T) {
 	}
 }
 
+func TestBridgeShutdownWaitsForEveryWorker(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{}, 2)
+	closed := false
+	waitForBridgeWorkers(ctx, done, 2, func() {
+		closed = true
+		done <- struct{}{}
+		done <- struct{}{}
+	})
+	if !closed || len(done) != 0 {
+		t.Fatalf("bridge shutdown left resources open: closed=%t pending=%d", closed, len(done))
+	}
+}
+
+func TestPacketStackAdmissionReclaimsLargeCapacity(t *testing.T) {
+	p := &packetStack{ctx: context.Background(), admission: make(chan struct{}, 1024)}
+	for index := 0; index < 1024; index++ {
+		if !p.acquire() {
+			t.Fatalf("session %d was rejected", index)
+		}
+	}
+	if p.acquire() {
+		t.Fatal("admission exceeded its configured capacity")
+	}
+	for index := 0; index < 1024; index++ {
+		p.release()
+		p.sessionWG.Done()
+	}
+	if !p.acquire() {
+		t.Fatal("released session capacity was not reusable")
+	}
+	p.release()
+	p.sessionWG.Done()
+	p.sessionMu.Lock()
+	p.closing.Store(true)
+	p.sessionMu.Unlock()
+	if p.acquire() {
+		t.Fatal("session was admitted during upper-layer shutdown")
+	}
+}
+
 func TestPacketStackForwardsIPv4UDPThroughOwnedSocksClient(t *testing.T) {
 	socksAddress, closeServer := startSocksUDPServer(t, false)
 	defer closeServer()

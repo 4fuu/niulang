@@ -564,9 +564,13 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 				c.handleLocal(ctx, conn)
 			}()
 		default:
-			_ = socks5.WriteReply(conn, socks5.ReplyGeneralFailure, nil)
+			// The client may still be waiting for the two-byte SOCKS greeting
+			// response. A request-level reply starts with 0x05, 0x01 and is then
+			// misread as "unsupported authentication method 0x01" by the mobile
+			// packet engine. Send the protocol-level method rejection instead.
+			_ = socks5.WriteMethodUnavailable(conn)
 			_ = conn.Close()
-			c.cfg.Logger.Warn("local session limit reached")
+			c.cfg.Logger.Debug("local session limit reached")
 		}
 	}
 }
