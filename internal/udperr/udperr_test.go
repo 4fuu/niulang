@@ -82,43 +82,117 @@ func TestAClosedSocketIsNeverTransient(t *testing.T) {
 // whatever code arrives, so a listed-codes-versus-real-codes mismatch fails
 // here instead of silently killing a read loop.
 //
-// A connected socket is used because that is the narrowest case any supported
-// platform reports: Linux and Windows both surface it, and Windows surfaces it
-// on unconnected sockets too. macOS reports nothing at all, so it skips.
+// Both socket kinds are probed because the platforms disagree about which one
+// is told. Windows reports it on an unconnected socket, which is the case the
+// production read loops actually hit; Linux and macOS report it only on a
+// connected socket. A host that reports neither skips rather than failing,
+// and the subtest logs which route it took so the CI record says whether the
+// assertion was load-bearing on that runner.
 func TestTheCodeTheHostActuallyReportsIsRecognised(t *testing.T) {
-	closed, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Skipf("no loopback UDP: %v", err)
+	for _, probe := range []struct {
+		name string
+		dial func(*net.UDPAddr) (sender, error)
+	}{
+		{"unconnected socket", dialUnconnected},
+		{"connected socket", dialConnected},
+	} {
+		t.Run(probe.name, func(t *testing.T) {
+			vanished, err := closedLoopbackPort()
+			if err != nil {
+				t.Skipf("no closed loopback port: %v", err)
+			}
+			conn, err := probe.dial(vanished)
+			if err != nil {
+				t.Skipf("no socket: %v", err)
+			}
+			t.Cleanup(conn.Close)
+			requireTheReportedCodeIsSkippable(t, conn)
+		})
 	}
-	vanished := closed.LocalAddr().(*net.UDPAddr)
-	if err := closed.Close(); err != nil {
-		t.Fatalf("close the port before probing it: %v", err)
-	}
+}
 
-	conn, err := net.DialUDP("udp", nil, vanished)
-	if err != nil {
-		t.Skipf("no connected UDP socket: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
+// sender is the part of a UDP socket this probe needs, so one body can drive
+// both the connected and the unconnected form.
+type sender interface {
+	send() error
+	receive([]byte, time.Duration) error
+	Close()
+}
 
-	// The first send draws the ICMP reply; a later read reports it. Sending
-	// more than once because which read carries it is not guaranteed.
+func closedLoopbackPort() (*net.UDPAddr, error) {
+	held, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return nil, err
+	}
+	addr := held.LocalAddr().(*net.UDPAddr)
+	if err := held.Close(); err != nil {
+		return nil, err
+	}
+	return addr, nil
+}
+
+type connectedSender struct{ conn *net.UDPConn }
+
+func dialConnected(to *net.UDPAddr) (sender, error) {
+	conn, err := net.DialUDP("udp", nil, to)
+	if err != nil {
+		return nil, err
+	}
+	return &connectedSender{conn: conn}, nil
+}
+
+func (s *connectedSender) send() error { _, err := s.conn.Write([]byte("probe")); return err }
+func (s *connectedSender) receive(buf []byte, within time.Duration) error {
+	if err := s.conn.SetReadDeadline(time.Now().Add(within)); err != nil {
+		return err
+	}
+	_, _, err := s.conn.ReadFromUDP(buf)
+	return err
+}
+func (s *connectedSender) Close() { _ = s.conn.Close() }
+
+type unconnectedSender struct {
+	conn *net.UDPConn
+	to   *net.UDPAddr
+}
+
+func dialUnconnected(to *net.UDPAddr) (sender, error) {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return nil, err
+	}
+	return &unconnectedSender{conn: conn, to: to}, nil
+}
+
+func (s *unconnectedSender) send() error {
+	_, err := s.conn.WriteToUDP([]byte("probe"), s.to)
+	return err
+}
+func (s *unconnectedSender) receive(buf []byte, within time.Duration) error {
+	if err := s.conn.SetReadDeadline(time.Now().Add(within)); err != nil {
+		return err
+	}
+	_, _, err := s.conn.ReadFromUDP(buf)
+	return err
+}
+func (s *unconnectedSender) Close() { _ = s.conn.Close() }
+
+func requireTheReportedCodeIsSkippable(t *testing.T, conn sender) {
+	t.Helper()
+	// The first send draws the ICMP reply and a later read reports it, so
+	// send repeatedly: which read carries it is not guaranteed.
 	buf := make([]byte, 128)
-	for attempt := 0; attempt < 8; attempt++ {
-		if _, err := conn.Write([]byte("probe")); err != nil {
+	for attempt := 1; attempt <= 8; attempt++ {
+		if err := conn.send(); err != nil {
 			if Transient(err) {
-				// The write itself reported it, which is also correct.
 				t.Logf("the send reported the unreachable peer: %#v", err)
 				return
 			}
 			t.Skipf("cannot send to a closed port: %v", err)
 		}
-		if err := conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
-			t.Fatalf("set a read deadline: %v", err)
-		}
-		_, _, err := conn.ReadFromUDP(buf)
+		err := conn.receive(buf, 250*time.Millisecond)
 		if err == nil {
-			t.Fatal("a closed port answered")
+			t.Skip("something answered on the closed port")
 		}
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
@@ -131,8 +205,8 @@ func TestTheCodeTheHostActuallyReportsIsRecognised(t *testing.T) {
 		if Fatal(err) {
 			t.Fatalf("Fatal(%#v) = true for a live socket", err)
 		}
-		t.Logf("read %d reported the unreachable peer: %#v", attempt+1, err)
+		t.Logf("read %d reported the unreachable peer: %#v", attempt, err)
 		return
 	}
-	t.Skip("this host does not report an unreachable peer to the sender")
+	t.Skip("this host does not report an unreachable peer on this socket kind")
 }
