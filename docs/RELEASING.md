@@ -197,11 +197,19 @@ signed download:
 ```sh
 unzip queqiaod_v0.1.0_darwin_arm64_signed.zip
 codesign --verify --strict --verbose=2 queqiaod
-spctl --assess --type exec --verbose=4 queqiaod
+spctl --assess --type open --context context:primary-signature -vvv queqiaod
 ```
 
-Both must report the `Developer ID Application` authority and an accepted
-assessment. The signed zips also carry build-provenance attestations.
+`codesign` must report the `Developer ID Application` authority, and `spctl`
+must report `source=Notarized Developer ID`. The assessment type matters:
+`--type exec` rejects every bare command-line tool, notarized or not, because
+it looks for something it can launch as an application, so it cannot tell the
+two apart. `--type open --context context:primary-signature` asks the question
+Gatekeeper actually asks of a quarantined download. A signed but un-notarized
+binary reports `source=Unnotarized Developer ID` there, which is what makes it
+a real check rather than a formality.
+
+The signed zips also carry build-provenance attestations.
 
 Signing runs in the `public-release` environment and needs six secrets there:
 
@@ -236,3 +244,11 @@ If any of the six secrets is absent the release still completes, the signing
 job publishes no signed assets, and the run summary states plainly that the
 macOS assets are unsigned. Missing credentials never silently produce a release
 that looks signed.
+
+Because the signing keys live in `public-release` and publication does too, a
+release asks for reviewer approval twice: once to release the keys to the
+signing job, and once to publish after that job has reported. This is not a
+misconfiguration to work around. Moving the keys to repository-level secrets
+would collapse it to one prompt and would also hand them to every workflow that
+runs; keeping them environment-scoped means the second approval is given by
+someone who can already see whether notarization was accepted.
