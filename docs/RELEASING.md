@@ -126,7 +126,10 @@ A separate six-native-runner gate executes each packaged
 archive. It also refuses to qualify a commit unless an exact-SHA push or manual
 run of the normal CI workflow succeeded, binding the Android, iOS, emulator,
 and short native-suite evidence into the candidate decision. The fail-closed
-selector has Python regression coverage. Pull-request CI does not qualify
+selector has Python regression coverage. It also signs and notarizes both
+candidate macOS binaries with the `public-release` environment credentials,
+checks the resolved Gatekeeper verdict, attests the signed zips and checksum
+manifest, and retains them as non-publishing evidence. Pull-request CI does not qualify
 because GitHub tests a synthetic merge commit for that event.
 The workflow uploads candidate archives and evidence but cannot create a tag or
 GitHub Release.
@@ -245,10 +248,9 @@ App Store distribution cannot notarize. Apple issues the `.p8` exactly once at
 creation and it cannot be re-downloaded, so a lost key is replaced by revoking
 it and issuing a new one.
 
-If any of the six secrets is absent the release still completes, the signing
-job publishes no signed assets, and the run summary states plainly that the
-macOS assets are unsigned. Missing credentials never silently produce a release
-that looks signed.
+If any of the six secrets is absent, candidate qualification and final
+publication stop at the signing job. Missing credentials can never silently
+produce a release with a different or unsigned macOS asset set.
 
 Because the signing keys live in `public-release` and publication does too, a
 release asks for reviewer approval twice: once to release the keys to the

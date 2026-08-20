@@ -280,6 +280,47 @@ jobs:
           if ($output -notmatch [regex]::Escape("commit=$env:GITHUB_SHA")) { throw 'commit metadata mismatch' }
           if ($output -notmatch 'wire=1') { throw 'wire metadata mismatch' }
 
+  # Exercise the same keychain, Developer ID, notarization, Gatekeeper, and
+  # attestation path used by the final release before an immutable tag exists.
+  # A candidate is non-publishing, but its signed artifacts are retained as
+  # evidence that the environment credentials can produce what release.yml
+  # promises.
+  macos-signing:
+    needs: [package, native-smoke]
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: public-release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: queqiaod-candidate-${{ github.run_id }}
+          path: dist
+      - name: Sign and notarize the candidate macOS binaries
+        env:
+          VERSION: ${{ inputs.version }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: ./scripts/sign_macos_release.sh dist "$VERSION" signed
+      - name: Attest the signed candidate assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: signed/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: queqiaod-candidate-${{ github.run_id }}-macos-signed
+          path: signed/
+          if-no-files-found: error
+          retention-days: 30
+
   provenance:
     if: github.event.repository.visibility == 'public'
     needs: [ci-evidence, full, native-test, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke]
@@ -300,7 +341,7 @@ jobs:
 
   candidate-summary:
     if: always()
-    needs: [ci-evidence, full, native-test, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke, provenance]
+    needs: [ci-evidence, full, native-test, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke, macos-signing, provenance]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every available gate
@@ -315,12 +356,13 @@ jobs:
           HISTORY: ${{ needs.history-secret-scan.result }}
           PACKAGE: ${{ needs.package.result }}
           NATIVE: ${{ needs.native-smoke.result }}
+          MACOS_SIGNING: ${{ needs.macos-signing.result }}
           PROVENANCE: ${{ needs.provenance.result }}
           VISIBILITY: ${{ github.event.repository.visibility }}
           CANDIDATE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          for result in "$CI_EVIDENCE" "$FULL" "$NATIVE_TEST" "$RACE" "$VULN" "$FUZZ" "$SOAK" "$HISTORY" "$PACKAGE" "$NATIVE"; do
+          for result in "$CI_EVIDENCE" "$FULL" "$NATIVE_TEST" "$RACE" "$VULN" "$FUZZ" "$SOAK" "$HISTORY" "$PACKAGE" "$NATIVE" "$MACOS_SIGNING"; do
             test "$result" = success
           done
           if test "$VISIBILITY" = public; then

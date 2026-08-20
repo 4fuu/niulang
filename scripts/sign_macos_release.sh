@@ -58,7 +58,9 @@ security create-keychain -p "$keychain_password" "$keychain"
 security set-keychain-settings -lut 900 "$keychain"
 security unlock-keychain -p "$keychain_password" "$keychain"
 
-printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$work/certificate.p12"
+# macOS's BSD base64 uses -D (the GNU --decode spelling is not available on
+# hosted runners). This script executes on macOS, so keep the decoder native.
+printf '%s' "$APPLE_CERTIFICATE_P12" | base64 -D > "$work/certificate.p12"
 security import "$work/certificate.p12" \
     -k "$keychain" \
     -P "$APPLE_CERTIFICATE_PASSWORD" \
@@ -88,7 +90,7 @@ security find-identity -v -p codesigning "$keychain" | grep -F "$APPLE_SIGNING_I
     exit 1
 }
 
-printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$work/api-key.p8"
+printf '%s' "$APPLE_API_KEY_P8" | base64 -D > "$work/api-key.p8"
 
 signed_dir="$work/signed"
 mkdir -p "$signed_dir"
