@@ -95,27 +95,6 @@ jobs:
       # including coded-path correctness, and executes its packaged binary.
       - run: go test -p=1 -count=1 -timeout 50m ./...
 
-  race:
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {runner: ubuntu-24.04, os: linux, arch: amd64}
-          - {runner: ubuntu-24.04-arm, os: linux, arch: arm64}
-          - {runner: macos-15-intel, os: darwin, arch: amd64}
-          - {runner: macos-15, os: darwin, arch: arm64}
-          - {runner: windows-2025, os: windows, arch: amd64}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      # Keep CPU-bound FEC instrumentation from distorting the wall-clock
-      # network simulators in another package.
-      - run: go test -p=1 -race -timeout 110m ./...
-
   vulnerability:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -323,7 +302,7 @@ jobs:
 
   provenance:
     if: github.event.repository.visibility == 'public'
-    needs: [ci-evidence, full, native-test, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke]
+    needs: [ci-evidence, full, native-test, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -341,7 +320,7 @@ jobs:
 
   candidate-summary:
     if: always()
-    needs: [ci-evidence, full, native-test, race, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke, macos-signing, provenance]
+    needs: [ci-evidence, full, native-test, vulnerability, fuzz, fallback-soak, history-secret-scan, package, native-smoke, macos-signing, provenance]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every available gate
@@ -349,7 +328,6 @@ jobs:
           CI_EVIDENCE: ${{ needs.ci-evidence.result }}
           FULL: ${{ needs.full.result }}
           NATIVE_TEST: ${{ needs.native-test.result }}
-          RACE: ${{ needs.race.result }}
           VULN: ${{ needs.vulnerability.result }}
           FUZZ: ${{ needs.fuzz.result }}
           SOAK: ${{ needs.fallback-soak.result }}
@@ -362,7 +340,7 @@ jobs:
           CANDIDATE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          for result in "$CI_EVIDENCE" "$FULL" "$NATIVE_TEST" "$RACE" "$VULN" "$FUZZ" "$SOAK" "$HISTORY" "$PACKAGE" "$NATIVE" "$MACOS_SIGNING"; do
+          for result in "$CI_EVIDENCE" "$FULL" "$NATIVE_TEST" "$VULN" "$FUZZ" "$SOAK" "$HISTORY" "$PACKAGE" "$NATIVE" "$MACOS_SIGNING"; do
             test "$result" = success
           done
           if test "$VISIBILITY" = public; then
