@@ -83,6 +83,17 @@ type harness struct {
 	token []byte
 }
 
+// referenceDialTimeout bounds the loopback QUIC handshake these tests need.
+//
+// It was 5s, which is half the production default, so the harness held the
+// reference to a stricter bound than the thing it is a control for -- and on
+// macos-15-intel one handshake missed it, surfacing as SOCKS5 reply code 1
+// after exactly 5.00s. Nothing here wants a tight bound: the dial is to a
+// loopback listener in the same process, and the timeout exists only so a
+// wedged dial fails instead of hanging. Take the production default rather
+// than inventing a stricter number for a slower machine.
+const referenceDialTimeout = defaultDialTimeout
+
 func startReference(t *testing.T, token []byte) harness {
 	t.Helper()
 	certificate, roots := testCertificate(t)
@@ -105,7 +116,7 @@ func startReference(t *testing.T, token []byte) harness {
 	client, err := NewClient(ClientConfig{
 		ListenAddr: socksListener.Addr().String(), RemoteAddr: packet.LocalAddr().String(),
 		ServerName: "queqiao.test", RootCAs: roots, Token: token,
-		Transport: TUICTransport(), DialTimeout: 5 * time.Second, Logger: logger,
+		Transport: TUICTransport(), DialTimeout: referenceDialTimeout, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
