@@ -28,6 +28,19 @@ It is usable from source today and is being prepared as a public preview.
 > implementation is functional; broader protocol-1 field qualification and
 > independent security review remain open. See [current status](docs/STATUS.md).
 
+Queqiao is motivated by a simple question: can a transport make difficult
+intercontinental paths usable without routing all traffic through an expensive,
+latency-adding egress? China–US connectivity is one motivating example. The
+public path can combine high RTT, asymmetric capacity, random erasure, and
+congestion; a dedicated link may feel dramatically better, but reproducing that
+experience through a Hong Kong gateway adds infrastructure and bandwidth cost
+and can increase latency. Queqiao explores whether a transport can extract more
+useful capacity from the public Internet itself by coordinating flows across a
+shared endpoint pair and combining measured path modeling, multipath techniques,
+erasure coding, pacing, and latency-aware recovery. It is an ongoing research
+project: results are path-dependent, and negative results and limitations are
+part of the evidence.
+
 ## Why Queqiao?
 
 Most congestion controllers must work for arbitrary connections to arbitrary
