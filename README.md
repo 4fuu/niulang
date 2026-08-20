@@ -17,29 +17,18 @@
   <a href="docs/README.md">Documentation</a>
 </p>
 
-Queqiao is a self-hosted performance-enhancing proxy for traffic crossing a
-known, difficult WAN segment. A local SOCKS5 agent carries TCP and UDP traffic
-to a known gateway or relay over QUIC, with authenticated TLS/TCP fallback.
-It is usable from source today and is being prepared as a public preview.
+Queqiao started from a problem I experienced firsthand. While working at
+Microsoft Research Asia, I used Microsoft's dedicated link from China and saw,
+for the first time, how fast access to Google and other websites could be. That
+made the public China–US path feel less like an unavoidable limit and more like
+a transport problem.
 
-> [!IMPORTANT]
-> Queqiao is an evolving protocol, not a claim that one transport is optimal on
-> every network. Protocol version 1 is the only supported wire version. The
-> implementation is functional; broader protocol-1 field qualification and
-> independent security review remain open. See [current status](docs/STATUS.md).
-
-Queqiao is motivated by a simple question: can a transport make difficult
-intercontinental paths usable without routing all traffic through an expensive,
-latency-adding egress? China–US connectivity is one motivating example. The
-public path can combine high RTT, asymmetric capacity, random erasure, and
-congestion; a dedicated link may feel dramatically better, but reproducing that
-experience through a Hong Kong gateway adds infrastructure and bandwidth cost
-and can increase latency. Queqiao explores whether a transport can extract more
-useful capacity from the public Internet itself by coordinating flows across a
-shared endpoint pair and combining measured path modeling, multipath techniques,
-erasure coding, pacing, and latency-aware recovery. It is an ongoing research
-project: results are path-dependent, and negative results and limitations are
-part of the evidence.
+Later, I built an egress gateway in Hong Kong to improve the route. It worked,
+but it added infrastructure, doubled the network bandwidth cost, and increased
+latency. Queqiao asks whether we can get similar benefits directly from the
+public Internet, using multipath, erasure coding, shared path modeling, pacing,
+and latency-aware recovery. It is an ongoing research project: results depend
+on the path, and negative results and limitations are part of the evidence.
 
 ## Why Queqiao?
 
@@ -243,6 +232,12 @@ baselines, contention tests, and archival reports. Start with
 the [field-validation matrix](docs/FIELD-VALIDATION.md).
 
 ## What works today
+
+> [!IMPORTANT]
+> Queqiao is an evolving protocol, not a claim that one transport is optimal on
+> every network. Protocol version 1 is the only supported wire version. The
+> implementation is functional; broader protocol-1 field qualification and
+> independent security review remain open. See [current status](docs/STATUS.md).
 
 - SOCKS5 TCP CONNECT and UDP ASSOCIATE on desktop/server builds
 - pooled QUIC streams and QUIC datagrams with automatic TLS/TCP fallback
