@@ -7,32 +7,30 @@ they make different choices about path state, recovery, and scheduling.
 
 ## Design comparison
 
-| Question | Queqiao | TUIC v5 | Hysteria 2 |
-| --- | --- | --- | --- |
-| Main carrier | QUIC streams and datagrams, with authenticated TLS/TCP fallback | QUIC/UDP proxy transport | QUIC/UDP proxy transport |
-| Optimization scope | Shared client-to-gateway endpoint pair | Usually per connection | Usually per connection |
-| Recovery model | Retransmission plus selective sliding-window coding for measured erasure | QUIC stream recovery and protocol-specific UDP behavior | QUIC/UDP recovery and protocol-specific congestion behavior |
-| Cross-flow policy | Aggregate pacing, priority, and reactive bulk isolation | Normally supplied by the proxy and its connections | Normally supplied by the proxy and its connections |
-| UDP application traffic | QUIC datagrams when available, with bounded relay rescue | UDP relay semantics | UDP relay semantics |
-| Project claim | Path-scoped optimization with explicit evidence boundaries | General-purpose proxy transport | General-purpose proxy transport |
+| System | Main carrier | Optimization scope | Recovery model | Cross-flow policy | UDP application traffic |
+| --- | --- | --- | --- | --- | --- |
+| **Queqiao** | QUIC streams/datagrams with authenticated TLS/TCP fallback | Shared client-to-gateway endpoint pair | Selective sliding-window coding plus retransmission | Aggregate pacing, priority, and reactive isolation | QUIC datagrams when available, with bounded relay rescue |
+| TUIC v5 | QUIC/UDP proxy transport | Usually per connection | QUIC stream recovery and protocol-specific UDP behavior | Normally supplied by the proxy and its connections | UDP relay semantics |
+| Hysteria 2 | QUIC/UDP proxy transport | Usually per connection | Protocol-specific UDP/QUIC recovery | Normally supplied by the proxy and its connections | UDP relay semantics |
 
 These are architectural distinctions, not a ranking. A different path can
 reverse any performance result.
 
-## Published historical comparison
+## Representative benchmark
 
-The following table is from the six-round real-path campaign recorded in
-[the archived report](archive/2026-08-development/MEASUREMENTS-20260816.md).
-It used wire protocol 3, a client in China, a fixed US egress, sing-box 1.13.18
-for the native TUIC/Hysteria2 stacks, and a path with roughly 1–3% loss and no
-capacity knee below 200 Mbit/s. That is not the path model Queqiao currently
-targets, and the result does not qualify protocol 1.
+The following table is from a six-round real-path campaign recorded in
+[the benchmark report](archive/2026-08-development/MEASUREMENTS-20260816.md).
+It used a client in China, a fixed US egress, sing-box 1.13.18 for the native
+TUIC/Hysteria2 stacks, and a path with roughly 1–3% loss and no capacity knee
+below 200 Mbit/s. Treat it as representative design evidence, not a universal
+performance guarantee; repeat the benchmark on the current release and your
+own path before making a deployment decision.
 
 ### Bulk download, 20-second windows
 
-| Stack | Median goodput | Mean | Min | Max | Trials | Relative to Queqiao |
+| System | Median goodput | Mean | Min | Max | Trials | Relative to Queqiao |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Queqiao (wire 3) | **143.06 Mbit/s** | 137.31 | 105.77 | 159.33 | 6/6 | 1.00× |
+| **Queqiao** | **143.06 Mbit/s** | 137.31 | 105.77 | 159.33 | 6/6 | 1.00× |
 | Hysteria2 | 90.15 Mbit/s | 84.25 | 46.91 | 104.20 | 6/6 | 0.63× |
 | TUIC v5 | 76.79 Mbit/s | 74.70 | 47.08 | 87.20 | 6/6 | 0.54× |
 
@@ -41,9 +39,9 @@ also found that the advantage was not universal across workloads.
 
 ### Warm short-request latency and interactive tail
 
-| Stack | Warm request p50 | SSH p99 under own bulk load | Voice p99 under own bulk load |
+| System | Warm request p50 | SSH p99 under own bulk load | Voice p99 under own bulk load |
 | --- | ---: | ---: | ---: |
-| Queqiao (wire 3) | 242 ms | **940 ms** | 565 ms |
+| **Queqiao** | 242 ms | **940 ms** | 565 ms |
 | TUIC v5 | 239 ms | 662 ms | **326 ms** |
 | Hysteria2 | 242 ms | **526 ms** | 452 ms |
 
@@ -56,11 +54,10 @@ that path. The table is useful precisely because it includes that counterexample
 
 - Queqiao has a clear architectural difference: it coordinates a known shared
   endpoint-pair bottleneck and can spend measured parity to avoid WAN RTT.
-- The historical wire-3 campaign is evidence that this approach can produce a
+- The representative campaign is evidence that this approach can produce a
   large bulk-goodput advantage on one real path.
-- It is not evidence that protocol 1 is faster than TUIC or Hysteria 2 in
-  general. No complete public protocol-1 multi-network comparison is recorded
-  yet.
+- A current multi-network campaign remains the right next step before making a
+  broader performance claim.
 
 For a current claim, run the same alternating workload against all three
 stacks, bind every outer socket to the intended physical interface, record
