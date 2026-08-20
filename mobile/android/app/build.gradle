@@ -90,6 +90,39 @@ android {
     }
 }
 
+// Gradle's stock names -- app-release-unsigned.apk, app-release.aab,
+// app-debug.apk -- say nothing about what a downloaded file contains. Once a
+// file leaves CI it has no directory to explain it, so the product, version,
+// and build type belong in the name itself.
+//
+// AGP 9 removed the legacy applicationVariants DSL, so this uses the supported
+// androidComponents variant API. Only the APK name is settable here; the
+// bundle name is derived by AGP from archivesName, which is set below so the
+// AAB is descriptive too. The version comes from the same properties as
+// versionName, so an asset cannot disagree with the manifest it ships.
+def queqiaoVersionName = providers.gradleProperty("queqiaoVersionName").getOrElse("0.1.0-dev")
+
+base {
+    archivesName = "queqiao_v${queqiaoVersionName}_android"
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        // Gradle's stock release name ends in "-unsigned", which is the one
+        // genuinely useful thing about it: an unsigned APK cannot be installed
+        // and must not be handed to a user as though it could. Renaming has to
+        // preserve that, so the marker is kept whenever no signing config was
+        // supplied through the QUEQIAO_ANDROID_* variables.
+        def unsigned = variant.buildType == "release" && !releaseSigningConfigured ? "-unsigned" : ""
+        variant.outputs.each { output ->
+            // The build type is the only other discriminator. The debug
+            // variant's versionNameSuffix already carries "-debug", so naming
+            // the type twice would read queqiao_v0.1.0-dev-debug_android_debug.
+            output.outputFileName.set("queqiao_v${queqiaoVersionName}_android_${variant.buildType}${unsigned}.apk")
+        }
+    }
+}
+
 dependencies {
     implementation files("libs/mobilecore.aar")
 }

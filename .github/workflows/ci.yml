@@ -198,6 +198,20 @@ jobs:
             diff <(echo "$expected") <(echo "$declared") >&2 || true
             exit 1
           fi
+      # The Android build previously proved the APKs compile and then discarded
+      # them, so nothing downstream could inspect what CI had actually built.
+      # These are CI artifacts for review, not release assets: the release APK
+      # is unsigned, its name says so, and publication remains a separate
+      # reviewed decision.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: queqiao-android-${{ github.sha }}
+          path: |
+            mobile/android/app/build/outputs/apk/release/*.apk
+            mobile/android/app/build/outputs/apk/debug/*.apk
+            mobile/android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 14
 
   android-instrumentation:
     name: Android Keystore API ${{ matrix.api }}
