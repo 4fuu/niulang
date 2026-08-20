@@ -8,7 +8,6 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -297,11 +296,18 @@ func TestResponseProgressRenewsLocalHalfCloseGrace(t *testing.T) {
 	}
 }
 
+// The injected write failure is taken from this platform's half-close sample
+// list rather than written as syscall.EPIPE. There is no EPIPE on a Windows
+// socket -- a send there reports WSAECONNRESET or WSAECONNABORTED -- and the
+// syscall constant of that name is one of the synthetic APPLICATION_ERROR
+// values no socket returns. Naming it directly asserted that a code Windows
+// never produces is treated as a local close, which is the same class of
+// mistake sockerr_windows.go exists to correct.
 func TestFailedApplicationWriteSendsAbortImmediately(t *testing.T) {
 	pipe, peer := net.Pipe()
 	defer peer.Close()
 	outer := newAckCaptureConn(0, nil)
-	flow := newMultipathFlow(context.Background(), &writeFailConn{Conn: pipe, err: syscall.EPIPE},
+	flow := newMultipathFlow(context.Background(), &writeFailConn{Conn: pipe, err: halfCloseSamples[0].err},
 		[16]byte{1}, 7, 1024, protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
 	flow.abortDrainGrace = 20 * time.Millisecond
 	flow.lanes[0] = &mpLane{id: 0, fc: newFrameConn(outer)}
