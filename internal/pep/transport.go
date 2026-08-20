@@ -450,7 +450,9 @@ const (
 	maxConnectionReceiveWindow = 128 * 1024 * 1024
 	// A bounded stream fan-out lets one QUIC connection carry multiple
 	// independent PEP flows, like TUIC, without an unbounded stream commitment.
-	maxIncomingStreams = 128
+	// 1,024 is the mobile upper bound; stream state and retained payload remain
+	// bounded separately by the endpoint's memory budgets.
+	maxIncomingStreams = 1024
 )
 
 // flowWindows selects the QUIC receive windows. A zero field takes the

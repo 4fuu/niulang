@@ -238,3 +238,10 @@ func TestQUICConnectionsHaveAnAdmissionBound(t *testing.T) {
 		t.Fatal("released QUIC connection capacity was not reusable")
 	}
 }
+
+func TestServerQUICStreamCapacitySupportsMobileSessions(t *testing.T) {
+	config := quicServerConfig(flowWindows{})
+	if config.MaxIncomingStreams < 1024 {
+		t.Fatalf("server QUIC stream capacity = %d, want at least 1024", config.MaxIncomingStreams)
+	}
+}
