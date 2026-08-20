@@ -115,10 +115,18 @@ alongside bulk goodput rather than claiming a universal win. See the full
   coding, aggregate pacing, priority scheduling, and reactive bulk isolation.
 - One-time invitations, provider-pinned identity, per-device mutual TLS,
   renewal, revocation, and per-user session limits.
-- Android and iOS source clients using the same protocol-1 core, plus a starter
-  [Clash/mihomo profile](deploy/clash-queqiao.yaml).
+- A starter [Clash/mihomo profile](deploy/clash-queqiao.yaml).
 - Bounded JSON logs, metrics, a local visualizer, deterministic benchmarks,
   release packaging, SBOMs, and rollback procedures.
+
+## Platform availability
+
+- **macOS and Linux:** desktop and provider-gateway builds are available to use
+  from source today.
+- **Windows:** native release targets are built, but the Windows client is
+  currently under testing and is not presented as production-ready.
+- **Android and iOS:** clients use the same protocol-1 core and are currently
+  under testing. They are not yet presented as production-ready mobile apps.
 
 ## Quick start
 
