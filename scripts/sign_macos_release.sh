@@ -19,13 +19,20 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 <dist-dir> <version>" >&2
+    echo "usage: $0 <dist-dir> <version> [output-dir]" >&2
     exit 2
 }
 
-test $# -eq 2 || usage
+test $# -ge 2 && test $# -le 3 || usage
 dist=$1
 version=$2
+# The signed assets are written outside the dist directory, not into it.
+# scripts/validate_release.py asserts that the release directory contains
+# nothing but regular files, so a subdirectory of signed output would make the
+# reproducible tree fail its own validator -- today only because the two run in
+# separate jobs. Keeping the output a sibling means the reproducible archives
+# are never mutated and the validator can run at any point.
+out=${3:-"$dist-signed"}
 test -d "$dist" || { echo "no such dist directory: $dist" >&2; exit 1; }
 
 : "${APPLE_CERTIFICATE_P12:?base64 Developer ID Application .p12 is required}"
@@ -149,11 +156,11 @@ for arch in amd64 arm64; do
     }
 done
 
-install -d "$dist/signed"
+install -d "$out"
 for arch in amd64 arm64; do
     base="queqiaod_${version}_darwin_${arch}"
-    install -m 0644 "$signed_dir/${base}_signed.zip" "$dist/signed/${base}_signed.zip"
+    install -m 0644 "$signed_dir/${base}_signed.zip" "$out/${base}_signed.zip"
 done
 
-(cd "$dist/signed" && shasum -a 256 -- *_signed.zip > SHA256SUMS.signed)
-echo "signed and notarized macOS assets are in $dist/signed"
+(cd "$out" && shasum -a 256 -- *_signed.zip > SHA256SUMS.signed)
+echo "signed and notarized macOS assets are in $out"
