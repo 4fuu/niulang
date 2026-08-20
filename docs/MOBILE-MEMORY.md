@@ -39,10 +39,11 @@ must not multiply retained payload memory without limit.
 | Shared out-of-order receive payload | 3 MiB | 8 MiB |
 | Per-flow transmit ceiling | 1 MiB | 2 MiB |
 | Per-flow receive ceiling | 1 MiB | 2 MiB |
-| Active TCP/UDP sessions | 64 | 128 |
-| Pending remote opens | 16 | 32 |
+| Active TCP/UDP sessions | 1,024 | 128 |
+| Pending remote opens | 128 | 32 |
 | QUIC connection receive window | 2 MiB fixed | 4 MiB fixed |
-| QUIC stream receive window | 512 KiB fixed | 1 MiB fixed |
+| QUIC stream receive window | 64 KiB fixed | 1 MiB fixed |
+| QUIC peer-initiated streams | 32 | 64 |
 | Secondary bulk QUIC connections | 1 | 2 |
 | Coded-path send/receive mailbox | 2 frames each | 4 frames each |
 | TUN link descriptors | 64 | 64 |

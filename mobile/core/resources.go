@@ -25,8 +25,12 @@ type mobileResourceLimits struct {
 
 var iosResourceLimits = mobileResourceLimits{
 	name: "ios-fixed-40m", goMemoryLimit: 40 * 1024 * 1024,
-	maxSessions: 64, maxPendingOpens: 16, chunkSize: 16 * 1024,
-	streamWindow: 512 * 1024, connectionWindow: 2 * 1024 * 1024, maxIncomingStreams: 32,
+	// Session admission is intentionally independent from the payload arenas
+	// below.  A session mostly owns a small state machine; retained bytes are
+	// charged to the shared budgets, so raising this ceiling does not multiply
+	// the amount of data the process may keep in memory.
+	maxSessions: 1024, maxPendingOpens: 128, chunkSize: 16 * 1024,
+	streamWindow: 64 * 1024, connectionWindow: 2 * 1024 * 1024, maxIncomingStreams: 32,
 	memory: pep.MemoryLimits{
 		SendBudgetBytes: 3 * 1024 * 1024, ReceiveBudgetBytes: 3 * 1024 * 1024,
 		MaxFlowSendBytes: 1024 * 1024, MaxFlowReceiveBytes: 1024 * 1024,

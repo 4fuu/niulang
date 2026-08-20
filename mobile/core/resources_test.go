@@ -23,6 +23,9 @@ func TestMobileResourceProfilesHaveFixedEndpointBudgets(t *testing.T) {
 			}
 		})
 	}
+	if iosResourceLimits.maxSessions < 1024 {
+		t.Fatalf("iOS admission capacity = %d, want at least 1024", iosResourceLimits.maxSessions)
+	}
 }
 
 func TestMetricsExposeTheSelectedMemoryEnvelope(t *testing.T) {
