@@ -71,10 +71,10 @@ jobs:
           if test -z "$APPROVED_COMMIT"; then
             APPROVED_COMMIT="$commit"
           fi
-          case "$APPROVED_COMMIT" in
-            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-            *) echo "approved_commit must be a full lowercase SHA" >&2; exit 1 ;;
-          esac
+          [[ "$APPROVED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "approved_commit must be a full lowercase SHA" >&2
+            exit 1
+          }
           # A tag push discovers the successful candidate run for the commit.
           if test -z "$CANDIDATE_RUN_ID"; then
             CANDIDATE_RUN_ID=$(gh api \
