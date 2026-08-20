@@ -179,17 +179,25 @@ func TestRateLimiterDeliversItsConfiguredRate(t *testing.T) {
 				// delayed relay. Slow hosted runners legitimately skip only the
 				// unattainable cells; they still exercise every lower cell.
 				//
-				// The margin is 1.5x rather than 1.25x because the unshaped
-				// probe is the wrong shape for a shaped run: it is unpaced, and
-				// pacing plus per-packet policing costs more CPU per byte than
-				// forwarding flat out. A macOS-15-intel runner measured 551
-				// Mbit/s unshaped, cleared the old 500 Mbit/s bar for the 400
-				// Mbit/s cell by ten percent, and then delivered 0.73 -- the
-				// headroom was inside the noise of the thing it was gating.
+				// The sender is asked for 1.5x the limit so the limiter is the
+				// thing that binds, but the host must clear twice the limit
+				// unshaped before that offer is credible. The unshaped probe is
+				// the wrong shape for a shaped run: it is unpaced, and pacing
+				// plus per-packet policing costs more CPU per byte than
+				// forwarding flat out, so the generator and the shaper end up
+				// competing for the same cores. Two observations fix the bar. A
+				// macOS-15-intel runner measured 551 Mbit/s unshaped, cleared an
+				// earlier 500 Mbit/s bar for the 400 Mbit/s cell, and delivered
+				// 0.73. Another measured 347 Mbit/s, cleared 1.5x for the 200
+				// Mbit/s cell, then generated only 288 of the 300 Mbit/s it was
+				// asked for and delivered 0.89. In both the headroom over the
+				// offered load -- 1.38x and 1.16x -- was inside the noise of the
+				// thing it was gating. Requiring 2x the limit leaves 1.33x over
+				// the offer itself, which is the quantity that has to hold.
 				offered := mbits * 1.5
-				if unshaped < offered {
-					t.Skipf("host forwards %.0f Mbit/s unshaped at rtt=%v; need %.0f Mbit/s to calibrate a %.0f Mbit/s limiter",
-						unshaped, rtt, offered, mbits)
+				if needed := mbits * 2; unshaped < needed {
+					t.Skipf("host forwards %.0f Mbit/s unshaped at rtt=%v; need %.0f Mbit/s to calibrate a %.0f Mbit/s limiter under a %.0f Mbit/s offer",
+						unshaped, rtt, needed, mbits, offered)
 				}
 				cfg := Config{
 					OneWayDelay:     rtt / 2,
