@@ -237,21 +237,38 @@ func TestQuietLocalHalfCloseDoesNotArmAbort(t *testing.T) {
 	}
 }
 
+// The four durations below are a budget, not free parameters. Writing them as
+// named constants because the original spelled them inline as 35ms of gap
+// against a 60ms grace, and that 25ms of headroom was thinner than a Windows
+// timer tick: the abort fired mid-run and the pipe EOF'd, failing the test in
+// exactly abortGrace. Every margin here is now at least a gap wide.
+//
+//	gap < grace                  one late sleep must not exhaust the grace
+//	gaps*gap < timeout           all four frames get sent before ctx expires
+//	timeout < gaps*gap + grace   ctx ends the loop before the last grace does
+//	grace < gaps*gap             a grace that stopped renewing still fails
+const (
+	halfCloseGraceProbeGap     = 100 * time.Millisecond
+	halfCloseGraceProbeGrace   = 250 * time.Millisecond
+	halfCloseGraceProbeTimeout = 450 * time.Millisecond
+	halfCloseGraceProbeFrames  = 4
+)
+
 func TestResponseProgressRenewsLocalHalfCloseGrace(t *testing.T) {
 	inner, application := net.Pipe()
 	defer application.Close()
 	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
 		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
-	flow.abortGrace = 60 * time.Millisecond
+	flow.abortGrace = halfCloseGraceProbeGrace
 	flow.noteLocalClose(0)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 140*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), halfCloseGraceProbeTimeout)
 	defer cancel()
 	result := make(chan error, 1)
 	go func() { result <- flow.receiveInner(ctx) }()
-	for sequence := uint64(0); sequence < 4; sequence++ {
+	for sequence := uint64(0); sequence < halfCloseGraceProbeFrames; sequence++ {
 		if sequence > 0 {
-			time.Sleep(35 * time.Millisecond)
+			time.Sleep(halfCloseGraceProbeGap)
 		}
 		flow.events <- inboundEvent{frame: protocol.Frame{Header: protocol.Header{
 			Version: protocol.Version, Type: protocol.TypeData,
@@ -259,7 +276,12 @@ func TestResponseProgressRenewsLocalHalfCloseGrace(t *testing.T) {
 		}, Payload: []byte{'x'}}}
 		var got [1]byte
 		if _, err := io.ReadFull(application, got[:]); err != nil {
-			t.Fatalf("read response byte %d: %v", sequence, err)
+			// An EOF here is the abort closing inner, which is the failure
+			// this test exists to catch -- say so rather than reporting a
+			// bare read error.
+			t.Fatalf("read response byte %d after %v: %v; the half-close grace "+
+				"stopped being renewed by response progress",
+				sequence, time.Duration(sequence)*halfCloseGraceProbeGap, err)
 		}
 	}
 	select {
@@ -267,7 +289,7 @@ func TestResponseProgressRenewsLocalHalfCloseGrace(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("progressing response ended receive loop with %v, want context deadline", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(4 * halfCloseGraceProbeTimeout):
 		t.Fatal("receive loop did not honor its context")
 	}
 	if flow.localAbortSent.Load() {
