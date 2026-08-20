@@ -17,6 +17,42 @@ import (
 // the same method cmd/pathprobe uses on the live link.
 func offer(t *testing.T, cfg Config, mbits float64, duration time.Duration) (delivered float64, pattern lossmodel.Pattern) {
 	t.Helper()
+	delivered, pattern, _ = offerAttributed(t, cfg, mbits, duration)
+	return delivered, pattern
+}
+
+// attribution says where the missing packets went. The emulator drops on
+// purpose -- erasure loss and bottleneck tail drop -- and the harness around it
+// can also lose packets, in the client's send buffer or the sink's receive
+// buffer. Those look identical in the arrival vector and are not: only the
+// first two are the path the test means to measure.
+type attribution struct {
+	sent     uint64
+	arrived  int
+	relayIn  uint64
+	relayOut uint64
+	erased   uint64
+	dropped  uint64
+}
+
+// unaccounted is the loss the emulator did not cause: packets the relay either
+// never saw, or forwarded without the sink recording them. It is harness
+// overload, and it is correlated, so it contaminates exactly the independence
+// this test asserts.
+func (a attribution) unaccounted() int {
+	missedIngress := int(a.sent) - int(a.relayIn)
+	missedEgress := int(a.relayOut) - a.arrived
+	if missedIngress < 0 {
+		missedIngress = 0
+	}
+	if missedEgress < 0 {
+		missedEgress = 0
+	}
+	return missedIngress + missedEgress
+}
+
+func offerAttributed(t *testing.T, cfg Config, mbits float64, duration time.Duration) (float64, lossmodel.Pattern, attribution) {
+	t.Helper()
 	const payload = 1200
 
 	sink, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -90,8 +126,13 @@ func offer(t *testing.T, cfg Config, mbits float64, duration time.Duration) (del
 			received++
 		}
 	}
-	delivered = float64(received) * payload * 8 / duration.Seconds() / 1e6
-	return delivered, lossmodel.Analyze(arrived)
+	deliveredMbits := float64(received) * payload * 8 / duration.Seconds() / 1e6
+	up, _ := relay.Stats()
+	return deliveredMbits, lossmodel.Analyze(arrived), attribution{
+		sent: sent, arrived: received,
+		relayIn: up.PacketsIn, relayOut: up.PacketsOut,
+		erased: up.PacketsLost, dropped: up.PacketsDropped,
+	}
 }
 
 // liveChannel is the China-US path as measured on 2026-08-13: a rate limiter
@@ -137,11 +178,29 @@ func TestTheEmulatorReproducesTheMeasuredPath(t *testing.T) {
 		{offered: 50, wantDelivered: 14.5, tolerance: 1.5, wantIndep: false},
 	} {
 		t.Run(fmt.Sprintf("offered%.0f", test.offered), func(t *testing.T) {
-			delivered, p := offer(t, liveChannel(), test.offered, 4*time.Second)
+			delivered, p, where := offerAttributed(t, liveChannel(), test.offered, 4*time.Second)
 			t.Logf("offered=%.0f delivered=%.2f loss=%.1f%% P(loss|prev arrived)=%.3f "+
 				"mean_burst=%.2f burst_factor=%.2f longest=%d",
 				test.offered, delivered, 100*p.Loss, p.LossAfterArrival,
 				p.MeanBurst, p.BurstFactor, p.LongestBurst)
+			t.Logf("  of the %d sent: %d arrived, %d erased, %d tail-dropped, %d unaccounted",
+				where.sent, where.arrived, where.erased, where.dropped, where.unaccounted())
+
+			// Loss the emulator did not cause is harness overload, and it is
+			// bursty: a full socket buffer drops a run of packets. That
+			// contaminates the independence assertion below with a correlation
+			// the channel does not have, so a run whose loss is not the
+			// emulator's is not evidence about the emulator either way.
+			//
+			// macos-15-intel under -race failed here with loss at 0.460
+			// against the channel's 0.420 and P(loss|prev arrived) at 0.411:
+			// the surplus over the configured erasure rate was the tell, and
+			// the old assertion read it as the channel having memory.
+			if strays := where.unaccounted(); strays*20 > int(where.sent) {
+				t.Skipf("%d of %d packets went missing outside the emulator (%.1f%%); "+
+					"this host cannot run the open-loop sweep cleanly enough to measure loss structure",
+					strays, where.sent, 100*float64(strays)/float64(where.sent))
+			}
 
 			if math.Abs(delivered-test.wantDelivered) > test.tolerance {
 				t.Errorf("delivered %.2f Mbit/s, want %.2f +/- %.2f",
