@@ -119,7 +119,12 @@ jobs:
           found=0
           for pkg in $(go list ./...); do
             for target in $(go test -list 'Fuzz.*' "$pkg" | grep '^Fuzz' || true); do
-              go test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime 60s
+              # A fixed execution count avoids the Go fuzz driver's known
+              # duration-boundary flake (golang/go#72104), where a healthy
+              # campaign can fail with context deadline exceeded as its own
+              # fuzztime expires. Crashes and invariant failures still fail
+              # closed, and every target gets the same minimum workload.
+              go test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime 500000x
               found=$((found + 1))
             done
           done

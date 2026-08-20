@@ -134,7 +134,9 @@ jobs:
           for pkg in $(go list ./...); do
             for target in $(go test -list 'Fuzz.*' "$pkg" | grep '^Fuzz' || true); do
               echo "::group::$pkg $target"
-              go test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime 60s
+              # Avoid the duration-boundary flake tracked as golang/go#72104
+              # while keeping a deterministic, fail-closed workload.
+              go test "$pkg" -run '^$' -fuzz "^${target}\$" -fuzztime 500000x
               echo "::endgroup::"
               found=$((found + 1))
             done
