@@ -224,7 +224,13 @@ func TestIntermittentUDPBlockingReturnsToQUIC(t *testing.T) {
 
 func openTestUDPAssociation(t *testing.T, control net.Conn) *net.UDPAddr {
 	t.Helper()
-	_ = control.SetDeadline(time.Now().Add(5 * time.Second))
+	// Comfortably above the FallbackDelay its callers configure. Associating
+	// may legitimately fall back from QUIC to TCP, and a budget equal to the
+	// fallback delay -- which this was -- turns any fallback into a failed
+	// read instead of a slower success. On a contended runner that is the
+	// difference between a green build and an i/o timeout attributed to the
+	// rescue path, which is not where the time went.
+	_ = control.SetDeadline(time.Now().Add(30 * time.Second))
 	if _, err := control.Write([]byte{5, 1, 0}); err != nil {
 		t.Fatal(err)
 	}
