@@ -114,6 +114,8 @@ workload; see the full [comparison and methodology](docs/COMPARISON.md).
 - One-time invitations, provider-pinned identity, per-device mutual TLS,
   renewal, revocation, and per-user session limits.
 - A starter [Clash/mihomo profile](deploy/clash-queqiao.yaml).
+- One client process serving several providers, each on its own loopback SOCKS5
+  listener, for Clash/mihomo routing and failover.
 - Bounded JSON logs, metrics, a local visualizer, deterministic benchmarks,
   release packaging, SBOMs, and rollback procedures.
 

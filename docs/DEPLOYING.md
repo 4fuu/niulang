@@ -297,11 +297,39 @@ queqiaod client \
 
 Manifest version 1 requires a nonempty, unique name, profile, and listener for
 every provider. Relative profile paths are resolved from the manifest
-directory. Each listener must use a literal loopback IP and a numeric port;
-`--listen` cannot be combined with `--providers`. Other client runtime flags
-apply to every provider. `--max-sessions` is shared across all provider
-listeners, and the metrics endpoint aggregates their activity. Logs add the
-manifest name and listener to each provider record.
+directory. Each listener must use a literal loopback IP and a port between 1
+and 65535; `--listen` cannot be combined with `--providers`.
+
+Every entry must name a separately enrolled device. Two entries which resolve
+to one device — a copied profile, a symlink, a hard link — are rejected at
+startup: two clients on one certificate would leave two renewal loops racing to
+save a single identity into two files.
+
+Process-wide budgets stay process-wide rather than being granted once per
+provider:
+
+- `--max-sessions` is the combined admission limit. Half of it is reserved in
+  equal shares, one share per provider, and half stays common. The reservation
+  is what keeps a standby provider able to accept a connection while a busy one
+  holds most of the common pool — without it a saturated primary starves the
+  failover target that is supposed to replace it.
+- `--aggregate-bytes-per-sec` and `--interactive-reserve-bytes-per-sec` pace
+  the whole process. Providers share one budget, so the configured rate is the
+  rate the uplink sees no matter how many providers are configured.
+- `--metrics-listen` aggregates every provider's activity into one endpoint.
+  Per-provider counters are not exported today; use the runtime log, which tags
+  each record with the manifest name and listener, to attribute activity.
+
+Other client runtime flags apply to each provider independently.
+
+All listeners bind before the first gateway is dialled, so a provider whose
+gateway is unreachable at startup cannot hold a healthy provider's SOCKS port
+down. Certificate renewal then runs for every provider concurrently.
+
+The process exits if any provider's listener stops, so a partially working
+client never looks healthy to a service manager. Run it under a supervisor
+that restarts it — a bare foreground `queqiaod client --providers` will not
+come back on its own.
 
 To let Clash/mihomo choose between these endpoints, define one SOCKS5 proxy for
 each listener and put them in a health-checked group. This `fallback` example
