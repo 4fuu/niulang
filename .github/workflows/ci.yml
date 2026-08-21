@@ -79,7 +79,9 @@ jobs:
 
   # Run the portable suite on every advertised native OS and architecture.
   # -short skips the tests that bring QUIC up across an emulated 300 ms
-  # erasure path. Those run natively in deep.yml and release-candidate.yml.
+  # erasure path, and the emulator calibrations that need an uncontended host
+  # to measure anything. Those run natively in deep.yml and
+  # release-candidate.yml.
   test:
     timeout-minutes: 30
     strategy:
