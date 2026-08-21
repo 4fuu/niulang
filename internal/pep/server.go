@@ -233,8 +233,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.AggregateBytesPerSec == 0 && cfg.InteractiveReserveBytesPerSec != 0 {
 		return nil, errors.New("interactive reserve requires an aggregate byte budget")
 	}
-	if cfg.InteractiveReserveBytesPerSec > cfg.AggregateBytesPerSec {
-		return nil, errors.New("interactive reserve cannot exceed aggregate byte budget")
+	// The reserve is withheld from bulk traffic, so a reserve equal to the
+	// whole budget leaves bulk not merely slow but unable to send a byte: the
+	// budget has no bulk capacity to admit against and refuses every bulk
+	// request outright. Require the reserve to leave something behind.
+	if cfg.AggregateBytesPerSec != 0 && cfg.InteractiveReserveBytesPerSec >= cfg.AggregateBytesPerSec {
+		return nil, errors.New("interactive reserve must leave bulk capacity below the aggregate byte budget")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -245,6 +249,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if !cfg.EnableTCP && !cfg.EnableQUIC {
 		cfg.EnableTCP = true
 	}
+	budget := limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec})
+	cfg.ChunkSize = chunkSizeForBudget(cfg.ChunkSize, budget)
 	server := &Server{
 		cfg:             cfg,
 		semaphore:       make(chan struct{}, cfg.MaxSessions),
@@ -252,7 +258,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		enrollments:     make(chan struct{}, min(cfg.MaxSessions, 64)),
 		sessions:        make(map[[16]byte]*serverFlow),
 		accountSessions: make(map[string]int),
-		budget:          limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec}),
+		budget:          budget,
 		metrics:         cfg.Metrics,
 		udpRelays:       newUDPRelayStore(),
 	}

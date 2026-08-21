@@ -382,9 +382,19 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.AggregateBytesPerSec == 0 && cfg.InteractiveReserveBytesPerSec != 0 {
 		return nil, errors.New("interactive reserve requires an aggregate byte budget")
 	}
-	if cfg.InteractiveReserveBytesPerSec > cfg.AggregateBytesPerSec {
-		return nil, errors.New("interactive reserve cannot exceed aggregate byte budget")
+	// The reserve is withheld from bulk traffic, so a reserve equal to the
+	// whole budget leaves bulk not merely slow but unable to send a byte: the
+	// budget has no bulk capacity to admit against and refuses every bulk
+	// request outright. Require the reserve to leave something behind.
+	if cfg.AggregateBytesPerSec != 0 && cfg.InteractiveReserveBytesPerSec >= cfg.AggregateBytesPerSec {
+		return nil, errors.New("interactive reserve must leave bulk capacity below the aggregate byte budget")
 	}
+	budget := limiter.New(limiter.Config{
+		TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
+	})
+	// Before resolveMemoryLimits: the per-flow send budget is checked against
+	// the chunk size, and the chunk that has to fit there is the corrected one.
+	cfg.ChunkSize = chunkSizeForBudget(cfg.ChunkSize, budget)
 	if cfg.FallbackDelay <= 0 {
 		cfg.FallbackDelay = 300 * time.Millisecond
 	}
@@ -404,10 +414,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	return &Client{
 		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
-		credentials: cfg.Credentials,
-		budget: limiter.New(limiter.Config{
-			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
-		}),
+		credentials: cfg.Credentials, budget: budget,
 		metrics: cfg.Metrics, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
 	}, nil

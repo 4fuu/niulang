@@ -511,7 +511,11 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	if opts.dialTimeout <= 0 || opts.handshakeTimeout <= 0 {
 		return errors.New("dial and handshake timeouts must be positive")
 	}
-	if opts.aggregateBytesPerSec == 0 && opts.interactiveReserveBytesPerSec != 0 || opts.interactiveReserveBytesPerSec > opts.aggregateBytesPerSec {
+	// The reserve is withheld from bulk traffic, so it has to leave some of
+	// the budget behind: a reserve equal to the whole of it would stop bulk
+	// entirely rather than slow it down.
+	if opts.aggregateBytesPerSec == 0 && opts.interactiveReserveBytesPerSec != 0 ||
+		opts.aggregateBytesPerSec != 0 && opts.interactiveReserveBytesPerSec >= opts.aggregateBytesPerSec {
 		return errors.New("invalid aggregate/interactive byte budget")
 	}
 	if opts.adaptiveMinBytesSec == 0 || opts.adaptiveMaxBytesSec < opts.adaptiveMinBytesSec {
