@@ -1501,6 +1501,12 @@ func (f *multipathFlow) enqueueFrameWritten(ctx context.Context, lane *mpLane, f
 	if lane == nil || lane.closed.Load() {
 		return errors.New("lane is closed")
 	}
+	if f.budget != nil {
+		interactive := !bulk
+		if err := f.budget.Wait(ctx, len(frame.Payload), interactive); err != nil {
+			return fmt.Errorf("aggregate pacing: %w", err)
+		}
+	}
 	queue := lane.writeQ
 	if !bulk && lane.writeInteractiveQ != nil {
 		queue = lane.writeInteractiveQ
@@ -1545,12 +1551,6 @@ func (f *multipathFlow) enqueueFrameWritten(ctx context.Context, lane *mpLane, f
 }
 
 func (f *multipathFlow) enqueueOnHealthyLane(ctx context.Context, frame protocol.Frame, bulk bool) error {
-	if f.budget != nil {
-		interactive := !bulk
-		if err := f.budget.Wait(ctx, len(frame.Payload), interactive); err != nil {
-			return fmt.Errorf("aggregate pacing: %w", err)
-		}
-	}
 	for {
 		// One lane carries this plane: the isolated one for data, lane zero for
 		// control. This used to try each of several without blocking before
