@@ -157,6 +157,20 @@ func TestForwardingCapacity(t *testing.T) {
 // limiter's queue is sized from the product and is exactly where a fault would
 // hide.
 func TestRateLimiterDeliversItsConfiguredRate(t *testing.T) {
+	if testing.Short() {
+		// This calibration needs a host that can generate several hundred
+		// Mbit/s while it simultaneously paces, shapes and polices the same
+		// traffic. The per-PR matrix is the wrong place to ask for that: six
+		// runners, packages in parallel, and no control over what else shares
+		// the core. A cell there can clear both load guards and still
+		// under-deliver because the generator and the shaper are competing,
+		// which reports a limiter fault the limiter did not commit --
+		// observed on windows-11-arm and on macos-15-intel, a different
+		// runner each time. deep.yml and release-candidate.yml run this
+		// without -short and with -p=1, which is the serialised, uncontended
+		// condition a measurement of this kind has to have to mean anything.
+		t.Skip("rate calibration is meaningful only on an uncontended host; runs in deep.yml")
+	}
 	rates := []float64{50, 200, 400}
 	if raceDetectorEnabled {
 		// Race instrumentation capped the two-core hosted runner near 180
