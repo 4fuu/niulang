@@ -73,6 +73,35 @@ func TestClientAdmissionDefaultsAndPendingOpenBound(t *testing.T) {
 	}
 }
 
+func TestClientSessionLimitCanBeShared(t *testing.T) {
+	_, credentials := testCertificate(t)
+	limit, err := NewSessionLimit(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := make([]*Client, 2)
+	for i := range clients {
+		clients[i], err = NewClient(ClientConfig{
+			ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1",
+			Credentials: credentials, SessionLimit: limit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !clients[0].sessionLimit.acquire() {
+		t.Fatal("first client was not admitted")
+	}
+	if clients[1].sessionLimit.acquire() {
+		t.Fatal("second client exceeded the shared session limit")
+	}
+	clients[0].sessionLimit.release()
+	if !clients[1].sessionLimit.acquire() {
+		t.Fatal("released shared session slot was not reusable")
+	}
+	clients[1].sessionLimit.release()
+}
+
 func TestClientCredentialUpdateCannotChangeIdentity(t *testing.T) {
 	_, credentials := testCertificate(t)
 	client, err := NewClient(ClientConfig{

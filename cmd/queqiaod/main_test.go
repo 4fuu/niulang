@@ -127,6 +127,17 @@ func TestClientMissingProfileExplainsEnrollment(t *testing.T) {
 	}
 }
 
+func TestClientProfileAndProvidersAreMutuallyExclusive(t *testing.T) {
+	err := runClient([]string{"--profile", "profile.json", "--providers", "providers.json"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("profile and providers were not rejected together: %v", err)
+	}
+	err = runClient([]string{"--providers", "providers.json", "--listen", "127.0.0.1:1081"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used") {
+		t.Fatalf("global listener was accepted with providers: %v", err)
+	}
+}
+
 func TestClientAndServerCreateSeparateRuntimeLogs(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv("QUEQIAO_LOG_DIR", directory)

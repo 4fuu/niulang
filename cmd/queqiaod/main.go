@@ -557,6 +557,7 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 func runClient(args []string) (returnErr error) {
 	fs := newFlagSet("client")
 	profilePath := fs.String("profile", "", "imported client profile")
+	providersPath := fs.String("providers", "", "multi-provider manifest")
 	noAutoRenew := fs.Bool("no-auto-renew", false, "disable certificate renewal before expiry")
 	var opts runtimeOptions
 	bindRuntimeFlags(fs, &opts, true)
@@ -569,6 +570,21 @@ func runClient(args []string) (returnErr error) {
 	if err := requireNoArguments(fs); err != nil {
 		return err
 	}
+	if *profilePath != "" && *providersPath != "" {
+		return errors.New("--profile and --providers are mutually exclusive")
+	}
+	if *profilePath == "" && *providersPath == "" {
+		return errors.New("--profile is required; import an invitation first with `queqiaod enroll INVITATION`")
+	}
+	listenSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "listen" {
+			listenSet = true
+		}
+	})
+	if *providersPath != "" && listenSet {
+		return errors.New("--listen cannot be used with --providers; set each listener in the manifest")
+	}
 	if err := validateRuntime(opts, true); err != nil {
 		return err
 	}
@@ -577,10 +593,10 @@ func runClient(args []string) (returnErr error) {
 		return err
 	}
 	defer finishRuntimeLog(logger, logSink, "client", &returnErr)
-	logRuntimeConfiguration(logger, opts, true)
-	if *profilePath == "" {
-		return errors.New("--profile is required; import an invitation first with `queqiaod enroll INVITATION`")
+	if *providersPath != "" {
+		return runProviderClients(*providersPath, *noAutoRenew, opts, logger)
 	}
+	logRuntimeConfiguration(logger, opts, true)
 	profile, err := identity.LoadClientProfile(*profilePath)
 	if err != nil {
 		return fmt.Errorf("load client profile %q: %w", *profilePath, err)
@@ -588,40 +604,12 @@ func runClient(args []string) (returnErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if !*noAutoRenew {
-		needs, err := profile.NeedsRenewal(time.Now(), 7*24*time.Hour)
+		profile, err = renewClientProfile(ctx, *profilePath, profile, opts, logger)
 		if err != nil {
 			return err
 		}
-		if needs {
-			renewed, renewErr := identity.RenewProfileWithOptions(ctx, profile, identity.DialOptions{Timeout: opts.handshakeTimeout, LocalAddress: opts.localAddress})
-			if renewErr != nil {
-				logger.Warn("automatic certificate renewal failed; continuing with current valid identity", "error", renewErr)
-			} else if err := renewed.Save(*profilePath); err != nil {
-				return fmt.Errorf("save renewed profile: %w", err)
-			} else {
-				profile = renewed
-				logger.Info("device identity renewed")
-			}
-		}
 	}
-	credentials, err := profile.Credentials()
-	if err != nil {
-		return err
-	}
-	client, err := pep.NewClient(pep.ClientConfig{
-		ListenAddr: opts.listen, RemoteAddr: profile.Endpoint, LocalAddress: opts.localAddress,
-		Credentials: credentials, ChunkSize: opts.chunkSize,
-		DialTimeout: opts.dialTimeout, HandshakeTimeout: opts.handshakeTimeout,
-		FlowIdleTimeout: opts.flowIdleTimeout, FlowMaxLifetime: opts.flowMaxLifetime,
-		MaxSessions: opts.maxSessions, MaxPendingOpens: opts.maxPendingOpens, Transport: pep.TransportKind(opts.transport),
-		TCPFallbackLanes: opts.tcpFallbackLanes, EnableQUICPool: opts.quicPool,
-		WaitForOpenAcknowledgement: opts.waitForOpenAck, UDPOnStream: opts.udpOnStream,
-		Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
-		AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
-		AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
-		FallbackDelay: opts.fallbackDelay, FallbackGrace: opts.fallbackGrace,
-		UDPFailureThreshold: opts.udpFailureThreshold, UDPCooldown: opts.udpCooldown, Logger: logger,
-	})
+	client, err := newRuntimeClient(profile, opts.listen, opts, logger, nil, nil)
 	if err != nil {
 		return err
 	}

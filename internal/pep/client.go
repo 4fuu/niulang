@@ -82,6 +82,9 @@ type ClientConfig struct {
 	FlowIdleTimeout  time.Duration
 	FlowMaxLifetime  time.Duration
 	MaxSessions      int
+	// SessionLimit optionally shares admission across several clients in one
+	// process. Nil gives this client its own MaxSessions-sized limit.
+	SessionLimit *SessionLimit
 	// MaxPendingOpens bounds flows that are still establishing their remote
 	// transport. Keeping this separate from MaxSessions prevents a failed
 	// endpoint and its retries from occupying every healthy-flow slot.
@@ -167,6 +170,7 @@ type Client struct {
 	cfg           ClientConfig
 	udpHealth     *udpHealth
 	budget        *limiter.Budget
+	sessionLimit  *SessionLimit
 	sendMemory    *memlimit.Budget
 	receiveMemory *memlimit.Budget
 	memoryLimits  flowMemoryLimits
@@ -225,6 +229,31 @@ type Client struct {
 	// their total-session slot, and leave capacity for established flows.
 	pendingOpens chan struct{}
 }
+
+// SessionLimit bounds concurrent local SOCKS sessions across one or more
+// clients. Admission is deliberately non-blocking so an overloaded listener
+// can reject promptly instead of accumulating unauthenticated local sockets.
+type SessionLimit struct {
+	slots chan struct{}
+}
+
+func NewSessionLimit(max int) (*SessionLimit, error) {
+	if max < 1 || max > maxConfiguredSessions {
+		return nil, fmt.Errorf("maximum sessions must be between 1 and %d", maxConfiguredSessions)
+	}
+	return &SessionLimit{slots: make(chan struct{}, max)}, nil
+}
+
+func (l *SessionLimit) acquire() bool {
+	select {
+	case l.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *SessionLimit) release() { <-l.slots }
 
 // bulkConn is one pre-authenticated secondary QUIC connection reserved for
 // bulk lane joins.
@@ -337,6 +366,11 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.MaxSessions > maxConfiguredSessions {
 		return nil, fmt.Errorf("maximum sessions must not exceed %d", maxConfiguredSessions)
 	}
+	if cfg.SessionLimit == nil {
+		cfg.SessionLimit, _ = NewSessionLimit(cfg.MaxSessions)
+	} else if cfg.SessionLimit.slots == nil {
+		return nil, errors.New("shared session limit is not initialized")
+	}
 	if cfg.MaxPendingOpens <= 0 {
 		cfg.MaxPendingOpens = defaultMaxPendingOpens
 	}
@@ -408,7 +442,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		budget: limiter.New(limiter.Config{
 			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
 		}),
-		metrics: cfg.Metrics, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
+		metrics: cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
 	}, nil
 }
@@ -536,7 +570,6 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 	go c.watchUplink(ctx, uplink)
 
 	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, c.cfg.MaxSessions)
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -555,15 +588,14 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 			}
 			return fmt.Errorf("accept local connection: %w", acceptErr)
 		}
-		select {
-		case semaphore <- struct{}{}:
+		if c.sessionLimit.acquire() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				defer func() { <-semaphore }()
+				defer c.sessionLimit.release()
 				c.handleLocal(ctx, conn)
 			}()
-		default:
+		} else {
 			// The client may still be waiting for the two-byte SOCKS greeting
 			// response. A request-level reply starts with 0x05, 0x01 and is then
 			// misread as "unsupported authentication method 0x01" by the mobile
