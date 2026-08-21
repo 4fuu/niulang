@@ -42,9 +42,11 @@ exact commit. Production-ready language has additional gates below.
   paired fixed-egress public preview.
 - [ ] The maintainer has reviewed the candidate artifacts and explicitly
   approved publication.
-- [x] The GitHub `public-release` environment requires the approving reviewer,
-  and the release is triggered either by pushing the reviewed `v*` tag or by
-  manual workflow inputs naming the reviewed commit and candidate run.
+- [x] The GitHub `public-release` environment holds the signing secrets and
+  scopes them to the jobs that name it, and the release is triggered either by
+  pushing the reviewed `v*` tag or by manual workflow inputs naming the
+  reviewed commit and candidate run. The tag push is the approval; the
+  environment carries no deployment prompt.
 
 ### Repository settings
 
@@ -66,8 +68,11 @@ Applied and read back on 2026-08-19:
 - the `protect release tags` ruleset blocks deletion, non-fast-forward, and
   update across `refs/tags/v*`, so a published tag cannot be moved out from
   under the attestation that names it; and
-- the `public-release` environment requires the maintainer as reviewer, which
-  is what makes the deployment gate in `release.yml` mean anything.
+- the `public-release` environment scopes the six Apple signing secrets to the
+  jobs that name it, so no other workflow can read them. It carries no
+  deployment approval: what makes publication mean anything is the authorize
+  job in `release.yml`, which refuses any tag whose commit has no successful
+  candidate run.
 
 Confirm them in repository settings as well. From inside a workflow file an
 unconfigured gate looks exactly like a satisfied one.

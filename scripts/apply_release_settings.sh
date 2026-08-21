@@ -3,7 +3,7 @@
 # Apply the four repository settings that RELEASE-CHECKLIST.md requires and
 # that GitHub refuses to accept while the repository is private: private
 # vulnerability reporting, protection for main, protection for release tags,
-# and the reviewer the public-release environment gate depends on.
+# and the public-release environment the signing secrets are scoped to.
 #
 # Run this once, immediately after the repository is made public and before the
 # release tag is pushed. Every step verifies itself by reading the setting back,
@@ -26,12 +26,9 @@ visibility=$(gh api "repos/$repository" --jq .visibility)
 if [ "$visibility" != public ]; then
   fail "$repository is $visibility. GitHub offers none of these settings on a
 private repository at this plan: rulesets and branch protection answer 403,
-required reviewers answer 422, and private vulnerability reporting answers 404.
+environment settings answer 422, and private vulnerability reporting answers 404.
 Make the repository public first; release.yml refuses to publish otherwise."
 fi
-
-owner=${repository%%/*}
-reviewer=$(gh api "users/$owner" --jq .id)
 
 # 1. Private vulnerability reporting. Until this is on, the advisory URL in
 # SECURITY.md returns a 404 to an outside reporter, so the email channel in that
@@ -70,18 +67,21 @@ apply_ruleset "$branch_ruleset" 'refs/heads/main' \
 apply_ruleset "$tag_ruleset" 'refs/tags/v*' \
   '[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"update"}]' tag
 
-# 4. The environment gate. release.yml's publish job already names this
-# environment, so this is the setting that turns the checklist's
-# maintainer-approval item from a declaration into something GitHub enforces.
-# prevent_self_review stays false deliberately: the maintainer is the only
-# reviewer, and true would make the gate impossible to satisfy rather than
-# strict.
-echo "requiring a reviewer on the $environment environment"
-printf '{"prevent_self_review":false,"reviewers":[{"type":"User","id":%s}],"deployment_branch_policy":null}' \
-  "$reviewer" | gh api -X PUT "repos/$repository/environments/$environment" --input - --silent
+# 4. The environment itself, with no deployment approval on it. What the
+# environment is still for is scope: the six Apple signing secrets live here
+# and only the jobs that name this environment can read them, which is the
+# property worth keeping. Approval is not that property.
+#
+# The human decision is the tag push. Only a maintainer can create a v* tag,
+# the tag ruleset above makes it immutable once created, and release.yml's
+# authorize job independently refuses any tag whose commit lacks a successful
+# candidate run. A reviewer prompt on top of that gated an already-gated path.
+echo "clearing deployment approval on the $environment environment"
+printf '{"prevent_self_review":false,"reviewers":[],"deployment_branch_policy":null}' |
+  gh api -X PUT "repos/$repository/environments/$environment" --input - --silent
 gh api "repos/$repository/environments/$environment" \
   --jq '.protection_rules | map(select(.type == "required_reviewers")) | length' |
-  grep -qx 1 || fail "$environment still has no required reviewer"
+  grep -qx 0 || fail "$environment still has a required reviewer"
 
 echo "done. Confirm in repository settings as well: an API that answered 200 is"
 echo "evidence the call was accepted, not that the gate reads the way you meant."
