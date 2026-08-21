@@ -85,6 +85,12 @@ type ClientConfig struct {
 	// SessionLimit optionally shares admission across several clients in one
 	// process. Nil gives this client its own MaxSessions-sized limit.
 	SessionLimit *SessionLimit
+	// Budget optionally shares the aggregate byte budget across several
+	// clients in one process. Nil derives a private budget from
+	// AggregateBytesPerSec, which paces this client alone; a multi-provider
+	// process must share one budget or it offers the configured total once
+	// per provider.
+	Budget *limiter.Budget
 	// MaxPendingOpens bounds flows that are still establishing their remote
 	// transport. Keeping this separate from MaxSessions prevents a failed
 	// endpoint and its retries from occupying every healthy-flow slot.
@@ -233,27 +239,87 @@ type Client struct {
 // SessionLimit bounds concurrent local SOCKS sessions across one or more
 // clients. Admission is deliberately non-blocking so an overloaded listener
 // can reject promptly instead of accumulating unauthenticated local sockets.
+//
+// A limit may hold a private reservation as well as a share of a pool common
+// to every client. The reservation is what keeps a quiet provider able to
+// admit new flows while a busy sibling holds most of the common pool: a
+// failover target which cannot accept a session is not a failover target.
 type SessionLimit struct {
-	slots chan struct{}
+	reserved chan struct{}
+	shared   chan struct{}
+}
+
+// sessionSlot returns one admitted session to the pool it came from.
+type sessionSlot struct {
+	pool chan struct{}
+}
+
+func (s sessionSlot) release() {
+	if s.pool != nil {
+		<-s.pool
+	}
 }
 
 func NewSessionLimit(max int) (*SessionLimit, error) {
 	if max < 1 || max > maxConfiguredSessions {
 		return nil, fmt.Errorf("maximum sessions must be between 1 and %d", maxConfiguredSessions)
 	}
-	return &SessionLimit{slots: make(chan struct{}, max)}, nil
+	return &SessionLimit{shared: make(chan struct{}, max)}, nil
 }
 
-func (l *SessionLimit) acquire() bool {
+// NewSharedSessionLimits divides max across clients so their combined
+// admission never exceeds max while each client keeps a private reservation.
+// Half the budget is reserved in equal shares and half stays common, so an
+// idle provider can still burst into capacity its siblings are not using. When
+// max is too small to reserve a slot per client the whole budget stays common.
+func NewSharedSessionLimits(max, clients int) ([]*SessionLimit, error) {
+	if clients < 1 {
+		return nil, errors.New("shared session limits require at least one client")
+	}
+	if max < 1 || max > maxConfiguredSessions {
+		return nil, fmt.Errorf("maximum sessions must be between 1 and %d", maxConfiguredSessions)
+	}
+	reserve := max / (2 * clients)
+	shared := make(chan struct{}, max-reserve*clients)
+	limits := make([]*SessionLimit, clients)
+	for i := range limits {
+		limits[i] = &SessionLimit{shared: shared}
+		if reserve > 0 {
+			limits[i].reserved = make(chan struct{}, reserve)
+		}
+	}
+	return limits, nil
+}
+
+// Reserved reports the slots this limit holds for its own client alone.
+func (l *SessionLimit) Reserved() int {
+	if l == nil {
+		return 0
+	}
+	return cap(l.reserved)
+}
+
+// acquire takes the private reservation first so a client's own capacity is
+// never spent on a sibling. A nil limit admits: callers which never configured
+// one are unlimited rather than dead.
+func (l *SessionLimit) acquire() (sessionSlot, bool) {
+	if l == nil {
+		return sessionSlot{}, true
+	}
+	if l.reserved != nil {
+		select {
+		case l.reserved <- struct{}{}:
+			return sessionSlot{pool: l.reserved}, true
+		default:
+		}
+	}
 	select {
-	case l.slots <- struct{}{}:
-		return true
+	case l.shared <- struct{}{}:
+		return sessionSlot{pool: l.shared}, true
 	default:
-		return false
+		return sessionSlot{}, false
 	}
 }
-
-func (l *SessionLimit) release() { <-l.slots }
 
 // bulkConn is one pre-authenticated secondary QUIC connection reserved for
 // bulk lane joins.
@@ -367,9 +433,16 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("maximum sessions must not exceed %d", maxConfiguredSessions)
 	}
 	if cfg.SessionLimit == nil {
-		cfg.SessionLimit, _ = NewSessionLimit(cfg.MaxSessions)
-	} else if cfg.SessionLimit.slots == nil {
+		limit, err := NewSessionLimit(cfg.MaxSessions)
+		if err != nil {
+			return nil, err
+		}
+		cfg.SessionLimit = limit
+	} else if cfg.SessionLimit.shared == nil {
 		return nil, errors.New("shared session limit is not initialized")
+	}
+	if cfg.Budget == nil {
+		cfg.Budget = NewAggregateBudget(cfg.AggregateBytesPerSec, cfg.InteractiveReserveBytesPerSec)
 	}
 	if cfg.MaxPendingOpens <= 0 {
 		cfg.MaxPendingOpens = defaultMaxPendingOpens
@@ -439,10 +512,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	return &Client{
 		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
 		credentials: cfg.Credentials,
-		budget: limiter.New(limiter.Config{
-			TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec,
-		}),
-		metrics: cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
+		budget:      cfg.Budget,
+		metrics:     cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
 	}, nil
 }
@@ -512,12 +583,27 @@ func (c *Client) windows() flowWindows {
 }
 
 func (c *Client) Serve(ctx context.Context) error {
-	lc := net.ListenConfig{KeepAlive: 30 * time.Second}
-	listener, err := lc.Listen(ctx, "tcp", c.cfg.ListenAddr)
+	listener, err := ListenLocal(ctx, c.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen on local SOCKS5 address: %w", err)
 	}
 	return c.ServeListener(ctx, listener)
+}
+
+// ListenLocal binds a local SOCKS5 listener. Serve and any caller which binds
+// ahead of ServeListener share it so both get identical socket options.
+func ListenLocal(ctx context.Context, address string) (net.Listener, error) {
+	lc := net.ListenConfig{KeepAlive: 30 * time.Second}
+	return lc.Listen(ctx, "tcp", address)
+}
+
+// NewAggregateBudget builds one byte budget several clients can share, so a
+// process running many clients paces to the configured total instead of
+// offering that total once per client. A zero rate means unpaced.
+func NewAggregateBudget(totalBytesPerSec, reserveBytesPerSec uint64) *limiter.Budget {
+	return limiter.New(limiter.Config{
+		TotalBytesPerSec: totalBytesPerSec, ReserveBytesPerSec: reserveBytesPerSec,
+	})
 }
 
 // Metrics exposes aggregate counters for an optional operator endpoint.
@@ -588,11 +674,11 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 			}
 			return fmt.Errorf("accept local connection: %w", acceptErr)
 		}
-		if c.sessionLimit.acquire() {
+		if slot, admitted := c.sessionLimit.acquire(); admitted {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				defer c.sessionLimit.release()
+				defer slot.release()
 				c.handleLocal(ctx, conn)
 			}()
 		} else {

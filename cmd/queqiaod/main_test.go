@@ -128,6 +128,10 @@ func TestClientMissingConfigurationExplainsEnrollment(t *testing.T) {
 }
 
 func TestClientProfileAndProvidersAreMutuallyExclusive(t *testing.T) {
+	// These checks sit above openRuntimeLogger today, but that is not a
+	// property the test should depend on: without this the first refactor which
+	// logs a validation error writes into the real platform log directory.
+	t.Setenv("QUEQIAO_LOG_DIR", t.TempDir())
 	err := runClient([]string{"--profile", "profile.json", "--providers", "providers.json"})
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("profile and providers were not rejected together: %v", err)

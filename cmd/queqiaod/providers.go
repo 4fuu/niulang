@@ -14,10 +14,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bojieli/queqiao/internal/identity"
+	"github.com/bojieli/queqiao/internal/limiter"
 	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/pep"
 )
@@ -50,6 +52,33 @@ type providerServeResult struct {
 	err  error
 }
 
+// decodeProviderManifest reads the version with a permissive pass before the
+// strict one. Decoding strictly first would report an unrecognised field from a
+// newer manifest as an unknown-field error, pointing the operator at a field
+// name instead of at the version they need to downgrade or upgrade.
+func decodeProviderManifest(data []byte) (providerManifest, error) {
+	var envelope struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return providerManifest{}, fmt.Errorf("decode provider manifest: %w", err)
+	}
+	if envelope.Version != 1 {
+		return providerManifest{}, fmt.Errorf("unsupported provider manifest version %d", envelope.Version)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var manifest providerManifest
+	if err := decoder.Decode(&manifest); err != nil {
+		return providerManifest{}, fmt.Errorf("decode provider manifest: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return providerManifest{}, errors.New("provider manifest contains trailing data")
+	}
+	return manifest, nil
+}
+
 func loadProviderClients(manifestPath string) ([]providerClientConfig, error) {
 	manifestPath, err := filepath.Abs(manifestPath)
 	if err != nil {
@@ -59,18 +88,9 @@ func loadProviderClients(manifestPath string) ([]providerClientConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read provider manifest %q: %w", manifestPath, err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var manifest providerManifest
-	if err := decoder.Decode(&manifest); err != nil {
-		return nil, fmt.Errorf("decode provider manifest: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, errors.New("provider manifest contains trailing data")
-	}
-	if manifest.Version != 1 {
-		return nil, fmt.Errorf("unsupported provider manifest version %d", manifest.Version)
+	manifest, err := decodeProviderManifest(data)
+	if err != nil {
+		return nil, err
 	}
 	if len(manifest.Providers) == 0 {
 		return nil, errors.New("provider manifest must contain at least one provider")
@@ -105,11 +125,11 @@ func loadProviderClients(manifestPath string) ([]providerClientConfig, error) {
 		if !filepath.IsAbs(profilePath) {
 			profilePath = filepath.Join(filepath.Dir(manifestPath), profilePath)
 		}
+		// filepath.Abs cleans its result, so no separate Clean is needed.
 		profilePath, err = filepath.Abs(profilePath)
 		if err != nil {
 			return nil, fmt.Errorf("resolve provider %q profile path: %w", entry.Name, err)
 		}
-		profilePath = filepath.Clean(profilePath)
 		if _, exists := profilePaths[profilePath]; exists {
 			return nil, fmt.Errorf("duplicate provider profile path %q", profilePath)
 		}
@@ -119,23 +139,24 @@ func loadProviderClients(manifestPath string) ([]providerClientConfig, error) {
 		})
 	}
 
-	profileInfos := make([]os.FileInfo, 0, len(configs))
-	for _, config := range configs {
-		info, err := os.Stat(config.profilePath)
-		if err != nil {
-			return nil, fmt.Errorf("inspect provider %q profile: %w", config.name, err)
-		}
-		for _, previous := range profileInfos {
-			if os.SameFile(previous, info) {
-				return nil, fmt.Errorf("provider %q profile duplicates another profile file", config.name)
-			}
-		}
-		profileInfos = append(profileInfos, info)
-	}
+	// Distinct paths can still name one enrolled device: a copied profile, a
+	// symlink, a hard link. Running both would put two clients on a single
+	// device certificate and leave two renewal loops racing to save one
+	// identity into two files, so compare the loaded identity rather than the
+	// file. Reading each profile once also closes the window a separate stat
+	// pass would leave between the check and the read.
+	devices := make(map[string]string, len(configs))
 	for i := range configs {
 		profile, err := identity.LoadClientProfile(configs[i].profilePath)
 		if err != nil {
 			return nil, fmt.Errorf("load provider %q profile %q: %w", configs[i].name, configs[i].profilePath, err)
+		}
+		if profile.ProviderID != "" && profile.DeviceID != "" {
+			device := profile.ProviderID + "/" + profile.DeviceID
+			if previous, exists := devices[device]; exists {
+				return nil, fmt.Errorf("provider %q uses the same enrolled device as provider %q; enroll a separate device for each provider entry", configs[i].name, previous)
+			}
+			devices[device] = configs[i].name
 		}
 		configs[i].profile = profile
 	}
@@ -151,14 +172,16 @@ func normalizeProviderListener(address string) (string, error) {
 	if ip == nil || !ip.IsLoopback() {
 		return "", errors.New("must use a literal loopback IP; SOCKS has no remote authentication")
 	}
+	// Port 0 would bind whatever the kernel handed out, which no proxy client
+	// can be configured against.
 	port, err := strconv.Atoi(portText)
-	if err != nil || port < 0 || port > 65535 {
-		return "", errors.New("must use a numeric port between 0 and 65535")
+	if err != nil || port < 1 || port > 65535 {
+		return "", errors.New("must use a numeric port between 1 and 65535")
 	}
 	return net.JoinHostPort(ip.String(), strconv.Itoa(port)), nil
 }
 
-func newRuntimeClient(profile identity.ClientProfile, listen string, opts runtimeOptions, logger *slog.Logger, registry *metrics.Registry, sessionLimit *pep.SessionLimit) (*pep.Client, error) {
+func newRuntimeClient(profile identity.ClientProfile, listen string, opts runtimeOptions, logger *slog.Logger, registry *metrics.Registry, sessionLimit *pep.SessionLimit, budget *limiter.Budget) (*pep.Client, error) {
 	credentials, err := profile.Credentials()
 	if err != nil {
 		return nil, err
@@ -174,16 +197,23 @@ func newRuntimeClient(profile identity.ClientProfile, listen string, opts runtim
 		Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 		AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 		AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
+		Budget:        budget,
 		FallbackDelay: opts.fallbackDelay, FallbackGrace: opts.fallbackGrace,
 		UDPFailureThreshold: opts.udpFailureThreshold, UDPCooldown: opts.udpCooldown,
 		Metrics: registry, Logger: logger,
 	})
 }
 
+// renewClientProfile refreshes a device certificate which is close to expiry.
+// A gateway which cannot be reached is not an error: the current identity is
+// still valid, and the maintenance loop will try again. A profile which was
+// renewed but could not be written is returned with its error so the caller can
+// decide, and the fresh identity is returned rather than the stale one so a
+// caller which continues does so on the better certificate.
 func renewClientProfile(ctx context.Context, profilePath string, profile identity.ClientProfile, opts runtimeOptions, logger *slog.Logger) (identity.ClientProfile, error) {
 	needs, err := profile.NeedsRenewal(time.Now(), 7*24*time.Hour)
 	if err != nil {
-		return profile, err
+		return profile, fmt.Errorf("check device identity lifetime: %w", err)
 	}
 	if !needs {
 		return profile, nil
@@ -194,7 +224,7 @@ func renewClientProfile(ctx context.Context, profilePath string, profile identit
 		return profile, nil
 	}
 	if err := renewed.Save(profilePath); err != nil {
-		return profile, fmt.Errorf("save renewed profile: %w", err)
+		return renewed, fmt.Errorf("save renewed profile %q: %w", profilePath, err)
 	}
 	logger.Info("device identity renewed")
 	return renewed, nil
@@ -206,56 +236,94 @@ func runProviderClients(manifestPath string, noAutoRenew bool, opts runtimeOptio
 	return runProviderClientsContext(ctx, manifestPath, noAutoRenew, opts, logger)
 }
 
+// logProviderRuntimeConfiguration records the process-wide controls once and
+// then only what differs per provider. Repeating the whole record per provider
+// would print the shared session budget once per listener and read as if each
+// provider owned that many sessions.
+func logProviderRuntimeConfiguration(logger *slog.Logger, opts runtimeOptions, configs []providerClientConfig, limits []*pep.SessionLimit) {
+	shared := opts
+	// There is no single listener in this mode; each provider logs its own.
+	shared.listen = ""
+	logRuntimeConfiguration(logger, shared, true)
+	for i := range configs {
+		logger.LogAttrs(context.Background(), slog.LevelInfo, "provider configuration",
+			slog.Int("config_schema", 1),
+			slog.String("provider", configs[i].name),
+			slog.String("listen", configs[i].listen),
+			slog.Int("reserved_sessions", limits[i].Reserved()),
+		)
+	}
+}
+
 func runProviderClientsContext(ctx context.Context, manifestPath string, noAutoRenew bool, opts runtimeOptions, logger *slog.Logger) error {
 	configs, err := loadProviderClients(manifestPath)
 	if err != nil {
 		return err
 	}
 	registry := metrics.New()
-	sessionLimit, err := pep.NewSessionLimit(opts.maxSessions)
+	sessionLimits, err := pep.NewSharedSessionLimits(opts.maxSessions, len(configs))
 	if err != nil {
 		return err
 	}
-	runtimes := make([]providerClientRuntime, 0, len(configs))
+	// One budget for the process. A budget per provider would offer the
+	// configured aggregate rate once per provider onto a single uplink.
+	budget := pep.NewAggregateBudget(opts.aggregateBytesPerSec, opts.interactiveReserveBytesPerSec)
+
+	loggers := make([]*slog.Logger, len(configs))
+	for i := range configs {
+		loggers[i] = logger.With("provider", configs[i].name, "listener", configs[i].listen)
+	}
+
+	// Bind every listener before the first gateway dial. Startup renewal can
+	// block for a handshake timeout, and holding a healthy provider's listener
+	// down while an unrelated provider's gateway times out is the outage a
+	// multi-provider client exists to avoid.
+	listeners := make([]net.Listener, 0, len(configs))
 	closeListeners := func() {
-		for _, runtime := range runtimes {
-			if runtime.listener != nil {
-				_ = runtime.listener.Close()
-			}
+		for _, listener := range listeners {
+			_ = listener.Close()
 		}
 	}
-
-	for _, config := range configs {
-		providerLogger := logger.With("provider", config.name, "listener", config.listen)
-		profile := config.profile
-		if !noAutoRenew {
-			profile, err = renewClientProfile(ctx, config.profilePath, profile, opts, providerLogger)
-			if err != nil {
-				providerLogger.Warn("automatic certificate renewal failed; continuing with current valid identity", "error", err)
-				profile = config.profile
-			}
-		}
-		config.profile = profile
-		client, err := newRuntimeClient(profile, config.listen, opts, providerLogger, registry, sessionLimit)
-		if err != nil {
-			return fmt.Errorf("configure provider %q: %w", config.name, err)
-		}
-		providerOpts := opts
-		providerOpts.listen = config.listen
-		logRuntimeConfiguration(providerLogger, providerOpts, true)
-		runtimes = append(runtimes, providerClientRuntime{config: config, client: client, logger: providerLogger})
-	}
-
-	lc := net.ListenConfig{KeepAlive: 30 * time.Second}
-	for i := range runtimes {
-		listener, err := lc.Listen(ctx, "tcp", runtimes[i].config.listen)
+	for i := range configs {
+		listener, err := pep.ListenLocal(ctx, configs[i].listen)
 		if err != nil {
 			closeListeners()
-			return fmt.Errorf("bind provider %q listener %q: %w", runtimes[i].config.name, runtimes[i].config.listen, err)
+			return fmt.Errorf("bind provider %q listener %q: %w", configs[i].name, configs[i].listen, err)
 		}
-		runtimes[i].listener = listener
+		listeners = append(listeners, listener)
 	}
-	logger.Info("all provider listeners bound", "providers", len(runtimes))
+	logger.Info("all provider listeners bound", "providers", len(configs))
+
+	// Renew concurrently so an unreachable gateway costs the process one
+	// handshake timeout rather than one per provider.
+	if !noAutoRenew {
+		var wg sync.WaitGroup
+		for i := range configs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				profile, err := renewClientProfile(ctx, configs[i].profilePath, configs[i].profile, opts, loggers[i])
+				if err != nil {
+					loggers[i].Error("provider identity maintenance failed; continuing", "error", err)
+				}
+				configs[i].profile = profile
+			}()
+		}
+		wg.Wait()
+	}
+
+	runtimes := make([]providerClientRuntime, 0, len(configs))
+	for i := range configs {
+		client, err := newRuntimeClient(configs[i].profile, configs[i].listen, opts, loggers[i], registry, sessionLimits[i], budget)
+		if err != nil {
+			closeListeners()
+			return fmt.Errorf("configure provider %q: %w", configs[i].name, err)
+		}
+		runtimes = append(runtimes, providerClientRuntime{
+			config: configs[i], client: client, listener: listeners[i], logger: loggers[i],
+		})
+	}
+	logProviderRuntimeConfiguration(logger, opts, configs, sessionLimits)
 
 	stopMetrics, err := serveMetrics(opts.metricsListen, registry, logger)
 	if err != nil {
@@ -288,6 +356,10 @@ func waitProviderClients(ctx context.Context, cancel context.CancelFunc, results
 		remaining--
 		if result.err == nil {
 			if ctx.Err() != nil {
+				// Cancellation may be this process shutting down or a sibling
+				// which already failed. Either way the stop is recorded, so a
+				// provider is never dropped silently from the operator's log.
+				logger.Info("provider client stopped during shutdown", "provider", result.name)
 				continue
 			}
 			result.err = errors.New("listener stopped unexpectedly")

@@ -69,7 +69,7 @@ func TestProviderManifestIsStrictAndRequiresLoopback(t *testing.T) {
 	if _, err := loadProviderClients(path); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unknown manifest field was accepted: %v", err)
 	}
-	for _, address := range []string{"0.0.0.0:1080", "localhost:1080", "127.0.0.1:http"} {
+	for _, address := range []string{"0.0.0.0:1080", "localhost:1080", "127.0.0.1:http", "127.0.0.1:0", "127.0.0.1:65536"} {
 		if _, err := normalizeProviderListener(address); err == nil {
 			t.Errorf("unsafe provider listener %q was accepted", address)
 		}
@@ -125,6 +125,10 @@ func TestTwoProviderClientsReachIndependentGateways(t *testing.T) {
 	}})
 	opts := parseRuntimeForTest(t, true, "--transport", "tcp", "--local-address", "127.0.0.1", "--telemetry-log-interval", "0")
 	clientCtx, stopClients := context.WithCancel(context.Background())
+	// Deferred as well as called below: a t.Fatalf between here and the
+	// explicit stop would otherwise leave both SOCKS listeners bound for the
+	// rest of the test binary and turn one failure into a cascade.
+	defer stopClients()
 	clientDone := make(chan error, 1)
 	go func() { clientDone <- runProviderClientsContext(clientCtx, manifestPath, true, opts, logger) }()
 
@@ -339,5 +343,98 @@ func runProviderTestFlow(t *testing.T, socksAddress, destination string) {
 	got := make([]byte, len(payload))
 	if _, err := io.ReadFull(conn, got); err != nil || string(got) != string(payload) {
 		t.Fatalf("SOCKS payload round trip failed: %q, %v", got, err)
+	}
+}
+
+func TestProviderManifestRejectsOneDeviceUnderTwoNames(t *testing.T) {
+	for name, clone := range map[string]func(t *testing.T, source, target string){
+		"copy": func(t *testing.T, source, target string) {
+			data, err := os.ReadFile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlink": func(t *testing.T, source, target string) {
+			if err := os.Symlink(source, target); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		},
+		"hardlink": func(t *testing.T, source, target string) {
+			if err := os.Link(source, target); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			directory := t.TempDir()
+			_, profile := providerTestProfile(t, directory, 0, "127.0.0.1:1")
+			duplicate := filepath.Join(directory, "duplicate.json")
+			clone(t, profile, duplicate)
+			manifestPath := writeProviderManifest(t, directory, providerManifest{Version: 1, Providers: []providerManifestEntry{
+				{Name: "one", Profile: filepath.Base(profile), Listen: "127.0.0.1:1081"},
+				{Name: "two", Profile: filepath.Base(duplicate), Listen: "127.0.0.1:1082"},
+			}})
+			if _, err := loadProviderClients(manifestPath); err == nil || !strings.Contains(err.Error(), "same enrolled device") {
+				t.Fatalf("one device under two provider names was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestProviderManifestReportsUnsupportedVersionBeforeUnknownFields(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "providers.json")
+	// A manifest from a future build carries fields this build has never heard
+	// of. The operator needs to be told the version is wrong, not the name of
+	// whichever new field happened to be decoded first.
+	if err := os.WriteFile(path, []byte(`{"version":2,"providers":[],"routing":"latency"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadProviderClients(path); err == nil || !strings.Contains(err.Error(), "unsupported provider manifest version 2") {
+		t.Fatalf("future manifest version was misreported: %v", err)
+	}
+}
+
+func TestProviderClientsShareOneAggregateBudgetAndSessionBudget(t *testing.T) {
+	directory := t.TempDir()
+	_, first := providerTestProfile(t, directory, 0, "127.0.0.1:1")
+	_, second := providerTestProfile(t, directory, 1, "127.0.0.1:2")
+	manifestPath := writeProviderManifest(t, directory, providerManifest{Version: 1, Providers: []providerManifestEntry{
+		{Name: "one", Profile: filepath.Base(first), Listen: unusedProviderTestAddress(t)},
+		{Name: "two", Profile: filepath.Base(second), Listen: unusedProviderTestAddress(t)},
+	}})
+	configs, err := loadProviderClients(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := parseRuntimeForTest(t, true, "--transport", "tcp", "--aggregate-bytes-per-sec", "1000000", "--max-sessions", "8")
+	limits, err := pep.NewSharedSessionLimits(opts.maxSessions, len(configs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := pep.NewAggregateBudget(opts.aggregateBytesPerSec, opts.interactiveReserveBytesPerSec)
+	if budget == nil {
+		t.Fatal("aggregate budget was not built from the runtime options")
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	clients := make([]*pep.Client, len(configs))
+	for i := range configs {
+		clients[i], err = newRuntimeClient(configs[i].profile, configs[i].listen, opts, logger, nil, limits[i], budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two providers must not each be handed the whole session budget. Budget
+	// sharing itself is asserted in the pep package, which can see the field.
+	for i := range clients {
+		if clients[i] == nil {
+			t.Fatalf("provider %d client was not built", i)
+		}
+	}
+	if limits[0].Reserved() != 2 || limits[1].Reserved() != 2 {
+		t.Fatalf("session reservations = %d and %d, want the shared budget divided", limits[0].Reserved(), limits[1].Reserved())
 	}
 }

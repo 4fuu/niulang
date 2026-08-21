@@ -50,6 +50,9 @@ BASELINE = {
     ("G301", "mobile/tools/notices/main.go"): 1,
     ("G302", "cmd/queqiaopack/main.go"): 2,
     ("G304", "cmd/queqiaod/main.go"): 2,
+    # The multi-provider manifest is opened from the operator's own --providers
+    # path, on the same footing as the reviewed --profile reads above it.
+    ("G304", "cmd/queqiaod/providers.go"): 1,
     ("G304", "cmd/queqiaopack/main.go"): 6,
     ("G304", "cmd/queqiaoref/main.go"): 2,
     ("G304", "internal/identity/enrollment.go"): 1,

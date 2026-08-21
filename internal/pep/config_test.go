@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,17 +90,108 @@ func TestClientSessionLimitCanBeShared(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if !clients[0].sessionLimit.acquire() {
+	slot, admitted := clients[0].sessionLimit.acquire()
+	if !admitted {
 		t.Fatal("first client was not admitted")
 	}
-	if clients[1].sessionLimit.acquire() {
+	if _, admitted := clients[1].sessionLimit.acquire(); admitted {
 		t.Fatal("second client exceeded the shared session limit")
 	}
-	clients[0].sessionLimit.release()
-	if !clients[1].sessionLimit.acquire() {
+	slot.release()
+	sibling, admitted := clients[1].sessionLimit.acquire()
+	if !admitted {
 		t.Fatal("released shared session slot was not reusable")
 	}
-	clients[1].sessionLimit.release()
+	sibling.release()
+}
+
+func TestSharedSessionLimitsReserveCapacityPerClient(t *testing.T) {
+	limits, err := NewSharedSessionLimits(8, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits[0].Reserved() != 2 || limits[1].Reserved() != 2 {
+		t.Fatalf("reservations = %d and %d, want 2 each", limits[0].Reserved(), limits[1].Reserved())
+	}
+	// The first client drains its own reservation and then the common pool.
+	var held []sessionSlot
+	for range 6 {
+		slot, admitted := limits[0].acquire()
+		if !admitted {
+			t.Fatalf("greedy client was capped at %d sessions, want its reservation plus the common pool", len(held))
+		}
+		held = append(held, slot)
+	}
+	if _, admitted := limits[0].acquire(); admitted {
+		t.Fatal("greedy client exceeded the combined limit")
+	}
+	// Its sibling still has its own reservation, which is the whole point: a
+	// failover target which cannot accept a session is not a failover target.
+	for i := range 2 {
+		if _, admitted := limits[1].acquire(); !admitted {
+			t.Fatalf("reserved slot %d was consumed by the busy sibling", i+1)
+		}
+	}
+	if _, admitted := limits[1].acquire(); admitted {
+		t.Fatal("sibling exceeded its reservation while the common pool was empty")
+	}
+	for _, slot := range held {
+		slot.release()
+	}
+}
+
+func TestSharedSessionLimitsStayCommonWhenTooSmallToReserve(t *testing.T) {
+	limits, err := NewSharedSessionLimits(3, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, limit := range limits {
+		if limit.Reserved() != 0 {
+			t.Fatalf("client %d reserved %d slots from a budget too small to divide", i, limit.Reserved())
+		}
+	}
+	admitted := 0
+	for _, limit := range limits {
+		if _, ok := limit.acquire(); ok {
+			admitted++
+		}
+	}
+	if admitted != 3 {
+		t.Fatalf("admitted %d sessions, want the whole common budget of 3", admitted)
+	}
+}
+
+func TestNewClientRejectsUninitializedSharedSessionLimit(t *testing.T) {
+	_, credentials := testCertificate(t)
+	_, err := NewClient(ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1",
+		Credentials: credentials, SessionLimit: &SessionLimit{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not initialized") {
+		t.Fatalf("uninitialized shared session limit was accepted: %v", err)
+	}
+}
+
+func TestClientsCanShareOneAggregateBudget(t *testing.T) {
+	_, credentials := testCertificate(t)
+	budget := NewAggregateBudget(1<<20, 0)
+	if budget == nil {
+		t.Fatal("aggregate budget was not built")
+	}
+	clients := make([]*Client, 2)
+	for i := range clients {
+		client, err := NewClient(ClientConfig{
+			ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1",
+			Credentials: credentials, AggregateBytesPerSec: 1 << 20, Budget: budget,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[i] = client
+	}
+	if clients[0].budget != budget || clients[1].budget != budget {
+		t.Fatal("clients did not share the supplied aggregate budget")
+	}
 }
 
 func TestClientCredentialUpdateCannotChangeIdentity(t *testing.T) {

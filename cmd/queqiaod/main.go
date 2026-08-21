@@ -609,7 +609,7 @@ func runClient(args []string) (returnErr error) {
 			return err
 		}
 	}
-	client, err := newRuntimeClient(profile, opts.listen, opts, logger, nil, nil)
+	client, err := newRuntimeClient(profile, opts.listen, opts, logger, nil, nil, nil)
 	if err != nil {
 		return err
 	}
