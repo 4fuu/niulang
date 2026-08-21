@@ -441,9 +441,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	} else if cfg.SessionLimit.shared == nil {
 		return nil, errors.New("shared session limit is not initialized")
 	}
-	if cfg.Budget == nil {
-		cfg.Budget = NewAggregateBudget(cfg.AggregateBytesPerSec, cfg.InteractiveReserveBytesPerSec)
-	}
 	if cfg.MaxPendingOpens <= 0 {
 		cfg.MaxPendingOpens = defaultMaxPendingOpens
 	}
@@ -489,9 +486,26 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.AggregateBytesPerSec == 0 && cfg.InteractiveReserveBytesPerSec != 0 {
 		return nil, errors.New("interactive reserve requires an aggregate byte budget")
 	}
-	if cfg.InteractiveReserveBytesPerSec > cfg.AggregateBytesPerSec {
-		return nil, errors.New("interactive reserve cannot exceed aggregate byte budget")
+	// The reserve is withheld from bulk traffic, so a reserve equal to the
+	// whole budget leaves bulk not merely slow but unable to send a byte: the
+	// budget has no bulk capacity to admit against and refuses every bulk
+	// request outright. Require the reserve to leave something behind.
+	if cfg.AggregateBytesPerSec != 0 && cfg.InteractiveReserveBytesPerSec >= cfg.AggregateBytesPerSec {
+		return nil, errors.New("interactive reserve must leave bulk capacity below the aggregate byte budget")
 	}
+	// A caller may supply one budget shared by several clients, so that a
+	// multi-provider process paces to the configured total instead of offering
+	// that total once per provider. The chunk cap below is then measured
+	// against the shared budget, which is the one these flows will admit
+	// against.
+	budget := cfg.Budget
+	if budget == nil {
+		budget = NewAggregateBudget(cfg.AggregateBytesPerSec, cfg.InteractiveReserveBytesPerSec)
+		cfg.Budget = budget
+	}
+	// Before resolveMemoryLimits: the per-flow send budget is checked against
+	// the chunk size, and the chunk that has to fit there is the corrected one.
+	cfg.ChunkSize = chunkSizeForBudget(cfg.ChunkSize, budget)
 	if cfg.FallbackDelay <= 0 {
 		cfg.FallbackDelay = 300 * time.Millisecond
 	}
@@ -511,9 +525,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	return &Client{
 		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
-		credentials: cfg.Credentials,
-		budget:      cfg.Budget,
-		metrics:     cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
+		credentials: cfg.Credentials, budget: budget,
+		metrics: cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
 	}, nil
 }

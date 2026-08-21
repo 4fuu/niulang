@@ -5,9 +5,33 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/bojieli/queqiao/internal/limiter"
 )
 
 const defaultChunkSize = 32 * 1024
+
+// chunkSizeForBudget caps a configured chunk size at what the endpoint's
+// aggregate budget can admit in one request.
+//
+// The budget refuses a request larger than its burst outright instead of
+// sleeping on one it can never satisfy, and that refusal now reaches the data
+// plane: a DATA frame above the burst fails its enqueue, and a lane whose
+// chunk fails to send is failed and retired. So an oversized chunk does not
+// pace the endpoint slowly, it tears its lanes down. Correct it here, where
+// the chunk size is a sending policy the endpoint chooses, rather than let it
+// be discovered one lane at a time.
+//
+// Bulk is the tighter of the two classes and any flow may be classified bulk,
+// so size every chunk to fit there. A budget that admits bulk at all admits at
+// least 64 KiB of it, so this never narrows a chunk to something pathological,
+// and a disabled budget imposes no ceiling at all.
+func chunkSizeForBudget(chunkSize int, budget *limiter.Budget) int {
+	if capacity := budget.MaxRequest(false); capacity < chunkSize {
+		return capacity
+	}
+	return chunkSize
+}
 
 type FlowStats struct {
 	Started   time.Time

@@ -72,6 +72,34 @@ func (b *Budget) refill(now time.Time) {
 	b.last = now
 }
 
+// capacity is the largest single request this budget can ever admit for one
+// class.  Bulk is confined to bulk capacity; interactive may also draw on
+// whatever bulk capacity is idle, so its ceiling is the sum.  These fields are
+// fixed by New and never written afterwards, so reading them needs no lock.
+func (b *Budget) capacity(interactive bool) float64 {
+	total := b.bulkCap
+	if interactive {
+		total += b.intCap
+	}
+	return total
+}
+
+// MaxRequest reports the largest single request Wait can ever admit for this
+// class.  Anything above it is refused outright with ErrInvalidRequest rather
+// than slept on, so a caller that chooses its own request sizes -- a sending
+// chunk size, say -- has to stay at or below this to be paced rather than
+// rejected.  A nil Budget paces nothing and so imposes no ceiling.
+func (b *Budget) MaxRequest(interactive bool) int {
+	if b == nil {
+		return math.MaxInt
+	}
+	total := b.capacity(interactive)
+	if total >= float64(math.MaxInt) {
+		return math.MaxInt
+	}
+	return int(total)
+}
+
 // Wait reserves n bytes.  A nil Budget disables pacing.  Interactive traffic
 // can consume its reserve and any currently idle bulk capacity; bulk traffic
 // can consume only bulk capacity.  The request is never partially released,
@@ -85,11 +113,7 @@ func (b *Budget) Wait(ctx context.Context, n int, interactive bool) error {
 	// configuration (for example a 1 MiB frame on a 10 KiB/s budget) would
 	// sleep and retry forever, retaining application and replay buffers until
 	// the caller's much longer timeout expires.
-	maxCapacity := b.bulkCap
-	if interactive {
-		maxCapacity += b.intCap
-	}
-	if float64(n) > maxCapacity {
+	if float64(n) > b.capacity(interactive) {
 		return ErrInvalidRequest
 	}
 	for {
