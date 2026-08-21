@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -178,6 +179,41 @@ func TestProviderStartupClosesPreviouslyBoundListenersOnFailure(t *testing.T) {
 		t.Fatalf("first provider listener was not rolled back: %v", err)
 	}
 	_ = rebound.Close()
+}
+
+func TestProviderRuntimeStopCancelsSiblingClients(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		firstErr error
+		want     string
+	}{
+		{name: "listener error", firstErr: errors.New("accept failed"), want: "accept failed"},
+		{name: "unexpected clean stop", want: "listener stopped unexpectedly"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			results := make(chan providerServeResult, 2)
+			done := make(chan error, 1)
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			go func() { done <- waitProviderClients(ctx, cancel, results, 2, logger) }()
+
+			results <- providerServeResult{name: "one", err: test.firstErr}
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("first stopped provider did not cancel its sibling")
+			}
+			results <- providerServeResult{name: "two"}
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), `provider "one" stopped`) || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("runtime stop error = %v, want provider and cause", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("provider supervisor did not finish after sibling shutdown")
+			}
+		})
+	}
 }
 
 func providerTestProfile(t *testing.T, directory string, index int, endpoint string) (*identity.Provider, string) {

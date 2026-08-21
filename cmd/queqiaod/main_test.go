@@ -119,11 +119,11 @@ func TestEnrollmentURIAllowsFollowingFlags(t *testing.T) {
 	}
 }
 
-func TestClientMissingProfileExplainsEnrollment(t *testing.T) {
+func TestClientMissingConfigurationExplainsEnrollment(t *testing.T) {
 	t.Setenv("QUEQIAO_LOG_DIR", t.TempDir())
 	err := runClient(nil)
-	if err == nil || !strings.Contains(err.Error(), "queqiaod enroll") {
-		t.Fatalf("missing profile produced unhelpful error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--profile") || !strings.Contains(err.Error(), "--providers") || !strings.Contains(err.Error(), "queqiaod enroll") {
+		t.Fatalf("missing client configuration produced unhelpful error: %v", err)
 	}
 }
 

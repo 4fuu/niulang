@@ -171,27 +171,8 @@ Clash/mihomo at that SOCKS5 endpoint. The [deployment guide](docs/DEPLOYING.md)
 covers service installation, firewall and socket tuning, multiple users,
 source-interface selection, verification, upgrades, and rollback.
 
-To connect one desktop client process to several independent providers, give
-each profile its own loopback SOCKS5 listener in a version 1 manifest:
-
-```json
-{
-  "version": 1,
-  "providers": [
-    {"name": "hong-kong", "profile": "hk.json", "listen": "127.0.0.1:1081"},
-    {"name": "us-west", "profile": "us.json", "listen": "127.0.0.1:1082"}
-  ]
-}
-```
-
-```sh
-./queqiaod client --providers ~/.config/queqiao/providers.json
-```
-
-Relative profile paths are resolved from the manifest directory. Provider
-names, profile files, and listeners must be unique. Clash/mihomo can route and
-fail over new flows between the separate SOCKS5 endpoints; existing flows stay
-with the provider through which they started.
+To use several providers from one desktop client process, follow the
+[multi-provider deployment guide](docs/DEPLOYING.md#connect-to-multiple-providers).
 
 ## Who is it for?
 

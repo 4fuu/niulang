@@ -574,7 +574,7 @@ func runClient(args []string) (returnErr error) {
 		return errors.New("--profile and --providers are mutually exclusive")
 	}
 	if *profilePath == "" && *providersPath == "" {
-		return errors.New("--profile is required; import an invitation first with `queqiaod enroll INVITATION`")
+		return errors.New("either --profile or --providers is required; import each provider invitation first with `queqiaod enroll INVITATION`")
 	}
 	listenSet := false
 	fs.Visit(func(f *flag.Flag) {

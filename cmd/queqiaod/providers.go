@@ -45,6 +45,11 @@ type providerClientRuntime struct {
 	logger   *slog.Logger
 }
 
+type providerServeResult struct {
+	name string
+	err  error
+}
+
 func loadProviderClients(manifestPath string) ([]providerClientConfig, error) {
 	manifestPath, err := filepath.Abs(manifestPath)
 	if err != nil {
@@ -258,42 +263,39 @@ func runProviderClientsContext(ctx context.Context, manifestPath string, noAutoR
 		return err
 	}
 	defer stopMetrics()
-	stopTelemetry := startTelemetryLog(ctx, opts.telemetryLogInterval, registry, logger)
+	serveCtx, cancelServe := context.WithCancel(ctx)
+	defer cancelServe()
+	stopTelemetry := startTelemetryLog(serveCtx, opts.telemetryLogInterval, registry, logger)
 	defer stopTelemetry()
 
-	type serveResult struct {
-		name string
-		err  error
-	}
-	results := make(chan serveResult, len(runtimes))
+	results := make(chan providerServeResult, len(runtimes))
 	for i := range runtimes {
 		runtime := &runtimes[i]
 		if !noAutoRenew {
-			go maintainClientIdentity(ctx, runtime.config.profilePath, runtime.config.profile, runtime.client, opts.handshakeTimeout, opts.localAddress, runtime.logger)
+			go maintainClientIdentity(serveCtx, runtime.config.profilePath, runtime.config.profile, runtime.client, opts.handshakeTimeout, opts.localAddress, runtime.logger)
 		}
 		go func() {
-			results <- serveResult{name: runtime.config.name, err: runtime.client.ServeListener(ctx, runtime.listener)}
+			results <- providerServeResult{name: runtime.config.name, err: runtime.client.ServeListener(serveCtx, runtime.listener)}
 		}()
 	}
+	return waitProviderClients(serveCtx, cancelServe, results, len(runtimes), logger)
+}
 
-	remaining := len(runtimes)
+func waitProviderClients(ctx context.Context, cancel context.CancelFunc, results <-chan providerServeResult, remaining int, logger *slog.Logger) error {
 	var firstErr error
 	for remaining > 0 {
-		select {
-		case result := <-results:
-			remaining--
-			if result.err != nil {
-				logger.Error("provider client stopped", "provider", result.name, "error", result.err)
-				if firstErr == nil {
-					firstErr = fmt.Errorf("provider %q stopped: %w", result.name, result.err)
-				}
+		result := <-results
+		remaining--
+		if result.err == nil {
+			if ctx.Err() != nil {
+				continue
 			}
-		case <-ctx.Done():
-			for remaining > 0 {
-				<-results
-				remaining--
-			}
-			return firstErr
+			result.err = errors.New("listener stopped unexpectedly")
+		}
+		logger.Error("provider client stopped", "provider", result.name, "error", result.err)
+		if firstErr == nil {
+			firstErr = fmt.Errorf("provider %q stopped: %w", result.name, result.err)
+			cancel()
 		}
 	}
 	return firstErr
