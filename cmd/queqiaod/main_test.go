@@ -119,11 +119,26 @@ func TestEnrollmentURIAllowsFollowingFlags(t *testing.T) {
 	}
 }
 
-func TestClientMissingProfileExplainsEnrollment(t *testing.T) {
+func TestClientMissingConfigurationExplainsEnrollment(t *testing.T) {
 	t.Setenv("QUEQIAO_LOG_DIR", t.TempDir())
 	err := runClient(nil)
-	if err == nil || !strings.Contains(err.Error(), "queqiaod enroll") {
-		t.Fatalf("missing profile produced unhelpful error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--profile") || !strings.Contains(err.Error(), "--providers") || !strings.Contains(err.Error(), "queqiaod enroll") {
+		t.Fatalf("missing client configuration produced unhelpful error: %v", err)
+	}
+}
+
+func TestClientProfileAndProvidersAreMutuallyExclusive(t *testing.T) {
+	// These checks sit above openRuntimeLogger today, but that is not a
+	// property the test should depend on: without this the first refactor which
+	// logs a validation error writes into the real platform log directory.
+	t.Setenv("QUEQIAO_LOG_DIR", t.TempDir())
+	err := runClient([]string{"--profile", "profile.json", "--providers", "providers.json"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("profile and providers were not rejected together: %v", err)
+	}
+	err = runClient([]string{"--providers", "providers.json", "--listen", "127.0.0.1:1081"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used") {
+		t.Fatalf("global listener was accepted with providers: %v", err)
 	}
 }
 

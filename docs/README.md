@@ -19,8 +19,8 @@ you choose the next document based on what you want to do.
 ## Use and operate Queqiao
 
 - [Deployment guide](DEPLOYING.md) — provider setup, invitations, desktop
-  enrollment, Clash/mihomo, service installation, monitoring, upgrades, and
-  rollback.
+  enrollment, multi-provider clients, Clash/mihomo, service installation,
+  monitoring, upgrades, and rollback.
 - [Runtime logging](LOGGING.md) — log locations, rotation, telemetry, and safe
   evidence collection.
 - [Mobile clients](MOBILE.md) — Android and iOS builds, product boundaries,

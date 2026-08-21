@@ -2,13 +2,13 @@
 
 > [!NOTE]
 > **Status:** Current operational guide for public protocol 1
-> **Last reviewed:** 2026-08-20
+> **Last reviewed:** 2026-08-21
 
 This guide takes you from an empty host to a working paired deployment: a
 provider gateway, one-time user enrollment, a desktop SOCKS client, and
-Clash/mihomo integration. It also covers service operation, upgrades, and
-rollback. Protocol 1 is the only supported wire protocol, so client and server
-must be upgraded together.
+Clash/mihomo integration. It also covers multi-provider clients, service
+operation, upgrades, and rollback. Protocol 1 is the only supported wire
+protocol, so client and server must be upgraded together.
 
 For a quick overview, start with the [repository README](../README.md). Use
 [known limitations](KNOWN-LIMITATIONS.md) to check whether the paired-gateway
@@ -256,6 +256,114 @@ The empty `--noproxy` is deliberate. Environments with `NO_PROXY=*` otherwise
 bypass even an explicitly supplied curl proxy and can produce a convincing but
 irrelevant result. Confirm that client and server `flows_started_total`
 counters increase during the request.
+
+## Connect to multiple providers
+
+One client process can maintain independent connections to several providers
+and expose one loopback SOCKS5 listener for each. Obtain a separate invitation
+from every provider and enroll each one into a clearly named profile:
+
+```sh
+# Use the Hong Kong provider's invitation in the first command.
+queqiaod enroll 'queqiao://enroll/…' \
+  --profile ~/.config/queqiao/hk.json \
+  --device-name alice-laptop
+
+# Use the US West provider's invitation in the second command.
+queqiaod enroll 'queqiao://enroll/…' \
+  --profile ~/.config/queqiao/us.json \
+  --device-name alice-laptop
+```
+
+Save the following manifest as `~/.config/queqiao/providers.json`:
+
+```json
+{
+  "version": 1,
+  "providers": [
+    {"name": "hong-kong", "profile": "hk.json", "listen": "127.0.0.1:1081"},
+    {"name": "us-west", "profile": "us.json", "listen": "127.0.0.1:1082"}
+  ]
+}
+```
+
+Start all configured providers together:
+
+```sh
+queqiaod client \
+  --providers ~/.config/queqiao/providers.json \
+  --metrics-listen 127.0.0.1:12090
+```
+
+Manifest version 1 requires a nonempty, unique name, profile, and listener for
+every provider. Relative profile paths are resolved from the manifest
+directory. Each listener must use a literal loopback IP and a port between 1
+and 65535; `--listen` cannot be combined with `--providers`.
+
+Every entry must name a separately enrolled device. Two entries which resolve
+to one device — a copied profile, a symlink, a hard link — are rejected at
+startup: two clients on one certificate would leave two renewal loops racing to
+save a single identity into two files.
+
+Process-wide budgets stay process-wide rather than being granted once per
+provider:
+
+- `--max-sessions` is the combined admission limit. Half of it is reserved in
+  equal shares, one share per provider, and half stays common. The reservation
+  is what keeps a standby provider able to accept a connection while a busy one
+  holds most of the common pool — without it a saturated primary starves the
+  failover target that is supposed to replace it.
+- `--aggregate-bytes-per-sec` and `--interactive-reserve-bytes-per-sec` pace
+  the whole process. Providers share one budget, so the configured rate is the
+  rate the uplink sees no matter how many providers are configured.
+- `--metrics-listen` aggregates every provider's activity into one endpoint.
+  Per-provider counters are not exported today; use the runtime log, which tags
+  each record with the manifest name and listener, to attribute activity.
+
+Other client runtime flags apply to each provider independently.
+
+All listeners bind before the first gateway is dialled, so a provider whose
+gateway is unreachable at startup cannot hold a healthy provider's SOCKS port
+down. Certificate renewal then runs for every provider concurrently.
+
+The process exits if any provider's listener stops, so a partially working
+client never looks healthy to a service manager. Run it under a supervisor
+that restarts it — a bare foreground `queqiaod client --providers` will not
+come back on its own.
+
+To let Clash/mihomo choose between these endpoints, define one SOCKS5 proxy for
+each listener and put them in a health-checked group. This `fallback` example
+prefers Hong Kong while it is healthy and sends new connections to US West
+when its health check fails:
+
+```yaml
+proxies:
+  - name: queqiao-hong-kong
+    type: socks5
+    server: 127.0.0.1
+    port: 1081
+    udp: true
+  - name: queqiao-us-west
+    type: socks5
+    server: 127.0.0.1
+    port: 1082
+    udp: true
+
+proxy-groups:
+  - name: Queqiao
+    type: fallback
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    proxies:
+      - queqiao-hong-kong
+      - queqiao-us-west
+```
+
+Point the relevant Clash/mihomo rules at the `Queqiao` group. Queqiao itself
+does not select providers. Clash/mihomo can switch only new connections;
+existing connections are not migrated and fail if their provider becomes
+unavailable. Use a `url-test` group instead when lowest measured latency is
+more important than provider order.
 
 ## Upgrade an existing deployment
 
