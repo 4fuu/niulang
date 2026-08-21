@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/limiter"
 	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/protocol"
 )
@@ -575,6 +576,31 @@ func TestLaneWriterPrioritizesInteractiveFrames(t *testing.T) {
 	case <-lane.writeDone:
 	case <-time.After(time.Second):
 		t.Fatal("lane writer did not stop")
+	}
+}
+
+func TestSchedulerDataFramesUseAggregateBudget(t *testing.T) {
+	flow := &multipathFlow{
+		ctx:     context.Background(),
+		done:    make(chan struct{}),
+		laneErr: make(chan laneFailure, 1),
+		budget: limiter.New(limiter.Config{
+			TotalBytesPerSec: 1,
+			Burst:            time.Millisecond,
+		}),
+	}
+	lane := &mpLane{
+		writeQ:    make(chan laneFrame, 1),
+		writeDone: make(chan struct{}),
+	}
+	frame := protocol.Frame{
+		Header:  protocol.Header{Version: protocol.Version, Type: protocol.TypeData, Class: protocol.ClassBulk},
+		Payload: make([]byte, 64*1024+1),
+	}
+
+	err := flow.enqueueFrameWritten(context.Background(), lane, frame, true, nil)
+	if !errors.Is(err, limiter.ErrInvalidRequest) {
+		t.Fatalf("oversized data frame error = %v, want aggregate pacing rejection", err)
 	}
 }
 
