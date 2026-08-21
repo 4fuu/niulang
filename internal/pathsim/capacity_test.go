@@ -140,6 +140,15 @@ func blast(t *testing.T, cfg Config, duration time.Duration, offeredMbits float6
 // TestForwardingCapacity measures what the emulator itself can forward with no
 // rate limiter, which bounds every transport number taken through it.
 func TestForwardingCapacity(t *testing.T) {
+	if testing.Short() {
+		// The floor below is a statement about the host, not about the
+		// emulator: a runner sharing its cores can forward under 100 Mbit/s
+		// while the emulator is perfectly correct. Unlike the calibration
+		// below, this one has no load guard that could tell those apart, so
+		// on the per-PR matrix it is the more fragile of the two. It belongs
+		// with the calibration it bounds, in the serialised deep runs.
+		t.Skip("forwarding capacity measures the host; runs in deep.yml")
+	}
 	for _, rtt := range []time.Duration{0, 20 * time.Millisecond, 200 * time.Millisecond} {
 		got := blast(t, Config{OneWayDelay: rtt / 2}, 3*time.Second, 0).deliveredMbits
 		t.Logf("rtt=%v unlimited capacity=%.0f Mbit/s", rtt, got)
