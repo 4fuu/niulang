@@ -153,10 +153,11 @@ run while the repository is private.
 
 1. Review the candidate commit, all candidate workflow jobs, checksums, SBOMs,
    secret-scan report, native smokes, and release checklist.
-2. Configure the GitHub `public-release` environment with the required human
-   reviewer and prevent administrator bypass where the repository plan permits.
-3. After approval, create an immutable `v*` tag on the reviewed commit. Do not
-   move a tag; replace a bad candidate with a new version.
+2. Confirm the `public-release` environment still holds the six signing
+   secrets, so only the jobs naming it can read them.
+3. Create an immutable `v*` tag on the reviewed commit. Pushing it is the
+   approval: everything after it runs unattended. Do not move a tag; replace a
+   bad candidate with a new version.
 4. Publish either way:
    - Push the `v*` tag. The push runs `.github/workflows/release.yml`
      automatically: the version and approved commit come from the tag itself,
@@ -171,8 +172,7 @@ candidate run. It rebuilds the final version twice from clean Go build caches
 and requires byte-identical output, executes the downloaded archive on native
 Linux, macOS, and Windows runners for amd64 and arm64, creates build-provenance
 attestations for every published file and CycloneDX attestations for every
-binary, waits at the `public-release` environment, and only then creates the
-GitHub Release.
+binary, and then creates the GitHub Release.
 
 Verify provenance after downloading:
 
@@ -254,10 +254,19 @@ If any of the six secrets is absent, candidate qualification and final
 publication stop at the signing job. Missing credentials can never silently
 produce a release with a different or unsigned macOS asset set.
 
-Because the signing keys live in `public-release` and publication does too, a
-release asks for reviewer approval twice: once to release the keys to the
-signing job, and once to publish after that job has reported. This is not a
-misconfiguration to work around. Moving the keys to repository-level secrets
-would collapse it to one prompt and would also hand them to every workflow that
-runs; keeping them environment-scoped means the second approval is given by
-someone who can already see whether notarization was accepted.
+The signing keys live in `public-release` and publication does too, so both
+jobs name that environment. Keep them there: an environment scopes its secrets
+to the jobs that name it, and moving them to repository-level secrets would
+hand them to every workflow that runs.
+
+The environment carries no deployment approval. Publication is gated, but by
+the tag rather than by a prompt: only a maintainer can create a `v*` tag, the
+`protect release tags` ruleset makes it immutable once created, and
+`release.yml`'s authorize job refuses any tag whose commit has no successful
+candidate run. A reviewer prompt on top of that asked a maintainer to approve
+a pipeline they had already approved by pushing the tag.
+
+What that trades away is worth naming: nobody now inspects the notarization
+result between signing and publishing. If that inspection matters to you,
+restore the approval on the `publish` job alone -- it is the one placed after
+signing has reported -- rather than on both.
