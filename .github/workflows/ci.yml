@@ -80,8 +80,26 @@ jobs:
           NUMBER: ${{ github.event.number }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if git diff --quiet "origin/${BASE_REF}...HEAD" -- CHANGELOG.md; then
+          # "I cannot compare" is not "you edited it". Saying so cost an hour
+          # once already: a pull request whose base branch had been deleted
+          # failed this step reporting a changelog edit it had not made.
+          base="origin/${BASE_REF}"
+          if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+            echo "Cannot resolve ${base}, so this check cannot tell whether"
+            echo "CHANGELOG.md was edited. That is a checkout or base-branch"
+            echo "problem rather than a changelog one: the base branch may have"
+            echo "been deleted or renamed while this pull request was open."
+            exit 1
+          fi
+          changed=0
+          git diff --quiet "${base}...HEAD" -- CHANGELOG.md || changed=$?
+          if [ "$changed" -eq 0 ]; then
             exit 0
+          fi
+          if [ "$changed" -ne 1 ]; then
+            echo "git diff against ${base} failed with status ${changed}, so"
+            echo "whether CHANGELOG.md was edited is unknown."
+            exit 1
           fi
           # Read the label from the API rather than from the event payload,
           # which is a snapshot taken when the pull request was opened. Adding
