@@ -334,15 +334,24 @@ func mustUDPAddr(t *testing.T, address string) *net.UDPAddr {
 	return addr
 }
 
+// The port is chosen by the UDP allocator, and TCP is bound onto it -- not the
+// other way around. Windows reserves contiguous excluded port ranges at boot,
+// Hyper-V and WinNAT among them, and a bind inside one fails with WSAEACCES
+// even though nothing holds the port. Asking TCP for an ephemeral port and then
+// forcing UDP onto that number walked into them: the ephemeral allocator hands
+// out ports close to sequentially, so all twenty retries landed in the same
+// excluded band and every one of them failed. A :0 UDP bind never returns a
+// UDP-excluded port, so the side that was failing now cannot, and a retry gets
+// a fresh kernel-chosen port rather than the next number up.
 func listenTCPAndUDPOnOnePort(t *testing.T) (net.Listener, net.PacketConn) {
 	t.Helper()
 	var lastErr error
 	for range 20 {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		packetConn, err := net.ListenPacket("udp", listener.Addr().String())
+		listener, err := net.Listen("tcp", packetConn.LocalAddr().String())
 		if err == nil {
 			t.Cleanup(func() {
 				_ = packetConn.Close()
@@ -351,7 +360,7 @@ func listenTCPAndUDPOnOnePort(t *testing.T) (net.Listener, net.PacketConn) {
 			return listener, packetConn
 		}
 		lastErr = err
-		_ = listener.Close()
+		_ = packetConn.Close()
 	}
 	t.Fatalf("could not reserve one TCP/UDP test port: %v", lastErr)
 	return nil, nil
