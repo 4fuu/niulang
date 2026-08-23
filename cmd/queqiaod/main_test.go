@@ -32,7 +32,7 @@ func parseRuntimeForTest(t *testing.T, client bool, args ...string) runtimeOptio
 
 func TestClientDefaultsNeedOnlyAnImportedProfile(t *testing.T) {
 	opts := parseRuntimeForTest(t, true)
-	if opts.listen != "127.0.0.1:1080" || !opts.quicPool || opts.transport != "auto" || opts.maxSessions != 2048 || opts.maxPendingOpens != 256 || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
+	if opts.listen != "127.0.0.1:12080" || !opts.quicPool || opts.transport != "auto" || opts.maxSessions != 2048 || opts.maxPendingOpens != 256 || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
 		t.Fatalf("unexpected client defaults: %+v", opts)
 	}
 }

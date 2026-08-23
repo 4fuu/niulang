@@ -14,6 +14,56 @@ For a quick overview, start with the [repository README](../README.md). Use
 [known limitations](KNOWN-LIMITATIONS.md) to check whether the paired-gateway
 assumption fits your network before exposing a service.
 
+## Install with the scripts
+
+Two scripts perform everything below and verify the result. Read this section
+and skip to [Connect Clash or mihomo](#connect-clash-or-mihomo); the rest of
+the guide remains the reference for what they do, for hosts they do not cover,
+and for the lifecycle work that has no installer.
+
+On the Linux gateway, as root:
+
+```sh
+sudo ./deploy/install-server.sh \
+  --name "Example Network" \
+  --endpoint gateway.example.net:443 \
+  --user alice \
+  --tune
+```
+
+That installs the binary, service account, directories, hardened unit, and
+environment file, initializes the provider, creates the first user, starts and
+verifies the gateway, and finally prints one single-use invitation URI. Deliver
+that URI over an authenticated private channel; it is a bearer credential.
+
+On the client, as the account that will use the tunnel -- not with `sudo`:
+
+```sh
+./deploy/install-client.sh --invite 'queqiao://enroll/...'
+```
+
+That enrolls the invitation, writes the provider manifest, installs a per-user
+service that starts on its own, and confirms that a request actually leaves
+through the gateway. Add a second provider later with the same command and only
+the new invitation; existing providers and their loopback ports are kept.
+
+If you already enrolled by hand, or you would rather see each step, the binary
+installs its own service and needs no script:
+
+```sh
+queqiaod enroll 'queqiao://enroll/...'
+queqiaod service install --profile "$PROFILE"
+```
+
+Both scripts take `--dry-run`, use `--binary PATH` when you have a reviewed
+release artifact instead of a source tree, and refuse any binary that does not
+report `wire=1`.
+
+The one thing `install-server.sh` will not do twice is create a provider trust
+root. Re-running it against an initialized state directory stops before
+touching the host; an upgrade passes `--no-provider-init` to keep that root and
+replace only the binary, unit, and environment file.
+
 ## What is configured where
 
 The provider chooses three durable values:
@@ -34,6 +84,10 @@ and locally generated device key. Users never copy provider keys, CA files,
 shared secrets, or individual JSON fields.
 
 ## Install the gateway
+
+`deploy/install-server.sh` performs this whole section. The steps below are
+what it does, and the path to take on a host it does not cover: it requires
+Linux with systemd and root.
 
 Install the exact reviewed binary and confirm its protocol before creating
 state:
@@ -88,7 +142,12 @@ QUEQIAOD_ARGS=--state /var/lib/queqiao/provider --listen :443 --transport auto -
 ```
 
 The environment file is a whitespace-separated argument list; do not put a
-state path containing spaces in it. Start and verify the service:
+state path containing spaces in it.
+
+The unit grants `CAP_NET_BIND_SERVICE` and bounds the capability set to it.
+The service account is unprivileged and `NoNewPrivileges=true` blocks acquiring
+a capability after exec, so without that grant a `--listen :443` cannot bind at
+all. Start and verify the service:
 
 ```sh
 sudo systemctl daemon-reload
@@ -178,20 +237,63 @@ sudo -u queqiao /usr/local/bin/queqiaod provider revoke-invite \
   --state /var/lib/queqiao/provider --invite INVITE_ID
 ```
 
-## Enroll a desktop client
+## Set up a desktop client
 
-The user imports the URI once:
+There are two ways in, and they end in the same place. Either one leaves a
+supervised client that starts on its own; do not run `queqiaod client` in a
+terminal as a deployment, because the process exits when any provider's
+listener stops and nothing brings it back.
+
+**One command.** `deploy/install-client.sh` enrolls, writes the manifest,
+installs the service, and verifies that traffic reaches the gateway:
+
+```sh
+./deploy/install-client.sh --invite 'queqiao://enroll/…'
+```
+
+**Two commands.** If you already enrolled by hand, or you want to see each step,
+`queqiaod` installs its own service:
+
+```sh
+queqiaod enroll 'queqiao://enroll/…'
+queqiaod service install --profile "$PROFILE"
+```
+
+`enroll` prints the exact `service install` line to run next, with the profile
+path filled in. Both routes are the same on macOS and Linux.
+
+### Where the files go
+
+| What | macOS | Linux |
+| --- | --- | --- |
+| Profile | `~/Library/Application Support/queqiao/` | `~/.config/queqiao/` |
+| Service | `~/Library/LaunchAgents/me.01.queqiao.client.plist` | `~/.config/systemd/user/queqiao-client.service` |
+| Log | `~/Library/Logs/Queqiao/client.log` | `~/.local/state/queqiao/client.log` |
+
+The profile directory is the platform configuration directory, which is what
+`queqiaod enroll` uses when `--profile` is not given. Run `queqiaod logs client`
+to print the log path and a follow command rather than assuming it.
+
+Changing the layout later is a re-run, not a manual move. Passing a different
+`--config-dir`, `--prefix`, `--label`, or `--service-name` to
+`deploy/install-client.sh` relocates the install: the service is stopped, the
+enrolled profiles move with it, and the superseded definition and binary are
+removed. Profiles are moved rather than re-enrolled because an invitation is
+single-use — the device key behind a consumed invitation cannot be reissued, so
+a profile left behind is a device lost.
+
+### Enrolling
 
 ```sh
 queqiaod enroll 'queqiao://enroll/…'
 ```
 
-The default profile path is printed on success. To select stable paths and a
+The default profile path is printed on success. To choose the path and a
 recognizable device label explicitly:
 
 ```sh
 queqiaod enroll 'queqiao://enroll/…' \
-  --profile ~/.config/queqiao/example-network.json \
+  --profile ~/queqiao/example-network.json \
   --device-name alice-laptop \
   --local-address if:en0
 ```
@@ -209,38 +311,45 @@ profile path, and device name to reuse that key safely. Do not delete the draft
 merely because the first response was lost; requesting a different key after
 token consumption is correctly rejected as replay.
 
-Start the client:
-
-```sh
-queqiaod client \
-  --profile ~/.config/queqiao/example-network.json \
-  --listen 127.0.0.1:12080 \
-  --local-address if:en0 \
-  --metrics-listen 127.0.0.1:12090
-```
-
-The client creates its JSON runtime log automatically. Run `queqiaod logs client`
-to print the absolute path and a follow command; on macOS the default
-is `~/Library/Logs/Queqiao/client.log`. The file contains five-second
-performance snapshots and rotates with the same bounds as the server.
-
 The profile must remain readable only by its owner. Queqiao rejects a
 group/world-readable profile rather than silently using an exposed key.
 
-For macOS, edit [`deploy/me.01.queqiao.client.plist`](../deploy/me.01.queqiao.client.plist)
-to contain the installed binary and profile paths, then load it:
+### The service
 
 ```sh
-cp deploy/me.01.queqiao.client.plist ~/Library/LaunchAgents/
-launchctl bootstrap "gui/$(id -u)" \
-  ~/Library/LaunchAgents/me.01.queqiao.client.plist
-launchctl print "gui/$(id -u)/me.01.queqiao.client"
-tail -n 20 -f ~/Library/Logs/Queqiao/client.log
+queqiaod service install --profile "$PROFILE"   # or --providers MANIFEST
+queqiaod service status
+queqiaod service print --profile "$PROFILE"     # render it without installing
+queqiaod service uninstall                      # leaves profiles alone
 ```
 
-After changing an already loaded plist, use `launchctl bootout` followed by
-`launchctl bootstrap`; `kickstart` restarts the cached definition and does not
-re-read arguments from disk.
+`install` writes the definition, loads it, and leaves it starting on its own
+from then on. The SOCKS5 listener defaults to `127.0.0.1:12080`, the port
+[`deploy/clash-queqiao.yaml`](../deploy/clash-queqiao.yaml) already points at.
+Use `--listen` to change it, `--label` or `--service-name` to run more than one
+client, and `--binary` when the definition should name a path other than the
+running executable.
+
+There is no plist or unit to copy and edit. The definition is generated from
+this machine's real paths, which is what a template with `/Users/YOU`
+placeholders could never be: the placeholder path was not even the directory
+`enroll` writes to on macOS.
+
+On macOS this is a LaunchAgent, so it starts **at login**, not at boot. That is
+the right scope for it — the profile is a `0600` private key owned by one
+account and the listener serves that account's applications — but it does mean
+the tunnel is not up before someone logs in. On Linux the unit is a systemd
+`--user` unit and `install` also runs `loginctl enable-linger`, which does give
+start-at-boot. Check either with:
+
+```sh
+queqiaod service status
+```
+
+After editing a loaded plist by hand, use `launchctl bootout` then
+`launchctl bootstrap`; `kickstart` restarts the definition launchd already
+cached and does not re-read arguments from disk. `queqiaod service install`
+does the bootout/bootstrap pair for you.
 
 ## Connect Clash or mihomo
 
@@ -272,16 +381,19 @@ from every provider and enroll each one into a clearly named profile:
 ```sh
 # Use the Hong Kong provider's invitation in the first command.
 queqiaod enroll 'queqiao://enroll/…' \
-  --profile ~/.config/queqiao/hk.json \
+  --profile ~/queqiao/hk.json \
   --device-name alice-laptop
 
 # Use the US West provider's invitation in the second command.
 queqiaod enroll 'queqiao://enroll/…' \
-  --profile ~/.config/queqiao/us.json \
+  --profile ~/queqiao/us.json \
   --device-name alice-laptop
 ```
 
-Save the following manifest as `~/.config/queqiao/providers.json`:
+`deploy/install-client.sh` writes this manifest for you. To write it by hand,
+save it beside the profiles — the profile directory is
+`~/Library/Application Support/queqiao` on macOS and `~/.config/queqiao` on
+Linux:
 
 ```json
 {
@@ -297,7 +409,7 @@ Start all configured providers together:
 
 ```sh
 queqiaod client \
-  --providers ~/.config/queqiao/providers.json \
+  --providers ~/queqiao/providers.json \
   --metrics-listen 127.0.0.1:12090
 ```
 
@@ -333,9 +445,9 @@ gateway is unreachable at startup cannot hold a healthy provider's SOCKS port
 down. Certificate renewal then runs for every provider concurrently.
 
 The process exits if any provider's listener stops, so a partially working
-client never looks healthy to a service manager. Run it under a supervisor
-that restarts it — a bare foreground `queqiaod client --providers` will not
-come back on its own.
+client never looks healthy to a service manager. Run it under a supervisor that
+restarts it — a bare foreground `queqiaod client --providers` will not come
+back on its own. `queqiaod service install --providers MANIFEST` sets that up.
 
 To let Clash/mihomo choose between these endpoints, define one SOCKS5 proxy for
 each listener and put them in a health-checked group. This `fallback` example
