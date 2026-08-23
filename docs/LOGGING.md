@@ -109,7 +109,8 @@ Prometheus `/metrics` names. They cover:
 - lanes, failures, replacements, reinjections, fallbacks, and timeouts;
 - transient local UDP send errors absorbed into QUIC loss recovery;
 - flow telemetry entries expired because nothing refreshed them, which is how
-  a round-trip aggregate frozen at a stale constant announces itself; and
+  a round-trip aggregate frozen at a stale constant announces itself;
+- lane joins refused, split by reason; and
 - the controller's measured erasure floor, sampler diagnostics, and class
   transitions.
 
@@ -117,6 +118,15 @@ The dashboard calculates interval packet loss from changes in sent and lost
 packet counters. QUIC can later recognize a packet previously declared lost,
 so its lost byte/packet counters are allowed to decrease; the dashboard skips
 that interval instead of displaying a fabricated negative loss rate.
+
+A gateway that refuses a lane join writes `msg="lane join refused"` with the
+reason at `info`, or at `warn` for a flow or principal mismatch, which are a
+peer naming a live session that is not the one it holds. A storm is rate
+limited per reason rather than per session -- the identifiers in a refused join
+are the peer's to choose, so a map keyed by them is memory a peer sizes -- and
+each record carries how many refusals of that reason it stands for in
+`suppressed`. The matching counters are `queqiao_lane_join_refused_total` by
+reason.
 
 Flow-completion records add an opaque session/flow correlation ID, transport,
 duration, directional bytes, class, lane byte

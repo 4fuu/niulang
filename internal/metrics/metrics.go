@@ -61,6 +61,11 @@ type Registry struct {
 	// event, while this is a peer whose build disagrees about the wire, and the
 	// two need different responses from whoever is on call.
 	peerProtocolViolations atomic.Uint64
+	// laneJoinRefusals counts lane joins this endpoint answered with a reset,
+	// by reason. A rescue refused is a flow that will fail, so a rising count
+	// here is the other half of a peer's stalling and failing flows -- the
+	// half the endpoint doing the refusing can see.
+	laneJoinRefusals [LaneJoinReasons]atomic.Uint64
 	// quicObservationsExpired counts per-flow QUIC telemetry entries dropped
 	// because nothing refreshed them within quicObservationTTL. The aggregate
 	// below reports round-trip time as a maximum, so an entry that is never
@@ -75,6 +80,54 @@ type Registry struct {
 	// clock is the time source for observation freshness. Tests replace it;
 	// production leaves it nil and reads the wall clock.
 	clock func() time.Time
+}
+
+// LaneJoinRefusal is why a lane join was refused.
+//
+// The set is closed at compile time because these are exported label values.
+// A label whose values come off the wire is a label a peer can make unbounded,
+// and this exposition deliberately carries no user-controlled labels at all.
+type LaneJoinRefusal int
+
+const (
+	// LaneJoinInvalidIdentity is a join naming no usable session, lane, or
+	// flow: a peer disagreeing about the wire rather than a lost session.
+	LaneJoinInvalidIdentity LaneJoinRefusal = iota
+	// LaneJoinUnknownSession is a rescue arriving after this endpoint has
+	// forgotten the session. It is the refusal that matters operationally:
+	// the peer's flow cannot be resumed and will fail.
+	LaneJoinUnknownSession
+	// LaneJoinFlowMismatch is a join for a live session naming a different
+	// flow, and LaneJoinPrincipalMismatch one from a different device than
+	// created the session. Neither is a forgotten session, and the second is a
+	// peer reaching for identifiers that are routing, not credentials.
+	LaneJoinFlowMismatch
+	LaneJoinPrincipalMismatch
+	// LaneJoinInvalidControlReplacement is a control-lane replacement for a
+	// flow that reserved none, or on a transport that cannot carry one.
+	LaneJoinInvalidControlReplacement
+	// LaneJoinLaneUnavailable is a join refused by this endpoint's own
+	// admission ceiling rather than by anything about the peer.
+	LaneJoinLaneUnavailable
+	// LaneJoinReasons is how many reasons there are.
+	LaneJoinReasons
+)
+
+var laneJoinRefusalNames = [LaneJoinReasons]string{
+	LaneJoinInvalidIdentity:           "invalid_identity",
+	LaneJoinUnknownSession:            "unknown_session",
+	LaneJoinFlowMismatch:              "flow_mismatch",
+	LaneJoinPrincipalMismatch:         "principal_mismatch",
+	LaneJoinInvalidControlReplacement: "invalid_control_replacement",
+	LaneJoinLaneUnavailable:           "lane_unavailable",
+}
+
+// String is the stable label and log value for a refusal reason.
+func (r LaneJoinRefusal) String() string {
+	if r < 0 || r >= LaneJoinReasons {
+		return "unknown"
+	}
+	return laneJoinRefusalNames[r]
 }
 
 // quicObservationTTL is how long one flow's QUIC telemetry keeps contributing
@@ -122,6 +175,8 @@ type Snapshot struct {
 	// QUICObservationsExpired counts flow telemetry entries dropped because
 	// they stopped being refreshed. See quicObservationsExpired.
 	QUICObservationsExpired uint64
+	// LaneJoinRefusals is indexed by LaneJoinRefusal.
+	LaneJoinRefusals [LaneJoinReasons]uint64
 }
 
 // QUICObservation is a point-in-time aggregate over the lanes of one logical
@@ -238,6 +293,14 @@ func (r *Registry) BulkIsolated() {
 	r.bulkIsolations.Add(1)
 }
 
+// LaneJoinRefused records a lane join answered with a reset.
+func (r *Registry) LaneJoinRefused(reason LaneJoinRefusal) {
+	if r == nil || reason < 0 || reason >= LaneJoinReasons {
+		return
+	}
+	r.laneJoinRefusals[reason].Add(1)
+}
+
 // PeerProtocolViolation records a peer that authenticated as a protocol-1
 // endpoint and then did something protocol 1 forbids.
 func (r *Registry) PeerProtocolViolation() { r.peerProtocolViolations.Add(1) }
@@ -301,6 +364,9 @@ func (r *Registry) Snapshot() Snapshot {
 	}
 	for i := range s.ClassTransitions {
 		s.ClassTransitions[i] = r.classTransitions[i].Load()
+	}
+	for i := range s.LaneJoinRefusals {
+		s.LaneJoinRefusals[i] = r.laneJoinRefusals[i].Load()
 	}
 	now := r.now()
 	var expired uint64
@@ -502,5 +568,12 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	for i, value := range s.ClassTransitions {
 		fmt.Fprintf(w, "queqiao_class_transitions_total{class=\"%d\"} %d\n", i, value)
+	}
+	// The reasons stay separate because they mean different things to whoever
+	// is on call: a forgotten session is a peer whose flows are failing, a
+	// principal mismatch is a peer reaching for a session that is not its own,
+	// and an unavailable lane is this endpoint's own ceiling.
+	for i, value := range s.LaneJoinRefusals {
+		fmt.Fprintf(w, "queqiao_lane_join_refused_total{reason=\"%s\"} %d\n", LaneJoinRefusal(i), value)
 	}
 }

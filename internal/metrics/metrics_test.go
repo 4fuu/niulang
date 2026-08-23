@@ -200,3 +200,40 @@ func TestSnapshotKeepsRefreshedQUICObservations(t *testing.T) {
 		}
 	}
 }
+
+// The refusal reasons are counted apart because they send an operator to
+// different places: a forgotten session is a peer whose flows are failing, a
+// principal mismatch is a peer reaching for a session that is not its own.
+func TestLaneJoinRefusalsAreCountedByReason(t *testing.T) {
+	registry := New()
+	registry.LaneJoinRefused(LaneJoinUnknownSession)
+	registry.LaneJoinRefused(LaneJoinUnknownSession)
+	registry.LaneJoinRefused(LaneJoinPrincipalMismatch)
+	registry.LaneJoinRefused(LaneJoinReasons) // out of range: ignored
+	registry.LaneJoinRefused(LaneJoinRefusal(-1))
+
+	got := registry.Snapshot()
+	if got.LaneJoinRefusals[LaneJoinUnknownSession] != 2 || got.LaneJoinRefusals[LaneJoinPrincipalMismatch] != 1 {
+		t.Fatalf("refusals = %v", got.LaneJoinRefusals)
+	}
+	if got.LaneJoinRefusals[LaneJoinFlowMismatch] != 0 {
+		t.Fatalf("flow mismatch counted %d refusals it never saw", got.LaneJoinRefusals[LaneJoinFlowMismatch])
+	}
+
+	recorder := httptest.NewRecorder()
+	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	for _, want := range []string{
+		"queqiao_lane_join_refused_total{reason=\"unknown_session\"} 2",
+		"queqiao_lane_join_refused_total{reason=\"principal_mismatch\"} 1",
+		"queqiao_lane_join_refused_total{reason=\"flow_mismatch\"} 0",
+		"queqiao_lane_join_refused_total{reason=\"lane_unavailable\"} 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics output is missing %q:\n%s", want, body)
+		}
+	}
+
+	var nilRegistry *Registry
+	nilRegistry.LaneJoinRefused(LaneJoinUnknownSession)
+}
