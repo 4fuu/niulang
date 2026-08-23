@@ -1,6 +1,7 @@
 package fec
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -192,5 +193,29 @@ func TestBinomialTail(t *testing.T) {
 			t.Errorf("binomialTailBelow(%d, %v, %d) = %.10f, want %.10f",
 				test.n, test.q, test.k, got, test.want)
 		}
+	}
+}
+
+// A loss rate of one or more is not a measurement: every honest rate is a
+// count of losses over a count of trials. Sizing a code for one would spend
+// the lowest rate this search allows -- eight times the wire per delivered
+// byte -- on the path that produced the impossible figure.
+func TestChooseRefusesAnImpossibleLossRate(t *testing.T) {
+	params := Params{ShardBytes: 1200, RateBytesPerSec: 1e6, RoundTrip: 300 * time.Millisecond, TargetResidual: 1e-3}
+	for _, loss := range []float64{1, 1.2527, math.Inf(1), math.NaN()} {
+		t.Run(fmt.Sprintf("%v", loss), func(t *testing.T) {
+			plan := Choose(lossmodel.Snapshot{Loss: loss, Floor: loss, Recent: loss, BurstFactor: 1}, params)
+			if plan.Code {
+				t.Fatalf("coded for a loss rate of %v: %+v", loss, plan)
+			}
+			if _, ok := ShardsFor(8, lossmodel.Snapshot{Loss: loss, Floor: loss, BurstFactor: 1}, params); ok {
+				t.Fatalf("sized a block for a loss rate of %v", loss)
+			}
+		})
+	}
+	// The guard must not touch a rate that is merely high.
+	plan := Choose(lossmodel.Snapshot{Loss: 0.42, Floor: 0.42, Recent: 0.42, BurstFactor: 1}, params)
+	if !plan.Code {
+		t.Fatalf("refused to code a 42%% erasure channel: %+v", plan)
 	}
 }

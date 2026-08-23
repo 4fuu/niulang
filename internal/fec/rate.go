@@ -106,6 +106,20 @@ func Choose(s lossmodel.Snapshot, p Params) Plan {
 	if loss < minCodedLoss {
 		return Plan{Why: "loss below the parity's cost"}
 	}
+	if !(loss < 1) {
+		// Written as a negation so it also refuses NaN, which passes every
+		// threshold it is compared against.
+		//
+		// A rate of one says nothing arrives, and no code repairs that. Every
+		// honest loss rate is a count of losses over a count of trials and so
+		// cannot reach one here, which makes this an accounting failure rather
+		// than a path: something was charged to the channel that the channel
+		// did not do. Sizing for it would spend the lowest rate this searches
+		// -- eight times the wire per delivered byte -- on the path that
+		// produced the impossible figure, so refuse instead and leave the
+		// counters saying why.
+		return Plan{Why: "loss rate is not a measurement"}
+	}
 	if p.ShardBytes <= 0 || p.TargetResidual <= 0 || p.TargetResidual >= 1 {
 		return Plan{Why: "no usable parameters"}
 	}
@@ -167,7 +181,7 @@ func ShardsFor(k int, s lossmodel.Snapshot, p Params) (int, bool) {
 	if loss <= 0 {
 		loss = s.Loss
 	}
-	if loss < minCodedLoss || p.TargetResidual <= 0 || p.TargetResidual >= 1 {
+	if loss < minCodedLoss || !(loss < 1) || p.TargetResidual <= 0 || p.TargetResidual >= 1 {
 		return k, false
 	}
 	burst := p.effectiveBurst(s)

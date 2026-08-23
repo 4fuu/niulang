@@ -315,19 +315,42 @@ const minMemorylessSamples = 200
 // a path that is losing packets from a peer that is not numbering them.
 func (e *Estimator) Discontinuities() uint64 { return e.discontinuities }
 
+// probability keeps a reported rate a rate.
+//
+// Every quotient below is a count of outcomes over a count of trials, so each
+// is in [0,1] by construction and this clamp should never bind. It is here
+// because the consequence of it binding is silent and expensive: a rate above
+// one reaching Choose sizes parity for a channel that delivers nothing, and
+// parity is load on the path that produced the impossible number. A figure
+// outside [0,1] is not evidence about a path, so it is not passed on as if it
+// were.
+func probability(v float64) float64 {
+	if !(v > 0) {
+		// Also catches NaN, which compares false against everything and would
+		// otherwise travel through every threshold below untouched.
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
 // Snapshot reports the current estimate.
 func (e *Estimator) Snapshot() Snapshot {
 	s := Snapshot{Reordered: e.reordered, Decided: e.decided, Samples: e.samples}
 	if e.samples <= 0 {
 		return s
 	}
-	s.Loss = e.losses / e.samples
+	s.Loss = probability(e.losses / e.samples)
 	if e.fromArrival > 0 {
-		s.LossAfterArrival = e.lossAfterArrival / e.fromArrival
+		s.LossAfterArrival = probability(e.lossAfterArrival / e.fromArrival)
 	}
 	if e.fromLoss > 0 {
-		s.ArrivalAfterLoss = e.arrivalAfterLoss / e.fromLoss
-		s.MeanBurst = 1 / s.ArrivalAfterLoss
+		s.ArrivalAfterLoss = probability(e.arrivalAfterLoss / e.fromLoss)
+		if s.ArrivalAfterLoss > 0 {
+			s.MeanBurst = 1 / s.ArrivalAfterLoss
+		}
 	}
 	// A memoryless channel loses a mean run of 1/(1-Loss), so dividing by that
 	// normalises the burst length to one for independent loss.
@@ -343,6 +366,7 @@ func (e *Estimator) Snapshot() Snapshot {
 	s.Memoryless = e.memoryless(s)
 
 	s.Floor, s.Recent = e.floor()
+	s.Floor, s.Recent = probability(s.Floor), probability(s.Recent)
 	if s.Recent > s.Floor {
 		s.Congestive = s.Recent - s.Floor
 	}
