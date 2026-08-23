@@ -80,20 +80,44 @@ built Rust implementation conflates the transport design with the language and
 QUIC library; comparing against this isolates the design.
 
 **`internal/extproxy`** — launches third-party implementations so the
-comparison is not limited to an in-tree control. With `--sing-box PATH` the
-benchmark gains four more stacks:
+comparison is not limited to an in-tree control:
 
-| Stack | Implementation | Carried by |
-| --- | --- | --- |
-| `tuic` | sing-box, native TUIC v5 | UDP relay |
-| `hysteria2` | sing-box | UDP relay |
-| `vless-tcp` | sing-box, VLESS over TLS | TCP relay |
-| `vless-ws` | sing-box, VLESS over WebSocket | TCP relay |
+| Stack | Implementation | Carried by | Needs |
+| --- | --- | --- | --- |
+| `tuic` | sing-box, native TUIC v5 | UDP relay | `--sing-box` |
+| `hysteria2` | sing-box | UDP relay | `--sing-box` |
+| `vless-tcp` | sing-box, VLESS over TLS | TCP relay | `--sing-box` |
+| `vless-ws` | sing-box, VLESS over WebSocket | TCP relay | `--sing-box` |
+| `kcptun` | kcptun, KCP with fixed-rate FEC | UDP relay | `--kcptun-client`, `--kcptun-server` |
 
 Each runs as a server the emulator forwards to and a client exposing SOCKS5,
-over exactly the same seeded path as queqiao. The client trusts exactly the
-server's certificate, so nothing disables verification. The four are registry
-entries rather than special cases; see the contract below for adding another.
+over exactly the same seeded path as queqiao. Where the transport has TLS the
+client trusts exactly the server's certificate, so nothing disables
+verification. They are registry entries rather than special cases; see the
+contract below for adding another.
+
+`kcptun` is the one that is not a proxy. It forwards a local TCP port, so the
+harness runs a SOCKS5 server of its own beyond the emulator for the tunnel's
+server to forward to, and the tunnel's local port is what the benchmark speaks
+to:
+
+```
+benchmark -> [kcptun client] -> emulator -> [kcptun server]
+          -> [harness SOCKS5 target] -> destination
+```
+
+The measured path is crossed exactly once, as for every other stack; the two
+extra hops are loopback. kcptun's upstream repository was withdrawn and
+`github.com/xtaci/kcptun` no longer resolves, which is why the stack takes two
+binary paths rather than naming a source: build from whatever copy you trust,
+and record which one and at what commit alongside the run, as for any other
+measured dependency. It is the comparison queqiao's own coding most needs,
+because both transports spend parity to avoid a round trip and choose how much
+in opposite ways — see the fixed-parity section below before quoting a number.
+kcptun ships one program per side, which is why it takes two paths; its
+compression is disabled, because the benchmark's payload is a repeating byte
+ramp that snappy would reduce to almost nothing, and the stack would then
+report the compressor's rate rather than the path's.
 
 **`cmd/queqiaobench`** — runs the selected stacks over one emulated path in a
 single process and reports per-trial rows, a summary, optional JSON, and an
@@ -168,13 +192,17 @@ What the running pair must satisfy:
    packet emulator, where loss, delay and rate apply. `"tcp"` means it can only
    be measured with `--loss 0`, for the reason in the section above.
 
-A tunnel rather than a proxy -- kcptun is the obvious example -- has no SOCKS5
-of its own: it forwards a local TCP port to a target. Such a stack is three
-processes, because the target has to be a SOCKS5 server on the server side, and
-the tunnel's local port is then the endpoint the benchmark speaks to. `Launch`
-describes two sides today; a stack of that shape should extend it with the
-third process rather than starting one outside the harness, so teardown keeps a
-single owner and no listener outlives the run.
+A tunnel rather than a proxy has no SOCKS5 of its own: it forwards a local TCP
+port to a target. Declare `socksTarget: true` in the registry entry and the
+harness runs `extproxy.StartSOCKSTarget` beyond the emulator and passes its
+address as `Config.SOCKSTarget`; forward to that, and expose the tunnel's own
+local port as `SOCKSListen`. The target is in-process on purpose: an external
+SOCKS5 server would be a third implementation in the measurement whose version
+and buffering nobody recorded. `Plan` refuses such a stack when the target is
+missing, because a tunnel forwarding to nothing fails every trial at SOCKS with
+an error that says nothing about why.
+
+`kcptun` is the worked example of all of this.
 
 ### Comparing a fixed-parity transport
 
@@ -185,24 +213,46 @@ kcptun-style code rate is a constant chosen in advance. A single configuration
 is therefore a comparison against one guess, and whichever way it lands the
 result is mostly about the guess.
 
-So a submitted comparison should carry:
+So a comparison should carry:
 
-- **A parity sweep, not a point.** Several `-datashard`/`-parityshard` ratios
-  spanning above and below the emulated erasure rate, with the best one shown
-  against queqiao rather than an arbitrary one.
+- **Size the window before anything else.** This is not a refinement, it is
+  the difference between a measurement and a rigged one. kcptun's default send
+  window of 128 packets caps a 210 ms path at about 6.6 Mbit/s no matter what
+  the code does. Measured live on that path, the same build went from 5.09 to
+  25.36 Mbit/s -- five times faster -- when `--kcptun-sndwnd` and
+  `--kcptun-rcvwnd` were raised to a delay-bandwidth product's worth of
+  packets, and the gap to queqiao fell from 9.6x to 2.1x. A comparison run at
+  the default windows is measuring the window.
+- **A parity sweep, not a point.** `--kcptun-parityshard` against a fixed
+  `--kcptun-datashard`, spanning ratios above and below the erasure rate, with
+  the best one shown against queqiao rather than an arbitrary one. The
+  defaults are kcptun's own (10 data, 3 parity, `fast`, 128/512 windows), which
+  is a starting point rather than an answer.
 - **The cost alongside the rate.** Parity is bandwidth spent on the same
   bottleneck, so report the parity share of bytes sent on both sides. Queqiao's
-  is `fec_repairs_total` over `fec_sent_total` in its runtime log; a transport
-  buying more of the wire can finish sooner while delivering fewer useful bytes
-  per byte sent, and a goodput column alone hides that.
-- **Every parameter that moves the answer.** Implementation version, `-mode` or
-  the explicit `-nodelay/-interval/-resend/-nc`, `-sndwnd`/`-rcvwnd`, `-mtu`,
-  compression, and whatever the SOCKS5 target adds. The window settings are the
-  congestion control in practice, so a run that does not state them is not
-  reproducible.
+  is `fec_repairs_total` over `fec_sent_total` in its runtime log, and kcptun's
+  is the ratio the sweep fixed; a transport buying more of the wire can finish
+  sooner while delivering fewer useful bytes per byte sent, and a goodput
+  column alone hides that.
+- **Every parameter that moves the answer.** The implementation version, and
+  the settings the harness passes: `--kcptun-mode`, `--kcptun-datashard`,
+  `--kcptun-parityshard`, `--kcptun-sndwnd`, `--kcptun-rcvwnd`. The windows are
+  the congestion control in practice, so a run that does not state them is not
+  reproducible. They appear in the archival JSON with the rest of the command.
 - **The same rules as every other cell**: one seeded path, alternating trial
   order, medians over all trials counting failures at their partial rate, and a
   check against the calibration bound below.
+
+```sh
+# One cell of a parity sweep, against queqiao on the same seeded path.
+for parity in 1 3 6 10; do
+  go run ./cmd/queqiaobench --stacks queqiao,kcptun \
+      --kcptun-client ./kcptun/client --kcptun-server ./kcptun/server \
+      --kcptun-mode fast3 --kcptun-datashard 10 --kcptun-parityshard "$parity" \
+      --rtt 200 --loss 20 --rate 50 --bytes $((16*1024*1024)) --trials 5 \
+      --json "/tmp/kcptun-parity-$parity.json"
+done
+```
 
 ## Reading the numbers
 
@@ -239,6 +289,13 @@ go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
 # Against real implementations rather than only the in-tree control.
 go run ./cmd/queqiaobench --stacks baseline,queqiao,tuic,hysteria2 \
     --sing-box /path/to/sing-box --rtt 200 --loss 1 --rate 100 --trials 5
+
+# Against a fixed-rate erasure code, which is the comparison queqiao's own
+# coding most needs. Sweep the parity; see the fixed-parity section.
+go run ./cmd/queqiaobench --stacks queqiao,kcptun \
+    --kcptun-client /path/to/kcptun/client --kcptun-server /path/to/kcptun/server \
+    --kcptun-mode fast3 --kcptun-parityshard 3 \
+    --rtt 200 --loss 20 --rate 50 --bytes $((16*1024*1024)) --trials 5
 
 # The TCP family, which cannot be measured under loss.
 go run ./cmd/queqiaobench --stacks vless-tcp,vless-ws \

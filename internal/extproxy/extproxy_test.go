@@ -134,15 +134,29 @@ func TestInvalidAddressesAreRejected(t *testing.T) {
 	}
 }
 
-func planFor(t *testing.T, kind Kind) Launch {
-	t.Helper()
-	launch, err := Plan(Config{
+// planConfig is what the harness supplies for a stack: the addresses, the
+// certificate, the work directory, a binary per side, and a SOCKS5 target for
+// a stack that is a tunnel rather than a proxy.
+func planConfig(kind Kind) Config {
+	cfg := Config{
 		Kind: kind, Binary: "/usr/local/bin/sing-box",
 		ServerListen: "127.0.0.1:11111", ClientRemote: "127.0.0.1:22222",
 		SOCKSListen:     "127.0.0.1:33333",
 		CertificatePath: "/tmp/cert.pem", KeyPath: "/tmp/key.pem",
 		WorkDir: "/tmp/bench",
-	})
+	}
+	if kind == KCPTun {
+		cfg.Binary, cfg.ServerBinary = "/usr/local/bin/kcptun-client", "/usr/local/bin/kcptun-server"
+	}
+	if kind.NeedsSOCKSTarget() {
+		cfg.SOCKSTarget = "127.0.0.1:44444"
+	}
+	return cfg
+}
+
+func planFor(t *testing.T, kind Kind) Launch {
+	t.Helper()
+	launch, err := Plan(planConfig(kind))
 	if err != nil {
 		t.Fatalf("plan %s: %v", kind, err)
 	}
@@ -166,10 +180,15 @@ func TestEveryRegisteredStackPlansBothSides(t *testing.T) {
 			if kind.Implementation() == "" {
 				t.Fatal("no implementation is named, so a caller cannot be told what to install")
 			}
+			cfg := planConfig(kind)
 			launch := planFor(t, kind)
-			if launch.ServerBinary != "/usr/local/bin/sing-box" || launch.ClientBinary != "/usr/local/bin/sing-box" {
-				t.Fatalf("binaries = %q and %q, want the configured one on both sides",
-					launch.ServerBinary, launch.ClientBinary)
+			wantServer := cfg.ServerBinary
+			if wantServer == "" {
+				wantServer = cfg.Binary
+			}
+			if launch.ServerBinary != wantServer || launch.ClientBinary != cfg.Binary {
+				t.Fatalf("binaries = %q and %q, want %q and %q",
+					launch.ServerBinary, launch.ClientBinary, wantServer, cfg.Binary)
 			}
 			if len(launch.ServerArgs) == 0 || len(launch.ClientArgs) == 0 {
 				t.Fatalf("launch = %+v, want arguments for both sides", launch)
