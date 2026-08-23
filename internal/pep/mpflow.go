@@ -672,7 +672,13 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 		f.currentRTTNS.Store(observation.SmoothedRTT.Nanoseconds())
 		f.baselineRTTNS.CompareAndSwap(0, observation.SmoothedRTT.Nanoseconds())
 	}
-	if f.metrics != nil {
+	// A finished flow must not publish again. Its registry entry is removed
+	// during teardown, and the lane managers keep polling this snapshot for a
+	// moment after that; a late publication would reinstate an entry with
+	// nothing left to remove it. The process-wide aggregate reports RTT as a
+	// maximum, so one reinstated entry pins the exported estimate at that
+	// flow's last measurement until the process restarts.
+	if f.metrics != nil && !f.finished.Load() {
 		f.metrics.ObserveQUIC(f.telemetryID, observation)
 	}
 }
@@ -1160,15 +1166,19 @@ func (f *multipathFlow) run(ctx context.Context) (FlowStats, error) {
 	limitsStop := make(chan struct{})
 	limitErr := make(chan error, 1)
 	go f.watchLimits(limitsStop, limitErr)
+	if f.metrics != nil {
+		// Registered before signalDone so that it runs after it: the lane
+		// managers stop on the done channel and poll this flow's telemetry
+		// until they do, so removing the entry first leaves a window in which
+		// one of them republishes it permanently.
+		defer f.metrics.RemoveQUIC(f.telemetryID)
+	}
 	defer f.signalDone()
 	defer func() {
 		cancelACKs()
 		close(limitsStop)
 		close(completionStop)
 		close(telemetryStop)
-		if f.metrics != nil {
-			f.metrics.RemoveQUIC(f.telemetryID)
-		}
 	}()
 	defer f.finished.Store(true)
 	stats := FlowStats{Started: f.started}
