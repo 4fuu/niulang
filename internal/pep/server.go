@@ -81,8 +81,11 @@ type Server struct {
 	maxObservedLanes atomic.Int64
 	// refusals keeps the lane-join refusal record readable during a storm.
 	refusals refusalLog
-	budget   *limiter.Budget
-	metrics  *metrics.Registry
+	// enrollLog does the same for enrollment and renewal attempts, which are
+	// likewise a stranger's to generate.
+	enrollLog enrollmentLog
+	budget    *limiter.Budget
+	metrics   *metrics.Registry
 	// udpRelays holds the relay sockets of UDP associations whose lane died,
 	// so the replacement association keeps the source address the destination
 	// has been talking to.
@@ -378,17 +381,27 @@ func (s *Server) handleTCP(ctx context.Context, conn *tls.Conn) {
 	}
 	state := conn.ConnectionState()
 	if state.NegotiatedProtocol == identity.EnrollmentALPN {
-		if s.cfg.Enrollment != nil && s.admitEnrollment() {
+		if s.cfg.Enrollment != nil {
+			if !s.admitEnrollment() {
+				s.recordEnrollmentAdmission("enrollment")
+				return
+			}
 			defer s.releaseEnrollment()
-			_ = s.cfg.Enrollment.Serve(conn)
+			result, err := s.cfg.Enrollment.Serve(conn)
+			s.recordEnrollment("enrollment", result, err)
 		}
 		return
 	}
 	if state.NegotiatedProtocol == identity.RenewalALPN {
-		if s.cfg.Enrollment != nil && s.admitEnrollment() {
+		if s.cfg.Enrollment != nil {
+			if !s.admitEnrollment() {
+				s.recordEnrollmentAdmission("renewal")
+				return
+			}
 			defer s.releaseEnrollment()
 			if principal, err := identity.PrincipalFromTLS(state); err == nil {
-				_ = s.cfg.Enrollment.Renew(conn, principal)
+				result, err := s.cfg.Enrollment.Renew(conn, principal)
+				s.recordEnrollment("renewal", result, err)
 			}
 		}
 		return
@@ -495,20 +508,29 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	})
 	state := conn.ConnectionState().TLS
 	if state.NegotiatedProtocol == identity.EnrollmentALPN {
-		if s.cfg.Enrollment == nil || !s.admitEnrollment() {
+		if s.cfg.Enrollment == nil {
+			return
+		}
+		if !s.admitEnrollment() {
+			s.recordEnrollmentAdmission("enrollment")
 			return
 		}
 		defer s.releaseEnrollment()
 		stream, err := acceptQUICStream(ctx, conn, controller)
 		if err == nil {
 			_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
-			_ = s.cfg.Enrollment.Serve(stream)
+			result, serveErr := s.cfg.Enrollment.Serve(stream)
+			s.recordEnrollment("enrollment", result, serveErr)
 			_ = stream.Close()
 		}
 		return
 	}
 	if state.NegotiatedProtocol == identity.RenewalALPN {
-		if s.cfg.Enrollment == nil || !s.admitEnrollment() {
+		if s.cfg.Enrollment == nil {
+			return
+		}
+		if !s.admitEnrollment() {
+			s.recordEnrollmentAdmission("renewal")
 			return
 		}
 		defer s.releaseEnrollment()
@@ -519,7 +541,8 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 		stream, err := acceptQUICStream(ctx, conn, controller)
 		if err == nil {
 			_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
-			_ = s.cfg.Enrollment.Renew(stream, principal)
+			result, renewErr := s.cfg.Enrollment.Renew(stream, principal)
+			s.recordEnrollment("renewal", result, renewErr)
 			_ = stream.Close()
 		}
 		return
