@@ -108,6 +108,35 @@ func TestRenderSystemdUnitQuotesEveryArgument(t *testing.T) {
 	}
 }
 
+// The client resolves --local-address by reading this machine's interfaces,
+// which needs AF_NETLINK. Without it the unit installs cleanly, binds its
+// listener, and then fails every flow at run time - the worst shape a sandbox
+// mistake can take, because nothing looks wrong until traffic is attempted.
+func TestRenderSystemdUnitAllowsInterfaceEnumeration(t *testing.T) {
+	config := testServiceConfig()
+	config.localAddress = "if:enp6s0"
+	rendered := renderSystemdUnit(config)
+
+	families := ""
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.HasPrefix(line, "RestrictAddressFamilies=") {
+			families = line
+		}
+	}
+	if families == "" {
+		t.Fatalf("unit does not restrict address families at all:\n%s", rendered)
+	}
+	if !strings.Contains(families, "AF_NETLINK") {
+		t.Fatalf("--local-address cannot resolve without AF_NETLINK: %s", families)
+	}
+	// The restriction must still be a restriction.
+	for _, refused := range []string{"AF_PACKET", "AF_RAW"} {
+		if strings.Contains(families, refused) {
+			t.Fatalf("%s must not be permitted: %s", refused, families)
+		}
+	}
+}
+
 func TestSystemdQuoteEscapesMetacharacters(t *testing.T) {
 	got := systemdQuote(`a"b\c`)
 	want := `"a\"b\\c"`

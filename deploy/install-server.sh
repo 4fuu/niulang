@@ -489,10 +489,16 @@ if [ "$verify" = true ]; then
 	}
 
 	if command -v ss >/dev/null 2>&1; then
-		listeners=$(ss -lntup 2>/dev/null | grep ":$listen_port " || true)
-		if [ -z "$listeners" ]; then
+		# Type=simple reports active as soon as the process is forked, so the
+		# socket is not bound yet on the first look. Checking once turned a
+		# successful upgrade into a failed install with a message saying the
+		# gateway was not listening while it was already serving traffic.
+		port_listening() {
+			ss -lntup 2>/dev/null | grep -q ":$listen_port "
+		}
+		wait_for port_listening ||
 			die "nothing is listening on port $listen_port after start-up"
-		fi
+		listeners=$(ss -lntup 2>/dev/null | grep ":$listen_port " || true)
 		echo "$listeners"
 		if [ "$transport" = auto ]; then
 			echo "$listeners" | grep -q '^udp' ||

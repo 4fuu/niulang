@@ -125,7 +125,14 @@ func renderSystemdUnit(c serviceConfig) string {
 	b.WriteString("PrivateTmp=true\n")
 	b.WriteString("LockPersonality=true\n")
 	b.WriteString("RestrictRealtime=true\n")
-	b.WriteString("RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n")
+	// AF_NETLINK is how the client reads this machine's interfaces, which it
+	// does to resolve --local-address: `if:NAME` needs the named interface's
+	// address, and `auto` needs to know whether the choice is ambiguous.
+	// Without it the unit installs, binds its listener, and looks healthy,
+	// then fails every flow with "enumerate local interfaces: netlinkrib:
+	// address family not supported by protocol" - and the option this breaks
+	// is the one the installer recommends when `auto` cannot decide.
+	b.WriteString("RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK\n")
 	b.WriteString("SystemCallArchitectures=native\n")
 	b.WriteString("LimitNOFILE=65536\n\n")
 	b.WriteString("[Install]\n")
