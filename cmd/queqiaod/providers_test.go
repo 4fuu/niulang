@@ -227,7 +227,7 @@ func providerTestProfile(t *testing.T, directory string, index int, endpoint str
 	if err != nil {
 		t.Fatal(err)
 	}
-	account, err := provider.Store.AddAccount("user", time.Time{}, 0, now)
+	account, err := provider.Store.AddAccount("user", time.Time{}, identity.AccountLimits{}, now)
 	if err != nil {
 		t.Fatal(err)
 	}

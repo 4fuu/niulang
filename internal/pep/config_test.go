@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -234,35 +235,115 @@ func TestCodedDataGetsOneReliableSafetyCopyBeforeOpenConfirmation(t *testing.T) 
 	}
 }
 
-func TestPerUserSessionLimitSpansDevicesAndReleases(t *testing.T) {
+// admissionFixture is an account with limits and the given number of enrolled
+// devices, plus a server holding only the admission state under test.
+func admissionFixture(t *testing.T, limits identity.AccountLimits, devices int) (*Server, []identity.Principal) {
+	t.Helper()
 	store, err := identity.NewStore(filepath.Join(t.TempDir(), "authorization.json"))
 	if err != nil || store.Initialize() != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	account, err := store.AddAccount("alice", time.Time{}, 1, now)
+	account, err := store.AddAccount("alice", time.Time{}, limits, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
-	_, token, _ := store.CreateInvite(account.ID, time.Hour, now)
-	_, device, err := store.ConsumeInvite(token, "laptop", publicKey, now)
-	if err != nil {
-		t.Fatal(err)
+	principals := make([]identity.Principal, 0, devices)
+	for i := 0; i < devices; i++ {
+		publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
+		_, token, _ := store.CreateInvite(account.ID, time.Hour, now)
+		_, device, err := store.ConsumeInvite(token, fmt.Sprintf("device-%d", i), publicKey, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		principals = append(principals, identity.Principal{AccountID: account.ID, DeviceID: device.ID, PublicKey: publicKey})
 	}
-	principal := identity.Principal{AccountID: account.ID, DeviceID: device.ID, PublicKey: publicKey}
-	server := &Server{cfg: ServerConfig{Credentials: identity.ServerCredentials{Store: store}}, accountSessions: make(map[string]int)}
-	if err := server.acquireAccountSession(principal); err != nil {
-		t.Fatal(err)
+	server := &Server{
+		cfg:          ServerConfig{Credentials: identity.ServerCredentials{Store: store}},
+		accountUsage: make(map[string]*accountUsage),
 	}
-	if err := server.acquireAccountSession(principal); err == nil {
-		t.Fatal("per-user session limit was exceeded")
+	return server, principals
+}
+
+func TestPerUserFlowLimitSpansDevicesAndReleases(t *testing.T) {
+	server, principals := admissionFixture(t, identity.AccountLimits{MaxFlows: 1}, 2)
+	laptop, phone := principals[0], principals[1]
+	if refusal := server.admitAccountFlow(laptop); refusal != nil {
+		t.Fatalf("first flow refused: %v", refusal)
 	}
-	server.releaseAccountSession(account.ID)
-	if err := server.acquireAccountSession(principal); err != nil {
-		t.Fatalf("released per-user session slot was not reusable: %v", err)
+	if refusal := server.admitAccountFlow(laptop); refusal != errAccountFlowLimit {
+		t.Fatalf("second flow refusal = %v, want the flow limit", refusal)
 	}
-	server.releaseAccountSession(account.ID)
+	// The limit is the account's, not the device's: a second device does not
+	// get its own allowance.
+	if refusal := server.admitAccountFlow(phone); refusal != errAccountFlowLimit {
+		t.Fatalf("another device's flow refusal = %v, want the flow limit", refusal)
+	}
+	server.releaseAccountFlow(laptop)
+	if refusal := server.admitAccountFlow(phone); refusal != nil {
+		t.Fatalf("released flow slot was not reusable: %v", refusal)
+	}
+	server.releaseAccountFlow(phone)
+	if len(server.accountUsage) != 0 {
+		t.Fatalf("account usage retained after every flow was released: %#v", server.accountUsage)
+	}
+}
+
+// The limit an operator reaches for when they mean "this account is for N
+// devices" must count devices. A device that opens a page's worth of
+// connections is still one device, and this is the property that makes the
+// client limit usable where a flow limit is not.
+func TestPerUserClientLimitCountsDevicesNotFlows(t *testing.T) {
+	server, principals := admissionFixture(t, identity.AccountLimits{MaxClients: 1}, 2)
+	laptop, phone := principals[0], principals[1]
+	for i := 0; i < 200; i++ {
+		if refusal := server.admitAccountFlow(laptop); refusal != nil {
+			t.Fatalf("flow %d from the only admitted device refused: %v", i, refusal)
+		}
+	}
+	if refusal := server.admitAccountFlow(phone); refusal != errAccountClientLimit {
+		t.Fatalf("second device refusal = %v, want the client limit", refusal)
+	}
+	// The slot frees only when the device stops holding flows entirely.
+	for i := 0; i < 199; i++ {
+		server.releaseAccountFlow(laptop)
+	}
+	if refusal := server.admitAccountFlow(phone); refusal != errAccountClientLimit {
+		t.Fatalf("second device admitted while the first still held a flow: %v", refusal)
+	}
+	server.releaseAccountFlow(laptop)
+	if refusal := server.admitAccountFlow(phone); refusal != nil {
+		t.Fatalf("device slot was not reusable once released: %v", refusal)
+	}
+}
+
+// A refused open must leave nothing behind. Otherwise an account that is
+// refused repeatedly accumulates state for flows it never got.
+func TestRefusedFlowLeavesNoAccountState(t *testing.T) {
+	server, principals := admissionFixture(t, identity.AccountLimits{MaxClients: 1}, 2)
+	if refusal := server.admitAccountFlow(principals[0]); refusal != nil {
+		t.Fatalf("first flow refused: %v", refusal)
+	}
+	server.releaseAccountFlow(principals[0])
+	if refusal := server.admitAccountFlow(principals[1]); refusal != nil {
+		t.Fatalf("device slot was not free after release: %v", refusal)
+	}
+	server.releaseAccountFlow(principals[1])
+	if len(server.accountUsage) != 0 {
+		t.Fatalf("account usage retained: %#v", server.accountUsage)
+	}
+}
+
+// Zero means "no per-account limit", not "no flows".
+func TestZeroAccountLimitsAdmitEverything(t *testing.T) {
+	server, principals := admissionFixture(t, identity.AccountLimits{}, 3)
+	for i := 0; i < 50; i++ {
+		for _, principal := range principals {
+			if refusal := server.admitAccountFlow(principal); refusal != nil {
+				t.Fatalf("unlimited account refused a flow: %v", refusal)
+			}
+		}
+	}
 }
 
 func TestTUICAlignedCongestionConfigurationIsAccepted(t *testing.T) {

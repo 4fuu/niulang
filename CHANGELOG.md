@@ -6,6 +6,44 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
 ## Unreleased
 
+### Added
+
+- A per-account concurrent-device limit, `provider add-user --max-clients`,
+  defaulting to 8. A device counts once however many flows it carries, so this
+  is the limit that expresses "this account is for eight devices" -- which is
+  what the per-account limit was widely assumed to already mean.
+- `provider set-user-limits`, which corrects an account's limits in place. The
+  only previous way to change them was to delete the account, which deletes
+  every device enrolled against it.
+- `queqiao_account_admission_refused_total` by reason, and an `account flow
+  open refused` log record at `warn` naming the reason, account, and device.
+  Account admission was previously the one admission decision the gateway made
+  silently: no record at any log level and no counter, so a gateway refusing
+  half an account's connections was indistinguishable from a healthy one.
+
+### Changed
+
+- `provider add-user --max-sessions` is renamed `--max-flows`, and now defaults
+  to 1024 instead of deferring to the gateway ceiling. It counts concurrent
+  flows -- one TCP connection or one UDP association each -- and never counted
+  devices. A browser opens roughly six connections per host across dozens of
+  hosts per page and holds them for the flow idle timeout, so a value chosen as
+  though it were a device count fails in the least legible way available: most
+  sites load and a few do not. The old flag name still works and warns.
+  Existing accounts keep the limit they were given; correct one with
+  `provider set-user-limits`.
+- A flow open refused by an account limit now says which limit refused it:
+  `account flow limit reached` or `account device limit reached`, replacing
+  `account session unavailable`. A device that lost authorization between its
+  handshake and its next flow open is answered with the AUTHENTICATION reset
+  code and `device is not authorized` rather than being reported as a limit.
+- `provider list-users` reports `MAX_FLOWS` and `MAX_CLIENTS` in place of
+  `MAX_SESSIONS`.
+- Provider authorization state writes the per-account flow limit as
+  `max_flows`. An existing state naming it `max_sessions` is read unchanged and
+  rewritten on the next save; a state naming both is refused rather than having
+  one silently win.
+
 ### Fixed
 
 - Provider state keeps its owner when a maintenance command runs under `sudo`.
@@ -37,6 +75,8 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
   storm stays one readable line. Enrollment attempts dropped because the
   enrollment slots were full are also reported now, matching the session and
   connection ceilings beside them.
+- The deployment guide's worked example created an account with a flow ceiling
+  of 8, which is too low to load a web page.
 
 ## v0.1.0 - 2026-08-19
 

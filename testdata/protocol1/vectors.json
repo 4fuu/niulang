@@ -648,8 +648,14 @@
     {
       "name": "flow limit",
       "code": 4,
-      "message": "account session unavailable",
-      "hex": "046163636f756e742073657373696f6e20756e617661696c61626c65"
+      "message": "account flow limit reached",
+      "hex": "046163636f756e7420666c6f77206c696d69742072656163686564"
+    },
+    {
+      "name": "client limit",
+      "code": 4,
+      "message": "account device limit reached",
+      "hex": "046163636f756e7420646576696365206c696d69742072656163686564"
     },
     {
       "name": "transport",

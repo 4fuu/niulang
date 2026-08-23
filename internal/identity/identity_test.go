@@ -120,7 +120,7 @@ func TestProviderRejectsMismatchedIssuerPrivateKey(t *testing.T) {
 func TestInvitationIsCompactStrictExpiringAndOneTime(t *testing.T) {
 	now := time.Now()
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, err := provider.Store.AddAccount("alice", time.Time{}, 2, now)
+	account, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{MaxFlows: 2}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestInvitationIsCompactStrictExpiringAndOneTime(t *testing.T) {
 func TestIssuerFailureDoesNotConsumeInvitation(t *testing.T) {
 	now := time.Now()
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	_, invitation, _ := provider.CreateInvitation(account.ID, time.Hour, now)
 	publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
 	if _, _, _, err := provider.Store.EnrollDevice(invitation.Token, "laptop", publicKey, now, func(Account, Device) ([]byte, error) {
@@ -181,7 +181,7 @@ func TestIssuerFailureDoesNotConsumeInvitation(t *testing.T) {
 func TestInterruptedEnrollmentIsIdempotentOnlyForTheSameClientKey(t *testing.T) {
 	now := time.Now()
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	_, invitation, _ := provider.CreateInvitation(account.ID, time.Hour, now)
 	publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
 	issue := func(account Account, device Device) ([]byte, error) {
@@ -204,7 +204,7 @@ func TestInterruptedEnrollmentIsIdempotentOnlyForTheSameClientKey(t *testing.T) 
 func TestConsumedInvitationRecoversAfterItsOriginalExpiry(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	_, invitation, _ := provider.CreateInvitation(account.ID, time.Minute, now)
 	publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
 	issue := func(account Account, device Device) ([]byte, error) {
@@ -236,7 +236,7 @@ func TestConsumedInvitationRecoversAfterItsOriginalExpiry(t *testing.T) {
 func TestProviderCanListAndRevokeOutstandingInvitations(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	record, token, err := provider.Store.CreateInvite(account.ID, time.Hour, now)
 	if err != nil {
 		t.Fatal(err)
@@ -256,7 +256,7 @@ func TestProviderCanListAndRevokeOutstandingInvitations(t *testing.T) {
 
 func TestEnrollmentDraftPreservesKeyAcrossRestart(t *testing.T) {
 	provider := testProvider(t, "127.0.0.1:443", time.Now())
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, time.Now())
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
 	_, invitation, _ := provider.CreateInvitation(account.ID, time.Hour, time.Now())
 	draft, err := NewEnrollmentDraft(invitation, "laptop")
 	if err != nil {
@@ -280,7 +280,7 @@ func TestEnrollmentDraftPreservesKeyAcrossRestart(t *testing.T) {
 func TestProfilesAreSelfContainedStrictAndPrivate(t *testing.T) {
 	now := time.Now()
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	profile := localProfile(t, provider, account, "laptop", now)
 	path := filepath.Join(t.TempDir(), "profile.json")
 	if err := profile.Save(path); err != nil {
@@ -344,7 +344,7 @@ func tlsHandshake(t *testing.T, serverConfig, clientConfig *tls.Config) error {
 func TestMutualTLSRequiresAnAuthorizedDeviceAndPinnedGateway(t *testing.T) {
 	now := time.Now()
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	profile := localProfile(t, provider, account, "laptop", now)
 	clientCredentials, _ := profile.Credentials()
 	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", false)
@@ -391,7 +391,7 @@ func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
 	}
 	defer listener.Close()
 	provider := testProvider(t, listener.Addr().String(), time.Now())
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, time.Now())
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
 	uri, invitation, err := provider.CreateInvitation(account.ID, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -429,7 +429,7 @@ func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
 
 func TestEnrollmentRejectsInvalidLocalAddressBeforeDial(t *testing.T) {
 	provider := testProvider(t, "127.0.0.1:443", time.Now())
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, time.Now())
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
 	_, invitation, err := provider.CreateInvitation(account.ID, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -451,7 +451,7 @@ func TestEnrollmentExplainsProtocolALPNMismatch(t *testing.T) {
 	}
 	defer listener.Close()
 	provider := testProvider(t, listener.Addr().String(), time.Now())
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, time.Now())
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
 	_, invitation, err := provider.CreateInvitation(account.ID, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -483,7 +483,7 @@ func TestRenewalPreservesDeviceAndRejectsRevocation(t *testing.T) {
 	}
 	defer listener.Close()
 	provider := testProvider(t, listener.Addr().String(), time.Now().Add(-24*24*time.Hour))
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, time.Now())
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
 	profile := localProfile(t, provider, account, "laptop", time.Now().Add(-24*24*time.Hour))
 	needs, err := profile.NeedsRenewal(time.Now(), 7*24*time.Hour)
 	if err != nil || !needs {
@@ -526,7 +526,7 @@ func TestRenewalPreservesDeviceAndRejectsRevocation(t *testing.T) {
 func TestAuthorizationRefreshKeepsLastKnownGoodState(t *testing.T) {
 	now := time.Now()
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	reader, err := NewStore(filepath.Join(provider.Directory, authorizationFile))
 	if err != nil || reader.Load() != nil {
 		t.Fatal(err)
@@ -572,6 +572,111 @@ func TestAuthorizationStoreRejectsUnknownAndInconsistentFields(t *testing.T) {
 	}
 }
 
+// A provider state written before the flow limit was renamed still calls it
+// max_sessions. The store rejects unknown fields and keeps the last known-good
+// state when a replacement will not decode, so failing to read the old name
+// would not degrade gracefully: it would leave a running gateway pinned to
+// stale authorization and a provider CLI unable to load the state at all.
+func TestLegacyMaxSessionsIsReadAsTheFlowLimit(t *testing.T) {
+	provider := testProvider(t, "127.0.0.1:443", time.Now())
+	path := filepath.Join(provider.Directory, authorizationFile)
+	if _, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{MaxFlows: 16}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := bytes.Replace(data, []byte(`"max_flows"`), []byte(`"max_sessions"`), 1)
+	if bytes.Equal(legacy, data) {
+		t.Fatal("test did not rewrite the flow limit to its old name")
+	}
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := NewStore(path)
+	if err := store.Load(); err != nil {
+		t.Fatalf("state naming the flow limit max_sessions did not load: %v", err)
+	}
+	account, ok := store.FindAccount("alice")
+	if !ok || account.MaxFlows != 16 {
+		t.Fatalf("legacy limit read as %d, want 16", account.MaxFlows)
+	}
+	// The old name is compatibility on read only. Saving must write the
+	// current one so the store has a single spelling of the limit.
+	if err := store.SetAccountEnabled(account.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(saved, []byte(`"max_sessions"`)) {
+		t.Fatal("saving rewrote the flow limit under its old name")
+	}
+	if !bytes.Contains(saved, []byte(`"max_flows"`)) {
+		t.Fatal("saving dropped the flow limit")
+	}
+}
+
+// Both spellings at once is a state nobody can have written on purpose, and
+// guessing which one the operator meant is guessing at a security policy.
+func TestConflictingFlowLimitSpellingsAreRejected(t *testing.T) {
+	provider := testProvider(t, "127.0.0.1:443", time.Now())
+	path := filepath.Join(provider.Directory, authorizationFile)
+	if _, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{MaxFlows: 16}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	both := bytes.Replace(data, []byte(`"max_flows": 16`), []byte(`"max_flows": 16, "max_sessions": 8`), 1)
+	if bytes.Equal(both, data) {
+		t.Fatal("test did not add the conflicting field")
+	}
+	if err := os.WriteFile(path, both, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := NewStore(path)
+	if err := store.Load(); err == nil {
+		t.Fatal("a store naming two different flow limits was accepted")
+	}
+}
+
+// An operator who set a limit too low must be able to correct it in place. The
+// alternative is deleting the account, which deletes every device enrolled
+// against it.
+func TestSetAccountLimitsIsAdoptedByAReader(t *testing.T) {
+	now := time.Now()
+	provider := testProvider(t, "127.0.0.1:443", now)
+	account, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{MaxFlows: 16, MaxClients: 2}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewStore(filepath.Join(provider.Directory, authorizationFile))
+	if err != nil || reader.Load() != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Store.SetAccountLimits(account.ID, AccountLimits{MaxFlows: 0, MaxClients: 8}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := reader.Refresh()
+	if err != nil || !changed {
+		t.Fatalf("refresh changed=%t err=%v", changed, err)
+	}
+	updated, _ := reader.FindAccount(account.ID)
+	if updated.MaxFlows != 0 || updated.MaxClients != 8 {
+		t.Fatalf("limits after refresh = %+v, want flows 0 and clients 8", updated.Limits())
+	}
+	if err := provider.Store.SetAccountLimits(account.ID, AccountLimits{MaxFlows: -1}); err == nil {
+		t.Fatal("a negative flow limit was accepted")
+	}
+	if err := provider.Store.SetAccountLimits("unknown", AccountLimits{}); err == nil {
+		t.Fatal("limits were set on an unknown account")
+	}
+}
+
 func TestIndependentProviderProcessesDoNotLoseConcurrentUpdates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "authorization.json")
 	first, _ := NewStore(path)
@@ -588,7 +693,7 @@ func TestIndependentProviderProcessesDoNotLoseConcurrentUpdates(t *testing.T) {
 		index, store := index, store
 		go func() {
 			<-start
-			_, err := store.AddAccount([]string{"alice", "bob"}[index], time.Time{}, 0, time.Now())
+			_, err := store.AddAccount([]string{"alice", "bob"}[index], time.Time{}, AccountLimits{}, time.Now())
 			results <- err
 		}()
 	}
@@ -627,7 +732,7 @@ func TestCertificateRolesCannotBeSwapped(t *testing.T) {
 func TestGatewayRenewalIsVisibleToExistingTLSConfiguration(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	provider := testProvider(t, "127.0.0.1:443", now)
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, 0, now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	profile := localProfile(t, provider, account, "laptop", now)
 	clientCredentials, err := profile.Credentials()
 	if err != nil {

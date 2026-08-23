@@ -27,7 +27,8 @@ provider_name=
 endpoint=
 listen=
 user_name=
-user_max_sessions=0
+user_max_flows=1024
+user_max_clients=8
 invite_expires_in=24h
 transport=auto
 max_sessions=4096
@@ -56,7 +57,11 @@ Required for a first install:
 
 Provider options:
   --state DIR              provider state directory (default /var/lib/queqiao/provider)
-  --user-max-sessions N    per-user concurrent flow limit (default 0, provider-wide)
+  --user-max-clients N     per-user concurrent device limit (default 8, 0 for every device)
+  --user-max-flows N       per-user concurrent flow limit (default 1024, 0 for the
+                           gateway-wide limit). One flow is one TCP connection or
+                           one UDP association, so a browser needs hundreds: this
+                           is not a device count.
   --invite-expires-in DUR  invitation lifetime, maximum 7d (default 24h)
   --no-provider-init       upgrade an existing deployment; skip init/add-user/invite
 
@@ -131,9 +136,20 @@ while [ "$#" -gt 0 ]; do
 		state=$2
 		shift
 		;;
+	--user-max-clients)
+		next_value "$#" "$1"
+		user_max_clients=$2
+		shift
+		;;
+	--user-max-flows)
+		next_value "$#" "$1"
+		user_max_flows=$2
+		shift
+		;;
 	--user-max-sessions)
 		next_value "$#" "$1"
-		user_max_sessions=$2
+		printf '%s\n' "install-server.sh: --user-max-sessions is the former name of --user-max-flows; use --user-max-clients to limit devices." >&2
+		user_max_flows=$2
 		shift
 		;;
 	--invite-expires-in)
@@ -294,8 +310,8 @@ EOF
 		cat <<EOF
 
 Would initialize provider "$provider_name" at $endpoint, create user
-"$user_name" with --max-sessions $user_max_sessions, and print one invitation
-valid for $invite_expires_in.
+"$user_name" with --max-clients $user_max_clients and --max-flows
+$user_max_flows, and print one invitation valid for $invite_expires_in.
 EOF
 	else
 		echo
@@ -423,7 +439,8 @@ if [ "$bootstrap" = true ]; then
 	provider_run "$binary_path" provider init \
 		--state "$state" --name "$provider_name" --endpoint "$endpoint"
 	provider_run "$binary_path" provider add-user \
-		--state "$state" --name "$user_name" --max-sessions "$user_max_sessions"
+		--state "$state" --name "$user_name" \
+		--max-flows "$user_max_flows" --max-clients "$user_max_clients"
 	echo "Created user $user_name."
 fi
 

@@ -110,7 +110,7 @@ Prometheus `/metrics` names. They cover:
 - transient local UDP send errors absorbed into QUIC loss recovery;
 - flow telemetry entries expired because nothing refreshed them, which is how
   a round-trip aggregate frozen at a stale constant announces itself;
-- lane joins refused, split by reason; and
+- lane joins refused and account flow opens refused, each split by reason; and
 - the controller's measured erasure floor, sampler diagnostics, and class
   transitions.
 
@@ -127,6 +127,15 @@ are the peer's to choose, so a map keyed by them is memory a peer sizes -- and
 each record carries how many refusals of that reason it stands for in
 `suppressed`. The matching counters are `queqiao_lane_join_refused_total` by
 reason.
+
+A gateway that refuses a flow open because of the opening account's own limits
+writes `msg="account flow open refused"` at `warn`, naming the `reason` --
+`flow_limit`, `client_limit`, or `unauthorized` -- with the account and device.
+It is rate limited and counted the same way, with `suppressed` and `total` in
+each record and `queqiao_account_admission_refused_total` by reason. This is
+the record to look for when a user reports that most sites load and a few do
+not: an account whose flow limit is too low for a browser fails exactly that
+way, and the flow limit counts connections rather than devices.
 
 Flow-completion records add an opaque session/flow correlation ID, transport,
 duration, directional bytes, class, lane byte

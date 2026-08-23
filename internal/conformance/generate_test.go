@@ -336,7 +336,8 @@ func resetVectors() []ResetVector {
 		{"protocol", session.ResetProtocol, "invalid flow open"},
 		{"authentication", session.ResetAuthentication, "device is not authorized"},
 		{"destination", session.ResetDestination, "destination unavailable"},
-		{"flow limit", session.ResetFlowLimit, "account session unavailable"},
+		{"flow limit", session.ResetFlowLimit, "account flow limit reached"},
+		{"client limit", session.ResetFlowLimit, "account device limit reached"},
 		{"transport", session.ResetTransport, "lane transport failed"},
 		{"no message", session.ResetProtocol, ""},
 	}

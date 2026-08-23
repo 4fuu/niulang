@@ -135,7 +135,7 @@ func TestProviderMutationUnderRootKeepsStateReadableByOwner(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := provider.Store.AddAccount("alice", time.Time{}, 0, now); err != nil {
+	if _, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now); err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {

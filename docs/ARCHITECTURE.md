@@ -226,7 +226,8 @@ atomic rename, and directory sync. The server reloads only complete snapshots
 and retains the last known-good state if a replacement is malformed.
 
 The implementation explicitly bounds unauthenticated connections, per-user
-sessions, streams, frames, payloads, acknowledgement ranges, send replay,
+flows and concurrently active devices, streams, frames, payloads,
+acknowledgement ranges, send replay,
 reassembly, writer queues, probes, lane recovery, retained UDP relays, idle
 periods, and total flow lifetime. Exact wire fields and validation rules are in
 the [protocol specification](PROTOCOL.md); operational residual risks are in

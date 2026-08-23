@@ -19,13 +19,101 @@ import (
 	"time"
 )
 
+// DefaultAccountMaxFlows and DefaultAccountMaxClients are the policy a new
+// account is created with.
+//
+// The flow ceiling is deliberately generous. One flow is one TCP connection or
+// one UDP association, and a browser opens roughly six per host across dozens
+// of hosts to load a single page; with the default flow idle timeout, its
+// keep-alive connections keep holding those slots long after the page
+// finished. A flow ceiling low enough to be interesting as a quota is
+// therefore low enough to break ordinary browsing, and it breaks it in the
+// least legible way available: most sites load and a few do not. The quota an
+// operator actually wants is a device count, which is what MaxClients is.
+const (
+	DefaultAccountMaxFlows   = 1024
+	DefaultAccountMaxClients = 8
+)
+
+// maxAccountLimit bounds both per-account limits. A hand-edited store cannot
+// name a policy larger than the gateway could ever admit.
+const maxAccountLimit = 1 << 16
+
+// AccountLimits is one account's admission policy.
+type AccountLimits struct {
+	// MaxFlows is how many proxied flows the account may hold at once. Zero
+	// defers to the gateway-wide session ceiling.
+	MaxFlows int
+	// MaxClients is how many of the account's enrolled devices may be
+	// carrying flows at once. A device counts once however many flows it
+	// holds, so this is the limit that expresses "this account is for eight
+	// devices". Zero admits every enrolled device.
+	MaxClients int
+}
+
+func (l AccountLimits) validate() error {
+	if l.MaxFlows < 0 || l.MaxFlows > maxAccountLimit {
+		return fmt.Errorf("account max flows must be between 0 and %d", maxAccountLimit)
+	}
+	if l.MaxClients < 0 || l.MaxClients > maxAccountLimit {
+		return fmt.Errorf("account max clients must be between 0 and %d", maxAccountLimit)
+	}
+	return nil
+}
+
 type Account struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Enabled     bool   `json:"enabled"`
-	ExpiresAt   string `json:"expires_at,omitempty"`
-	MaxSessions int    `json:"max_sessions,omitempty"`
-	CreatedAt   string `json:"created_at"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Enabled    bool   `json:"enabled"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+	MaxFlows   int    `json:"max_flows,omitempty"`
+	MaxClients int    `json:"max_clients,omitempty"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// Limits is this account's admission policy.
+func (a Account) Limits() AccountLimits {
+	return AccountLimits{MaxFlows: a.MaxFlows, MaxClients: a.MaxClients}
+}
+
+// accountJSON is the on-disk shape of an account. max_sessions is the name
+// MaxFlows was written under before there was a device limit beside it; it is
+// still read so an existing provider state survives this upgrade in place, and
+// it is never written back. Unknown fields stay rejected here exactly as the
+// store's own decoder rejects them: Refresh keeps the last known-good state
+// when a replacement will not decode, so a field this build does not
+// understand must fail loudly rather than be silently dropped on the next
+// save.
+type accountJSON struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Enabled    bool   `json:"enabled"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+	MaxFlows   int    `json:"max_flows,omitempty"`
+	MaxClients int    `json:"max_clients,omitempty"`
+	// LegacyMaxSessions is read-only compatibility; see the type comment.
+	LegacyMaxSessions int    `json:"max_sessions,omitempty"`
+	CreatedAt         string `json:"created_at"`
+}
+
+func (a *Account) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var raw accountJSON
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	if raw.LegacyMaxSessions != 0 {
+		if raw.MaxFlows != 0 && raw.MaxFlows != raw.LegacyMaxSessions {
+			return errors.New("account carries conflicting max_flows and legacy max_sessions")
+		}
+		raw.MaxFlows = raw.LegacyMaxSessions
+	}
+	*a = Account{
+		ID: raw.ID, Name: raw.Name, Enabled: raw.Enabled, ExpiresAt: raw.ExpiresAt,
+		MaxFlows: raw.MaxFlows, MaxClients: raw.MaxClients, CreatedAt: raw.CreatedAt,
+	}
+	return nil
 }
 
 type Device struct {
@@ -209,13 +297,13 @@ func (s *Store) beginWrite(initialize bool) (func(), error) {
 	return release, nil
 }
 
-func (s *Store) AddAccount(name string, expiresAt time.Time, maxSessions int, now time.Time) (Account, error) {
+func (s *Store) AddAccount(name string, expiresAt time.Time, limits AccountLimits, now time.Time) (Account, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 128 {
 		return Account{}, errors.New("account name must contain 1-128 characters")
 	}
-	if maxSessions < 0 || maxSessions > 1<<16 {
-		return Account{}, errors.New("account max sessions must be between 0 and 65536")
+	if err := limits.validate(); err != nil {
+		return Account{}, err
 	}
 	if now.IsZero() {
 		now = time.Now()
@@ -234,7 +322,11 @@ func (s *Store) AddAccount(name string, expiresAt time.Time, maxSessions int, no
 			return Account{}, fmt.Errorf("account name already exists: %s", name)
 		}
 	}
-	account := Account{ID: id, Name: name, Enabled: true, MaxSessions: maxSessions, CreatedAt: now.UTC().Format(time.RFC3339)}
+	account := Account{
+		ID: id, Name: name, Enabled: true,
+		MaxFlows: limits.MaxFlows, MaxClients: limits.MaxClients,
+		CreatedAt: now.UTC().Format(time.RFC3339),
+	}
 	if !expiresAt.IsZero() {
 		if !expiresAt.After(now) {
 			return Account{}, errors.New("account expiration must be in the future")
@@ -264,6 +356,33 @@ func (s *Store) SetAccountEnabled(accountID string, enabled bool) error {
 	}
 	old := account
 	account.Enabled = enabled
+	s.data.Accounts[accountID] = account
+	if err := s.saveLocked(); err != nil {
+		s.data.Accounts[accountID] = old
+		return err
+	}
+	return nil
+}
+
+// SetAccountLimits replaces one account's admission policy. The gateway adopts
+// it from disk within a second, so an operator who set a limit too low to
+// browse through can correct it without deleting the account and losing every
+// device enrolled against it.
+func (s *Store) SetAccountLimits(accountID string, limits AccountLimits) error {
+	if err := limits.validate(); err != nil {
+		return err
+	}
+	release, err := s.beginWrite(false)
+	if err != nil {
+		return err
+	}
+	defer release()
+	account, ok := s.data.Accounts[accountID]
+	if !ok {
+		return errors.New("unknown account")
+	}
+	old := account
+	account.MaxFlows, account.MaxClients = limits.MaxFlows, limits.MaxClients
 	s.data.Accounts[accountID] = account
 	if err := s.saveLocked(); err != nil {
 		s.data.Accounts[accountID] = old
@@ -609,7 +728,7 @@ func validateStoreData(data storeData) error {
 		}
 		accountNames[folded] = struct{}{}
 		created, err := parseStateTime(account.CreatedAt)
-		if err != nil || account.MaxSessions < 0 || account.MaxSessions > 1<<16 {
+		if err != nil || account.Limits().validate() != nil {
 			return fmt.Errorf("account %s has invalid policy or timestamps", id)
 		}
 		if account.ExpiresAt != "" {

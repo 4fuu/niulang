@@ -653,7 +653,7 @@ func benchmarkCredentials(directory, endpoint string) (identity.ServerCredential
 	if err != nil {
 		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
 	}
-	account, err := provider.Store.AddAccount("benchmark", time.Time{}, 0, now)
+	account, err := provider.Store.AddAccount("benchmark", time.Time{}, identity.AccountLimits{}, now)
 	if err != nil {
 		return identity.ServerCredentials{}, identity.ClientCredentials{}, err
 	}

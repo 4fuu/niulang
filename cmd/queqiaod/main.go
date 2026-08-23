@@ -74,6 +74,28 @@ func newFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
+// flagWasSet reports whether the operator named this flag, as opposed to it
+// holding its default. A limit the operator did not name must keep its current
+// value rather than being reset to a default.
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// describeLimit renders a limit for an operator, spelling out what zero means
+// instead of printing a zero that reads like "none allowed".
+func describeLimit(value int, unlimited string) string {
+	if value == 0 {
+		return fmt.Sprintf("0 (%s)", unlimited)
+	}
+	return fmt.Sprintf("%d", value)
+}
+
 func requireNoArguments(fs *flag.FlagSet) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
@@ -83,7 +105,7 @@ func requireNoArguments(fs *flag.FlagSet) error {
 
 func runProvider(args []string) error {
 	if len(args) == 0 {
-		return errors.New("provider command is required: init, add-user, list-users, invite, list-invites, revoke-invite, list-devices, revoke-device, enable-user, or disable-user")
+		return errors.New("provider command is required: init, add-user, list-users, set-user-limits, invite, list-invites, revoke-invite, list-devices, revoke-device, enable-user, or disable-user")
 	}
 	switch args[0] {
 	case "init":
@@ -111,7 +133,9 @@ func runProvider(args []string) error {
 		state := fs.String("state", "", "provider state directory")
 		name := fs.String("name", "", "unique user name")
 		expiresIn := fs.Duration("expires-in", 0, "optional account lifetime (0 never expires)")
-		maxSessions := fs.Int("max-sessions", 0, "concurrent flows for this user (0 uses provider limit)")
+		maxFlows := fs.Int("max-flows", identity.DefaultAccountMaxFlows, "concurrent proxied flows for this user (0 uses the gateway limit)")
+		maxClients := fs.Int("max-clients", identity.DefaultAccountMaxClients, "concurrent devices for this user (0 allows every enrolled device)")
+		maxSessions := fs.Int("max-sessions", 0, "deprecated name for --max-flows")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -129,11 +153,20 @@ func runProvider(args []string) error {
 		if *expiresIn > 0 {
 			expires = time.Now().Add(*expiresIn)
 		}
-		account, err := provider.Store.AddAccount(*name, expires, *maxSessions, time.Now())
+		limits := identity.AccountLimits{MaxFlows: *maxFlows, MaxClients: *maxClients}
+		if flagWasSet(fs, "max-sessions") {
+			if flagWasSet(fs, "max-flows") {
+				return errors.New("--max-sessions is the former name of --max-flows; set only one")
+			}
+			fmt.Fprintln(os.Stderr, "queqiaod: --max-sessions is deprecated and renamed --max-flows. It counts concurrent flows, not devices: one flow is one TCP connection or one UDP association, and a browser needs hundreds. Use --max-clients to limit devices.")
+			limits.MaxFlows = *maxSessions
+		}
+		account, err := provider.Store.AddAccount(*name, expires, limits, time.Now())
 		if err != nil {
 			return err
 		}
-		fmt.Printf("User %q created.\nID: %s\n", account.Name, account.ID)
+		fmt.Printf("User %q created.\nID: %s\nFlows: %s\nClients: %s\n",
+			account.Name, account.ID, describeLimit(account.MaxFlows, "gateway limit"), describeLimit(account.MaxClients, "every enrolled device"))
 		return nil
 	case "list-users":
 		fs := newFlagSet("provider list-users")
@@ -148,14 +181,53 @@ func runProvider(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println("ID\tNAME\tENABLED\tEXPIRES\tMAX_SESSIONS")
+		fmt.Println("ID\tNAME\tENABLED\tEXPIRES\tMAX_FLOWS\tMAX_CLIENTS")
 		for _, account := range provider.Store.Accounts() {
 			expires := account.ExpiresAt
 			if expires == "" {
 				expires = "never"
 			}
-			fmt.Printf("%s\t%s\t%t\t%s\t%d\n", account.ID, account.Name, account.Enabled, expires, account.MaxSessions)
+			fmt.Printf("%s\t%s\t%t\t%s\t%d\t%d\n", account.ID, account.Name, account.Enabled, expires, account.MaxFlows, account.MaxClients)
 		}
+		return nil
+	case "set-user-limits":
+		fs := newFlagSet("provider set-user-limits")
+		state := fs.String("state", "", "provider state directory")
+		user := fs.String("user", "", "user name or ID")
+		maxFlows := fs.Int("max-flows", 0, "concurrent proxied flows for this user, unchanged if not given (0 uses the gateway limit)")
+		maxClients := fs.Int("max-clients", 0, "concurrent devices for this user, unchanged if not given (0 allows every enrolled device)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := requireNoArguments(fs); err != nil {
+			return err
+		}
+		if !flagWasSet(fs, "max-flows") && !flagWasSet(fs, "max-clients") {
+			return errors.New("set at least one of --max-flows or --max-clients")
+		}
+		provider, err := loadProviderRequired(*state)
+		if err != nil {
+			return err
+		}
+		account, ok := provider.Store.FindAccount(*user)
+		if !ok {
+			return errors.New("unknown user")
+		}
+		// An unnamed limit keeps its current value. Correcting one limit is
+		// the common case, and defaulting the other to this build's default
+		// would silently rewrite a policy the operator did not mention.
+		limits := account.Limits()
+		if flagWasSet(fs, "max-flows") {
+			limits.MaxFlows = *maxFlows
+		}
+		if flagWasSet(fs, "max-clients") {
+			limits.MaxClients = *maxClients
+		}
+		if err := provider.Store.SetAccountLimits(account.ID, limits); err != nil {
+			return err
+		}
+		fmt.Printf("User %q limits updated.\nFlows: %s\nClients: %s\n",
+			account.Name, describeLimit(limits.MaxFlows, "gateway limit"), describeLimit(limits.MaxClients, "every enrolled device"))
 		return nil
 	case "invite":
 		fs := newFlagSet("provider invite")

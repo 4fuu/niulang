@@ -66,6 +66,14 @@ type Registry struct {
 	// here is the other half of a peer's stalling and failing flows -- the
 	// half the endpoint doing the refusing can see.
 	laneJoinRefusals [LaneJoinReasons]atomic.Uint64
+	// accountAdmissionRefusals counts flow opens this gateway answered with a
+	// reset because of the opening account's own policy, by reason. It exists
+	// because these refusals used to be the one admission decision the
+	// gateway made silently: an account whose limit was set too low to browse
+	// through produced a client reporting resets and a server reporting
+	// nothing at all, at any log level, with no counter to check. The reason
+	// an operator needs is which limit was hit.
+	accountAdmissionRefusals [AccountRefusalReasons]atomic.Uint64
 	// quicObservationsExpired counts per-flow QUIC telemetry entries dropped
 	// because nothing refreshed them within quicObservationTTL. The aggregate
 	// below reports round-trip time as a maximum, so an entry that is never
@@ -130,6 +138,47 @@ func (r LaneJoinRefusal) String() string {
 	return laneJoinRefusalNames[r]
 }
 
+// AccountRefusal is why a flow open was refused by the opening account's
+// admission policy.
+//
+// The set is closed at compile time for the same reason LaneJoinRefusal's is:
+// these are exported label values, and a label whose values come off the wire
+// is a label a peer can make unbounded.
+type AccountRefusal int
+
+const (
+	// AccountRefusalFlowLimit is an account already holding as many
+	// concurrent flows as its policy allows. One flow is one TCP connection
+	// or one UDP association, so this is reached by ordinary browsing on any
+	// account whose flow ceiling was set as though it counted devices.
+	AccountRefusalFlowLimit AccountRefusal = iota
+	// AccountRefusalClientLimit is a device that would be one more
+	// simultaneously active device than the account's policy allows. Unlike
+	// the flow limit it does not move with how hard one device is being used,
+	// so it is the refusal an operator should expect to see when a
+	// subscription is genuinely oversubscribed.
+	AccountRefusalClientLimit
+	// AccountRefusalUnauthorized is an account or device that stopped being
+	// authorized between the TLS handshake and this flow open.
+	AccountRefusalUnauthorized
+	// AccountRefusalReasons is how many reasons there are.
+	AccountRefusalReasons
+)
+
+var accountRefusalNames = [AccountRefusalReasons]string{
+	AccountRefusalFlowLimit:    "flow_limit",
+	AccountRefusalClientLimit:  "client_limit",
+	AccountRefusalUnauthorized: "unauthorized",
+}
+
+// String is the stable label and log value for a refusal reason.
+func (r AccountRefusal) String() string {
+	if r < 0 || r >= AccountRefusalReasons {
+		return "unknown"
+	}
+	return accountRefusalNames[r]
+}
+
 // quicObservationTTL is how long one flow's QUIC telemetry keeps contributing
 // to the process aggregate without being refreshed. A live flow republishes
 // every second, so this is generous by an order of magnitude; its purpose is
@@ -177,6 +226,8 @@ type Snapshot struct {
 	QUICObservationsExpired uint64
 	// LaneJoinRefusals is indexed by LaneJoinRefusal.
 	LaneJoinRefusals [LaneJoinReasons]uint64
+	// AccountAdmissionRefusals is indexed by AccountRefusal.
+	AccountAdmissionRefusals [AccountRefusalReasons]uint64
 }
 
 // QUICObservation is a point-in-time aggregate over the lanes of one logical
@@ -301,6 +352,15 @@ func (r *Registry) LaneJoinRefused(reason LaneJoinRefusal) {
 	r.laneJoinRefusals[reason].Add(1)
 }
 
+// AccountAdmissionRefused records a flow open answered with a reset because of
+// the opening account's admission policy.
+func (r *Registry) AccountAdmissionRefused(reason AccountRefusal) {
+	if r == nil || reason < 0 || reason >= AccountRefusalReasons {
+		return
+	}
+	r.accountAdmissionRefusals[reason].Add(1)
+}
+
 // PeerProtocolViolation records a peer that authenticated as a protocol-1
 // endpoint and then did something protocol 1 forbids.
 func (r *Registry) PeerProtocolViolation() { r.peerProtocolViolations.Add(1) }
@@ -367,6 +427,9 @@ func (r *Registry) Snapshot() Snapshot {
 	}
 	for i := range s.LaneJoinRefusals {
 		s.LaneJoinRefusals[i] = r.laneJoinRefusals[i].Load()
+	}
+	for i := range s.AccountAdmissionRefusals {
+		s.AccountAdmissionRefusals[i] = r.accountAdmissionRefusals[i].Load()
 	}
 	now := r.now()
 	var expired uint64
@@ -575,5 +638,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// and an unavailable lane is this endpoint's own ceiling.
 	for i, value := range s.LaneJoinRefusals {
 		fmt.Fprintf(w, "queqiao_lane_join_refused_total{reason=\"%s\"} %d\n", LaneJoinRefusal(i), value)
+	}
+	for i, value := range s.AccountAdmissionRefusals {
+		fmt.Fprintf(w, "queqiao_account_admission_refused_total{reason=\"%s\"} %d\n", AccountRefusal(i), value)
 	}
 }

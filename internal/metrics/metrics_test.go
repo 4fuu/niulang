@@ -201,6 +201,41 @@ func TestSnapshotKeepsRefreshedQUICObservations(t *testing.T) {
 	}
 }
 
+// Account admission had no counter at all, so a gateway refusing every second
+// flow an account opened was indistinguishable from a healthy one. The reasons
+// are counted apart because they need different fixes: a flow ceiling too low
+// for a browser is a misconfiguration, and a device limit reached is the
+// policy working.
+func TestAccountAdmissionRefusalsAreCountedByReason(t *testing.T) {
+	registry := New()
+	registry.AccountAdmissionRefused(AccountRefusalFlowLimit)
+	registry.AccountAdmissionRefused(AccountRefusalFlowLimit)
+	registry.AccountAdmissionRefused(AccountRefusalClientLimit)
+	registry.AccountAdmissionRefused(AccountRefusalReasons) // out of range: ignored
+	registry.AccountAdmissionRefused(AccountRefusal(-1))
+
+	got := registry.Snapshot()
+	if got.AccountAdmissionRefusals[AccountRefusalFlowLimit] != 2 || got.AccountAdmissionRefusals[AccountRefusalClientLimit] != 1 {
+		t.Fatalf("refusals = %v", got.AccountAdmissionRefusals)
+	}
+	if got.AccountAdmissionRefusals[AccountRefusalUnauthorized] != 0 {
+		t.Fatalf("unauthorized counted %d refusals it never saw", got.AccountAdmissionRefusals[AccountRefusalUnauthorized])
+	}
+
+	recorder := httptest.NewRecorder()
+	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	for _, want := range []string{
+		"queqiao_account_admission_refused_total{reason=\"flow_limit\"} 2",
+		"queqiao_account_admission_refused_total{reason=\"client_limit\"} 1",
+		"queqiao_account_admission_refused_total{reason=\"unauthorized\"} 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics output is missing %q:\n%s", want, body)
+		}
+	}
+}
+
 // The refusal reasons are counted apart because they send an operator to
 // different places: a forgotten session is a peer whose flows are failing, a
 // principal mismatch is a peer reaching for a session that is not its own.
