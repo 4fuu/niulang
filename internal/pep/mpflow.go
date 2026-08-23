@@ -2369,8 +2369,10 @@ func codedSubstrateFields(stats coded.Stats, ok bool) string {
 	// arrived and sources are printed next to lost because without them the
 	// line invites a ratio between opposite directions: sent is what this
 	// endpoint transmitted, lost is what it failed to receive, and "lost is
-	// ten times sent" is an ordinary asymmetric flow rather than a fault.
-	return fmt.Sprintf("sent=%d repairs=%d arrived=%d sources=%d recovered=%d lost=%d residual=%.4f erasure=%.4f window=%d coding=%t rate=%.2f",
+	// ten times sent" is an ordinary asymmetric flow rather than a fault. The
+	// two rates carry the direction in their names for the same reason, and to
+	// match the typed fields below.
+	return fmt.Sprintf("sent=%d repairs=%d arrived=%d sources=%d recovered=%d lost=%d recv_residual=%.4f recv_erasure=%.4f window=%d coding=%t rate=%.2f",
 		stats.Sent, stats.Repairs, stats.Arrived, stats.Sources, stats.Recovered, stats.Lost,
 		stats.Residual(), stats.Erasure(), stats.Window,
 		stats.Plan.Code, stats.Plan.Rate)
@@ -2392,12 +2394,16 @@ func codedSubstrateLogFields(stats coded.Stats, ok bool) []any {
 		"fec_residual_lost_total", stats.Lost,
 		"fec_arrived_total", stats.Arrived,
 		"fec_source_symbols_total", stats.SourceSymbols(),
-		// The receive direction's own rates. fec_observed_loss below is what
-		// the estimator infers from transmission-sequence gaps; these two are
-		// what the decoder actually accounted for, and both are in [0,1] by
-		// construction.
-		"fec_measured_erasure", stats.Erasure(),
-		"fec_residual_loss", stats.Residual(),
+		// The receive direction's own rates, named for it. An endpoint reports
+		// two erasure figures that differ by orders of magnitude on an
+		// asymmetric path -- these, and the controller's floor, which measures
+		// the direction it sends into -- and an operator comparing them
+		// without knowing that is the confusion this accounting was fixed for.
+		// fec_observed_loss below is a third thing again: what the estimator
+		// infers from transmission-sequence gaps rather than what the decoder
+		// accounted for. Both of these are in [0,1] by construction.
+		"fec_receive_erasure", stats.Erasure(),
+		"fec_receive_residual_loss", stats.Residual(),
 		"fec_oversize_total", stats.Oversize,
 		"fec_window_symbols", stats.Window,
 		"fec_coding", plan.Code,
