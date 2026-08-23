@@ -27,6 +27,51 @@ to `changelog.d/` instead, as [`CONTRIBUTING.md`](CONTRIBUTING.md) describes.
   keeps every existing device working while refusing every new enrollment, so
   nothing else in the flow counters moves when it happens.
 
+## v0.1.1 - 2026-08-21
+
+Recorded after the fact. This release shipped without notes of its own, which
+is the gap `changelog.d/` exists to close.
+
+### Added
+
+- One client process can serve several providers at once, each on its own
+  loopback SOCKS5 listener, which is what a Clash/mihomo fallback group needs
+  to route between them. Every manifest entry needs its own enrolled device;
+  two entries naming one device through a copy, a symlink, or a hard link are
+  refused rather than quietly sharing an identity. Process-wide budgets stay
+  process-wide: aggregate pacing covers the whole uplink rather than being
+  offered once per provider, while session admission reserves half the budget
+  in equal per-provider shares and leaves half common, so a degraded provider
+  cannot hold every slot and starve the sibling a fallback group is about to
+  fail over to. See
+  [the multi-provider guide](docs/DEPLOYING.md#connect-to-multiple-providers).
+
+### Changed
+
+- The README and the documentation set are reorganized for readers arriving
+  from outside the project, with a transport comparison and a platform status
+  table.
+
+### Fixed
+
+- Aggregate pacing now covers scheduler DATA frames. Endpoint budget admission
+  ran on a path the active send path did not use, so `--aggregate-bytes-per-sec`
+  and the interactive reserve did not apply to bulk data at all.
+- A configured chunk size is capped at what the aggregate budget can admit.
+  Once admission reached DATA frames, a chunk larger than the budget's burst
+  was refused outright rather than paced, which failed the enqueue and retired
+  the lane: an operator's rate limit took lanes apart instead of slowing the
+  endpoint down. A reserve equal to the whole budget is refused for the same
+  reason -- it leaves bulk nothing to admit against. Defaults never reached
+  either case.
+- A multi-provider client fails the process when any provider's listener stops,
+  so a service manager restarts it rather than leaving the process up with a
+  dead listener. It needs a supervisor rather than a bare foreground run.
+- Every listener binds before the first gateway dial. Startup renewal blocks
+  for a handshake timeout per provider and ran before any bind, so one
+  unreachable gateway held healthy providers' SOCKS ports down for as long as
+  it took to time out.
+
 ## v0.1.0 - 2026-08-19
 
 ### Added
