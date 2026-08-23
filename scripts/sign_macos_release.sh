@@ -42,6 +42,12 @@ test -d "$dist" || { echo "no such dist directory: $dist" >&2; exit 1; }
 : "${APPLE_API_KEY_ID:?App Store Connect key ID is required}"
 : "${APPLE_API_ISSUER_ID:?App Store Connect issuer ID is required}"
 
+# How long to wait for an accepted ticket to become resolvable. See the poll
+# below for why this is not zero. Overridable so a run can be made stricter or
+# more patient without editing the script.
+ticket_attempts=${QUEQIAO_TICKET_ATTEMPTS:-20}
+ticket_interval=${QUEQIAO_TICKET_INTERVAL:-15}
+
 work=$(mktemp -d)
 keychain="$work/queqiao-signing.keychain-db"
 keychain_password=$(uuidgen)
@@ -147,13 +153,41 @@ for arch in amd64 arm64; do
     # "Notarized Developer ID" only once Apple's ticket resolves for this exact
     # cdhash, and "Unnotarized Developer ID" for a correctly signed binary that
     # was never submitted.
+    #
+    # This is polled rather than asked once. Because the ticket for a bare
+    # executable is resolved online rather than stapled, notarytool returning
+    # Accepted means Apple recorded the ticket, not that the service answering
+    # Gatekeeper has caught up. v0.2.0 failed here three seconds after an
+    # accepted submission and then passed on a re-run that changed nothing but
+    # the clock, which makes every release a coin flip on a step that says
+    # nothing about whether the build is good.
+    #
+    # "Unnotarized Developer ID" is the one verdict worth waiting on: it means
+    # the signature is valid and only the ticket is missing. Any other verdict
+    # is a real signing failure and fails immediately instead of after the wait.
+    #
     # spctl exits non-zero on a rejected assessment, so its status is captured
     # rather than allowed to abort the script before the reason is reported.
-    spctl --assess --type open --context context:primary-signature -vvv \
-        "$stage/queqiaod" > "$work/spctl-$arch.txt" 2>&1 || true
+    resolved=
+    attempt=1
+    while :; do
+        spctl --assess --type open --context context:primary-signature -vvv \
+            "$stage/queqiaod" > "$work/spctl-$arch.txt" 2>&1 || true
+        if grep -qx 'source=Notarized Developer ID' "$work/spctl-$arch.txt"; then
+            resolved=yes
+            break
+        fi
+        grep -qx 'source=Unnotarized Developer ID' "$work/spctl-$arch.txt" || break
+        test "$attempt" -lt "$ticket_attempts" || break
+        echo "ticket for $base is accepted but not resolvable yet;" \
+            "retrying in ${ticket_interval}s ($attempt/$ticket_attempts)"
+        sleep "$ticket_interval"
+        attempt=$((attempt + 1))
+    done
     cat "$work/spctl-$arch.txt"
-    grep -qx 'source=Notarized Developer ID' "$work/spctl-$arch.txt" || {
-        echo "notarization ticket did not resolve for $base" >&2
+    test -n "$resolved" || {
+        echo "notarization ticket did not resolve for $base after" \
+            "$attempt attempt(s) over $((attempt * ticket_interval))s" >&2
         exit 1
     }
 done
