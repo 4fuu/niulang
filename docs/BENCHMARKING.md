@@ -192,6 +192,32 @@ What the running pair must satisfy:
    packet emulator, where loss, delay and rate apply. `"tcp"` means it can only
    be measured with `--loss 0`, for the reason in the section above.
 
+The harness has to be told where the binary comes from, which is the one step
+that is not in `internal/extproxy`. Add a flag for it in `cmd/queqiaobench` and
+a case to `externalBinaries` keyed on the implementation the registry entry
+names; a stack that skips this registers fine and then refuses every run with
+`stack "x" needs a y binary, and this benchmark has no flag for one`. An
+implementation shipping one program per side takes two flags, as kcptun does.
+
+### What the harness records
+
+A stack is measured from the outside. Per trial it records elapsed seconds,
+goodput, and whether the transfer completed -- and completion means the exact
+expected byte count arrived, not merely that the request returned. `--latency`
+and `--interactive` add cold/warm setup and first-byte splits, and `--contend`
+records each stack's share of one shared bottleneck. `--json` writes all of it
+with the commit, dirty bit, Go toolchain, target, module graph, exact
+arguments, and seeded path parameters, which is what makes a cell reproducible
+by somebody who was not there.
+
+Nothing reads a stack's own telemetry. Queqiao's counters reach the report
+because the harness runs it in-process; an external stack is a pair of
+processes whose logs are captured only to explain a failure. So a claim that
+depends on what the transport did internally -- parity share of bytes sent,
+retransmissions, window behaviour -- has to be recorded alongside the run by
+hand, from that implementation's own output. The fixed-parity section below is
+one instance of that requirement rather than an exception to it.
+
 A tunnel rather than a proxy has no SOCKS5 of its own: it forwards a local TCP
 port to a target. Declare `socksTarget: true` in the registry entry and the
 harness runs `extproxy.StartSOCKSTarget` beyond the emulator and passes its
