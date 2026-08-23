@@ -3,8 +3,25 @@ package extproxy
 import (
 	"fmt"
 	"net"
+	"path/filepath"
 	"strconv"
 )
+
+// singBoxLaunch answers the two questions in Launch for every sing-box stack:
+// one JSON configuration per side, and "run -c" over each of them.
+func singBoxLaunch(cfg Config) (Launch, error) {
+	server, client, err := buildConfigs(cfg)
+	if err != nil {
+		return Launch{}, err
+	}
+	serverPath := filepath.Join(cfg.WorkDir, string(cfg.Kind)+"-server.json")
+	clientPath := filepath.Join(cfg.WorkDir, string(cfg.Kind)+"-client.json")
+	return Launch{
+		Files:      map[string]any{serverPath: server, clientPath: client},
+		ServerArgs: []string{"run", "-c", serverPath},
+		ClientArgs: []string{"run", "-c", clientPath},
+	}, nil
+}
 
 // The configurations below are sing-box's schema. They are written as plain
 // maps rather than typed structs because the schema is the other project's and

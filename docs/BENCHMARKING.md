@@ -92,7 +92,8 @@ benchmark gains four more stacks:
 
 Each runs as a server the emulator forwards to and a client exposing SOCKS5,
 over exactly the same seeded path as queqiao. The client trusts exactly the
-server's certificate, so nothing disables verification.
+server's certificate, so nothing disables verification. The four are registry
+entries rather than special cases; see the contract below for adding another.
 
 **`cmd/queqiaobench`** — runs the selected stacks over one emulated path in a
 single process and reports per-trial rows, a summary, optional JSON, and an
@@ -116,6 +117,92 @@ WebSocket's framing cost — and `tuic` against `queqiao` is a fair comparison.
 `vless-tcp` against `tuic` is not. Emulating loss for a stream transport needs
 an IP-layer facility such as dummynet, which needs privilege this harness does
 not take.
+
+## Adding an external transport
+
+A stack is a pair of processes the harness starts, waits for, and stops. The
+harness owns the emulated path, the addresses, the TLS material, the work
+directory and the process lifetime. A stack answers two questions: what
+configuration to write, and what to run. `internal/extproxy` keeps those apart
+so a transport is added by registering it rather than by editing the launcher:
+
+```go
+// internal/extproxy/extproxy.go
+var stacks = map[Kind]stack{
+    TUIC: {transport: "udp", implementation: "sing-box", launch: singBoxLaunch},
+    ...
+}
+
+// A launch builder returns what to write and what to run.
+func singBoxLaunch(cfg Config) (Launch, error)
+```
+
+`Launch` carries `Files` (written before either process starts, keyed by a path
+under `Config.WorkDir`), `ServerArgs` and `ClientArgs`, and optionally
+`ServerBinary`/`ClientBinary` for an implementation that ships one program per
+side. `Plan` resolves it without running anything, which is how a stack's
+wiring is tested with nothing installed.
+
+What the running pair must satisfy:
+
+1. **The server binds `ServerListen` exactly.** That is the address the
+   emulator forwards to. A server that binds anything else produces a working
+   measurement that never crosses the emulated path, which is worse than a
+   failure because it looks like a result.
+2. **The client dials `ClientRemote`**, which is the emulator, never the server
+   directly.
+3. **The client exposes SOCKS5 at `SOCKSListen`.** SOCKS5 is the whole contract
+   with the benchmark, and the pair is considered ready when that address
+   accepts a TCP connection.
+4. **TLS material is the harness's.** The server uses `CertificatePath` and
+   `KeyPath`; the client trusts exactly `CertificatePath`. No verification
+   bypass, and the client's configuration must never reference the private key.
+   Both are tested.
+5. **Configuration goes in `WorkDir` and nowhere else.** The harness creates it
+   and removes it.
+6. **The processes must die with their process group.** The harness starts each
+   side in its own group and escalates if it does not exit; an implementation
+   that daemonizes or leaves a helper behind holds its ports and silently
+   contaminates every later trial.
+7. **Declare the relay honestly.** `transport: "udp"` puts the stack behind the
+   packet emulator, where loss, delay and rate apply. `"tcp"` means it can only
+   be measured with `--loss 0`, for the reason in the section above.
+
+A tunnel rather than a proxy -- kcptun is the obvious example -- has no SOCKS5
+of its own: it forwards a local TCP port to a target. Such a stack is three
+processes, because the target has to be a SOCKS5 server on the server side, and
+the tunnel's local port is then the endpoint the benchmark speaks to. `Launch`
+describes two sides today; a stack of that shape should extend it with the
+third process rather than starting one outside the harness, so teardown keeps a
+single owner and no listener outlives the run.
+
+### Comparing a fixed-parity transport
+
+A transport with FEC in the matrix is worth having, and it needs one thing said
+about the comparison before the numbers are taken. Queqiao chooses its parity
+from a measured erasure floor, and it revises that choice while a flow runs; a
+kcptun-style code rate is a constant chosen in advance. A single configuration
+is therefore a comparison against one guess, and whichever way it lands the
+result is mostly about the guess.
+
+So a submitted comparison should carry:
+
+- **A parity sweep, not a point.** Several `-datashard`/`-parityshard` ratios
+  spanning above and below the emulated erasure rate, with the best one shown
+  against queqiao rather than an arbitrary one.
+- **The cost alongside the rate.** Parity is bandwidth spent on the same
+  bottleneck, so report the parity share of bytes sent on both sides. Queqiao's
+  is `fec_repairs_total` over `fec_sent_total` in its runtime log; a transport
+  buying more of the wire can finish sooner while delivering fewer useful bytes
+  per byte sent, and a goodput column alone hides that.
+- **Every parameter that moves the answer.** Implementation version, `-mode` or
+  the explicit `-nodelay/-interval/-resend/-nc`, `-sndwnd`/`-rcvwnd`, `-mtu`,
+  compression, and whatever the SOCKS5 target adds. The window settings are the
+  congestion control in practice, so a run that does not state them is not
+  reproducible.
+- **The same rules as every other cell**: one seeded path, alternating trial
+  order, medians over all trials counting failures at their partial rate, and a
+  check against the calibration bound below.
 
 ## Reading the numbers
 

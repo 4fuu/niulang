@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -43,15 +43,73 @@ const (
 	VLESSTCP       Kind = "vless-tcp"
 )
 
-// Transport reports whether a kind runs over UDP, which decides whether the
-// UDP path emulator can carry it.
-func (k Kind) Transport() string {
-	switch k {
-	case TUIC, Hysteria2:
-		return "udp"
-	default:
-		return "tcp"
+// Launch is what a stack asks the harness to run for one measured pair.
+//
+// The harness owns the path, the addresses, the certificate, the work
+// directory and the process lifetime. A stack owns exactly two answers: what
+// to write, and what to run. Keeping those apart is what lets a transport be
+// added without touching Start -- sing-box takes a JSON file per side, an
+// implementation configured entirely by flags returns no files at all, and one
+// shipping separate client and server programs names a binary per side.
+type Launch struct {
+	// Files is configuration written before either process starts, keyed by
+	// path and marshalled as JSON. Build the paths from Config.WorkDir, which
+	// the caller creates and removes.
+	Files map[string]any
+	// ServerBinary and ClientBinary default to Config.Binary, which is the
+	// usual case: one implementation serving both sides.
+	ServerBinary, ClientBinary string
+	// ServerArgs and ClientArgs are what each side is run with.
+	ServerArgs, ClientArgs []string
+}
+
+// stack is one third-party transport this package can measure.
+type stack struct {
+	// transport is the relay that can carry it, "udp" or "tcp". It decides
+	// whether the packet emulator can carry the stack at all: a userspace
+	// relay cannot drop a segment out of a byte stream, so a TCP transport
+	// cannot be measured under emulated loss. See docs/BENCHMARKING.md.
+	transport string
+	// implementation is the program that provides it, which is what a caller
+	// missing its path has to be told to supply.
+	implementation string
+	launch         func(Config) (Launch, error)
+}
+
+// stacks is the registry a new transport is added to. Everything else in this
+// package is written against the registry rather than against sing-box.
+var stacks = map[Kind]stack{
+	TUIC:           {transport: "udp", implementation: "sing-box", launch: singBoxLaunch},
+	Hysteria2:      {transport: "udp", implementation: "sing-box", launch: singBoxLaunch},
+	VLESSTCP:       {transport: "tcp", implementation: "sing-box", launch: singBoxLaunch},
+	VLESSWebSocket: {transport: "tcp", implementation: "sing-box", launch: singBoxLaunch},
+}
+
+// Kinds lists the transports this package can launch, in a stable order.
+func Kinds() []Kind {
+	kinds := make([]Kind, 0, len(stacks))
+	for kind := range stacks {
+		kinds = append(kinds, kind)
 	}
+	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
+	return kinds
+}
+
+// Transport reports whether a kind runs over UDP, which decides whether the
+// UDP path emulator can carry it. An unregistered kind is reported as TCP,
+// which is the conservative answer: it keeps an unknown name away from the
+// packet relay rather than measuring it there.
+func (k Kind) Transport() string {
+	if s, ok := stacks[k]; ok {
+		return s.transport
+	}
+	return "tcp"
+}
+
+// Implementation names the program that provides a kind, so a caller that was
+// not given its path can say which one is missing.
+func (k Kind) Implementation() string {
+	return stacks[k].implementation
 }
 
 // Config describes one measured pair.
@@ -121,26 +179,22 @@ func (p *Pair) Logs() string {
 // connections, so a benchmark never measures a process that is still starting.
 func Start(ctx context.Context, cfg Config) (*Pair, error) {
 	cfg = cfg.withDefaults()
-	if cfg.Binary == "" {
-		return nil, errors.New("a proxy binary is required")
-	}
-	if _, err := os.Stat(cfg.Binary); err != nil {
-		return nil, fmt.Errorf("proxy binary: %w", err)
-	}
-	serverConfig, clientConfig, err := buildConfigs(cfg)
+	launch, err := Plan(cfg)
 	if err != nil {
 		return nil, err
 	}
-	serverPath := filepath.Join(cfg.WorkDir, string(cfg.Kind)+"-server.json")
-	clientPath := filepath.Join(cfg.WorkDir, string(cfg.Kind)+"-client.json")
-	if err := writeJSON(serverPath, serverConfig); err != nil {
-		return nil, err
+	for _, binary := range []string{launch.ServerBinary, launch.ClientBinary} {
+		if _, err := os.Stat(binary); err != nil {
+			return nil, fmt.Errorf("proxy binary: %w", err)
+		}
 	}
-	if err := writeJSON(clientPath, clientConfig); err != nil {
-		return nil, err
+	for path, value := range launch.Files {
+		if err := writeJSON(path, value); err != nil {
+			return nil, err
+		}
 	}
 
-	server, err := startProcess(ctx, cfg.Binary, "run", "-c", serverPath)
+	server, err := startProcess(ctx, launch.ServerBinary, launch.ServerArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -150,17 +204,48 @@ func Start(ctx context.Context, cfg Config) (*Pair, error) {
 		server.stop()
 		return nil, fmt.Errorf("%s server did not listen: %w\n%s", cfg.Kind, err, server.output())
 	}
-	client, err := startProcess(ctx, cfg.Binary, "run", "-c", clientPath)
+	client, err := startProcess(ctx, launch.ClientBinary, launch.ClientArgs...)
 	if err != nil {
 		server.stop()
 		return nil, err
 	}
+	// SOCKS5 is the contract with the benchmark: whatever the transport is,
+	// the measured client is a SOCKS5 endpoint at this address, and it is
+	// ready when that address accepts a connection.
 	if err := waitForListener(ctx, cfg.SOCKSListen, "tcp", 10*time.Second); err != nil {
 		client.stop()
 		server.stop()
 		return nil, fmt.Errorf("%s client did not listen: %w\n%s", cfg.Kind, err, client.output())
 	}
 	return &Pair{server: server, client: client}, nil
+}
+
+// Plan resolves what a stack would write and run, without running it. Start
+// uses it, and a test can read it to check a stack's wiring without needing
+// the implementation installed.
+func Plan(cfg Config) (Launch, error) {
+	cfg = cfg.withDefaults()
+	registered, ok := stacks[cfg.Kind]
+	if !ok {
+		return Launch{}, fmt.Errorf("unsupported transport %q", cfg.Kind)
+	}
+	if cfg.Binary == "" {
+		return Launch{}, fmt.Errorf("a %s binary is required for %s", registered.implementation, cfg.Kind)
+	}
+	launch, err := registered.launch(cfg)
+	if err != nil {
+		return Launch{}, err
+	}
+	if launch.ServerBinary == "" {
+		launch.ServerBinary = cfg.Binary
+	}
+	if launch.ClientBinary == "" {
+		launch.ClientBinary = cfg.Binary
+	}
+	if len(launch.ServerArgs) == 0 || len(launch.ClientArgs) == 0 {
+		return Launch{}, fmt.Errorf("%s launch plan is missing a side", cfg.Kind)
+	}
+	return launch, nil
 }
 
 func writeJSON(path string, value any) error {

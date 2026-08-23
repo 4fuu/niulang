@@ -579,7 +579,10 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		}
 		if opts.singBox == "" {
 			h.Close()
-			return nil, fmt.Errorf("stack %q requires --sing-box", stack)
+			// The registry says which implementation provides the stack, so a
+			// transport added later asks for its own binary rather than for
+			// the one the first four happened to use.
+			return nil, fmt.Errorf("stack %q requires a %s binary (--sing-box)", stack, kind.Implementation())
 		}
 		// The third-party implementation needs its TLS material on disk, and
 		// the SOCKS listener has to be free for it to bind itself.
@@ -997,7 +1000,7 @@ func writeCertificateFiles(dir string) (certPath, keyPath string, err error) {
 // segment, so the caller is told rather than given a silently lossless result.
 func startTCPStack(ctx context.Context, kind extproxy.Kind, opts options, pathCfg pathsim.Config, logger *slog.Logger) (*harness, error) {
 	if opts.singBox == "" {
-		return nil, fmt.Errorf("stack %q requires --sing-box", kind)
+		return nil, fmt.Errorf("stack %q requires a %s binary (--sing-box)", kind, kind.Implementation())
 	}
 	if pathCfg.LossRate > 0 || pathCfg.UpstreamLossRate > 0 {
 		return nil, fmt.Errorf("stack %q is TCP based and cannot be measured under emulated loss; "+
