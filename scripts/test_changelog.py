@@ -138,11 +138,60 @@ class ChangelogTests(unittest.TestCase):
             sorted(p.name for p in (self.root / "changelog.d").iterdir()), []
         )
 
+    def test_amend_appends_to_an_existing_category(self):
+        self.fragment("late.added.md", "Landed after the cut.\n")
+        result = self.run_tool("release", "--version", "v0.1.0", "--amend")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "### Added\n\n- Something that already shipped.\n- Landed after the cut.\n",
+            self.changelog.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            sorted(p.name for p in (self.root / "changelog.d").iterdir()), []
+        )
+
+    def test_amend_creates_a_category_in_order(self):
+        self.fragment("late.fixed.md", "A late fix.\n")
+        result = self.run_tool("release", "--version", "v0.1.0", "--amend")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.changelog.read_text(encoding="utf-8")
+        self.assertIn(
+            "- Something that already shipped.\n\n### Fixed\n\n- A late fix.\n", text
+        )
+        self.assertLess(text.index("### Added"), text.index("### Fixed"))
+
+    def test_amend_puts_a_new_category_before_a_later_one(self):
+        self.changelog.write_text(
+            HEADER + "## v0.1.0 - 2026-08-19\n\n### Fixed\n\n- Shipped fix.\n\n",
+            encoding="utf-8",
+        )
+        self.fragment("late.added.md", "A late addition.\n")
+        result = self.run_tool("release", "--version", "v0.1.0", "--amend")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.changelog.read_text(encoding="utf-8")
+        self.assertLess(text.index("### Added"), text.index("### Fixed"))
+        self.assertIn("### Added\n\n- A late addition.\n\n### Fixed", text)
+
+    def test_amend_leaves_other_sections_alone(self):
+        older = "## v0.0.9 - 2026-08-01\n\n### Fixed\n\n- Older.\n\n"
+        self.changelog.write_text(HEADER + RELEASED + older, encoding="utf-8")
+        self.fragment("late.added.md", "Landed after the cut.\n")
+        result = self.run_tool("release", "--version", "v0.1.0", "--amend")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(older, self.changelog.read_text(encoding="utf-8"))
+
+    def test_amend_refuses_an_absent_version(self):
+        self.fragment("late.added.md", "Body.\n")
+        result = self.run_tool("release", "--version", "v0.9.9", "--amend")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no section to amend", result.stderr)
+        self.assertTrue((self.root / "changelog.d" / "late.added.md").exists())
+
     def test_release_refuses_a_released_version(self):
         self.fragment("a-fix.fixed.md", "Body.\n")
         result = self.run_tool("release", "--version", "v0.1.0")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("already released", result.stderr)
+        self.assertIn("--amend", result.stderr)
         self.assertTrue((self.root / "changelog.d" / "a-fix.fixed.md").exists())
 
     def test_release_refuses_an_empty_pending_set(self):

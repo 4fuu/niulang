@@ -172,6 +172,70 @@ def render_section(heading: str, fragments: list[Fragment]) -> list[str]:
     return lines
 
 
+def amend_section(text: str, version: str, fragments: list[Fragment]) -> str | None:
+    """Fold late entries into a section that is cut but not yet tagged.
+
+    Entries keep landing between the release commit and the tag. Without this
+    they stay pending and the release ships changes it does not record, which is
+    how v0.1.1 shipped with no notes at all.
+    """
+    lines = text.split("\n")
+    start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if (m := VERSION_HEADING.match(line)) and m.group("version") == version
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        len(lines),
+    )
+    section = lines[start:end]
+    for category in CATEGORIES:
+        chosen = sorted(
+            (f for f in fragments if f.category == category), key=lambda f: f.slug
+        )
+        if not chosen:
+            continue
+        bullets: list[str] = []
+        for fragment in chosen:
+            bullets.extend(fragment.bullet())
+        heading = f"### {HEADINGS[category]}"
+        if heading in section:
+            # Append to the list that is already there; the entries above it
+            # were released together and are not re-sorted around.
+            at = section.index(heading) + 1
+            at = next(
+                (i for i in range(at, len(section)) if section[i].startswith("### ")),
+                len(section),
+            )
+            while at > 0 and section[at - 1] == "":
+                at -= 1
+            section[at:at] = bullets
+            continue
+        later = {HEADINGS[c] for c in CATEGORIES[CATEGORIES.index(category) + 1 :]}
+        at = next(
+            (
+                i
+                for i, line in enumerate(section)
+                if line.startswith("### ") and line[4:] in later
+            ),
+            None,
+        )
+        if at is None:
+            at = len(section)
+            while at > 0 and section[at - 1] == "":
+                at -= 1
+            section[at:at] = [""] + [heading, ""] + bullets
+        else:
+            section[at:at] = [heading, ""] + bullets + [""]
+    return "\n".join(lines[:start] + section + lines[end:])
+
+
 def insert_section(text: str, section: list[str]) -> str:
     """Insert above the newest released section, leaving released bytes alone."""
     lines = text.split("\n")
@@ -235,12 +299,25 @@ def command_release(args: argparse.Namespace) -> int:
     if report(problems):
         return 1
     text = changelog.read_text(encoding="utf-8")
-    for line in text.split("\n"):
-        match = VERSION_HEADING.match(line)
-        if match and match.group("version") == args.version:
-            return report([f"{changelog}: {args.version} is already released"])
-    section = render_section(f"## {args.version} - {date}", fragments)
-    changelog.write_text(insert_section(text, section), encoding="utf-8")
+    present = any(
+        (match := VERSION_HEADING.match(line)) and match.group("version") == args.version
+        for line in text.split("\n")
+    )
+    if present and not args.amend:
+        return report(
+            [
+                f"{changelog}: {args.version} is already released; --amend folds "
+                "these entries into it"
+            ]
+        )
+    if args.amend:
+        amended = amend_section(text, args.version, fragments)
+        if amended is None:
+            return report([f"{changelog}: {args.version} has no section to amend"])
+        changelog.write_text(amended, encoding="utf-8")
+    else:
+        section = render_section(f"## {args.version} - {date}", fragments)
+        changelog.write_text(insert_section(text, section), encoding="utf-8")
     for fragment in fragments:
         fragment.path.unlink()
     print(f"{changelog}: added {args.version} - {date}")
@@ -314,6 +391,11 @@ def main(argv: list[str] | None = None) -> int:
     release.add_argument("--date", help="release date, default today in UTC")
     release.add_argument(
         "--allow-empty", action="store_true", help="release with no pending changes"
+    )
+    release.add_argument(
+        "--amend",
+        action="store_true",
+        help="fold entries into an existing section not yet tagged",
     )
     release.set_defaults(handler=command_release)
 
