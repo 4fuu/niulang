@@ -232,6 +232,14 @@ type multipathFlow struct {
 	// does not know this session. That answer is permanent, so it ends the
 	// replacement grace rather than being retried.
 	resumeRefused atomic.Bool
+	// replacementAbandoned records that whatever opens replacement lanes for
+	// this flow has stopped: its attempt budget is spent, or its manager has
+	// returned. The grace exists to cover the time a replacement needs to
+	// arrive, so once nothing is going to attempt one it is only silence the
+	// application is waiting through. It is set on the endpoint that opens
+	// replacements; the other end keeps waiting for a rescue that is still
+	// somebody's to send.
+	replacementAbandoned atomic.Bool
 	// controlLaneShared reports whether another flow is currently using the
 	// pooled control connection. Nil means "no", which is what a flow on a
 	// dedicated connection should answer.
@@ -1617,12 +1625,23 @@ func (f *multipathFlow) tryEnqueueFrameClass(lane *mpLane, frame protocol.Frame,
 	}
 }
 
+// noteReplacementAbandoned records that no further replacement lane will be
+// attempted for this flow.
+//
+// It is a statement about this endpoint's own behaviour rather than a guess
+// about the path or the peer, which is what makes it safe to act on: waiting
+// longer cannot produce a lane nobody is going to open.
+func (f *multipathFlow) noteReplacementAbandoned() { f.replacementAbandoned.Store(true) }
+
 func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Duration) error {
 	if len(f.healthyLanes()) > 0 {
 		return nil
 	}
 	if f.resumeRefused.Load() {
 		return errResumeRefused
+	}
+	if f.replacementAbandoned.Load() {
+		return errReplacementAbandoned
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -1642,6 +1661,17 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 				// the handshake itself often fails, this was 45 seconds of
 				// silence per lost flow.
 				return errResumeRefused
+			}
+			if f.replacementAbandoned.Load() {
+				// The refusal above is the answer this flow gets when a rescue
+				// handshake completes. On a path lossy enough to kill every
+				// lane, the rescue handshake is usually what fails instead, so
+				// that answer often never arrives and the flow used to wait out
+				// the whole grace -- and then, once the attempt budget reset,
+				// several more of them. This is the same conclusion reached
+				// from evidence this endpoint already has: it has stopped
+				// trying to replace the lane.
+				return errReplacementAbandoned
 			}
 		case <-timer.C:
 			return errors.New("lane replacement timeout")
@@ -2437,6 +2467,10 @@ func (f *multipathFlow) takeReceivedRanges(cumulative uint64) [][2]uint64 {
 // errResumeRefused reports that the peer cannot resume this association: it
 // has no such session, so no replacement lane can be attached to it.
 var errResumeRefused = errors.New("peer does not hold this session")
+
+// errReplacementAbandoned reports that this endpoint has stopped attempting
+// replacement lanes for the flow, so its grace has nothing left to wait for.
+var errReplacementAbandoned = errors.New("no replacement lane will be attempted")
 
 // retainClose keeps this flow's half-close so a replacement lane can be given
 // it when the lane that carried it dies first.

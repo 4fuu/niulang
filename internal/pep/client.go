@@ -1807,6 +1807,12 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 	_, controlReserve := bulkLaneBudget(flow.reserveControlLane)
 	manageCtx, manageCancel := context.WithCancel(ctx)
 	defer manageCancel()
+	// This goroutine is the only thing that opens a replacement lane for this
+	// flow. When it returns -- budget spent, context gone, or handed off to the
+	// bundle manager below, which marks the flow again when it returns in turn
+	// -- the flow's replacement grace is waiting for something nobody will
+	// send, and it should stop rather than leave the application in silence.
+	defer flow.noteReplacementAbandoned()
 	go func() {
 		select {
 		case <-flow.doneChan():
@@ -1890,7 +1896,14 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 			snapshot := flow.snapshot()
 			now := time.Now()
 			if snapshot.HealthyLanes == 0 {
-				if flow.doneChanClosed() || recoveryAttempts >= maxLaneRecoveryAttempts {
+				if flow.doneChanClosed() {
+					return
+				}
+				if recoveryAttempts >= maxLaneRecoveryAttempts {
+					// Say so once, at the level a failing flow is reported at:
+					// from here the flow fails immediately rather than waiting
+					// out a grace nothing will arrive during.
+					c.cfg.Logger.Info("lane recovery abandoned", "attempts", recoveryAttempts, "flow_id", flowID)
 					return
 				}
 				if !nextRecovery.IsZero() && now.Before(nextRecovery) {
@@ -2019,6 +2032,9 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 func (c *Client) manageTCPBundle(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64) {
 	manageCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// As in manageQUICLanes: once this returns, nothing will open another lane
+	// for the flow, and its replacement grace has nothing left to wait for.
+	defer flow.noteReplacementAbandoned()
 	go func() {
 		select {
 		case <-flow.doneChan():
