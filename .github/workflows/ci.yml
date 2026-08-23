@@ -64,6 +64,9 @@ jobs:
   # them describe a user-visible change.
   changelog:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -71,19 +74,29 @@ jobs:
       - name: pending entries are well formed
         run: ./scripts/changelog.py check
       - name: CHANGELOG.md is assembled, not edited
-        if: >-
-          github.event_name == 'pull_request' &&
-          !contains(github.event.pull_request.labels.*.name, 'changelog')
+        if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.base_ref }}
+          NUMBER: ${{ github.event.number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if git diff --quiet "origin/${BASE_REF}...HEAD" -- CHANGELOG.md; then
+            exit 0
+          fi
+          # Read the label from the API rather than from the event payload,
+          # which is a snapshot taken when the pull request was opened. Adding
+          # the label to an open pull request and re-running this job has to be
+          # enough; with the payload it never is.
+          if gh api "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/labels" \
+              --jq '.[].name' | grep -qx changelog; then
+            echo "The 'changelog' label permits this pull request to edit it."
             exit 0
           fi
           echo "CHANGELOG.md is assembled from changelog.d/ at release time."
           echo "Describe this change in its own file instead:"
           echo "  ./scripts/changelog.py new <category> <slug>"
-          echo "A pull request that means to edit it carries the 'changelog' label."
+          echo "A pull request that means to edit it carries the 'changelog'"
+          echo "label; add it and re-run this job."
           exit 1
 
   analysis:

@@ -84,7 +84,8 @@ same file, so there is nothing to resolve when both merge. A change with no
 user-visible effect — a refactor, a test, internal documentation — needs no
 file. CI checks the pending files and rejects a branch that edits
 `CHANGELOG.md`. Cutting a release, or deliberately correcting text that already
-shipped, is what the `changelog` label on a pull request is for.
+shipped, is what the `changelog` label on a pull request is for; add the label
+and re-run the `changelog` job, which reads it at the moment it runs.
 
 This applies to generated and agent-authored branches too. Nothing in this
 repository writes `CHANGELOG.md` except `./scripts/changelog.py release`, and a
