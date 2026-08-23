@@ -30,7 +30,7 @@ func TestCodedSubstrateLogFieldsExposePlanAndEstimator(t *testing.T) {
 		// The receive direction's own rates, which is what "lost" needed to be
 		// readable at all: 217 of 1000 source symbols did not arrive, and 7 of
 		// them were still missing when the window moved on.
-		"fec_measured_erasure": 0.217, "fec_residual_loss": 0.007,
+		"fec_receive_erasure": 0.217, "fec_receive_residual_loss": 0.007,
 	} {
 		if values[key] != want {
 			t.Fatalf("%s = %#v, want %#v", key, values[key], want)

@@ -810,23 +810,34 @@ type refusalLog struct {
 	mu         sync.Mutex
 	last       [metrics.LaneJoinReasons]time.Time
 	suppressed [metrics.LaneJoinReasons]uint64
+	total      [metrics.LaneJoinReasons]uint64
 }
 
-// due reports whether this reason should be written now, and how many of its
-// refusals went unwritten since the last time it was.
-func (l *refusalLog) due(reason metrics.LaneJoinRefusal, now time.Time) (bool, uint64) {
+// due reports whether this reason should be written now, how many of its
+// refusals went unwritten since the last time it was, and how many there have
+// been in total.
+//
+// The total is there because the suppressed count alone is reported one record
+// late: a storm that stops leaves its tail in a record that never gets
+// written. Measured on a gateway restart, ninety-four refusals produced one
+// record saying it stood for none of them, which is the same silence this
+// logging exists to end. Every record now carries the count for its reason, so
+// one record is the whole story.
+func (l *refusalLog) due(reason metrics.LaneJoinRefusal, now time.Time) (write bool, suppressed, total uint64) {
 	if reason < 0 || reason >= metrics.LaneJoinReasons {
-		return false, 0
+		return false, 0, 0
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.total[reason]++
+	total = l.total[reason]
 	if last := l.last[reason]; !last.IsZero() && now.Sub(last) < laneJoinRefusalLogInterval {
 		l.suppressed[reason]++
-		return false, 0
+		return false, 0, total
 	}
-	suppressed := l.suppressed[reason]
+	suppressed = l.suppressed[reason]
 	l.last[reason], l.suppressed[reason] = now, 0
-	return true, suppressed
+	return true, suppressed, total
 }
 
 // refuseLaneJoin answers a lane join with a reset, and says so where an
@@ -839,7 +850,7 @@ func (l *refusalLog) due(reason metrics.LaneJoinRefusal, now time.Time) (bool, u
 // it belongs at the level a failing flow is reported at.
 func (s *Server) refuseLaneJoin(fc *frameConn, sessionID [16]byte, flowID, laneID uint64, reason metrics.LaneJoinRefusal, code session.ResetCode, message string) {
 	s.metrics.LaneJoinRefused(reason)
-	if write, suppressed := s.refusals.due(reason, time.Now()); write {
+	if write, suppressed, total := s.refusals.due(reason, time.Now()); write {
 		level := slog.LevelInfo
 		if reason == metrics.LaneJoinPrincipalMismatch || reason == metrics.LaneJoinFlowMismatch {
 			// Not a lost session: a peer that authenticated is naming a live
@@ -852,7 +863,8 @@ func (s *Server) refuseLaneJoin(fc *frameConn, sessionID [16]byte, flowID, laneI
 			slog.String("reason", reason.String()),
 			slog.Uint64("lane", laneID),
 			slog.Uint64("flow_id", flowID),
-			slog.Uint64("suppressed", suppressed))
+			slog.Uint64("suppressed", suppressed),
+			slog.Uint64("total", total))
 	}
 	_ = fc.Write(protocol.Frame{Header: protocol.Header{
 		Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID,

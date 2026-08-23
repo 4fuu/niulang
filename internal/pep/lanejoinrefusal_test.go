@@ -75,6 +75,10 @@ func TestLaneJoinRefusalsAreVisibleAndCountedByReason(t *testing.T) {
 			if record["msg"] != "lane join refused" || record["reason"] != test.reason.String() || record["level"] != test.level {
 				t.Fatalf("record = %#v", record)
 			}
+			// One record has to be readable on its own.
+			if record["total"] != float64(1) {
+				t.Fatalf("record total = %#v, want 1", record["total"])
+			}
 		})
 	}
 }
@@ -84,25 +88,51 @@ func TestLaneJoinRefusalsAreVisibleAndCountedByReason(t *testing.T) {
 func TestLaneJoinRefusalLogSurvivesAStorm(t *testing.T) {
 	var log refusalLog
 	start := time.Now()
-	write, suppressed := log.due(metrics.LaneJoinUnknownSession, start)
-	if !write || suppressed != 0 {
-		t.Fatalf("first refusal write=%t suppressed=%d, want true and 0", write, suppressed)
+	write, suppressed, total := log.due(metrics.LaneJoinUnknownSession, start)
+	if !write || suppressed != 0 || total != 1 {
+		t.Fatalf("first refusal write=%t suppressed=%d total=%d, want true, 0 and 1", write, suppressed, total)
 	}
 	const storm = 500
 	for i := 0; i < storm; i++ {
-		if write, _ := log.due(metrics.LaneJoinUnknownSession, start.Add(time.Duration(i)*time.Millisecond)); write {
+		if write, _, _ := log.due(metrics.LaneJoinUnknownSession, start.Add(time.Duration(i)*time.Millisecond)); write {
 			t.Fatalf("refusal %d was written inside the interval", i)
 		}
 	}
 	// A different reason is never suppressed by another one's storm.
-	if write, _ := log.due(metrics.LaneJoinPrincipalMismatch, start.Add(time.Second)); !write {
+	if write, _, _ := log.due(metrics.LaneJoinPrincipalMismatch, start.Add(time.Second)); !write {
 		t.Fatal("a principal mismatch was hidden by an unknown-session storm")
 	}
-	write, suppressed = log.due(metrics.LaneJoinUnknownSession, start.Add(laneJoinRefusalLogInterval))
-	if !write || suppressed != storm {
-		t.Fatalf("after the interval write=%t suppressed=%d, want true and %d", write, suppressed, storm)
+	write, suppressed, total = log.due(metrics.LaneJoinUnknownSession, start.Add(laneJoinRefusalLogInterval))
+	if !write || suppressed != storm || total != storm+2 {
+		t.Fatalf("after the interval write=%t suppressed=%d total=%d, want true, %d and %d",
+			write, suppressed, total, storm, storm+2)
 	}
-	if write, suppressed = log.due(metrics.LaneJoinUnknownSession, start.Add(2*laneJoinRefusalLogInterval)); !write || suppressed != 0 {
+	if write, suppressed, _ = log.due(metrics.LaneJoinUnknownSession, start.Add(2*laneJoinRefusalLogInterval)); !write || suppressed != 0 {
 		t.Fatalf("suppressed count survived being reported: write=%t suppressed=%d", write, suppressed)
+	}
+}
+
+// A storm that stops must still say how big it was. The suppressed count is
+// reported one record late, so on a gateway restart ninety-four refusals
+// produced a single record claiming to stand for none of them; the total is
+// what makes one record the whole story.
+func TestARefusalRecordSaysHowManyThereHaveBeen(t *testing.T) {
+	var log refusalLog
+	start := time.Now()
+	if _, _, total := log.due(metrics.LaneJoinUnknownSession, start); total != 1 {
+		t.Fatalf("total = %d on the first refusal, want 1", total)
+	}
+	for i := 0; i < 93; i++ {
+		log.due(metrics.LaneJoinUnknownSession, start.Add(time.Duration(i)*time.Millisecond))
+	}
+	// Nothing more arrives, so no further record is written and the suppressed
+	// count is never reported. The record that was written must already carry
+	// the count, which the next one confirms.
+	_, _, total := log.due(metrics.LaneJoinUnknownSession, start.Add(laneJoinRefusalLogInterval))
+	if total != 95 {
+		t.Fatalf("total = %d, want every refusal counted", total)
+	}
+	if _, _, other := log.due(metrics.LaneJoinFlowMismatch, start); other != 1 {
+		t.Fatalf("reasons share a total: flow mismatch = %d, want 1", other)
 	}
 }
