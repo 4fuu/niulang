@@ -137,7 +137,7 @@ func startTestGateway(t *testing.T) *testGateway {
 	if err != nil {
 		t.Fatal(err)
 	}
-	account, err := provider.Store.AddAccount("test account", time.Time{}, 0, now)
+	account, err := provider.Store.AddAccount("test account", time.Time{}, identity.AccountLimits{}, now)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -208,11 +208,50 @@ Create a separate account for every customer or administrative boundary:
 sudo -u queqiao /usr/local/bin/queqiaod provider add-user \
   --state /var/lib/queqiao/provider \
   --name alice \
-  --max-sessions 8
+  --max-clients 8
 ```
 
-`--max-sessions 0` uses the gateway-wide limit. The limit spans all devices
-owned by that user.
+An account carries two limits, and they count different things:
+
+- `--max-clients` is how many of the account's devices may be carrying traffic
+  at once. A device counts once however much it carries, so this is the limit
+  that expresses "this account is for eight devices". It defaults to 8, and
+  zero admits every enrolled device.
+- `--max-flows` is how many proxied flows the account may hold at once. One
+  flow is one TCP connection or one UDP association — not one device, and not
+  one page. It defaults to 1024, and zero defers to the gateway-wide
+  `--max-sessions` ceiling.
+
+Set the device limit and leave the flow limit alone unless you are deliberately
+capping one account's footprint on the gateway. A flow ceiling low enough to be
+interesting as a quota is low enough to break ordinary browsing: one page opens
+roughly six connections per host across dozens of hosts, and with the default
+`--flow-idle-timeout` those keep-alive connections keep holding their slots for
+half an hour after the page finished loading. The failure that produces is hard
+to recognize — most sites load, a few do not, and the only symptom is the
+client reporting `peer reset flow: account flow limit reached`.
+
+`--max-sessions` is the former name of `--max-flows` and still works. It is
+deprecated because it reads like a device count and has never been one.
+
+Both limits can be corrected in place, without deleting the account and every
+device enrolled against it:
+
+```sh
+sudo -u queqiao /usr/local/bin/queqiaod provider set-user-limits \
+  --state /var/lib/queqiao/provider \
+  --user alice \
+  --max-flows 0
+```
+
+A limit you do not name keeps its current value. The gateway re-reads
+authorization state every second, so a corrected limit admits new flows within
+a second, without a restart and without disturbing open connections.
+
+Refusals are counted at `queqiao_account_admission_refused_total` by reason —
+`flow_limit`, `client_limit`, `unauthorized` — and logged as `msg="account flow
+open refused"` naming the account and device. Check those first when a user
+reports that some sites work and others do not.
 
 Create a one-time invitation and deliver the single printed URI through an
 authenticated private channel:
