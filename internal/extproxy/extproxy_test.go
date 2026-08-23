@@ -133,3 +133,90 @@ func TestInvalidAddressesAreRejected(t *testing.T) {
 		t.Fatal("a malformed listen address was accepted")
 	}
 }
+
+func planFor(t *testing.T, kind Kind) Launch {
+	t.Helper()
+	launch, err := Plan(Config{
+		Kind: kind, Binary: "/usr/local/bin/sing-box",
+		ServerListen: "127.0.0.1:11111", ClientRemote: "127.0.0.1:22222",
+		SOCKSListen:     "127.0.0.1:33333",
+		CertificatePath: "/tmp/cert.pem", KeyPath: "/tmp/key.pem",
+		WorkDir: "/tmp/bench",
+	})
+	if err != nil {
+		t.Fatalf("plan %s: %v", kind, err)
+	}
+	return launch
+}
+
+// A stack answers two questions -- what to write and what to run -- and the
+// harness owns everything else. That split is the contract a new transport is
+// added against, so it is checked here rather than left to be discovered by
+// whoever adds the next one.
+func TestEveryRegisteredStackPlansBothSides(t *testing.T) {
+	kinds := Kinds()
+	if len(kinds) == 0 {
+		t.Fatal("no stacks are registered")
+	}
+	for _, kind := range kinds {
+		t.Run(string(kind), func(t *testing.T) {
+			if transport := kind.Transport(); transport != "udp" && transport != "tcp" {
+				t.Fatalf("transport = %q, want udp or tcp", transport)
+			}
+			if kind.Implementation() == "" {
+				t.Fatal("no implementation is named, so a caller cannot be told what to install")
+			}
+			launch := planFor(t, kind)
+			if launch.ServerBinary != "/usr/local/bin/sing-box" || launch.ClientBinary != "/usr/local/bin/sing-box" {
+				t.Fatalf("binaries = %q and %q, want the configured one on both sides",
+					launch.ServerBinary, launch.ClientBinary)
+			}
+			if len(launch.ServerArgs) == 0 || len(launch.ClientArgs) == 0 {
+				t.Fatalf("launch = %+v, want arguments for both sides", launch)
+			}
+			// Every file a side is told to read must be one the plan also
+			// writes, or the process starts against nothing.
+			for _, args := range [][]string{launch.ServerArgs, launch.ClientArgs} {
+				for _, arg := range args {
+					if !strings.HasPrefix(arg, "/tmp/bench/") {
+						continue
+					}
+					if _, ok := launch.Files[arg]; !ok {
+						t.Fatalf("%q is passed to a process but never written: %v", arg, launch.Files)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The two errors a contributor meets first must say what is wrong.
+func TestPlanRejectsAnUnknownStackAndAMissingBinary(t *testing.T) {
+	if _, err := Plan(Config{Kind: "kcptun", Binary: "/bin/true", WorkDir: "/tmp"}); err == nil {
+		t.Fatal("an unregistered stack was planned")
+	} else if !strings.Contains(err.Error(), "kcptun") {
+		t.Fatalf("error = %v, want the stack named", err)
+	}
+	if _, err := Plan(Config{Kind: TUIC, WorkDir: "/tmp"}); err == nil {
+		t.Fatal("a stack was planned with no binary")
+	} else if !strings.Contains(err.Error(), "sing-box") {
+		t.Fatalf("error = %v, want the implementation named", err)
+	}
+}
+
+// Kinds is what a caller lists stacks from, so its order must not depend on
+// map iteration.
+func TestKindsIsStablyOrdered(t *testing.T) {
+	first := Kinds()
+	for i := 0; i < 10; i++ {
+		got := Kinds()
+		if len(got) != len(first) {
+			t.Fatalf("Kinds() length changed: %v then %v", first, got)
+		}
+		for j := range got {
+			if got[j] != first[j] {
+				t.Fatalf("Kinds() order changed: %v then %v", first, got)
+			}
+		}
+	}
+}
