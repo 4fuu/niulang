@@ -107,7 +107,9 @@ Prometheus `/metrics` names. They cover:
 - delivery, ACK, send, pacing, and maximum-bandwidth estimates;
 - congestion window, bytes in flight, controller round/mode/recovery;
 - lanes, failures, replacements, reinjections, fallbacks, and timeouts;
-- transient local UDP send errors absorbed into QUIC loss recovery; and
+- transient local UDP send errors absorbed into QUIC loss recovery;
+- flow telemetry entries expired because nothing refreshed them, which is how
+  a round-trip aggregate frozen at a stale constant announces itself; and
 - the controller's measured erasure floor, sampler diagnostics, and class
   transitions.
 

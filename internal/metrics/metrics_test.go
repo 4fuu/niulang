@@ -143,3 +143,60 @@ func TestNilRegistryIsSafe(t *testing.T) {
 	registry.ReplayBytes(10)
 	registry.BulkIsolated()
 }
+
+// The exported round-trip estimate is a maximum over per-flow observations, so
+// an entry that stops being refreshed and is never removed holds the estimate
+// at whatever the path used to be for as long as the process lives. Expiring
+// it is what keeps the aggregate a measurement rather than a record high.
+func TestSnapshotExpiresQUICObservationsNobodyRefreshes(t *testing.T) {
+	registry := New()
+	now := time.Now()
+	registry.clock = func() time.Time { return now }
+
+	registry.ObserveQUIC(1, QUICObservation{Lanes: 2, LatestRTT: 900 * time.Millisecond, SmoothedRTT: 800 * time.Millisecond})
+	now = now.Add(quicObservationTTL + time.Second)
+	registry.ObserveQUIC(2, QUICObservation{Lanes: 1, LatestRTT: 320 * time.Millisecond, SmoothedRTT: 300 * time.Millisecond})
+
+	got := registry.Snapshot()
+	if got.QUICSmoothedRTT != 300*time.Millisecond || got.QUICLatestRTT != 320*time.Millisecond {
+		t.Fatalf("stale observation still steers the aggregate: smoothed=%s latest=%s", got.QUICSmoothedRTT, got.QUICLatestRTT)
+	}
+	if got.QUICLanes != 1 {
+		t.Fatalf("QUIC lanes = %d, want 1", got.QUICLanes)
+	}
+	if got.QUICObservationsExpired != 1 {
+		t.Fatalf("expired observations = %d, want 1", got.QUICObservationsExpired)
+	}
+
+	// The expired entry is gone rather than re-examined on every scrape, and
+	// the counter reports the one expiry instead of counting it again.
+	registry.telemetryMu.Lock()
+	remaining := len(registry.quicFlows)
+	registry.telemetryMu.Unlock()
+	if remaining != 1 {
+		t.Fatalf("registry retains %d observations, want 1", remaining)
+	}
+	if again := registry.Snapshot(); again.QUICObservationsExpired != 1 {
+		t.Fatalf("expired observations = %d on the second scrape, want 1", again.QUICObservationsExpired)
+	}
+
+	recorder := httptest.NewRecorder()
+	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := recorder.Body.String(); !strings.Contains(body, "queqiao_quic_observations_expired_total 1") {
+		t.Fatalf("metrics output is missing the expiry counter: %s", body)
+	}
+}
+
+// A flow that keeps publishing keeps its entry, however long it lives.
+func TestSnapshotKeepsRefreshedQUICObservations(t *testing.T) {
+	registry := New()
+	now := time.Now()
+	registry.clock = func() time.Time { return now }
+	for i := 0; i < 10; i++ {
+		registry.ObserveQUIC(1, QUICObservation{Lanes: 1, SmoothedRTT: 250 * time.Millisecond})
+		now = now.Add(quicObservationTTL - time.Second)
+		if got := registry.Snapshot(); got.QUICSmoothedRTT != 250*time.Millisecond || got.QUICObservationsExpired != 0 {
+			t.Fatalf("refreshed observation expired after %d intervals: %+v", i, got)
+		}
+	}
+}

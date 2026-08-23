@@ -900,6 +900,7 @@ func logPerformanceSnapshot(logger *slog.Logger, s metrics.Snapshot, interval ti
 		slog.Uint64("queqiao_quic_packets_sent", s.QUICPacketsSent),
 		slog.Uint64("queqiao_quic_packets_received", s.QUICPacketsReceived),
 		slog.Uint64("queqiao_quic_packets_lost", s.QUICPacketsLost),
+		slog.Uint64("queqiao_quic_observations_expired_total", s.QUICObservationsExpired),
 		slog.String("queqiao_quic_controller_kind", s.QUICControllerKind),
 		slog.Uint64("queqiao_quic_controller_mode", uint64(s.QUICControllerMode)),
 		slog.Uint64("queqiao_quic_controller_max_bandwidth_bytes_per_second", s.QUICControllerMaxBandwidth),

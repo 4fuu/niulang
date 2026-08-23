@@ -61,8 +61,33 @@ type Registry struct {
 	// event, while this is a peer whose build disagrees about the wire, and the
 	// two need different responses from whoever is on call.
 	peerProtocolViolations atomic.Uint64
-	telemetryMu            sync.Mutex
-	quicFlows              map[uint64]QUICObservation
+	// quicObservationsExpired counts per-flow QUIC telemetry entries dropped
+	// because nothing refreshed them within quicObservationTTL. The aggregate
+	// below reports round-trip time as a maximum, so an entry that is never
+	// refreshed and never removed pins the exported estimate at whatever it
+	// last held for as long as the process lives. A rising count means some
+	// flow stopped publishing without removing its entry, and it is the only
+	// warning an operator gets that the aggregate is being held up by a
+	// measurement that is no longer being taken.
+	quicObservationsExpired atomic.Uint64
+	telemetryMu             sync.Mutex
+	quicFlows               map[uint64]quicObservation
+	// clock is the time source for observation freshness. Tests replace it;
+	// production leaves it nil and reads the wall clock.
+	clock func() time.Time
+}
+
+// quicObservationTTL is how long one flow's QUIC telemetry keeps contributing
+// to the process aggregate without being refreshed. A live flow republishes
+// every second, so this is generous by an order of magnitude; its purpose is
+// to bound the damage of an entry that is never refreshed again rather than to
+// expire a busy flow that was briefly descheduled.
+const quicObservationTTL = 15 * time.Second
+
+// quicObservation is one flow's telemetry with the time it was recorded.
+type quicObservation struct {
+	QUICObservation
+	updated time.Time
 }
 
 type Snapshot struct {
@@ -94,6 +119,9 @@ type Snapshot struct {
 	QUICControllerMinRTT                                          time.Duration
 	QUICControllerErasureFloor                                    float64
 	QUICControllerInRecovery                                      bool
+	// QUICObservationsExpired counts flow telemetry entries dropped because
+	// they stopped being refreshed. See quicObservationsExpired.
+	QUICObservationsExpired uint64
 }
 
 // QUICObservation is a point-in-time aggregate over the lanes of one logical
@@ -132,7 +160,16 @@ type QUICObservation struct {
 	ControllerInRecovery       bool
 }
 
-func New() *Registry { return &Registry{quicFlows: make(map[uint64]QUICObservation)} }
+func New() *Registry { return &Registry{quicFlows: make(map[uint64]quicObservation)} }
+
+// now reads the registry's time source. A zero-value Registry is a supported
+// "metrics disabled" construction, so this must work without New.
+func (r *Registry) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
 
 func (r *Registry) FlowStarted() { r.activeFlows.Add(1); r.flowsStarted.Add(1) }
 
@@ -226,11 +263,12 @@ func (r *Registry) ObserveQUIC(key uint64, o QUICObservation) {
 	if o.SmoothedRTT < 0 {
 		o.SmoothedRTT = 0
 	}
+	now := r.now()
 	r.telemetryMu.Lock()
 	if r.quicFlows == nil {
-		r.quicFlows = make(map[uint64]QUICObservation)
+		r.quicFlows = make(map[uint64]quicObservation)
 	}
-	r.quicFlows[key] = o
+	r.quicFlows[key] = quicObservation{QUICObservation: o, updated: now}
 	r.telemetryMu.Unlock()
 }
 
@@ -264,6 +302,8 @@ func (r *Registry) Snapshot() Snapshot {
 	for i := range s.ClassTransitions {
 		s.ClassTransitions[i] = r.classTransitions[i].Load()
 	}
+	now := r.now()
+	var expired uint64
 	r.telemetryMu.Lock()
 	var quicLanes int64
 	var latestRTT, smoothedRTT time.Duration
@@ -278,7 +318,17 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerMinRTT time.Duration
 	var controllerErasureFloor float64
 	var controllerRecovery bool
-	for _, o := range r.quicFlows {
+	for key, entry := range r.quicFlows {
+		// An entry nobody refreshes is not a measurement of anything. Because
+		// the round-trip aggregate below is a maximum, keeping one would pin
+		// the exported estimate at a value the path stopped having, and every
+		// live flow measuring a faster path would be invisible underneath it.
+		if now.Sub(entry.updated) > quicObservationTTL {
+			delete(r.quicFlows, key)
+			expired++
+			continue
+		}
+		o := entry.QUICObservation
 		quicLanes += int64(o.Lanes)
 		if o.LatestRTT > latestRTT {
 			latestRTT = o.LatestRTT
@@ -342,6 +392,10 @@ func (r *Registry) Snapshot() Snapshot {
 		}
 	}
 	r.telemetryMu.Unlock()
+	if expired > 0 {
+		r.quicObservationsExpired.Add(expired)
+	}
+	s.QUICObservationsExpired = r.quicObservationsExpired.Load()
 	s.QUICLanes = quicLanes
 	s.QUICLatestRTT = latestRTT
 	s.QUICSmoothedRTT = smoothedRTT
@@ -416,6 +470,10 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_quic_packets_sent %d\n", s.QUICPacketsSent)
 	fmt.Fprintf(w, "queqiao_quic_packets_received %d\n", s.QUICPacketsReceived)
 	fmt.Fprintf(w, "queqiao_quic_packets_lost %d\n", s.QUICPacketsLost)
+	// A rising expiry count means some flow's telemetry stopped being
+	// refreshed without being removed. The RTT values above are maxima, so
+	// that is the failure mode which freezes them at a stale constant.
+	fmt.Fprintf(w, "queqiao_quic_observations_expired_total %d\n", s.QUICObservationsExpired)
 	if s.QUICControllerKind != "" {
 		fmt.Fprintf(w, "queqiao_quic_controller_kind{kind=\"%s\"} 1\n", s.QUICControllerKind)
 	}
