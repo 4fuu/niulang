@@ -3,6 +3,7 @@ package extproxy
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -35,8 +36,13 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-func startProcess(ctx context.Context, binary string, args ...string) (*process, error) {
+func startProcess(ctx context.Context, binary string, env []string, args ...string) (*process, error) {
 	cmd := exec.Command(binary, args...)
+	if len(env) > 0 {
+		// Added to the inherited environment rather than replacing it: an
+		// implementation still needs PATH, HOME and the rest to run at all.
+		cmd.Env = append(os.Environ(), env...)
+	}
 	logs := &lockedBuffer{}
 	cmd.Stdout = logs
 	cmd.Stderr = logs

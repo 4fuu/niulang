@@ -68,6 +68,9 @@ type options struct {
 	latency      bool
 	interactive  bool
 	singBox      string
+	kcptunClient string
+	kcptunServer string
+	kcp          extproxy.KCPParams
 	jsonOut      string
 	gate         bool
 	contend      string
@@ -108,6 +111,17 @@ func run(args []string) error {
 	fs.BoolVar(&opts.latency, "latency", false, "also measure small-request latency")
 	fs.BoolVar(&opts.interactive, "interactive", false, "issue small requests during the bulk transfer and report their latency")
 	fs.StringVar(&opts.singBox, "sing-box", "", "path to a sing-box binary, enabling the tuic and hysteria2 stacks")
+	fs.StringVar(&opts.kcptunClient, "kcptun-client", "", "path to a kcptun client binary, enabling the kcptun stack")
+	fs.StringVar(&opts.kcptunServer, "kcptun-server", "", "path to a kcptun server binary, which kcptun ships separately from its client")
+	// A fixed code rate is chosen in advance rather than measured, so it is
+	// the parameter a kcptun comparison has to be swept over rather than the
+	// one it can leave at a default. The rest are here for the same reason:
+	// an unstated window is an unreproducible measurement.
+	fs.StringVar(&opts.kcp.Mode, "kcptun-mode", "", "kcptun latency preset: normal, fast, fast2 or fast3 (default fast)")
+	fs.IntVar(&opts.kcp.DataShards, "kcptun-datashard", 0, "kcptun FEC data shards (default 10)")
+	fs.IntVar(&opts.kcp.ParityShards, "kcptun-parityshard", 0, "kcptun FEC parity shards, the fixed code rate to sweep (default 3)")
+	fs.IntVar(&opts.kcp.SendWindow, "kcptun-sndwnd", 0, "kcptun send window in packets (default 128)")
+	fs.IntVar(&opts.kcp.ReceiveWindow, "kcptun-rcvwnd", 0, "kcptun receive window in packets (default 512)")
 	fs.StringVar(&opts.jsonOut, "json", "", "also write the full result set to this path as JSON")
 	fs.StringVar(&opts.contend, "contend", "", "two stacks to run concurrently on one shared bottleneck, e.g. queqiao,baseline; reports each one's share of the link")
 	fs.BoolVar(&opts.gate, "gate", false, "exit non-zero when queqiao is worse than the reference beyond --tolerance")
@@ -577,12 +591,10 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			h.Close()
 			return nil, fmt.Errorf("stack %q is not carried by the UDP path emulator", stack)
 		}
-		if opts.singBox == "" {
+		clientBinary, serverBinary, err := externalBinaries(kind, opts)
+		if err != nil {
 			h.Close()
-			// The registry says which implementation provides the stack, so a
-			// transport added later asks for its own binary rather than for
-			// the one the first four happened to use.
-			return nil, fmt.Errorf("stack %q requires a %s binary (--sing-box)", stack, kind.Implementation())
+			return nil, err
 		}
 		// The third-party implementation needs its TLS material on disk, and
 		// the SOCKS listener has to be free for it to bind itself.
@@ -597,6 +609,20 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			_ = os.RemoveAll(workDir)
 			return nil, err
 		}
+		// A tunnel stack forwards a port rather than proxying, so the harness
+		// runs the SOCKS5 endpoint it forwards to. It sits beyond the
+		// emulator, so its own dial is loopback and is not measured.
+		socksTarget := ""
+		if kind.NeedsSOCKSTarget() {
+			target, err := extproxy.StartSOCKSTarget(ctx)
+			if err != nil {
+				h.Close()
+				_ = os.RemoveAll(workDir)
+				return nil, err
+			}
+			socksTarget = target.Address()
+			h.closes = append(h.closes, func() { _ = target.Close() })
+		}
 		// The external implementation binds these itself, so the harness has to
 		// release the addresses it reserved. Without this the server silently
 		// fails to bind and every request fails at SOCKS with a general error.
@@ -605,10 +631,11 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		socksAddr := h.socks
 		_ = socksListener.Close()
 		pair, err := extproxy.Start(ctx, extproxy.Config{
-			Kind: kind, Binary: opts.singBox,
+			Kind: kind, Binary: clientBinary, ServerBinary: serverBinary,
 			ServerListen: serverAddr, ClientRemote: relay.LocalAddr(),
 			SOCKSListen: socksAddr, CertificatePath: certPath, KeyPath: keyPath,
 			Congestion: externalCongestion(opts.congestion), WorkDir: workDir,
+			SOCKSTarget: socksTarget, KCP: opts.kcp,
 		})
 		if err != nil {
 			h.Close()
@@ -995,12 +1022,38 @@ func writeCertificateFiles(dir string) (certPath, keyPath string, err error) {
 	return certPath, keyPath, nil
 }
 
+// externalBinaries picks the programs one external stack needs, and says which
+// flag is missing when it has not been given them.
+//
+// The registry names the implementation, so a stack added later asks for its
+// own binary rather than for the one the first four happened to use, and an
+// implementation shipping one program per side asks for both.
+func externalBinaries(kind extproxy.Kind, opts options) (client, server string, err error) {
+	switch implementation := kind.Implementation(); implementation {
+	case "sing-box":
+		if opts.singBox == "" {
+			return "", "", fmt.Errorf("stack %q requires a sing-box binary (--sing-box)", kind)
+		}
+		return opts.singBox, "", nil
+	case "kcptun":
+		if opts.kcptunClient == "" || opts.kcptunServer == "" {
+			return "", "", fmt.Errorf("stack %q requires --kcptun-client and --kcptun-server: kcptun ships one program per side", kind)
+		}
+		return opts.kcptunClient, opts.kcptunServer, nil
+	case "":
+		return "", "", fmt.Errorf("stack %q is not a transport this benchmark knows", kind)
+	default:
+		return "", "", fmt.Errorf("stack %q needs a %s binary, and this benchmark has no flag for one", kind, implementation)
+	}
+}
+
 // startTCPStack runs a stream-based transport over the TCP relay. Loss is not
 // available there: a userspace relay carries a byte stream and cannot drop a
 // segment, so the caller is told rather than given a silently lossless result.
 func startTCPStack(ctx context.Context, kind extproxy.Kind, opts options, pathCfg pathsim.Config, logger *slog.Logger) (*harness, error) {
-	if opts.singBox == "" {
-		return nil, fmt.Errorf("stack %q requires a %s binary (--sing-box)", kind, kind.Implementation())
+	clientBinary, serverBinary, err := externalBinaries(kind, opts)
+	if err != nil {
+		return nil, err
 	}
 	if pathCfg.LossRate > 0 || pathCfg.UpstreamLossRate > 0 {
 		return nil, fmt.Errorf("stack %q is TCP based and cannot be measured under emulated loss; "+
@@ -1042,10 +1095,10 @@ func startTCPStack(ctx context.Context, kind extproxy.Kind, opts options, pathCf
 		return nil, err
 	}
 	pair, err := extproxy.Start(ctx, extproxy.Config{
-		Kind: kind, Binary: opts.singBox,
+		Kind: kind, Binary: clientBinary, ServerBinary: serverBinary,
 		ServerListen: serverAddr, ClientRemote: relay.LocalAddr(),
 		SOCKSListen: socksAddr, CertificatePath: certPath, KeyPath: keyPath,
-		WorkDir: workDir,
+		WorkDir: workDir, KCP: opts.kcp,
 	})
 	if err != nil {
 		h.Close()
