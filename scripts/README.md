@@ -36,6 +36,25 @@ go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
 ./scripts/check_gosec.py gosec.json .
 ```
 
+## Changelog assembly
+
+`changelog.py` keeps `CHANGELOG.md` out of feature branches. Each user-visible
+change adds one file to `changelog.d/`, so two branches never write the same
+lines and a merge has nothing to resolve; the released file is assembled from
+those files when a version is cut.
+
+```sh
+./scripts/changelog.py new fixed provider-unit-bind-capability
+./scripts/changelog.py check                       # what CI runs
+./scripts/changelog.py preview                     # the pending section
+./scripts/changelog.py release --version v0.1.2    # cut it, at release time
+```
+
+`check` rejects an unknown category, a malformed filename, an empty entry, CRLF,
+a hand-written list marker, and prose that would exceed 80 columns once the
+bullet is rendered. `release` refuses a version already in the file and an empty
+pending set. See [`docs/RELEASING.md`](../docs/RELEASING.md).
+
 ## Public-history secret scan
 
 `scan_history_secrets.sh` downloads a pinned, checksum-verified Gitleaks binary,

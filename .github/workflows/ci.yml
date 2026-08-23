@@ -58,6 +58,34 @@ jobs:
             echo "not gofmt'd:"; echo "$unformatted"; exit 1
           fi
 
+  # Changelog entries are one file per change in changelog.d/, assembled into
+  # CHANGELOG.md only at release time. Nothing else writes that file, which is
+  # what stops two branches conflicting over the same list every time both of
+  # them describe a user-visible change.
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: pending entries are well formed
+        run: ./scripts/changelog.py check
+      - name: CHANGELOG.md is assembled, not edited
+        if: >-
+          github.event_name == 'pull_request' &&
+          !contains(github.event.pull_request.labels.*.name, 'changelog')
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if git diff --quiet "origin/${BASE_REF}...HEAD" -- CHANGELOG.md; then
+            exit 0
+          fi
+          echo "CHANGELOG.md is assembled from changelog.d/ at release time."
+          echo "Describe this change in its own file instead:"
+          echo "  ./scripts/changelog.py new <category> <slug>"
+          echo "A pull request that means to edit it carries the 'changelog' label."
+          exit 1
+
   analysis:
     runs-on: ubuntu-latest
     steps:

@@ -33,6 +33,7 @@ go test -short -timeout 20m ./...
 go vet ./...
 test -z "$(gofmt -l .)"
 python3 -m unittest discover -s scripts -p 'test_*.py'
+./scripts/changelog.py check
 go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -checks=all,-U1000 ./...
 ```
 
@@ -64,6 +65,31 @@ Keep changes scoped and explain how they were checked. Preserve failed and
 incomplete measurements rather than silently dropping them. Never commit
 credentials, private keys, active host configuration, packet captures with user
 traffic, or reports containing private infrastructure details.
+
+### Changelog entries
+
+Do not edit `CHANGELOG.md`. It is assembled at release time, and a branch that
+writes to it conflicts with every other branch that also did. A user-visible
+change adds one file to [`changelog.d/`](changelog.d/) instead:
+
+```sh
+./scripts/changelog.py new fixed provider-unit-bind-capability
+./scripts/changelog.py preview   # what the next release will say
+```
+
+The file is named `<slug>.<category>.md` for one of `added`, `changed`,
+`deprecated`, `removed`, `fixed`, or `security`, and holds the entry as prose
+wrapped at 78 columns with no leading `- `. Two pull requests never write the
+same file, so there is nothing to resolve when both merge. A change with no
+user-visible effect — a refactor, a test, internal documentation — needs no
+file. CI checks the pending files and rejects a branch that edits
+`CHANGELOG.md`. Cutting a release, or deliberately correcting text that already
+shipped, is what the `changelog` label on a pull request is for.
+
+This applies to generated and agent-authored branches too. Nothing in this
+repository writes `CHANGELOG.md` except `./scripts/changelog.py release`, and a
+released section is history: appending to it after its version has shipped is
+the mistake this layout exists to prevent.
 
 For security vulnerabilities, follow [`SECURITY.md`](SECURITY.md) and report
 privately instead of opening a public issue or pull request.
