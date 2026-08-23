@@ -41,7 +41,19 @@ type Registry struct {
 	udpRescueFailures      atomic.Uint64
 	completionTimeouts     atomic.Uint64
 	flowTimeouts           atomic.Uint64
-	classTransitions       [3]atomic.Uint64
+	// The authorization counters below describe the gateway's own state
+	// rather than any flow. A store that cannot be re-read leaves the last
+	// snapshot in force, which keeps established devices connecting while
+	// every enrollment fails - a split that looks healthy from the outside
+	// and is invisible without these.
+	authorizationRefreshFailures     atomic.Uint64
+	authorizationReloads             atomic.Uint64
+	authorizationConsecutiveFailures atomic.Uint64
+	// authorizationLastGoodUnix is exported as a timestamp rather than an age
+	// so the value does not depend on when it was scraped; the age is
+	// time() - metric, the way process_start_time_seconds is used.
+	authorizationLastGoodUnix atomic.Int64
+	classTransitions          [3]atomic.Uint64
 	// The rescue window is dropped rather than allowed to throttle the
 	// application. That trade has to be visible: a flow that has evicted part
 	// of its window will fail rather than recover if its lane dies, so a
@@ -200,6 +212,9 @@ type Snapshot struct {
 	UDPAssociationReconnects, UDPAssociationRescueFailures        uint64
 	CompletionTimeouts                                            uint64
 	FlowTimeouts                                                  uint64
+	AuthorizationRefreshFailures, AuthorizationReloads            uint64
+	AuthorizationConsecutiveRefreshFailures                       uint64
+	AuthorizationLastGoodUnix                                     int64
 	ClassTransitions                                              [3]uint64
 	BulkIsolations, Reinjections                                  uint64
 	PeerProtocolViolations                                        uint64
@@ -367,6 +382,27 @@ func (r *Registry) PeerProtocolViolation() { r.peerProtocolViolations.Add(1) }
 
 func (r *Registry) CompletionTimeout() { r.completionTimeouts.Add(1) }
 func (r *Registry) FlowTimeout()       { r.flowTimeouts.Add(1) }
+
+// AuthorizationRefreshFailed records one failed attempt to re-read the
+// authorization store, carrying how many have now failed in a row so a chronic
+// outage is distinguishable from a single missed tick.
+func (r *Registry) AuthorizationRefreshFailed(consecutive uint64) {
+	r.authorizationRefreshFailures.Add(1)
+	r.authorizationConsecutiveFailures.Store(consecutive)
+}
+
+// AuthorizationRefreshed records a successful read. lastGood is when the
+// snapshot now in force was read, and reloaded reports whether it differed
+// from the one it replaced.
+func (r *Registry) AuthorizationRefreshed(lastGood time.Time, reloaded bool) {
+	r.authorizationConsecutiveFailures.Store(0)
+	if !lastGood.IsZero() {
+		r.authorizationLastGoodUnix.Store(lastGood.Unix())
+	}
+	if reloaded {
+		r.authorizationReloads.Add(1)
+	}
+}
 func (r *Registry) ClassTransition(class int) {
 	if class >= 0 && class < len(r.classTransitions) {
 		r.classTransitions[class].Add(1)
@@ -410,17 +446,21 @@ func (r *Registry) Snapshot() Snapshot {
 		FlowsCompleted: int64(r.flowsCompleted.Load()), FlowsFailed: int64(r.flowsFailed.Load()),
 		BytesUp: r.bytesUp.Load(), BytesDown: r.bytesDown.Load(), LaneFailures: r.laneFailures.Load(),
 		LaneReplacements: r.laneReplacements.Load(), Fallbacks: r.fallbacks.Load(),
-		UDPPathUnavailable:            r.udpPathUnavailable.Load(),
-		EndpointTransportRaceFailures: r.endpointRaceFailures.Load(),
-		TransientUDPSendErrors:        r.transientUDPSendErrors.Load(),
-		UDPAssociationReconnects:      r.udpReconnects.Load(),
-		UDPAssociationRescueFailures:  r.udpRescueFailures.Load(),
-		CompletionTimeouts:            r.completionTimeouts.Load(),
-		FlowTimeouts:                  r.flowTimeouts.Load(),
-		BulkIsolations:                r.bulkIsolations.Load(),
-		Reinjections:                  r.reinjections.Load(),
-		PeerProtocolViolations:        r.peerProtocolViolations.Load(),
-		ReplayBytesInUse:              r.replayBytesInUse.Load(),
+		UDPPathUnavailable:                      r.udpPathUnavailable.Load(),
+		EndpointTransportRaceFailures:           r.endpointRaceFailures.Load(),
+		TransientUDPSendErrors:                  r.transientUDPSendErrors.Load(),
+		UDPAssociationReconnects:                r.udpReconnects.Load(),
+		UDPAssociationRescueFailures:            r.udpRescueFailures.Load(),
+		CompletionTimeouts:                      r.completionTimeouts.Load(),
+		FlowTimeouts:                            r.flowTimeouts.Load(),
+		AuthorizationRefreshFailures:            r.authorizationRefreshFailures.Load(),
+		AuthorizationReloads:                    r.authorizationReloads.Load(),
+		AuthorizationConsecutiveRefreshFailures: r.authorizationConsecutiveFailures.Load(),
+		AuthorizationLastGoodUnix:               r.authorizationLastGoodUnix.Load(),
+		BulkIsolations:                          r.bulkIsolations.Load(),
+		Reinjections:                            r.reinjections.Load(),
+		PeerProtocolViolations:                  r.peerProtocolViolations.Load(),
+		ReplayBytesInUse:                        r.replayBytesInUse.Load(),
 	}
 	for i := range s.ClassTransitions {
 		s.ClassTransitions[i] = r.classTransitions[i].Load()
@@ -583,6 +623,15 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_udp_association_rescue_failures_total %d\n", s.UDPAssociationRescueFailures)
 	fmt.Fprintf(w, "queqiao_completion_timeouts_total %d\n", s.CompletionTimeouts)
 	fmt.Fprintf(w, "queqiao_flow_timeouts_total %d\n", s.FlowTimeouts)
+	// A non-zero consecutive count means the gateway is enforcing a snapshot
+	// it can no longer re-read: established devices keep working while every
+	// enrollment fails. Alert on the consecutive count, and use
+	// time() - queqiao_authorization_last_good_timestamp_seconds for the age
+	// of the rules actually in force.
+	fmt.Fprintf(w, "queqiao_authorization_refresh_failures_total %d\n", s.AuthorizationRefreshFailures)
+	fmt.Fprintf(w, "queqiao_authorization_reloads_total %d\n", s.AuthorizationReloads)
+	fmt.Fprintf(w, "queqiao_authorization_consecutive_refresh_failures %d\n", s.AuthorizationConsecutiveRefreshFailures)
+	fmt.Fprintf(w, "queqiao_authorization_last_good_timestamp_seconds %d\n", s.AuthorizationLastGoodUnix)
 	// A rising unreplayable count means lane rescue is no longer available for
 	// the affected flows: their rescue window was dropped to keep the
 	// application moving, so a lane failure now fails the flow.
