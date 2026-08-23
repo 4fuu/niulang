@@ -173,6 +173,16 @@ func readStoreData(path string) (storeData, error) {
 	return decoded, nil
 }
 
+// ErrStoreUnavailable marks a failure to reach the authorization store rather
+// than a decision the store made.
+//
+// The two are indistinguishable to a caller that sees only an error string,
+// but they belong to different people. A rejected invitation is the enrolling
+// user's problem; a store that cannot be opened is the operator's. Reporting
+// the second as the first is how a gateway outage reaches an administrator as
+// a user complaining about a bad invitation.
+var ErrStoreUnavailable = errors.New("authorization store is unavailable")
+
 // beginWrite serializes writers across both goroutines and provider CLI
 // processes, then refreshes from disk before mutation. This prevents two
 // administrators, enrollment, and a running gateway from silently replacing
@@ -180,7 +190,7 @@ func readStoreData(path string) (storeData, error) {
 func (s *Store) beginWrite(initialize bool) (func(), error) {
 	unlockFile, err := lockFile(s.path + ".lock")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
 	s.mu.Lock()
 	release := func() {
@@ -193,7 +203,7 @@ func (s *Store) beginWrite(initialize bool) (func(), error) {
 	decoded, err := readStoreData(s.path)
 	if err != nil {
 		release()
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
 	s.data = decoded
 	return release, nil
@@ -552,7 +562,7 @@ func (s *Store) saveLocked() error {
 		return fmt.Errorf("encode authorization store: %w", err)
 	}
 	if err := writeFileAtomic(s.path, append(data, '\n'), 0o600); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 	}
 	return nil
 }

@@ -159,24 +159,66 @@ type EnrollmentService struct {
 	Provider *Provider
 }
 
-func (s EnrollmentService) Serve(conn io.ReadWriter) error {
+// EnrollmentOutcome names how an enrollment or renewal attempt ended.
+//
+// The gateway records the outcome; the client is told only the coarse result.
+// Keeping the wire message vague is deliberate: a client that could tell "no
+// such invitation" from "that invitation has expired" would be able to use
+// this endpoint to test tokens. The precise reason belongs in the operator's
+// log, which is the one place it is both safe and useful.
+type EnrollmentOutcome string
+
+const (
+	// EnrollmentAccepted issued a device certificate.
+	EnrollmentAccepted EnrollmentOutcome = "accepted"
+	// EnrollmentMalformed could not parse the request or its key material, so
+	// no invitation was ever consulted.
+	EnrollmentMalformed EnrollmentOutcome = "malformed_request"
+	// EnrollmentRejected reached the store and the store said no. This is the
+	// enrolling user's problem: a wrong, expired, or spent invitation.
+	EnrollmentRejected EnrollmentOutcome = "rejected"
+	// EnrollmentUnavailable never got an answer, because the authorization
+	// store could not be read, locked, or written. This is the operator's
+	// problem and is not a statement about the invitation at all.
+	EnrollmentUnavailable EnrollmentOutcome = "store_unavailable"
+)
+
+// EnrollmentResult reports what an attempt did so the gateway can record it.
+// It accompanies the error rather than replacing it: the wire response is
+// already written by the time Serve returns, and the caller still needs the
+// underlying cause to log.
+//
+// The identifiers are the provider's own, filled in only once the request has
+// been authorized. Nothing the caller chose - the device name above all - is
+// carried into a rejected result, so a stranger cannot write into this
+// gateway's log by attempting enrollments.
+type EnrollmentResult struct {
+	Outcome    EnrollmentOutcome
+	AccountID  string
+	DeviceID   string
+	DeviceName string
+}
+
+func (s EnrollmentService) Serve(conn io.ReadWriter) (EnrollmentResult, error) {
 	if s.Provider == nil || s.Provider.Store == nil {
-		return errors.New("enrollment service is not configured")
+		return EnrollmentResult{Outcome: EnrollmentUnavailable}, errors.New("enrollment service is not configured")
 	}
 	requestBytes, err := readEnrollmentMessage(conn)
 	if err != nil {
-		return err
+		return EnrollmentResult{Outcome: EnrollmentMalformed}, err
 	}
 	var request enrollmentRequest
 	if err := decodeStrictJSON(requestBytes, &request); err != nil {
-		return s.writeError(conn, "invalid enrollment request")
+		return s.fail(conn, EnrollmentMalformed, "invalid enrollment request", err)
 	}
 	if request.Version != InvitationVersion {
-		return s.writeError(conn, "unsupported enrollment version")
+		return s.fail(conn, EnrollmentMalformed, "unsupported enrollment version",
+			fmt.Errorf("enrollment version %d is not %d", request.Version, InvitationVersion))
 	}
 	publicKey, err := base64.RawURLEncoding.DecodeString(request.PublicKey)
 	if err != nil || len(publicKey) != ed25519.PublicKeySize {
-		return s.writeError(conn, "invalid device public key")
+		return s.fail(conn, EnrollmentMalformed, "invalid device public key",
+			errors.New("device public key is not a base64url Ed25519 key"))
 	}
 	now := time.Now()
 	account, device, certificate, err := s.Provider.Store.EnrollDevice(request.Token, request.DeviceName, ed25519.PublicKey(publicKey), now,
@@ -184,7 +226,13 @@ func (s EnrollmentService) Serve(conn io.ReadWriter) error {
 			return s.Provider.IssueDevice(account.ID, device.ID, ed25519.PublicKey(publicKey), now)
 		})
 	if err != nil {
-		return s.writeError(conn, "invitation is invalid, expired, already used, or unavailable")
+		// A store that cannot be reached has not judged this invitation, and
+		// saying otherwise sends the operator's outage to the user as their
+		// mistake. That is the failure this split exists to prevent.
+		if errors.Is(err, ErrStoreUnavailable) {
+			return s.fail(conn, EnrollmentUnavailable, "enrollment is temporarily unavailable", err)
+		}
+		return s.fail(conn, EnrollmentRejected, "invitation is invalid, expired, or already used", err)
 	}
 	response := enrollmentResponse{
 		Version: ProfileVersion, ProviderName: s.Provider.Metadata.Name,
@@ -194,43 +242,73 @@ func (s EnrollmentService) Serve(conn io.ReadWriter) error {
 		AccountID:       account.ID, DeviceID: device.ID,
 		DeviceCertificate: string(certificate), IssuedAt: now.UTC().Format(time.RFC3339),
 	}
-	return writeEnrollmentJSON(conn, response)
+	result := EnrollmentResult{
+		Outcome: EnrollmentAccepted, AccountID: account.ID,
+		DeviceID: device.ID, DeviceName: device.Name,
+	}
+	if err := writeEnrollmentJSON(conn, response); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
-func (s EnrollmentService) writeError(conn io.Writer, message string) error {
+// fail answers the client with a deliberately coarse message and hands the
+// caller the outcome and the real cause to record.
+func (s EnrollmentService) fail(conn io.Writer, outcome EnrollmentOutcome, message string, cause error) (EnrollmentResult, error) {
+	result := EnrollmentResult{Outcome: outcome}
+	// The message goes to the client and the cause goes to the caller. The
+	// previous helper returned the refusal text as the error, which is the
+	// substitution this change removes: it left the caller holding a sentence
+	// written for a stranger instead of the reason it needed to record.
 	if err := writeEnrollmentJSON(conn, enrollmentResponse{Version: ProfileVersion, Error: message}); err != nil {
-		return err
+		return result, err
 	}
-	return errors.New(message)
+	if cause == nil {
+		return result, errors.New(message)
+	}
+	return result, cause
 }
 
 // Renew reissues a short-lived certificate for the same authorized device
 // key and identity. The caller's principal comes from mutual TLS; request data
 // cannot select another account or device.
-func (s EnrollmentService) Renew(conn io.ReadWriter, principal Principal) error {
+func (s EnrollmentService) Renew(conn io.ReadWriter, principal Principal) (EnrollmentResult, error) {
 	if s.Provider == nil || s.Provider.Store == nil {
-		return errors.New("renewal service is not configured")
+		return EnrollmentResult{Outcome: EnrollmentUnavailable}, errors.New("renewal service is not configured")
 	}
 	requestBytes, err := readEnrollmentMessage(conn)
 	if err != nil {
-		return err
+		return EnrollmentResult{Outcome: EnrollmentMalformed}, err
 	}
 	var request renewalRequest
 	if err := decodeStrictJSON(requestBytes, &request); err != nil || request.Version != ProfileVersion {
-		return s.writeError(conn, "invalid renewal request")
+		return s.fail(conn, EnrollmentMalformed, "invalid renewal request", err)
 	}
+	// The principal is established by mutual TLS, so both refusals below name
+	// a device this gateway will not renew rather than anything it could not
+	// reach. They are recorded with the device's own identifiers, which the
+	// certificate proved.
+	renewing := EnrollmentResult{AccountID: principal.AccountID, DeviceID: principal.DeviceID}
 	if principal.ProviderID != s.Provider.Metadata.ProviderID {
-		return s.writeError(conn, "device is not authorized")
+		result, err := s.fail(conn, EnrollmentRejected, "device is not authorized",
+			errors.New("certificate names a different provider"))
+		result.AccountID, result.DeviceID = renewing.AccountID, renewing.DeviceID
+		return result, err
 	}
 	if _, err := s.Provider.Store.Authorize(principal, time.Now()); err != nil {
-		return s.writeError(conn, "device is not authorized")
+		result, failure := s.fail(conn, EnrollmentRejected, "device is not authorized", err)
+		result.AccountID, result.DeviceID = renewing.AccountID, renewing.DeviceID
+		return result, failure
 	}
 	now := time.Now()
 	certificate, err := s.Provider.IssueDevice(principal.AccountID, principal.DeviceID, principal.PublicKey, now)
 	if err != nil {
-		return s.writeError(conn, "unable to renew device identity")
+		result, failure := s.fail(conn, EnrollmentUnavailable, "unable to renew device identity", err)
+		result.AccountID, result.DeviceID = renewing.AccountID, renewing.DeviceID
+		return result, failure
 	}
-	return writeEnrollmentJSON(conn, enrollmentResponse{
+	renewing.Outcome = EnrollmentAccepted
+	return renewing, writeEnrollmentJSON(conn, enrollmentResponse{
 		Version: ProfileVersion, ProviderID: s.Provider.Metadata.ProviderID,
 		GatewayID: s.Provider.Metadata.GatewayID, RootPin: s.Provider.Metadata.RootPin,
 		AccountID: principal.AccountID, DeviceID: principal.DeviceID,

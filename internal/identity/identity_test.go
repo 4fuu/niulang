@@ -410,7 +410,7 @@ func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
 		conn := tls.Server(raw, serverConfig)
 		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 		if conn.Handshake() == nil {
-			_ = service.Serve(conn)
+			_, _ = service.Serve(conn)
 		}
 	}
 	go serveOne()
@@ -502,7 +502,7 @@ func TestRenewalPreservesDeviceAndRejectsRevocation(t *testing.T) {
 		if conn.Handshake() == nil {
 			principal, principalErr := PrincipalFromTLS(conn.ConnectionState())
 			if principalErr == nil {
-				_ = service.Renew(conn, principal)
+				_, _ = service.Renew(conn, principal)
 			}
 		}
 	}
