@@ -79,18 +79,19 @@ type Server struct {
 	accountMu        sync.Mutex
 	accountUsage     map[string]*accountUsage
 	maxObservedLanes atomic.Int64
-	// refusals keeps the lane-join refusal record readable during a storm,
-	// and accountRefusals does the same for account admission. They are
-	// separate logs so a lane-join storm cannot suppress the record of an
-	// account hitting its limit, which is the record an operator is looking
-	// for when a user reports that some sites load and others do not.
-	refusals        refusalLog
-	accountRefusals refusalLog
-	// enrollLog does the same for enrollment and renewal attempts, which are
-	// likewise a stranger's to generate.
-	enrollLog enrollmentLog
-	budget    *limiter.Budget
-	metrics   *metrics.Registry
+	// These keep three kinds of record readable during a storm: lane-join
+	// refusals, account admission refusals, and enrollment or renewal
+	// attempts. All three are a stranger's to generate.
+	//
+	// They are three limiters rather than one because a storm in any of them
+	// must not suppress the others. The record an operator wants when a user
+	// says some sites load and others do not is the account one, and a peer
+	// hammering lane joins would otherwise bury it.
+	refusals        recordLimiter
+	accountRefusals recordLimiter
+	enrollLog       recordLimiter
+	budget          *limiter.Budget
+	metrics         *metrics.Registry
 	// udpRelays holds the relay sockets of UDP associations whose lane died,
 	// so the replacement association keeps the source address the destination
 	// has been talking to.
@@ -870,58 +871,6 @@ func (s *Server) retainCompletedSession(sessionID [16]byte, serverSession *serve
 			s.unregisterSession(sessionID, serverSession)
 		})
 	})
-}
-
-// refusalLogInterval is how often one refusal reason is written to the log
-// while a storm is running. The first refusal of a reason is always written;
-// the ones a storm suppresses are counted and reported with the next.
-const refusalLogInterval = 10 * time.Second
-
-// refusalLog rate-limits the refusal record without keeping per-session state.
-//
-// Per session would read better in a log, but the session identifier in a
-// refused join is the peer's to choose: a map keyed by it is memory whose size
-// a peer decides, and a storm of refusals is exactly when a peer is producing
-// identifiers this endpoint has never seen. Per reason is bounded by the
-// reasons, and the suppressed count keeps the storm's size in the record.
-// The reason is carried as its own label rather than as an enum value so one
-// implementation serves both refusal paths. Both enums are closed at compile
-// time, so the keys stay bounded by the reasons that exist.
-type refusalLog struct {
-	mu         sync.Mutex
-	last       map[string]time.Time
-	suppressed map[string]uint64
-	total      map[string]uint64
-}
-
-// due reports whether this reason should be written now, how many of its
-// refusals went unwritten since the last time it was, and how many there have
-// been in total.
-//
-// The total is there because the suppressed count alone is reported one record
-// late: a storm that stops leaves its tail in a record that never gets
-// written. Measured on a gateway restart, ninety-four refusals produced one
-// record saying it stood for none of them, which is the same silence this
-// logging exists to end. Every record now carries the count for its reason, so
-// one record is the whole story.
-func (l *refusalLog) due(reason fmt.Stringer, now time.Time) (write bool, suppressed, total uint64) {
-	label := reason.String()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.total == nil {
-		l.last = make(map[string]time.Time)
-		l.suppressed = make(map[string]uint64)
-		l.total = make(map[string]uint64)
-	}
-	l.total[label]++
-	total = l.total[label]
-	if last := l.last[label]; !last.IsZero() && now.Sub(last) < refusalLogInterval {
-		l.suppressed[label]++
-		return false, 0, total
-	}
-	suppressed = l.suppressed[label]
-	l.last[label], l.suppressed[label] = now, 0
-	return true, suppressed, total
 }
 
 // refuseLaneJoin answers a lane join with a reset, and says so where an

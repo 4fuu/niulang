@@ -126,7 +126,7 @@ func TestUnauthorizedDeviceIsNotReportedAsALimit(t *testing.T) {
 // A storm of refusals from one account must not suppress the record of a
 // different reason, and must not suppress lane-join records either.
 func TestAccountAndLaneJoinRefusalsDoNotSuppressEachOther(t *testing.T) {
-	var accountLog, laneLog refusalLog
+	var accountLog, laneLog recordLimiter
 	now := time.Now()
 	if write, _, _ := accountLog.due(metrics.AccountRefusalFlowLimit, now); !write {
 		t.Fatal("the first account refusal was not written")
