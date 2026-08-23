@@ -10,6 +10,15 @@ Clash/mihomo integration. It also covers multi-provider clients, service
 operation, upgrades, and rollback. Protocol 1 is the only supported wire
 protocol, so client and server must be upgraded together.
 
+**Download the binary first:** [latest release](https://github.com/bojieli/queqiao/releases/latest), or the
+per-platform links in the
+[README](../README.md#platform-availability). Every release publishes
+reproducible archives for Linux, macOS, and Windows on amd64 and arm64, so a
+normal deployment has no build step; check what you downloaded against the
+release's `SHA256SUMS` before running it. [Build from
+source](../README.md#build-from-source) only to develop or to run somewhere no
+archive covers.
+
 For a quick overview, start with the [repository README](../README.md). Use
 [known limitations](KNOWN-LIMITATIONS.md) to check whether the paired-gateway
 assumption fits your network before exposing a service.

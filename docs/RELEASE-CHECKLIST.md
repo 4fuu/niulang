@@ -43,6 +43,10 @@ exact commit. Production-ready language has additional gates below.
   section has been read as prose, and `changelog.d/` is empty on the candidate
   commit. A shipped release with no section of its own is a release whose
   changes are recorded nowhere.
+- [ ] The download links in `README.md` name the version being released.
+  `python3 -m unittest scripts.test_download_links` fails until they do: it
+  compares them against the newest section in `CHANGELOG.md`, which the step
+  above has just added.
 - [ ] `CHANGELOG.md` and the exact candidate release notes describe v0.1 as a
   paired fixed-egress public preview.
 - [ ] The maintainer has reviewed the candidate artifacts and explicitly
