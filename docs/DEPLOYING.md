@@ -72,6 +72,12 @@ account, remove inherited access with the directory's DACL (for example with
 `icacls`), and grant full control only to that account and `SYSTEM`. Do not keep
 provider state on a shared or synchronizing folder on either platform.
 
+Run the `provider` subcommands as the account that owns that directory, as every
+example below does. Running one under plain `sudo` is no longer destructive -
+state files keep the owner they already had rather than following the caller -
+but the account that owns the state is still the account the gateway reads it
+as, and keeping the two aligned is what makes a misconfiguration obvious.
+
 ### systemd
 
 Install [`deploy/queqiaod.service`](../deploy/queqiaod.service), then create

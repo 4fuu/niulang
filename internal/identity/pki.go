@@ -705,6 +705,12 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close state file: %w", err)
 	}
+	// Carry the existing owner across the replace. The rename installs a new
+	// inode owned by the calling process, which would otherwise move the file
+	// out of reach of the service account that has to read it.
+	if err := adoptOwnerOf(tmpName, path); err != nil {
+		return err
+	}
 	if err := replaceFile(tmpName, path); err != nil {
 		return fmt.Errorf("install state file: %w", err)
 	}
