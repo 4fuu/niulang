@@ -79,8 +79,10 @@ type Server struct {
 	accountMu        sync.Mutex
 	accountSessions  map[string]int
 	maxObservedLanes atomic.Int64
-	budget           *limiter.Budget
-	metrics          *metrics.Registry
+	// refusals keeps the lane-join refusal record readable during a storm.
+	refusals refusalLog
+	budget   *limiter.Budget
+	metrics  *metrics.Registry
 	// udpRelays holds the relay sockets of UDP associations whose lane died,
 	// so the replacement association keeps the source address the destination
 	// has been talking to.
@@ -792,26 +794,101 @@ func (s *Server) retainCompletedSession(sessionID [16]byte, serverSession *serve
 	})
 }
 
+// laneJoinRefusalLogInterval is how often one refusal reason is written to the
+// log while a storm is running. The first refusal of a reason is always
+// written; the ones a storm suppresses are counted and reported with the next.
+const laneJoinRefusalLogInterval = 10 * time.Second
+
+// refusalLog rate-limits the refusal record without keeping per-session state.
+//
+// Per session would read better in a log, but the session identifier in a
+// refused join is the peer's to choose: a map keyed by it is memory whose size
+// a peer decides, and a storm of refusals is exactly when a peer is producing
+// identifiers this endpoint has never seen. Per reason is bounded by the
+// reasons, and the suppressed count keeps the storm's size in the record.
+type refusalLog struct {
+	mu         sync.Mutex
+	last       [metrics.LaneJoinReasons]time.Time
+	suppressed [metrics.LaneJoinReasons]uint64
+}
+
+// due reports whether this reason should be written now, and how many of its
+// refusals went unwritten since the last time it was.
+func (l *refusalLog) due(reason metrics.LaneJoinRefusal, now time.Time) (bool, uint64) {
+	if reason < 0 || reason >= metrics.LaneJoinReasons {
+		return false, 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if last := l.last[reason]; !last.IsZero() && now.Sub(last) < laneJoinRefusalLogInterval {
+		l.suppressed[reason]++
+		return false, 0
+	}
+	suppressed := l.suppressed[reason]
+	l.last[reason], l.suppressed[reason] = now, 0
+	return true, suppressed
+}
+
+// refuseLaneJoin answers a lane join with a reset, and says so where an
+// operator will see it.
+//
+// This used to be a Debug record, which meant a gateway refusing hundreds of
+// session resumes an hour looked completely healthy at the default level: the
+// refusals were only diagnosable from the peer, which is the one place the
+// answer is least useful. A refused join is a flow that is about to fail, so
+// it belongs at the level a failing flow is reported at.
+func (s *Server) refuseLaneJoin(fc *frameConn, sessionID [16]byte, flowID, laneID uint64, reason metrics.LaneJoinRefusal, code session.ResetCode, message string) {
+	s.metrics.LaneJoinRefused(reason)
+	if write, suppressed := s.refusals.due(reason, time.Now()); write {
+		level := slog.LevelInfo
+		if reason == metrics.LaneJoinPrincipalMismatch || reason == metrics.LaneJoinFlowMismatch {
+			// Not a lost session: a peer that authenticated is naming a live
+			// session that is not the one it holds. That is a build
+			// disagreeing about the wire or a peer reaching for identifiers
+			// that route rather than authorize, and neither is routine.
+			level = slog.LevelWarn
+		}
+		s.cfg.Logger.LogAttrs(context.Background(), level, "lane join refused",
+			slog.String("reason", reason.String()),
+			slog.Uint64("lane", laneID),
+			slog.Uint64("flow_id", flowID),
+			slog.Uint64("suppressed", suppressed))
+	}
+	_ = fc.Write(protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID,
+		FlowID: flowID, Class: protocol.ClassBulk,
+	}, Payload: session.ResetPayload(code, message)})
+}
+
 // handleLaneJoinOpen runs only after mutual TLS and exact JOIN validation. It
 // additionally binds the new lane to the principal that created the session;
 // session and flow IDs are routing identifiers, never bearer credentials.
 func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *frameConn, principal identity.Principal, sessionID [16]byte, laneID uint64, open protocol.Frame) {
 	if session.IsZeroSessionID(sessionID) || laneID == 0 || open.Header.FlowID == 0 {
-		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid lane join identity")})
+		s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinInvalidIdentity, session.ResetProtocol, "invalid lane join identity")
 		return
 	}
 	serverSession := s.lookupSession(sessionID)
-	if serverSession == nil || serverSession.flow.flowID != open.Header.FlowID || !samePrincipal(serverSession.principal, principal) {
+	switch {
+	case serverSession == nil:
 		// A rescue arriving after the session is gone is the failure mode that
-		// matters most on a lossy path, and it used to be silent on this side.
-		s.cfg.Logger.Debug("lane join refused: unknown session", "lane", laneID, "known", serverSession != nil)
-		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "unknown session")})
+		// matters most on a lossy path: the peer will spend its whole
+		// replacement grace discovering this answer and then fail the flow.
+		// The three refusals below are kept apart because they send the
+		// operator to different places.
+		s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinUnknownSession, session.ResetProtocol, "unknown session")
+		return
+	case serverSession.flow.flowID != open.Header.FlowID:
+		s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinFlowMismatch, session.ResetProtocol, "unknown session")
+		return
+	case !samePrincipal(serverSession.principal, principal):
+		s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinPrincipalMismatch, session.ResetProtocol, "unknown session")
 		return
 	}
 	kind := transportKindForConn(conn)
 	controlReplacement := open.Header.Flags&protocol.FlagReserveControl != 0
 	if controlReplacement && (!serverSession.flow.reserveControlLane || kind != TransportQUIC) {
-		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetProtocol, "invalid control lane replacement")})
+		s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinInvalidControlReplacement, session.ResetProtocol, "invalid control lane replacement")
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -852,8 +929,8 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 		control: controlReplacement, staged: true,
 	}
 	if err := serverSession.addLane(replacement); err != nil {
-		s.cfg.Logger.Debug("lane join refused: lane unavailable", "lane", laneID, "error", err)
-		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}, Payload: session.ResetPayload(session.ResetFlowLimit, "lane unavailable")})
+		s.cfg.Logger.Debug("lane join admission refused", "lane", laneID, "error", err)
+		s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinLaneUnavailable, session.ResetFlowLimit, "lane unavailable")
 		return
 	}
 	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
