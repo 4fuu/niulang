@@ -82,7 +82,12 @@ QUEQIAOD_ARGS=--state /var/lib/queqiao/provider --listen :443 --transport auto -
 ```
 
 The environment file is a whitespace-separated argument list; do not put a
-state path containing spaces in it. Start and verify the service:
+state path containing spaces in it.
+
+The unit grants `CAP_NET_BIND_SERVICE` and bounds the capability set to it.
+The service account is unprivileged and `NoNewPrivileges=true` blocks acquiring
+a capability after exec, so without that grant a `--listen :443` cannot bind at
+all. Start and verify the service:
 
 ```sh
 sudo systemctl daemon-reload

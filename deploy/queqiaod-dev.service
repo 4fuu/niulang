@@ -12,6 +12,12 @@ ExecStart=/usr/local/bin/queqiaod server --state /var/lib/queqiao/provider --lis
 Restart=on-failure
 RestartSec=2s
 NoNewPrivileges=true
+# A gateway listening on 443 is bound by an unprivileged account, which needs
+# this capability granted at exec: NoNewPrivileges blocks acquiring it any
+# other way. Bounding the set to the single capability the service can use
+# also removes every other capability from its reach.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true

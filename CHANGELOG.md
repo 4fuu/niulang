@@ -92,6 +92,11 @@ remain stricter than semantic versioning alone; see `docs/PROTOCOL.md`.
 
 ### Fixed
 
+- The provider unit now grants `CAP_NET_BIND_SERVICE`. `deploy/queqiaod.service`
+  runs as an unprivileged account with `NoNewPrivileges=true`, so the `--listen
+  :443` the guide recommends could not bind: the capability has to be granted
+  at exec because nothing may acquire it afterwards. The capability bounding
+  set is now that one capability rather than the full set.
 - SOCKS5 UDP associations survive an unreachable destination. Sending to a
   closed UDP port draws an ICMP port-unreachable that the host reports to the
   sender on a later read, and Windows reports it even for an unconnected
