@@ -169,8 +169,24 @@ client:
 ```
 
 The client listens on `127.0.0.1:1080` by default. Point an application or
-Clash/mihomo at that SOCKS5 endpoint. The [deployment guide](docs/DEPLOYING.md)
-covers service installation, firewall and socket tuning, multiple users,
+Clash/mihomo at that SOCKS5 endpoint.
+
+For a real deployment rather than a foreground trial, two scripts do the same
+work as services and verify the result:
+
+```sh
+# Linux gateway, as root: binary, service account, unit, provider, first user,
+# and one invitation printed once the running gateway has been verified.
+sudo ./deploy/install-server.sh --name "Example Network" \
+  --endpoint gateway.example.net:443 --user alice --tune
+
+# Client, as the account that will use the tunnel: enrollment, manifest, a
+# per-user service that starts at login, and an end-to-end egress check.
+./deploy/install-client.sh --invite 'queqiao://enroll/…'
+```
+
+The [deployment guide](docs/DEPLOYING.md) covers what those scripts do, the
+hosts they do not cover, firewall and socket tuning, multiple users,
 source-interface selection, verification, upgrades, and rollback.
 
 To use several providers from one desktop client process, follow the

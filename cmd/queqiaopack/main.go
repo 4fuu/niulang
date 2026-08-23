@@ -450,9 +450,20 @@ func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 		"docs/archive/2026-08-development/field-results/20260817-primary-high-port.md",
 		"docs/field-results/README.md",
 		"deploy/clash-queqiao.yaml",
+		"deploy/install-client.sh",
+		"deploy/install-server.sh",
 		"deploy/me.01.queqiao.client.plist",
 		"deploy/queqiaod.service",
+		"deploy/tune-server.sh",
 		"internal/congestion/NOTICE",
+	}
+	// The deployment guide in this archive tells the operator to run these, and
+	// they find the archive's own reviewed binary beside them, so they ship
+	// executable. Unpacking a release is then the only prerequisite.
+	executable := map[string]bool{
+		"deploy/install-client.sh": true,
+		"deploy/install-server.sh": true,
+		"deploy/tune-server.sh":    true,
 	}
 	files := make([]archiveFile, 0, len(names))
 	for _, name := range names {
@@ -460,7 +471,11 @@ func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read distribution file %s: %w", name, err)
 		}
-		files = append(files, archiveFile{name: name, mode: 0o644, data: data})
+		mode := int64(0o644)
+		if executable[name] {
+			mode = 0o755
+		}
+		files = append(files, archiveFile{name: name, mode: mode, data: data})
 	}
 	return files, nil
 }

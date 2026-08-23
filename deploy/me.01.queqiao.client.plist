@@ -2,13 +2,22 @@
 <!--
   macOS LaunchAgent for the queqiao local client.
 
+  deploy/install-client.sh generates this agent with the real paths already
+  filled in. This template is the hand-installed path.
+
   Install:
     cp deploy/me.01.queqiao.client.plist ~/Library/LaunchAgents/
-    # edit the paths and <EGRESS-IP> below
-    launchctl load ~/Library/LaunchAgents/me.01.queqiao.client.plist
+    # edit every /Users/YOU path and the profile name below
+    launchctl bootstrap "gui/$(id -u)" \
+      ~/Library/LaunchAgents/me.01.queqiao.client.plist
 
   Restart after upgrading the binary or changing configuration:
-    launchctl kickstart -k gui/$(id -u)/me.01.queqiao.client
+    launchctl bootout "gui/$(id -u)/me.01.queqiao.client"
+    launchctl bootstrap "gui/$(id -u)" \
+      ~/Library/LaunchAgents/me.01.queqiao.client.plist
+
+  kickstart restarts the definition launchd already cached and does not re-read
+  edited arguments from disk, so it is not enough after changing this file.
 
   See docs/DEPLOYING.md for the egress side and the Clash profile.
 -->

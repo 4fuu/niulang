@@ -14,6 +14,48 @@ For a quick overview, start with the [repository README](../README.md). Use
 [known limitations](KNOWN-LIMITATIONS.md) to check whether the paired-gateway
 assumption fits your network before exposing a service.
 
+## Install with the scripts
+
+Two scripts perform everything below and verify the result. Read this section
+and skip to [Connect Clash or mihomo](#connect-clash-or-mihomo); the rest of
+the guide remains the reference for what they do, for hosts they do not cover,
+and for the lifecycle work that has no installer.
+
+On the Linux gateway, as root:
+
+```sh
+sudo ./deploy/install-server.sh \
+  --name "Example Network" \
+  --endpoint gateway.example.net:443 \
+  --user alice \
+  --tune
+```
+
+That installs the binary, service account, directories, hardened unit, and
+environment file, initializes the provider, creates the first user, starts and
+verifies the gateway, and finally prints one single-use invitation URI. Deliver
+that URI over an authenticated private channel; it is a bearer credential.
+
+On the client, as the account that will use the tunnel -- not with `sudo`:
+
+```sh
+./deploy/install-client.sh --invite 'queqiao://enroll/...'
+```
+
+That enrolls the invitation, writes the provider manifest, installs a per-user
+service that starts at login, and confirms that a request actually leaves
+through the gateway. Add a second provider later with the same command and only
+the new invitation; existing providers and their loopback ports are kept.
+
+Both scripts take `--dry-run`, use `--binary PATH` when you have a reviewed
+release artifact instead of a source tree, and refuse any binary that does not
+report `wire=1`.
+
+The one thing `install-server.sh` will not do twice is create a provider trust
+root. Re-running it against an initialized state directory stops before
+touching the host; an upgrade passes `--no-provider-init` to keep that root and
+replace only the binary, unit, and environment file.
+
 ## What is configured where
 
 The provider chooses three durable values:
@@ -34,6 +76,10 @@ and locally generated device key. Users never copy provider keys, CA files,
 shared secrets, or individual JSON fields.
 
 ## Install the gateway
+
+`deploy/install-server.sh` performs this whole section. The steps below are
+what it does, and the path to take on a host it does not cover: it requires
+Linux with systemd and root.
 
 Install the exact reviewed binary and confirm its protocol before creating
 state:
@@ -179,6 +225,11 @@ sudo -u queqiao /usr/local/bin/queqiaod provider revoke-invite \
 
 ## Enroll a desktop client
 
+`deploy/install-client.sh` performs this section and the macOS or Linux service
+that follows it. Run it as the account that will use the tunnel. The steps
+below are what it does, and what to follow on Windows or when the service
+should be defined by hand.
+
 The user imports the URI once:
 
 ```sh
@@ -226,7 +277,9 @@ performance snapshots and rotates with the same bounds as the server.
 The profile must remain readable only by its owner. Queqiao rejects a
 group/world-readable profile rather than silently using an exposed key.
 
-For macOS, edit [`deploy/me.01.queqiao.client.plist`](../deploy/me.01.queqiao.client.plist)
+For macOS, `deploy/install-client.sh` writes this agent with the real paths
+already filled in. To do it by hand instead, edit
+[`deploy/me.01.queqiao.client.plist`](../deploy/me.01.queqiao.client.plist)
 to contain the installed binary and profile paths, then load it:
 
 ```sh
@@ -240,6 +293,16 @@ tail -n 20 -f ~/Library/Logs/Queqiao/client.log
 After changing an already loaded plist, use `launchctl bootout` followed by
 `launchctl bootstrap`; `kickstart` restarts the cached definition and does not
 re-read arguments from disk.
+
+On Linux the client is a systemd `--user` unit, which
+`deploy/install-client.sh` generates and enables. It also runs `loginctl
+enable-linger`, without which the user manager exists only while the account is
+logged in and the client does not come back after a reboot. Check both:
+
+```sh
+systemctl --user is-active queqiao-client
+loginctl show-user "$(id -un)" --property=Linger
+```
 
 ## Connect Clash or mihomo
 

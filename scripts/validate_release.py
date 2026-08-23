@@ -28,8 +28,11 @@ REQUIRED_ARCHIVE_FILES = {
     "THIRD_PARTY_NOTICES.md",
     "assets/queqiao-icon.png",
     "deploy/clash-queqiao.yaml",
+    "deploy/install-client.sh",
+    "deploy/install-server.sh",
     "deploy/me.01.queqiao.client.plist",
     "deploy/queqiaod.service",
+    "deploy/tune-server.sh",
     "docs/ARCHITECTURE.md",
     "docs/BENCHMARKING.md",
     "docs/CONTRIBUTING-NETWORK-EVIDENCE.md",
@@ -66,6 +69,14 @@ REQUIRED_ARCHIVE_FILES = {
     "docs/archive/2026-08-development/field-results/20260817-primary-high-port.md",
     "docs/field-results/README.md",
     "internal/congestion/NOTICE",
+}
+
+# The deployment guide in the archive tells the operator to run these, so they
+# must arrive executable rather than needing a chmod the guide does not mention.
+EXECUTABLE_ARCHIVE_FILES = {
+    "deploy/install-client.sh",
+    "deploy/install-server.sh",
+    "deploy/tune-server.sh",
 }
 CHECKSUM = re.compile(r"[0-9a-f]{64}")
 FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -364,7 +375,8 @@ def validate_release(
                 f"unexpected={sorted(set(contents) - required)}"
             )
         for name, (_, mode) in contents.items():
-            expected_mode = 0o755 if name == binary_name else 0o644
+            executable = name == binary_name or name in EXECUTABLE_ARCHIVE_FILES
+            expected_mode = 0o755 if executable else 0o644
             if mode != expected_mode:
                 raise ValueError(
                     f"{archive_path.name}: {name} mode is {mode:o}, want {expected_mode:o}"
