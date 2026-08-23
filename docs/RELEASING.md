@@ -5,6 +5,33 @@ or `zip` commands. The packager fixes archive ordering, timestamps, ownership,
 permissions, build metadata, and Go path information. Given the same commit,
 Go toolchain, version, and commit timestamp, it produces the same bytes.
 
+## Assemble the changelog
+
+`CHANGELOG.md` is written only here. Between releases every user-visible change
+lands as its own file in [`changelog.d/`](../changelog.d/), which is why two
+branches that both changed behavior never conflicted over this file. Cutting a
+release turns those files into one dated section:
+
+```sh
+./scripts/changelog.py preview                      # read it before committing
+./scripts/changelog.py release --version v0.1.2     # --date defaults to today
+```
+
+The command inserts the new section above the newest released one, groups the
+entries by category, and deletes every file it consumed; released sections are
+left byte for byte alone. It refuses a version already in the file, a version
+that is not `vMAJOR.MINOR.PATCH`, an unparsable pending file, and an empty
+pending set unless `--allow-empty` says the release really carries no
+user-visible change.
+
+Review the assembled section as prose before committing it. Grouping is
+mechanical and ordering within a category is by filename, so an entry that
+belongs in a different category, or a set of entries that reads better merged
+into one, is corrected here — it is the last point at which the wording is
+still cheap to change. Commit the result together with the deletions, open it
+as a pull request labeled `changelog` (the label is what permits a branch to
+touch `CHANGELOG.md`), and tag the merged commit.
+
 ## Build a release locally
 
 Start from a clean checkout at the commit being released. Use the commit time,

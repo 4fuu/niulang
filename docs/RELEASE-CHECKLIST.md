@@ -38,6 +38,11 @@ exact commit. Production-ready language has additional gates below.
   only as a format; generate fresh evidence for protocol 1.
 - [ ] Install, one-endpoint patch upgrade, coordinated incompatible-version
   refusal, and rollback evidence is attached to the candidate report.
+- [ ] `./scripts/changelog.py release --version vX.Y.Z` has assembled the
+  pending [`changelog.d/`](../changelog.d/) entries into a dated section, the
+  section has been read as prose, and `changelog.d/` is empty on the candidate
+  commit. A shipped release with no section of its own is a release whose
+  changes are recorded nowhere.
 - [ ] `CHANGELOG.md` and the exact candidate release notes describe v0.1 as a
   paired fixed-egress public preview.
 - [ ] The maintainer has reviewed the candidate artifacts and explicitly

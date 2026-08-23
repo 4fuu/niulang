@@ -62,12 +62,13 @@ you choose the next document based on what you want to do.
 ## Contribute and maintain
 
 - [Contributing guide](../CONTRIBUTING.md) — development checks, pull requests,
-  protocol changes, and safe reporting.
+  changelog entries, protocol changes, and safe reporting.
 - [Contributing network evidence](CONTRIBUTING-NETWORK-EVIDENCE.md) — how to
   share measurements and counterexamples without exposing private data.
 - [Roadmap](ROADMAP.md) — what is implemented, what was retired, and what
   qualification work remains.
-- [Releasing](RELEASING.md) — reproducible archives, installation, and rollback.
+- [Releasing](RELEASING.md) — changelog assembly, reproducible archives,
+  installation, and rollback.
 - [Mobile memory](MOBILE-MEMORY.md) — resource budgets for the packet-tunnel
   extension.
 
