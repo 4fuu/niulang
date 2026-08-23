@@ -295,22 +295,72 @@ func (s *Server) Serve(ctx context.Context) error {
 	return firstErr
 }
 
+// watchAuthorizationStore adopts authorization changes written by provider CLI
+// processes, and reports the state of that adoption.
+//
+// A failed refresh leaves the previous snapshot in force. That is the right
+// behaviour - a malformed or briefly unreadable file must not disarm a running
+// gateway - but it is also silent by construction: Authorize keeps admitting
+// established devices from the cached snapshot while every enrollment, which
+// re-reads from disk, fails. The gateway looks healthy from the outside and
+// the users who cannot enroll are told their invitations are bad.
+//
+// So the transitions are what get reported. The first failure is always
+// written, because it is the only record that says when this started;
+// continuing failures are restated at a bounded rate carrying how long it has
+// been going and how old the rules still in force are; and recovery is always
+// written, because a store that silently starts working again leaves an
+// operator reading an error with no ending.
 func (s *Server) watchAuthorizationStore(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var watch authorizationWatch
 	for {
 		select {
 		case <-ticker.C:
 			changed, err := s.cfg.Credentials.Store.Refresh()
+			now := time.Now()
 			if err != nil {
-				s.cfg.Logger.Error("authorization refresh failed; retaining last known-good state", "error", err)
-			} else if changed {
+				write, consecutive, suppressed, failingFor := watch.failed(now)
+				s.metrics.AuthorizationRefreshFailed(consecutive)
+				if !write {
+					continue
+				}
+				s.cfg.Logger.LogAttrs(context.Background(), slog.LevelError,
+					"authorization refresh failed; retaining last known-good state",
+					slog.String("error", err.Error()),
+					slog.Uint64("consecutive", consecutive),
+					slog.Uint64("suppressed", suppressed),
+					slog.Int64("failing_for_seconds", int64(failingFor/time.Second)),
+					slog.Int64("enforcing_snapshot_age_seconds", s.authorizationSnapshotAge(now)))
+				continue
+			}
+			if recovered, attempts, unreadableFor := watch.succeeded(now); recovered {
+				s.cfg.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+					"authorization refresh recovered",
+					slog.Uint64("failed_attempts", attempts),
+					slog.Int64("unreadable_for_seconds", int64(unreadableFor/time.Second)))
+			}
+			s.metrics.AuthorizationRefreshed(s.cfg.Credentials.Store.LastGoodAt(), changed)
+			if changed {
 				s.cfg.Logger.Info("authorization state reloaded")
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// authorizationSnapshotAge reports how old the authorization state currently
+// being enforced is, in seconds, or -1 if it has never been read. Enrollment
+// refreshes the same snapshot under its own lock, so the store is asked rather
+// than tracked here.
+func (s *Server) authorizationSnapshotAge(now time.Time) int64 {
+	lastGood := s.cfg.Credentials.Store.LastGoodAt()
+	if lastGood.IsZero() {
+		return -1
+	}
+	return int64(now.Sub(lastGood) / time.Second)
 }
 
 func (s *Server) serveTCP(ctx context.Context) error {

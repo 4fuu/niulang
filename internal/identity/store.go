@@ -78,6 +78,13 @@ type Store struct {
 	path string
 	mu   sync.RWMutex
 	data storeData
+	// lastGoodAt is when data was last replaced by a complete snapshot read
+	// from disk. It is the only way to say how old the authorization state
+	// being enforced actually is: when a refresh fails the previous snapshot
+	// stays in force indefinitely, and without a timestamp a gateway that has
+	// been serving stale rules for three days is indistinguishable from one
+	// that missed a single tick.
+	lastGoodAt time.Time
 }
 
 // A consumed invitation is retained after its advertised expiry so a client
@@ -113,7 +120,13 @@ func (s *Store) Initialize() error {
 		return fmt.Errorf("inspect authorization store: %w", err)
 	}
 	s.data = emptyStoreData()
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	// A store just written is in force and current; without this a freshly
+	// initialized provider would report a snapshot it had never read.
+	s.lastGoodAt = time.Now()
+	return nil
 }
 
 func (s *Store) Load() error {
@@ -122,7 +135,7 @@ func (s *Store) Load() error {
 		return err
 	}
 	s.mu.Lock()
-	s.data = decoded
+	s.data, s.lastGoodAt = decoded, time.Now()
 	s.mu.Unlock()
 	return nil
 }
@@ -138,11 +151,25 @@ func (s *Store) Refresh() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// Record the read, not the change. An unchanged file was still read
+	// successfully, and treating that as staleness would report every quiet
+	// gateway as one that had lost its store.
+	s.lastGoodAt = time.Now()
 	if reflect.DeepEqual(decoded, s.data) {
 		return false, nil
 	}
 	s.data = decoded
 	return true, nil
+}
+
+// LastGoodAt reports when the in-memory authorization snapshot was last read
+// from disk, or the zero time if it never has been. Enrollment refreshes the
+// same snapshot under its own lock, so this is the authority on the snapshot's
+// age rather than anything the refresh loop can track on its own.
+func (s *Store) LastGoodAt() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastGoodAt
 }
 
 func readStoreData(path string) (storeData, error) {
@@ -195,7 +222,7 @@ func (s *Store) beginWrite(initialize bool) (func(), error) {
 		release()
 		return nil, err
 	}
-	s.data = decoded
+	s.data, s.lastGoodAt = decoded, time.Now()
 	return release, nil
 }
 

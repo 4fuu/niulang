@@ -555,6 +555,22 @@ launchctl print "gui/$(id -u)/me.01.queqiao.client"
 curl -fsS http://127.0.0.1:12090/metrics
 ```
 
+The one gateway fault that does not show up in the flow counters is an
+authorization store the gateway can no longer re-read. The snapshot already in
+force stays in force, so established devices keep connecting and every rate and
+error metric stays healthy, while every new enrollment fails. Alert on it
+directly:
+
+```
+queqiao_authorization_consecutive_refresh_failures > 30
+time() - queqiao_authorization_last_good_timestamp_seconds > 300
+```
+
+The first fires while the store is unreadable; the second catches a snapshot
+that has gone stale for any reason. The runtime log carries the same run at
+error level, restated once a minute with how long it has been failing, and a
+`authorization refresh recovered` record when it ends.
+
 Logs omit invitations, private keys, session identifiers, and payloads. Do not
 publish provider state, profiles, old shared-secret files, or packet captures
 without redaction.
