@@ -119,7 +119,17 @@ that interval instead of displaying a fabricated negative loss rate.
 Flow-completion records add an opaque session/flow correlation ID, transport,
 duration, directional bytes, class, lane byte
 allocation, coded-versus-stream payload, and the FEC sent/repair/recovered/
-residual/window/rate summary. Failed flows are warning-level records with the
+residual/window/rate summary.
+
+The FEC counters have two directions and they must not be divided into each
+other. `fec_sent_total` and `fec_repairs_total` are what this endpoint
+transmitted; `fec_arrived_total`, `fec_recovered_total` and
+`fec_residual_lost_total` are what it received, so on an asymmetric flow
+`lost` above `sent` is ordinary rather than impossible. The receive direction's
+rates are `fec_measured_erasure`, the share of the peer's source symbols that
+did not arrive, and `fec_residual_loss`, the share the code could not repair
+and the session had to re-issue. Both are taken over `fec_source_symbols_total`
+and are therefore in [0,1]. Failed flows are warning-level records with the
 same performance and FEC fields plus the error, so they remain visible at the
 default `info` level. `QUEQIAO_LANE_TRACE=1` remains an opt-in raw
 per-lane diagnostic. It is not needed for the standard aggregate dashboard.

@@ -2326,8 +2326,13 @@ func codedSubstrateFields(stats coded.Stats, ok bool) string {
 	if !ok {
 		return "none"
 	}
-	return fmt.Sprintf("sent=%d repairs=%d recovered=%d lost=%d window=%d coding=%t rate=%.2f",
-		stats.Sent, stats.Repairs, stats.Recovered, stats.Lost, stats.Window,
+	// arrived and sources are printed next to lost because without them the
+	// line invites a ratio between opposite directions: sent is what this
+	// endpoint transmitted, lost is what it failed to receive, and "lost is
+	// ten times sent" is an ordinary asymmetric flow rather than a fault.
+	return fmt.Sprintf("sent=%d repairs=%d arrived=%d sources=%d recovered=%d lost=%d residual=%.4f erasure=%.4f window=%d coding=%t rate=%.2f",
+		stats.Sent, stats.Repairs, stats.Arrived, stats.Sources, stats.Recovered, stats.Lost,
+		stats.Residual(), stats.Erasure(), stats.Window,
 		stats.Plan.Code, stats.Plan.Rate)
 }
 
@@ -2345,6 +2350,14 @@ func codedSubstrateLogFields(stats coded.Stats, ok bool) []any {
 		"fec_repairs_total", stats.Repairs,
 		"fec_recovered_total", stats.Recovered,
 		"fec_residual_lost_total", stats.Lost,
+		"fec_arrived_total", stats.Arrived,
+		"fec_source_symbols_total", stats.SourceSymbols(),
+		// The receive direction's own rates. fec_observed_loss below is what
+		// the estimator infers from transmission-sequence gaps; these two are
+		// what the decoder actually accounted for, and both are in [0,1] by
+		// construction.
+		"fec_measured_erasure", stats.Erasure(),
+		"fec_residual_loss", stats.Residual(),
 		"fec_oversize_total", stats.Oversize,
 		"fec_window_symbols", stats.Window,
 		"fec_coding", plan.Code,

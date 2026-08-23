@@ -302,3 +302,41 @@ func TestASequenceFarAheadIsADiscontinuityNotFourBillionLosses(t *testing.T) {
 		t.Fatalf("a clean run after the jump measured %.2f loss", loss)
 	}
 }
+
+// Every figure the estimator reports as a probability is a count of outcomes
+// over a count of trials, so none of them can leave [0,1] on its own. What
+// reads them cannot tell a rate from an accounting failure, though, and a
+// figure above one sizes parity for a channel that delivers nothing -- so the
+// reported values are rates whatever the counters behind them say.
+func TestSnapshotReportsProbabilitiesEvenFromInconsistentCounters(t *testing.T) {
+	e := New(Config{})
+	// Counters that cannot arise from Observe, standing in for any future
+	// accounting path that charges a loss to a trial that never happened.
+	e.samples, e.losses = 100, 125.27
+	e.fromArrival, e.lossAfterArrival = 10, 40
+	e.fromLoss, e.arrivalAfterLoss = 10, 30
+	e.rounds = []float64{1.4, 2.2}
+
+	s := e.Snapshot()
+	for name, value := range map[string]float64{
+		"loss": s.Loss, "loss after arrival": s.LossAfterArrival,
+		"arrival after loss": s.ArrivalAfterLoss, "floor": s.Floor,
+		"recent": s.Recent, "congestive": s.Congestive,
+	} {
+		if value < 0 || value > 1 {
+			t.Fatalf("%s = %v is not a probability", name, value)
+		}
+	}
+}
+
+// A path that really erases nothing must still report zero rather than the
+// clamp's bounds, or the guard would be hiding the measurement it protects.
+func TestSnapshotLeavesAnOrdinaryEstimateAlone(t *testing.T) {
+	e := New(Config{RoundSamples: 100})
+	for i := 0; i < 1000; i++ {
+		e.ObserveOutcome(i%4 != 0)
+	}
+	if s := e.Snapshot(); s.Loss < 0.2 || s.Loss > 0.3 {
+		t.Fatalf("loss = %v, want about a quarter", s.Loss)
+	}
+}

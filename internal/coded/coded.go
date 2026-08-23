@@ -180,6 +180,13 @@ type Path struct {
 	sent     atomic.Uint64
 	repairs  atomic.Uint64
 	oversize atomic.Uint64
+	// arrivals counts datagrams that reached this path, of which sources
+	// carried a source symbol. They are the receive direction's own
+	// denominator: sent above counts what this endpoint put on the wire in the
+	// other direction, so a loss ratio taken against it is not a rate at all
+	// and can exceed one without anything being wrong with the path.
+	arrivals atomic.Uint64
+	sources  atomic.Uint64
 	// malformed counts datagrams a peer sent that protocol 1 does not permit.
 	// It is kept apart from the erasure estimate on purpose: a rejected
 	// datagram is a peer disagreeing about the wire, and folding it into loss
@@ -439,7 +446,8 @@ func (p *Path) sendSource(esi uint32, vector []byte) error {
 	d[4] = kindSource
 	binary.BigEndian.PutUint32(d[5:], esi)
 	copy(d[sourceHeader:], vector)
-	return p.put(d)
+	_, err := p.put(d)
+	return err
 }
 
 // sendRepair emits one repair over the newest count symbols, or over the whole
@@ -457,8 +465,11 @@ func (p *Path) sendRepair(count int) error {
 	binary.BigEndian.PutUint32(d[9:], repair.First)
 	binary.BigEndian.PutUint16(d[13:], uint16(repair.Count))
 	copy(d[repairHeader:], repair.Vector)
-	p.repairs.Add(1)
-	return p.put(d)
+	sent, err := p.put(d)
+	if sent {
+		p.repairs.Add(1)
+	}
+	return err
 }
 
 func (p *Path) take() uint32 {
@@ -467,20 +478,37 @@ func (p *Path) take() uint32 {
 	return seq
 }
 
-func (p *Path) put(d []byte) error {
+// untake returns a transmission sequence that was never transmitted.
+//
+// The peer measures the channel from the gaps between the sequences it
+// receives, so a number spent on a datagram the carrier refused is a hole in
+// its numbering that the wire never made. Charging the channel for a casualty
+// of this endpoint's own transport is how a local failure becomes a measured
+// erasure rate, and that rate sizes the parity which then becomes load on the
+// path that was already failing. Only the send loop takes a sequence, and it
+// takes the next one immediately after this, so handing the number back leaves
+// the numbering describing exactly what went out.
+func (p *Path) untake() { p.nextSeq-- }
+
+// put hands one datagram to the carrier and reports whether it reached it.
+func (p *Path) put(d []byte) (bool, error) {
 	switch err := p.carrier.Send(d); {
 	case err == nil:
 		p.sent.Add(1)
-		return nil
+		return true, nil
 	case errors.Is(err, ErrDatagramTooLarge):
 		// The path's estimate moved under us. Losing this datagram is cheaper
 		// than losing the connection, and the next symbol is sized from the
-		// carrier's revised limit.
+		// carrier's revised limit. The symbol it carried is still lost -- the
+		// session above re-issues it -- but it was lost here rather than on
+		// the wire, so the peer must not be shown a gap for it.
 		p.oversize.Add(1)
-		return nil
+		p.untake()
+		return false, nil
 	default:
+		p.untake()
 		p.fail(err)
-		return err
+		return false, err
 	}
 }
 
@@ -515,6 +543,7 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 	defer p.mu.Unlock()
 	// Every arrival measures the channel, including one carrying nothing new:
 	// the gaps between transmission sequences are what loss is.
+	p.arrivals.Add(1)
 	p.estimator.Observe(uint64(seq))
 
 	var delivered fec.Delivery
@@ -523,6 +552,7 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 	case kindSource:
 		esi := binary.BigEndian.Uint32(d[5:])
 		vector := d[sourceHeader:]
+		p.sources.Add(1)
 		delivered = p.decoder.Source(esi, vector)
 		frames = p.assembler.arrived(esi, vector, frames)
 	case kindRepair:
@@ -829,7 +859,17 @@ type Stats struct {
 	// the window still missing, and whose frames the session must re-issue.
 	Recovered uint64
 	Lost      uint64
-	Oversize  uint64
+	// Arrived is datagrams this path received, of which Sources carried a
+	// source symbol.
+	//
+	// They are here because Lost had no denominator without them. Sent counts
+	// the direction this endpoint transmits into and Lost the direction it
+	// receives, so "lost over sent" is not a rate and reaches ten on a
+	// perfectly ordinary asymmetric flow. Erasure and Residual below are the
+	// rates that can actually be read.
+	Arrived  uint64
+	Sources  uint64
+	Oversize uint64
 	// Malformed is datagrams rejected for breaking the protocol's bounds,
 	// which is a peer problem rather than a path problem.
 	Malformed uint64
@@ -848,9 +888,37 @@ func (p *Path) Stats() Stats {
 	return Stats{
 		Snapshot: snapshot, Plan: current.plan, Window: current.capacity,
 		Sent: p.sent.Load(), Repairs: p.repairs.Load(),
-		Recovered: recovered, Lost: lost, Oversize: p.oversize.Load(),
+		Recovered: recovered, Lost: lost,
+		Arrived: p.arrivals.Load(), Sources: p.sources.Load(),
+		Oversize:  p.oversize.Load(),
 		Malformed: p.malformed.Load(),
 	}
+}
+
+// SourceSymbols is how many of the peer's source symbols this path has
+// accounted for: those that arrived, those the code reconstructed, and those
+// that left the window unrecovered. Every symbol the peer sent ends in exactly
+// one of the three, which is what makes it a denominator.
+func (s Stats) SourceSymbols() uint64 { return s.Sources + s.Recovered + s.Lost }
+
+// Erasure is the share of source symbols that did not arrive, whether the code
+// repaired them or not: the wire loss this receiver measured, in [0,1].
+func (s Stats) Erasure() float64 {
+	total := s.SourceSymbols()
+	if total == 0 {
+		return 0
+	}
+	return float64(s.Recovered+s.Lost) / float64(total)
+}
+
+// Residual is the share of source symbols the code could not repair, which is
+// what the session above has to re-issue. It is in [0,1] by construction.
+func (s Stats) Residual() float64 {
+	total := s.SourceSymbols()
+	if total == 0 {
+		return 0
+	}
+	return float64(s.Lost) / float64(total)
 }
 
 func (p *Path) fail(err error) {
