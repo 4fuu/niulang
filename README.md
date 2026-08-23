@@ -119,85 +119,90 @@ workload; see the full [comparison and methodology](docs/COMPARISON.md).
 - Bounded JSON logs, metrics, a local visualizer, deterministic benchmarks,
   release packaging, SBOMs, and rollback procedures.
 
+All of it ships as a prebuilt binary. Download it below, or from the
+[latest release](https://github.com/bojieli/queqiao/releases/latest); there is no build step for normal use.
+
 ## Platform availability
 
-- **macOS and Linux:** desktop and provider-gateway builds are available to use
-  from source today.
-- **Windows:** native release targets are built, but the Windows client is
-  currently under testing and is not presented as production-ready.
-- **Android and iOS:** clients use the same protocol-1 core and are currently
-  under testing. They are not yet presented as production-ready mobile apps.
+Every release publishes reproducible, signed binaries for six native targets.
+The links below are v0.1.1, the current release; the
+[releases page](https://github.com/bojieli/queqiao/releases/latest) always has the newest.
+
+| Platform | Status | Download |
+| --- | --- | --- |
+| macOS, Apple silicon | Desktop and gateway, ready to use | [`darwin_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.1.1/queqiaod_v0.1.1_darwin_arm64_signed.zip), notarized |
+| macOS, Intel | Desktop and gateway, ready to use | [`darwin_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.1.1/queqiaod_v0.1.1_darwin_amd64_signed.zip), notarized |
+| Linux, x86-64 | Desktop and gateway, ready to use | [`linux_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.1.1/queqiaod_v0.1.1_linux_amd64.tar.gz) |
+| Linux, arm64 | Desktop and gateway, ready to use | [`linux_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.1.1/queqiaod_v0.1.1_linux_arm64.tar.gz) |
+| Windows, x86-64 | Native target built; under testing, not production-ready | [`windows_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.1.1/queqiaod_v0.1.1_windows_amd64.zip) |
+| Windows, arm64 | Native target built; under testing, not production-ready | [`windows_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.1.1/queqiaod_v0.1.1_windows_arm64.zip) |
+| Android and iOS | Same protocol-1 core, under testing; not yet production-ready mobile apps | -- |
+
+Check a download against its release's
+[`SHA256SUMS`](https://github.com/bojieli/queqiao/releases/download/v0.1.1/SHA256SUMS)
+before running it. Each archive carries its own CycloneDX SBOM and the complete
+license text for every module linked into the binary.
 
 ## Quick start
 
-Build from source with the Go version declared in [`go.mod`](go.mod):
+Two scripts perform a whole deployment and verify the result, one per side.
+Neither needs a Go toolchain: point them at the binary you downloaded above.
+
+On the Linux gateway, as root:
+
+```sh
+sudo ./deploy/install-server.sh \
+  --binary ./queqiaod \
+  --name "Example Network" \
+  --endpoint gateway.example.net:443 \
+  --user alice \
+  --tune
+```
+
+That installs the binary, service account, directories, hardened unit, and
+environment file, initializes the provider, creates the first user, starts and
+verifies the gateway, and only then prints one single-use invitation URI.
+Deliver that URI over an authenticated private channel: it is a bearer
+credential.
+
+On the client, as the account that will use the tunnel -- not with `sudo`:
+
+```sh
+./deploy/install-client.sh --binary ./queqiaod --invite 'queqiao://enroll/...'
+```
+
+That enrolls the invitation, writes the profile and manifest, installs a
+per-user service that starts at login -- a LaunchAgent on macOS, a systemd
+`--user` unit on Linux -- and checks end to end that traffic reaches the
+gateway. Repeat `--invite` to add providers, each on its own loopback port.
+
+The client listens on `127.0.0.1:12080`, the port
+[`deploy/clash-queqiao.yaml`](deploy/clash-queqiao.yaml) already points at.
+Point an application or Clash/mihomo at that SOCKS5 endpoint.
+
+The scripts live in this repository: clone it, or copy `deploy/` beside the
+downloaded binary. From the next release they also ship inside the archives.
+
+The [deployment guide](docs/DEPLOYING.md) is the reference for everything past
+this point -- what the scripts do, the hosts they do not cover, the manual
+gateway and enrollment steps for a host they do not fit, firewall and socket
+tuning, multiple users, source-interface selection, verification, upgrades, and
+rollback. To serve several providers from one client process, see
+[multi-provider](docs/DEPLOYING.md#connect-to-multiple-providers).
+
+## Build from source
+
+Normal use needs no build. Build to develop, or to run on a platform with no
+published archive, using the Go version declared in [`go.mod`](go.mod):
 
 ```sh
 go test ./...
 go build -o ./queqiaod ./cmd/queqiaod
 ```
 
-On the provider gateway, initialize a provider, add a user, and create a
-single-use invitation:
-
-```sh
-sudo ./queqiaod provider init \
-  --state /var/lib/queqiao/provider \
-  --name "Example Network" \
-  --endpoint gateway.example.net:443
-
-sudo ./queqiaod provider add-user \
-  --state /var/lib/queqiao/provider \
-  --name alice \
-  --max-sessions 8
-
-sudo ./queqiaod provider invite \
-  --state /var/lib/queqiao/provider \
-  --user alice
-
-sudo ./queqiaod server \
-  --state /var/lib/queqiao/provider \
-  --listen :443
-```
-
-Send the printed `queqiao://` URI to the user over a private channel. On the
-client:
-
-```sh
-./queqiaod enroll 'queqiao://enroll/…'
-./queqiaod service install --profile "$PROFILE"
-```
-
-`enroll` prints the profile path it wrote and the exact `service install` line
-to run next. That second command installs a per-user service — a LaunchAgent on
-macOS, a systemd `--user` unit on Linux — so the client starts on its own
-instead of living in a terminal. `./queqiaod client --profile "$PROFILE"` runs
-it in the foreground when you only want to try it.
-
-The client listens on `127.0.0.1:12080`, the port
-[`deploy/clash-queqiao.yaml`](deploy/clash-queqiao.yaml) already points at.
-Point an application or Clash/mihomo at that SOCKS5 endpoint.
-
-Two scripts collapse the whole of the above into one command per side and
-verify the result:
-
-```sh
-# Linux gateway, as root: binary, service account, unit, provider, first user,
-# and one invitation printed once the running gateway has been verified.
-sudo ./deploy/install-server.sh --name "Example Network" \
-  --endpoint gateway.example.net:443 --user alice --tune
-
-# Client, as the account that will use the tunnel: enrollment, manifest,
-# service, and an end-to-end check that traffic reaches the gateway.
-./deploy/install-client.sh --invite 'queqiao://enroll/…'
-```
-
-The [deployment guide](docs/DEPLOYING.md) covers what those scripts do, the
-hosts they do not cover, firewall and socket tuning, multiple users,
-source-interface selection, verification, upgrades, and rollback.
-
-To use several providers from one desktop client process, follow the
-[multi-provider deployment guide](docs/DEPLOYING.md#connect-to-multiple-providers).
+Both installer scripts pick up `./queqiaod` from the repository root on their
+own, so the commands above work unchanged without `--binary`.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) lists the full development checks.
 
 ## Who is it for?
 
@@ -216,8 +221,8 @@ a full mesh control plane belong to a larger overlay product built around it.
 
 ## Project status
 
-Queqiao is ready to build and use from source for the supported paired-gateway
-topology. It is a public preview, not a production-ready claim for every
+Queqiao is ready to use for the supported paired-gateway topology, from the
+published binaries or from source. It is a public preview, not a production-ready claim for every
 network. Protocol 1 is the only supported wire version; broader independent
 field qualification, transport and security review, and mobile review remain
 open. See [current status](docs/STATUS.md) for the evidence boundary and

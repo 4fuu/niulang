@@ -6,8 +6,8 @@
 > **Wire protocol:** Version 1 only; incompatible versions fail closed
 > **Last reviewed:** 2026-08-20
 
-Queqiao is ready to build and use from source for its supported paired-gateway
-topology. It is not a universal acceleration layer and it does not promise the
+Queqiao is ready to use for its supported paired-gateway topology, from the
+binaries published with every release or from source. It is not a universal acceleration layer and it does not promise the
 same result on every route. The current work is broadening independent field
 evidence and review while keeping the usable protocol moving forward.
 
@@ -41,7 +41,7 @@ limitations](KNOWN-LIMITATIONS.md) before deploying it.
 | Contention | behavioral flow state, priority queues, reactive bulk isolation, and bounded opt-in TCP fallback striping |
 | Identity | one-time invitations, provider-pinned gateway identity, per-device mutual TLS, renewal, revocation, and per-user limits |
 | Operations | bounded JSON logs, metrics, local visualizer, service examples, release packaging, SBOMs, and rollback procedure |
-| Clients | one process per provider or one process serving several providers on separate loopback SOCKS5 listeners; macOS/Linux desktop and gateway builds available from source; Windows targets built but under testing; Android SOCKS export and iOS packet-tunnel clients under testing, all using the protocol-1 core |
+| Clients | one process per provider or one process serving several providers on separate loopback SOCKS5 listeners; macOS/Linux desktop and gateway binaries published with every release; Windows targets built but under testing; Android SOCKS export and iOS packet-tunnel clients under testing, all using the protocol-1 core |
 | Conformance | committed protocol-1 vectors for framing, acknowledgement, destinations, UDP, coding, and enrollment, replayed by the test suite |
 
 ## Evidence and open work
@@ -69,6 +69,7 @@ than a single benchmark number.
 
 | Claim | Status |
 | --- | --- |
+| Prebuilt binaries for macOS, Linux, and Windows | Published with every release: six reproducible archives with SBOMs and license texts |
 | Builds and runs from source | Supported by the current repository and CI design |
 | Usable public preview | Supported for the paired-gateway topology; final publication gates remain explicit |
 | Works on every high-loss path | Not claimed |
