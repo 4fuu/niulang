@@ -37,7 +37,7 @@ func TestLastGoodAtAdvancesOnAnUnchangedRefresh(t *testing.T) {
 func TestLastGoodAtHoldsWhileRefreshFails(t *testing.T) {
 	provider := testProvider(t, "127.0.0.1:443", time.Now())
 	store := provider.Store
-	account, err := store.AddAccount("alice", time.Time{}, 0, time.Now())
+	account, err := store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

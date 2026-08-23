@@ -334,7 +334,7 @@ func (s *Server) watchAuthorizationStore(ctx context.Context) {
 				if !write {
 					continue
 				}
-				s.cfg.Logger.LogAttrs(context.Background(), slog.LevelError,
+				s.cfg.Logger.LogAttrs(ctx, slog.LevelError,
 					"authorization refresh failed; retaining last known-good state",
 					slog.String("error", err.Error()),
 					slog.Uint64("consecutive", consecutive),
@@ -344,7 +344,7 @@ func (s *Server) watchAuthorizationStore(ctx context.Context) {
 				continue
 			}
 			if recovered, attempts, unreadableFor := watch.succeeded(now); recovered {
-				s.cfg.Logger.LogAttrs(context.Background(), slog.LevelWarn,
+				s.cfg.Logger.LogAttrs(ctx, slog.LevelWarn,
 					"authorization refresh recovered",
 					slog.Uint64("failed_attempts", attempts),
 					slog.Int64("unreadable_for_seconds", int64(unreadableFor/time.Second)))
