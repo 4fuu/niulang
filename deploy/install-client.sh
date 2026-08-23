@@ -17,7 +17,11 @@ repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 
 home=${HOME:?HOME must be set}
 prefix=$home/.queqiao
-config_dir=$home/.config/queqiao
+# Left empty here and resolved once the platform is known: `queqiaod enroll`
+# uses the platform configuration directory, and an installer that chose a
+# different one would leave hand-enrolled and script-enrolled profiles in two
+# places with no hint that either existed.
+config_dir=
 base_port=12080
 metrics_listen=127.0.0.1:12090
 local_address=auto
@@ -58,7 +62,9 @@ Options:
   --device-name NAME       device label shown to the provider (default hostname)
   --metrics-listen ADDR    loopback metrics address (default 127.0.0.1:12090)
   --log-level LEVEL        debug, info, warn, or error (default info)
-  --config-dir DIR         profiles and manifest (default ~/.config/queqiao)
+  --config-dir DIR         profiles and manifest (default: the same directory
+                           `queqiaod enroll` uses -- ~/Library/Application
+                           Support/queqiao on macOS, ~/.config/queqiao on Linux)
   --prefix DIR             binary install prefix (default ~/.queqiao)
   --label NAME             macOS LaunchAgent label (default me.01.queqiao.client)
   --service-name NAME      Linux systemd --user unit name (default queqiao-client)
@@ -68,6 +74,12 @@ Options:
   --no-verify              skip listener and egress verification entirely
   --dry-run                print the plan and exit without changing anything
   -h, --help               show this help
+
+Re-running the script updates the install in place. Changing --config-dir,
+--prefix, --label, or --service-name relocates it: the service is stopped,
+every enrolled profile moves with it, and the superseded definition and binary
+are removed. Profiles are moved rather than re-enrolled because an invitation
+is single-use and the device key cannot be reissued.
 
 The binary is taken from --binary, then ./queqiaod in the repository root,
 then a local `go build ./cmd/queqiaod`.
@@ -217,6 +229,14 @@ Linux) platform=linux ;;
 *) die "the client installer supports macOS and Linux; use the manual steps in docs/DEPLOYING.md" ;;
 esac
 
+if [ -z "$config_dir" ]; then
+	if [ "$platform" = macos ]; then
+		config_dir="$home/Library/Application Support/queqiao"
+	else
+		config_dir="${XDG_CONFIG_HOME:-$home/.config}/queqiao"
+	fi
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
 	die "run this as the account that will use the tunnel, not with sudo.
 The profile is that user's private key and the service is a per-user agent."
@@ -242,9 +262,92 @@ done
 
 binary_path=$prefix/bin/queqiaod
 manifest=$config_dir/providers.json
+if [ "$platform" = macos ]; then
+	service_dir=$home/Library/LaunchAgents
+	service_path=$service_dir/$label.plist
+else
+	service_dir=$home/.config/systemd/user
+	service_path=$service_dir/$service_name.service
+fi
 if [ -z "$device_name" ]; then
 	device_name=$(hostname 2>/dev/null || echo device)
 fi
+
+# The installed service definition is the only durable record of where a
+# previous install put its files, so it is what gets read back. Discovery is by
+# content rather than by name: an operator who changes --label or
+# --service-name would otherwise look like a first install, and a first install
+# does not migrate anything -- it would leave the enrolled profiles behind,
+# unreachable and impossible to re-enroll, because invitations are single-use.
+previous_definition=
+previous_manifest=
+previous_binary=
+stale_binary=
+
+read_service_arguments() {
+	if [ "$platform" = macos ]; then
+		sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$1" |
+			sed -n 's|^[[:space:]]*<string>\(.*\)</string>[[:space:]]*$|\1|p'
+	else
+		# Every token is quoted when written, so quoted-token extraction
+		# survives a path containing spaces where field splitting would not.
+		sed -n 's/^ExecStart=//p' "$1" | grep -o '"[^"]*"' | sed -e 's/^"//' -e 's/"$//'
+	fi
+}
+
+find_previous_install() {
+	[ -d "$service_dir" ] || return 0
+	if [ "$platform" = macos ]; then
+		set -- "$service_dir"/*.plist
+	else
+		set -- "$service_dir"/*.service
+	fi
+	matches=$work_dir/matches
+	: >"$matches"
+	for candidate in "$@"; do
+		[ -f "$candidate" ] || continue
+		grep -q -- '--providers' "$candidate" || continue
+		grep -q 'queqiaod' "$candidate" || continue
+		printf '%s\n' "$candidate" >>"$matches"
+	done
+	found=$(wc -l <"$matches" | tr -d ' ')
+	[ "$found" -gt 0 ] || return 0
+	if [ "$found" -gt 1 ]; then
+		die "$service_dir holds more than one queqiao client service:
+$(cat "$matches")
+Remove the ones you do not want before relocating; this script will not guess
+which install is current."
+	fi
+	previous_definition=$(cat "$matches")
+	read_service_arguments "$previous_definition" >"$work_dir/previous-args"
+	previous_binary=$(head -n 1 "$work_dir/previous-args")
+	previous_manifest=$(awk 'prev == "--providers" { print; exit } { prev = $0 }' \
+		"$work_dir/previous-args")
+}
+
+stop_previous_service() {
+	previous_id=$(basename "$previous_definition")
+	if [ "$platform" = macos ]; then
+		launchctl bootout "gui/$(id -u)/${previous_id%.plist}" >/dev/null 2>&1 || true
+	else
+		systemctl --user disable --now "${previous_id%.service}" >/dev/null 2>&1 || true
+	fi
+}
+
+# The old binary is removed only once nothing else points at it. A second
+# install sharing one binary is unusual but cheap to check, and deleting a
+# running service's executable would be a poor trade for tidiness.
+remove_unreferenced_binary() {
+	[ -f "$1" ] || return 0
+	if [ -d "$service_dir" ] && grep -rlF -- "$1" "$service_dir" 2>/dev/null | grep -q .; then
+		echo "Left $1 in place; another service definition still references it." >&2
+		return 0
+	fi
+	rm -f "$1"
+	rmdir "$(dirname "$1")" 2>/dev/null || true
+	rmdir "$(dirname "$(dirname "$1")")" 2>/dev/null || true
+	echo "Removed the superseded binary $1."
+}
 
 name_taken() {
 	cut -f1 "$entries" | grep -Fqx "$1"
@@ -271,16 +374,16 @@ slugify() {
 # The manifest is rewritten from this script's own one-object-per-line shape.
 # A hand-edited file is not re-serialized blindly: an unrecognized layout stops
 # the install rather than dropping providers the operator added by hand.
-load_existing_manifest() {
-	[ -f "$manifest" ] || return 0
-	declared=$(grep -c '"name"' "$manifest" || true)
-	parsed=$(grep -o '{"name": "[^"]*", "profile": "[^"]*", "listen": "[^"]*"}' "$manifest" || true)
+read_manifest_entries() {
+	[ -f "$1" ] || return 0
+	declared=$(grep -c '"name"' "$1" || true)
+	parsed=$(grep -o '{"name": "[^"]*", "profile": "[^"]*", "listen": "[^"]*"}' "$1" || true)
 	found=0
 	if [ -n "$parsed" ]; then
 		found=$(printf '%s\n' "$parsed" | wc -l | tr -d ' ')
 	fi
 	if [ "$declared" -ne "$found" ]; then
-		die "$manifest was edited into a shape this script cannot merge.
+		die "$1 was edited into a shape this script cannot merge.
 Add the new provider by hand, or move the file aside and re-enroll every
 provider in one run."
 	fi
@@ -294,21 +397,69 @@ provider in one run."
 		entry_listen=${rest%%\"*}
 		printf '%s\t%s\t%s\n' "$entry_name" "$entry_profile" "$entry_listen" >>"$entries"
 	done
-	echo "Keeping $found provider(s) already in $manifest."
+	echo "Keeping $found provider(s) already in $1."
 }
 
-if [ ! -s "$pending" ] && [ ! -f "$manifest" ]; then
+# Relocation moves the profiles rather than re-enrolling them. A profile is a
+# device private key whose invitation has already been consumed, so moving the
+# file is the only way to keep the device; re-enrolling is not available.
+relocate_profiles() {
+	moved=$work_dir/moved
+	: >"$moved"
+	while IFS="$tab" read -r entry_name entry_profile entry_listen; do
+		destination=$config_dir/$(basename "$entry_profile")
+		if [ "$entry_profile" != "$destination" ]; then
+			if [ -e "$destination" ]; then
+				die "cannot move $entry_profile to $destination: a file is already there.
+Move it aside and re-run, or keep the previous --config-dir."
+			fi
+			if [ ! -f "$entry_profile" ]; then
+				die "provider $entry_name refers to $entry_profile, which is missing.
+Its invitation is already consumed, so it cannot be re-enrolled; restore that
+file from backup before relocating."
+			fi
+			mv "$entry_profile" "$destination"
+			rm -f "$entry_profile.lock"
+			echo "Moved $entry_name to $destination."
+		fi
+		printf '%s\t%s\t%s\n' "$entry_name" "$destination" "$entry_listen" >>"$moved"
+	done <"$entries"
+	mv "$moved" "$entries"
+}
+
+find_previous_install
+
+relocating=false
+if [ -n "$previous_definition" ]; then
+	if [ "$previous_manifest" != "$manifest" ] ||
+		[ "$previous_definition" != "$service_path" ] ||
+		[ "$previous_binary" != "$binary_path" ]; then
+		relocating=true
+	fi
+fi
+
+if [ "$relocating" = false ] && [ ! -s "$pending" ] && [ ! -f "$manifest" ]; then
 	usage_error "at least one --invite is required for a first install"
 fi
 
 if [ "$dry_run" = true ]; then
+	if [ "$relocating" = true ]; then
+		echo "Would relocate the install described by $previous_definition:"
+		[ "$previous_binary" = "$binary_path" ] ||
+			echo "  binary    $previous_binary -> $binary_path"
+		[ "$previous_manifest" = "$manifest" ] ||
+			echo "  manifest  $previous_manifest -> $manifest"
+		[ "$previous_definition" = "$service_path" ] ||
+			echo "  service   $previous_definition -> $service_path"
+		echo "Would stop the running service and move every enrolled profile with it."
+	fi
 	echo "Would install $binary_path and write $manifest."
 	echo "Would enroll $(wc -l <"$pending" | tr -d ' ') invitation(s) with --local-address $local_address as device \"$device_name\"."
 	echo "Would allocate loopback SOCKS5 ports from $base_port upward."
 	if [ "$platform" = macos ]; then
-		echo "Would install the LaunchAgent $home/Library/LaunchAgents/$label.plist."
+		echo "Would install the LaunchAgent $service_path."
 	else
-		echo "Would install the systemd user unit $home/.config/systemd/user/$service_name.service."
+		echo "Would install the systemd user unit $service_path."
 	fi
 	exit 0
 fi
@@ -347,7 +498,28 @@ install -d -m 0700 "$config_dir"
 install -m 0755 "$staged_binary" "$binary_path.new"
 mv -f "$binary_path.new" "$binary_path"
 
-load_existing_manifest
+if [ "$relocating" = true ]; then
+	echo "Relocating the install described by $previous_definition."
+	stop_previous_service
+	read_manifest_entries "$previous_manifest"
+	relocate_profiles
+	if [ "$previous_manifest" != "$manifest" ]; then
+		rm -f "$previous_manifest"
+	fi
+	if [ "$previous_definition" != "$service_path" ]; then
+		rm -f "$previous_definition"
+		echo "Removed the superseded service definition $previous_definition."
+	fi
+	if [ "$previous_binary" != "$binary_path" ]; then
+		stale_binary=$previous_binary
+	fi
+else
+	read_manifest_entries "$manifest"
+fi
+
+if [ ! -s "$pending" ] && [ ! -s "$entries" ]; then
+	usage_error "at least one --invite is required for a first install"
+fi
 
 index=0
 while IFS="$tab" read -r invitation requested_name; do
@@ -422,137 +594,30 @@ manifest_tmp=$work_dir/providers.json
 } >"$manifest_tmp"
 install -m 0600 "$manifest_tmp" "$manifest"
 
-# One argument list, rendered twice: as plist <string> elements and as a quoted
-# systemd ExecStart. Keeping it in one place is what stops the two supervisors
-# from drifting apart.
-args_file=$work_dir/args
-: >"$args_file"
-add_arg() {
-	printf '%s\n' "$1" >>"$args_file"
-}
-add_arg client
-add_arg --providers
-add_arg "$manifest"
-add_arg --local-address
-add_arg "$local_address"
-if [ -n "$metrics_listen" ]; then
-	add_arg --metrics-listen
-	add_arg "$metrics_listen"
+# The service definition has one renderer, and it lives in the binary. This
+# script owns enrollment, the manifest, and verification; `queqiaod service`
+# owns what a LaunchAgent and a systemd user unit look like. Two copies of that
+# knowledge is exactly how the old hand-edited plist drifted from the guide.
+# Positional parameters rather than one string: the default configuration
+# directory on macOS is "Application Support", and word splitting would tear
+# that path in half.
+set -- service install \
+	--providers "$manifest" \
+	--local-address "$local_address" \
+	--log-level "$log_level" \
+	--metrics-listen "$metrics_listen" \
+	--label "$label" \
+	--service-name "$service_name"
+if [ "$start_service" = false ]; then
+	set -- "$@" --no-start
 fi
-add_arg --log-level
-add_arg "$log_level"
-add_arg --log-format
-add_arg json
-add_arg --telemetry-log-interval
-add_arg 5s
-if [ "$platform" = macos ]; then
-	# launchd discards stderr unless a path is configured, so the rotating
-	# JSON file is the only useful surface. journald keeps stderr on Linux.
-	add_arg --log-stderr=false
-fi
+"$binary_path" "$@"
 
-if [ "$platform" = macos ]; then
-	agent_dir=$home/Library/LaunchAgents
-	service_path=$agent_dir/$label.plist
-	plist_tmp=$work_dir/agent.plist
-	install -d -m 0755 "$agent_dir"
-	{
-		cat <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Generated by deploy/install-client.sh. Re-run that script after changing
-     providers; edits made here are overwritten. -->
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>$label</string>
-
-  <key>ProgramArguments</key>
-  <array>
-    <string>$binary_path</string>
-EOF
-		while IFS= read -r argument; do
-			printf '    <string>%s</string>\n' "$argument"
-		done <"$args_file"
-		cat <<'EOF'
-  </array>
-
-  <key>RunAtLoad</key>
-  <true/>
-
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
-
-  <key>ProcessType</key>
-  <string>Interactive</string>
-</dict>
-</plist>
-EOF
-	} >"$plist_tmp"
-	install -m 0644 "$plist_tmp" "$service_path"
-
-	if [ "$start_service" = true ]; then
-		# bootout before bootstrap: kickstart restarts the definition launchd
-		# already cached and would not re-read the arguments just written.
-		launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
-		launchctl bootstrap "gui/$(id -u)" "$service_path"
-	fi
-else
-	unit_dir=$home/.config/systemd/user
-	service_path=$unit_dir/$service_name.service
-	unit_tmp=$work_dir/unit.service
-	install -d -m 0755 "$unit_dir"
-
-	exec_start="\"$binary_path\""
-	while IFS= read -r argument; do
-		exec_start="$exec_start \"$argument\""
-	done <"$args_file"
-
-	cat >"$unit_tmp" <<EOF
-# Generated by deploy/install-client.sh. Re-run that script after changing
-# providers; edits made here are overwritten.
-[Unit]
-Description=queqiao local SOCKS5 client
-Documentation=https://github.com/bojieli/queqiao
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$exec_start
-# The process exits when any provider's listener stops, so a partially working
-# client never looks healthy. Restarting is what makes that safe.
-Restart=on-failure
-RestartSec=2s
-NoNewPrivileges=true
-PrivateTmp=true
-LockPersonality=true
-RestrictRealtime=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-SystemCallArchitectures=native
-LimitNOFILE=65536
-
-[Install]
-WantedBy=default.target
-EOF
-	install -m 0644 "$unit_tmp" "$service_path"
-
-	if [ "$start_service" = true ]; then
-		systemctl --user daemon-reload ||
-			die "systemctl --user is unavailable in this session.
-Log in on the desktop, or set XDG_RUNTIME_DIR for this account, then re-run."
-		systemctl --user enable "$service_name" >/dev/null
-		systemctl --user restart "$service_name"
-		# Without lingering the user manager exists only while the account is
-		# logged in, so the client would not come back after a reboot.
-		if command -v loginctl >/dev/null 2>&1; then
-			loginctl enable-linger "$(id -un)" >/dev/null 2>&1 ||
-				echo "NOTE: could not enable lingering. Run 'sudo loginctl enable-linger $(id -un)' so the client starts at boot without a login." >&2
-		fi
-	fi
+# Only now is the superseded binary genuinely unreferenced. Until the new
+# definition was written, the scan would still have found the old path inside
+# it and declined to remove anything.
+if [ -n "$stale_binary" ]; then
+	remove_unreferenced_binary "$stale_binary"
 fi
 
 have_nc=false

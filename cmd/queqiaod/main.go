@@ -42,7 +42,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("a command is required: provider, enroll, client, server, logs, or version")
+		return errors.New("a command is required: provider, enroll, client, service, server, logs, or version")
 	}
 	switch args[0] {
 	case "version", "--version", "-version":
@@ -61,8 +61,10 @@ func run(args []string) error {
 		return runServer(args[1:])
 	case "logs":
 		return runLogs(args[1:])
+	case "service":
+		return runService(args[1:])
 	default:
-		return fmt.Errorf("unknown command %q; want provider, enroll, client, server, logs, or version", args[0])
+		return fmt.Errorf("unknown command %q; want provider, enroll, client, service, server, logs, or version", args[0])
 	}
 }
 
@@ -410,7 +412,7 @@ func runEnroll(args []string) error {
 	if err := os.Remove(pendingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("profile was saved successfully at %s, but the completed draft %s still contains private credentials and must be removed: %w", *profilePath, pendingPath, err)
 	}
-	fmt.Printf("Enrolled %q as device %q.\nProfile: %s\nSOCKS: queqiaod client --profile %q\n", profile.Name, profile.DeviceName, *profilePath, *profilePath)
+	fmt.Printf("Enrolled %q as device %q.\nProfile: %s\nSOCKS: queqiaod client --profile %q\nService: queqiaod service install --profile %q\n", profile.Name, profile.DeviceName, *profilePath, *profilePath, *profilePath)
 	return nil
 }
 
@@ -439,7 +441,11 @@ func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
 	defaultListen := ":443"
 	defaultMaxSessions := 4096
 	if client {
-		defaultListen, defaultMaxSessions = "127.0.0.1:1080", 2048
+		// 12080 rather than the conventional 1080: deploy/clash-queqiao.yaml
+		// and the deployment guide both point Clash at that port, and a
+		// default that disagrees with the profile shipped beside it turns
+		// every unconfigured start into a silent no-route.
+		defaultListen, defaultMaxSessions = "127.0.0.1:12080", 2048
 	}
 	fs.StringVar(&opts.listen, "listen", defaultListen, "listen address")
 	fs.IntVar(&opts.maxSessions, "max-sessions", defaultMaxSessions, "global concurrent-session limit")

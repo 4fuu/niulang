@@ -165,14 +165,21 @@ client:
 
 ```sh
 ./queqiaod enroll 'queqiao://enroll/…'
-./queqiaod client --profile ~/.config/queqiao/PROVIDER_ID.json
+./queqiaod service install --profile "$PROFILE"
 ```
 
-The client listens on `127.0.0.1:1080` by default. Point an application or
-Clash/mihomo at that SOCKS5 endpoint.
+`enroll` prints the profile path it wrote and the exact `service install` line
+to run next. That second command installs a per-user service — a LaunchAgent on
+macOS, a systemd `--user` unit on Linux — so the client starts on its own
+instead of living in a terminal. `./queqiaod client --profile "$PROFILE"` runs
+it in the foreground when you only want to try it.
 
-For a real deployment rather than a foreground trial, two scripts do the same
-work as services and verify the result:
+The client listens on `127.0.0.1:12080`, the port
+[`deploy/clash-queqiao.yaml`](deploy/clash-queqiao.yaml) already points at.
+Point an application or Clash/mihomo at that SOCKS5 endpoint.
+
+Two scripts collapse the whole of the above into one command per side and
+verify the result:
 
 ```sh
 # Linux gateway, as root: binary, service account, unit, provider, first user,
@@ -180,8 +187,8 @@ work as services and verify the result:
 sudo ./deploy/install-server.sh --name "Example Network" \
   --endpoint gateway.example.net:443 --user alice --tune
 
-# Client, as the account that will use the tunnel: enrollment, manifest, a
-# per-user service that starts at login, and an end-to-end egress check.
+# Client, as the account that will use the tunnel: enrollment, manifest,
+# service, and an end-to-end check that traffic reaches the gateway.
 ./deploy/install-client.sh --invite 'queqiao://enroll/…'
 ```
 

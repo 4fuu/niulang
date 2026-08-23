@@ -30,7 +30,6 @@ REQUIRED_ARCHIVE_FILES = {
     "deploy/clash-queqiao.yaml",
     "deploy/install-client.sh",
     "deploy/install-server.sh",
-    "deploy/me.01.queqiao.client.plist",
     "deploy/queqiaod.service",
     "deploy/tune-server.sh",
     "docs/ARCHITECTURE.md",
