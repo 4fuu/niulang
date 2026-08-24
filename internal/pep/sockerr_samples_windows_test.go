@@ -14,9 +14,9 @@ var (
 		{"network unreachable", windows.WSAENETUNREACH},
 		{"host down", windows.WSAEHOSTDOWN},
 		{"host unreachable", windows.WSAEHOSTUNREACH},
-		{"source address gone", windows.WSAEADDRNOTAVAIL},
 		{"send queue full", windows.WSAENOBUFS},
 	}
+	staleSourceWriteSample  = errnoSample{"source address gone", windows.WSAEADDRNOTAVAIL}
 	unreachableRouteSamples = []errnoSample{
 		{"network down", windows.WSAENETDOWN},
 		{"network unreachable", windows.WSAENETUNREACH},

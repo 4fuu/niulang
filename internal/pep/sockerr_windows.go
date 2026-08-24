@@ -44,7 +44,6 @@ func unreachableRouteErrno(err error) bool {
 
 func transientRouteWriteErrno(err error) bool {
 	return unreachableRouteErrno(err) ||
-		errors.Is(err, windows.WSAEADDRNOTAVAIL) ||
 		errors.Is(err, windows.WSAENOBUFS)
 }
 

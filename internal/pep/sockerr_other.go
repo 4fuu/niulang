@@ -23,9 +23,14 @@ func unreachableRouteErrno(err error) bool {
 // transientRouteWriteErrno reports the codes a local send returns while the
 // route is momentarily absent -- changing networks, a link flapping, or the
 // send queue briefly full. The socket outlives all of them.
+//
+// EADDRNOTAVAIL is deliberately absent. It means the source address a bound
+// socket owns has disappeared, as happens after DHCP assigns a different
+// address on a new Wi-Fi network. That socket cannot adopt the replacement
+// address, so hiding the error would keep QUIC retransmitting forever on a
+// path which cannot send.
 func transientRouteWriteErrno(err error) bool {
 	return unreachableRouteErrno(err) ||
-		errors.Is(err, syscall.EADDRNOTAVAIL) ||
 		errors.Is(err, syscall.ENOBUFS)
 }
 

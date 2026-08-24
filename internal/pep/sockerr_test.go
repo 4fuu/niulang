@@ -84,14 +84,14 @@ func TestTheCodesTheHostActuallyReportsAreClassified(t *testing.T) {
 		accepts func(error) bool
 	}{
 		{
-			// Binding to an address this host does not hold is the one route
+			// Binding to an address this host does not hold is the one source
 			// error a test can provoke without touching the machine's network
-			// configuration. It is in transientRouteWriteError's set because a
-			// source address vanishing mid-connection is exactly what a
-			// network change looks like to a socket.
+			// configuration. A socket bound to an address which vanished cannot
+			// adopt the replacement address, so this must remain fatal instead
+			// of being disguised as one lost datagram.
 			what:    "a source address this host does not hold",
 			draw:    bindToAnAddressThisHostDoesNotHold,
-			accepts: transientRouteWriteError,
+			accepts: func(err error) bool { return !transientRouteWriteError(err) },
 		},
 		{
 			// A write to a socket whose peer has gone reports the local
