@@ -400,18 +400,44 @@ type udpAssociation struct {
 	token  []byte
 }
 
+type udpAssociationOpenTransportError struct {
+	operation string
+	err       error
+}
+
+func (e *udpAssociationOpenTransportError) Error() string {
+	return e.operation + ": " + e.err.Error()
+}
+
+func (e *udpAssociationOpenTransportError) Unwrap() error { return e.err }
+
 func (c *Client) openUDPAssociation(ctx context.Context, resume []byte) (*udpAssociation, error) {
-	return c.openUDPAssociationMode(ctx, resume, false, false)
+	association, err := c.openUDPAssociationMode(ctx, resume, false, false)
+	if err == nil || ctx.Err() != nil {
+		return association, err
+	}
+	var transportErr *udpAssociationOpenTransportError
+	if !errors.As(err, &transportErr) {
+		return nil, err
+	}
+	// The first failure has already retired a timed-out pooled QUIC
+	// generation. AUTO uses its authenticated TCP path for this one bounded
+	// retry, while later associations are free to establish a fresh QUIC pool.
+	retry, retryErr := c.openUDPAssociationMode(ctx, resume, true, false)
+	if retryErr != nil {
+		return nil, fmt.Errorf("UDP association open failed (%v); fast retry failed: %w", err, retryErr)
+	}
+	return retry, nil
 }
 
 func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fastRetry, rescue bool) (*udpAssociation, error) {
 	var lane *authenticatedLane
 	var err error
-	if rescue && c.cfg.Transport == TransportAuto {
+	if (fastRetry || rescue) && c.cfg.Transport == TransportAuto {
 		// An established association already failed. Waiting for another QUIC
-		// dial proves nothing about the endpoint and can exceed the preserved
-		// SOCKS datagram's useful lifetime, so recover this flow over the warm
-		// standby transport without changing global UDP health.
+		// dial -- or retrying a just-failed association on the same path -- can
+		// exceed the preserved SOCKS datagram's useful lifetime, so recover this
+		// flow over the warm standby transport without changing global UDP health.
 		c.metrics.Fallback()
 		lane, err = c.dialAuthenticatedCandidate(ctx, TransportTCP)
 	} else {
@@ -436,13 +462,11 @@ func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fast
 		Version: protocol.Version, Type: protocol.TypeOpen, SessionID: lane.sessionID,
 		FlowID: flowID, Class: protocol.ClassInteractive,
 	}, Payload: payload}); err != nil {
-		_ = lane.fc.Close()
-		return nil, fmt.Errorf("send UDP association open: %w", err)
+		return nil, failUDPAssociationOpenLane(lane, "send UDP association open", err)
 	}
 	response, err := lane.fc.Read()
 	if err != nil {
-		_ = lane.fc.Close()
-		return nil, fmt.Errorf("read UDP association acknowledgement: %w", err)
+		return nil, failUDPAssociationOpenLane(lane, "read UDP association acknowledgement", err)
 	}
 	if response.Header.SessionID != lane.sessionID || response.Header.FlowID != flowID {
 		_ = lane.fc.Close()
@@ -471,6 +495,17 @@ func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fast
 	}
 	_ = lane.outer.SetDeadline(time.Time{})
 	return association, nil
+}
+
+func failUDPAssociationOpenLane(lane *authenticatedLane, operation string, err error) error {
+	transportErr := &udpAssociationOpenTransportError{operation: operation, err: err}
+	if lane != nil && lane.fc != nil {
+		if observer, ok := lane.fc.transport().(interface{ transportFailed(error) }); ok {
+			observer.transportFailed(transportErr)
+		}
+		_ = lane.fc.Close()
+	}
+	return transportErr
 }
 
 func (c *Client) runClientUDPUplink(ctx context.Context, udpConn *net.UDPConn, fc *frameConn, sessionID [16]byte, flowID uint64, peerMu *sync.RWMutex, peer **net.UDPAddr, activity chan<- struct{}, counters *udpCounters) error {
