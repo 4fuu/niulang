@@ -18,15 +18,15 @@ func sendTUICPacket(sender *TUICBBRSender, sentTime monotime.Time, preSend quicc
 
 func TestTUICMinMaxRetainsPeakForTenRounds(t *testing.T) {
 	m := newTUICMinMax()
-	m.updateMax(1, 100)
-	m.updateMax(3, 120)
-	m.updateMax(5, 160)
-	m.updateMax(7, 100)
-	m.updateMax(10, 100)
+	m.updateMax(1, monotime.Time(0), 100)
+	m.updateMax(3, monotime.Time(0), 120)
+	m.updateMax(5, monotime.Time(0), 160)
+	m.updateMax(7, monotime.Time(0), 100)
+	m.updateMax(10, monotime.Time(0), 100)
 	if got := m.get(); got != 160 {
 		t.Fatalf("peak was lost inside filter window: %d", got)
 	}
-	m.updateMax(16, 100)
+	m.updateMax(16, monotime.Time(0), 100)
 	if got := m.get(); got != 100 {
 		t.Fatalf("expired peak remained in filter: %d", got)
 	}
@@ -34,15 +34,15 @@ func TestTUICMinMaxRetainsPeakForTenRounds(t *testing.T) {
 
 func TestTUICMinMaxHalfWindowStartsAtThirdSample(t *testing.T) {
 	m := newTUICMinMax()
-	m.updateMax(0, 100)
+	m.updateMax(0, monotime.Time(0), 100)
 	// The quarter-window refresh records the second and third samples at round
 	// three. The half-window clock must start there, not at the original best.
-	m.updateMax(3, 90)
-	m.updateMax(6, 80)
+	m.updateMax(3, monotime.Time(0), 90)
+	m.updateMax(6, monotime.Time(0), 80)
 	if got := m.samples[2]; got.round != 3 || got.value != 90 {
 		t.Fatalf("third sample advanced before its half-window elapsed: %+v", got)
 	}
-	m.updateMax(9, 80)
+	m.updateMax(9, monotime.Time(0), 80)
 	if got := m.samples[2]; got.round != 9 || got.value != 80 {
 		t.Fatalf("third sample did not advance after its half-window: %+v", got)
 	}
@@ -177,7 +177,7 @@ func TestTUICAppLimitedMarkerIsPacketScoped(t *testing.T) {
 
 func TestTUICAppLimitedSampleCanRaiseBandwidth(t *testing.T) {
 	e := newTUICBandwidthEstimator()
-	e.maxFilter.updateMax(1, 100)
+	e.maxFilter.updateMax(1, monotime.Time(0), 100)
 	start := monotime.Now()
 	e.markAppLimited()
 	e.onSentPacket(start, 0, 1200, 0, true)
@@ -561,7 +561,7 @@ func TestTUICStartupDoesNotExitOnOnePostModelLoss(t *testing.T) {
 	sender.recovery = tuicConservation
 	sender.roundsNoGain = 0
 	sender.bwAtLastRound = 1
-	sender.estimator.maxFilter.updateMax(1, 1)
+	sender.estimator.maxFilter.updateMax(1, monotime.Time(0), 1)
 	sender.checkFullBandwidth(tuicSendState{valid: true})
 	if sender.fullBandwidth {
 		t.Fatal("one recovery event prematurely exited startup")
@@ -584,7 +584,7 @@ func TestTUICProbeBWLowGainDoesNotStickAboveTarget(t *testing.T) {
 	sender.mode = tuicBbrProbeBW
 	sender.pacingGain = tuicPacingGains[1]
 	sender.cycleOffset = 1
-	sender.estimator.maxFilter.updateMax(1, 1024*1024)
+	sender.estimator.maxFilter.updateMax(1, monotime.Time(0), 1024*1024)
 	start := monotime.Now()
 	sender.lastCycle = start
 	inFlight := sender.targetCwnd(1) + sender.maxDatagramSize
@@ -599,7 +599,7 @@ func TestTUICProbeRTTPreservesModelAndExitsAfterPriorRound(t *testing.T) {
 	sender.fullBandwidth = true
 	sender.mode = tuicBbrProbeBW
 	sender.cwnd = 512 * 1024
-	sender.estimator.maxFilter.updateMax(1, 2*1024*1024)
+	sender.estimator.maxFilter.updateMax(1, monotime.Time(0), 2*1024*1024)
 	start := monotime.Now()
 	sender.maybeProbeRTT(start, false, 0, true)
 	if sender.mode != tuicBbrProbeRTT || sender.GetCongestionWindow() != sender.minCwnd || !sender.estimator.appLimited {
@@ -627,8 +627,8 @@ func TestTUICTargetWindowUsesStartupGainWithoutBandwidth(t *testing.T) {
 
 func TestTUICStartupGrowthPreservesAckHeight(t *testing.T) {
 	sender := NewTUICBBRSender(1200)
-	sender.ackAgg.maxAckHeight.updateMax(1, 24*1200)
-	sender.estimator.maxFilter.updateMax(1, 1024*1024)
+	sender.ackAgg.maxAckHeight.updateMax(1, monotime.Time(0), 24*1200)
+	sender.estimator.maxFilter.updateMax(1, monotime.Time(0), 1024*1024)
 	sender.checkFullBandwidth(tuicSendState{valid: true})
 	if got := sender.ackAgg.maxAckHeight.get(); got != 24*1200 {
 		t.Fatalf("startup bandwidth growth discarded ACK height: %d", got)

@@ -257,7 +257,13 @@ func (b *TUICBBRSender) seedBandwidth(rate uint64, roundTrip time.Duration) {
 	if rate > tuicMaxRate {
 		rate = tuicMaxRate
 	}
-	b.estimator.maxFilter.updateMax(b.round, rate)
+	// The seed is stamped with the current time like any other sample, so a
+	// lane that inherits a rate and then goes quiet lets it expire rather than
+	// pacing from another lane's peak indefinitely.
+	if roundTrip > 0 {
+		b.estimator.maxFilter.setRoundTrip(roundTrip)
+	}
+	b.estimator.maxFilter.updateMax(b.round, monotime.Now(), rate)
 	if pacing := uint64(float64(rate) * b.highGain); pacing > b.pacingRate {
 		b.pacingRate = minUint64(pacing, tuicMaxRate)
 	}
@@ -986,6 +992,10 @@ func (a *tuicAckAggregation) update(newlyAcked uint64, now monotime.Time, round,
 	}
 	a.epochBytes = satAddUint64(a.epochBytes, newlyAcked)
 	diff := a.epochBytes - expected
-	a.maxAckHeight.updateMax(round, diff)
+	// The ack-aggregation filter keeps the original round-only clock: it
+	// measures how much more than expected one round delivered, which is a
+	// statement about rounds and means nothing between them. A zero time
+	// leaves it exactly as it was.
+	a.maxAckHeight.updateMax(round, monotime.Time(0), diff)
 	return diff
 }
