@@ -300,6 +300,8 @@ type Snapshot struct {
 	QUICControllerCongestionWindow, QUICControllerBytesInFlight   uint64
 	QUICControllerBytesLost, QUICControllerPacketsLost            uint64
 	QUICControllerMinRTT                                          time.Duration
+	QUICSampleMean, QUICSampleMax, QUICSampleDelivered            uint64
+	QUICSampleInterval                                            time.Duration
 	QUICErasureSend                                               float64
 	QUICDelayBrake                                                float64
 	QUICControllerInRecovery                                      bool
@@ -337,6 +339,10 @@ type QUICObservation struct {
 	ControllerCongestionWindow uint64
 	ControllerBytesInFlight    uint64
 	ControllerMinRTT           time.Duration
+	ControllerSampleMean       uint64
+	ControllerSampleMax        uint64
+	ControllerSampleDelivered  uint64
+	ControllerSampleInterval   time.Duration
 	ControllerErasure          float64
 	ControllerDelayBrake       float64
 	ControllerInRecovery       bool
@@ -675,6 +681,8 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerRound uint64
 	var controllerMinRTT time.Duration
 	var controllerErasure, controllerDelayBrake float64
+	var sampleMean, sampleMax, sampleDelivered uint64
+	var sampleInterval time.Duration
 	var controllerRecovery bool
 	for key, entry := range r.quicFlows {
 		// An entry nobody refreshes is not a measurement of anything. Because
@@ -737,6 +745,16 @@ func (r *Registry) Snapshot() Snapshot {
 			if o.ControllerErasure > controllerErasure {
 				controllerErasure = o.ControllerErasure
 			}
+			// The widest sample any lane produced, with the interval and
+			// delivery that produced it, so the three stay from one sample.
+			if o.ControllerSampleMax > sampleMax {
+				sampleMax = o.ControllerSampleMax
+				sampleDelivered = o.ControllerSampleDelivered
+				sampleInterval = o.ControllerSampleInterval
+			}
+			if o.ControllerSampleMean > sampleMean {
+				sampleMean = o.ControllerSampleMean
+			}
 			if o.ControllerDelayBrake > controllerDelayBrake {
 				controllerDelayBrake = o.ControllerDelayBrake
 			}
@@ -780,6 +798,8 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICControllerBytesLost = counters.ControllerBytesLost
 	s.QUICControllerPacketsLost = counters.ControllerPacketsLost
 	s.QUICControllerMinRTT = controllerMinRTT
+	s.QUICSampleMean, s.QUICSampleMax = sampleMean, sampleMax
+	s.QUICSampleDelivered, s.QUICSampleInterval = sampleDelivered, sampleInterval
 	s.QUICErasureSend = controllerErasure
 	s.QUICDelayBrake = controllerDelayBrake
 	s.QUICControllerInRecovery = controllerRecovery
@@ -887,6 +907,14 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// is being held back by it, which is a different condition from a path that
 	// simply measured less.
 	fmt.Fprintf(w, "queqiao_delay_brake_ratio %.9f\n", s.QUICDelayBrake)
+	// The shape of the delivery-rate samples the bandwidth estimate is built
+	// from. The estimate is a maximum over these, and a maximum far above the
+	// mean is a tail rather than the path -- while a tail measured over a short
+	// interval is a measurement artefact rather than either.
+	fmt.Fprintf(w, "queqiao_quic_sample_mean_bytes_per_second %d\n", s.QUICSampleMean)
+	fmt.Fprintf(w, "queqiao_quic_sample_max_bytes_per_second %d\n", s.QUICSampleMax)
+	fmt.Fprintf(w, "queqiao_quic_sample_max_delivered_bytes %d\n", s.QUICSampleDelivered)
+	fmt.Fprintf(w, "queqiao_quic_sample_max_interval_seconds %.9f\n", s.QUICSampleInterval.Seconds())
 	if s.QUICControllerInRecovery {
 		fmt.Fprintln(w, "queqiao_quic_controller_in_recovery 1")
 	} else {

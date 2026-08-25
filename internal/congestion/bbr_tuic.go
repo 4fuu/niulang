@@ -980,6 +980,8 @@ func (b *TUICBBRSender) publishTelemetry() {
 		b.estimator.zeroSamples,
 		b.round,
 	)
+	_, mean, max, delivered, interval := b.estimator.sampleSummary()
+	b.telemetry.updateSampleShape(mean, max, delivered, interval)
 }
 
 func (b *TUICBBRSender) Telemetry() ControllerTelemetry { return b.telemetry.snapshot() }

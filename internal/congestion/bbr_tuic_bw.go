@@ -27,7 +27,23 @@ type tuicBandwidthEstimator struct {
 	// considered for the filter. It is nil in production and exists because
 	// three attempts to fix the estimate on a policed path were made by
 	// reasoning about what these numbers should be, and each was wrong.
-	sampleTrace    func(bandwidthSampleTrace)
+	sampleTrace func(bandwidthSampleTrace)
+
+	// Sample summary, kept always rather than behind the trace hook, because
+	// the question it answers cannot be asked of a harness: whether the samples
+	// this estimator is built from are the right shape on a real path.
+	//
+	// A rate on its own cannot say whether it is high because the path is fast
+	// or because the window it was measured over was short, so the widest
+	// sample is kept together with the interval and the delivery behind it. The
+	// mean beside it says whether a high maximum is the distribution or its
+	// tail.
+	sampleCount        uint64
+	sampleRateSum      uint64
+	sampleRateMax      uint64
+	sampleMaxDelivered uint64
+	sampleMaxInterval  time.Duration
+
 	totalSent      uint64
 	latestSample   uint64
 	latestAckRate  uint64
@@ -258,6 +274,29 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 			}
 			e.sampleTrace(trace)
 		}
+		{
+			candidate := ackRate
+			if sendRate > 0 && (candidate == 0 || sendRate < candidate) {
+				candidate = sendRate
+			}
+			if candidate > 0 {
+				e.sampleCount = satAddUint64(e.sampleCount, 1)
+				e.sampleRateSum = satAddUint64(e.sampleRateSum, candidate)
+				if candidate > e.sampleRateMax {
+					e.sampleRateMax = candidate
+					if !state.lastAckedAckTime.IsZero() && ackTime.After(state.lastAckedAckTime) {
+						e.sampleMaxInterval = ackTime.Sub(state.lastAckedAckTime)
+					} else {
+						e.sampleMaxInterval = 0
+					}
+					if e.totalAcked >= state.totalAckedAtSend {
+						e.sampleMaxDelivered = e.totalAcked - state.totalAckedAtSend
+					} else {
+						e.sampleMaxDelivered = 0
+					}
+				}
+			}
+		}
 		sample := ackRate
 		e.latestAckRate = ackRate
 		e.latestSendRate = sendRate
@@ -401,6 +440,20 @@ func (e *tuicBandwidthEstimator) bytesAckedThisWindow() uint64 {
 func (e *tuicBandwidthEstimator) endAcks() { e.ackedAtWindow = e.totalAcked }
 
 func (e *tuicBandwidthEstimator) estimate() uint64 { return e.maxFilter.get() }
+
+// sampleSummary is the shape of the samples the estimate is built from: how
+// many, their mean, the widest one, and the interval and delivery behind that
+// widest one.
+//
+// The maximum alone is what the filter reports and is not enough to read it. A
+// maximum far above the mean is a tail, and a tail measured over a short
+// interval is a measurement artefact rather than a path.
+func (e *tuicBandwidthEstimator) sampleSummary() (count, mean, max, delivered uint64, interval time.Duration) {
+	if e.sampleCount > 0 {
+		mean = e.sampleRateSum / e.sampleCount
+	}
+	return e.sampleCount, mean, e.sampleRateMax, e.sampleMaxDelivered, e.sampleMaxInterval
+}
 
 func rateFromDelta(bytes uint64, elapsed time.Duration) uint64 {
 	if bytes == 0 || elapsed <= 0 {

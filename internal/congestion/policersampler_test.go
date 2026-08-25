@@ -218,3 +218,42 @@ func TestBurstinessDoesNotInflateTheEstimate(t *testing.T) {
 		}
 	}
 }
+
+// The summary the running stack publishes has to describe the same samples the
+// trace hook sees, or reading it off a real path proves nothing.
+func TestTheSampleSummaryMatchesTheSamples(t *testing.T) {
+	const (
+		shaped  = 250_000.0
+		offered = 9_000_000.0
+		rtt     = 300 * time.Millisecond
+	)
+	e, traces := driveThroughPolicer(t, offered, shaped, rtt, 6)
+	count, mean, max, delivered, interval := e.sampleSummary()
+	if count != uint64(len(traces)) {
+		t.Fatalf("summary counted %d samples, the trace saw %d", count, len(traces))
+	}
+
+	var sum, widest uint64
+	var widestTrace bandwidthSampleTrace
+	for _, s := range traces {
+		sum += s.Sample
+		if s.Sample > widest {
+			widest, widestTrace = s.Sample, s
+		}
+	}
+	if max != widest {
+		t.Fatalf("summary's widest sample is %d, the trace's is %d", max, widest)
+	}
+	if want := sum / uint64(len(traces)); mean != want {
+		t.Fatalf("summary mean %d against %d over the traced samples", mean, want)
+	}
+	// The interval and delivery must come from the same sample as the maximum,
+	// which is the whole point of keeping them: a rate divorced from its window
+	// cannot be read.
+	if interval != widestTrace.AckInterval || delivered != widestTrace.AckedDelta {
+		t.Fatalf("summary reports %v over %d bytes for its widest sample; the trace says %v over %d",
+			interval, delivered, widestTrace.AckInterval, widestTrace.AckedDelta)
+	}
+	t.Logf("on a policed path: %d samples, mean %d (%.2fx), max %d (%.2fx) over %v carrying %d bytes",
+		count, mean, float64(mean)/shaped, max, float64(max)/shaped, interval.Round(time.Millisecond), delivered)
+}

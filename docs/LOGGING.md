@@ -121,6 +121,15 @@ Prometheus `/metrics` names. They cover:
   endpoint sends into, published as `queqiao_erasure_ratio{direction="send"}`
   and as `queqiao_erasure_ratio_send` in the log. A gateway's send direction is
   its downstream. This is what a code is sized from;
+- the shape of the delivery-rate samples the bandwidth estimate is built from:
+  `queqiao_quic_sample_mean_bytes_per_second`,
+  `queqiao_quic_sample_max_bytes_per_second`, and the
+  `..._max_delivered_bytes` and `..._max_interval_seconds` behind that widest
+  sample. The estimate is a maximum over these samples, and a maximum alone
+  cannot be read: a rate is high either because the path is fast or because the
+  window it was measured over was short. A maximum far above the mean is a tail
+  rather than the path, and a tail measured over a short interval is a
+  measurement artefact rather than either;
 - how much of the sending rate the delay bound is removing, as
   `queqiao_delay_brake_ratio`. It is non-zero only while the path is carrying
   more than one bandwidth-delay product of queue, and it separates a rate held

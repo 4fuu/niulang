@@ -725,6 +725,14 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 			if controller.Erasure > observation.ControllerErasure {
 				observation.ControllerErasure = controller.Erasure
 			}
+			if controller.SampleMax > observation.ControllerSampleMax {
+				observation.ControllerSampleMax = controller.SampleMax
+				observation.ControllerSampleDelivered = controller.SampleMaxDelivered
+				observation.ControllerSampleInterval = controller.SampleMaxInterval
+			}
+			if controller.SampleMean > observation.ControllerSampleMean {
+				observation.ControllerSampleMean = controller.SampleMean
+			}
 			if controller.DelayBrake > observation.ControllerDelayBrake {
 				observation.ControllerDelayBrake = controller.DelayBrake
 			}
