@@ -28,6 +28,19 @@ func TestResolveLiteral(t *testing.T) {
 	}
 }
 
+func TestIsDynamic(t *testing.T) {
+	for _, spec := range []string{"auto", "if:en0"} {
+		if !IsDynamic(spec) {
+			t.Errorf("IsDynamic(%q) = false", spec)
+		}
+	}
+	for _, spec := range []string{"", "192.0.2.10", "2001:db8::10"} {
+		if IsDynamic(spec) {
+			t.Errorf("IsDynamic(%q) = true", spec)
+		}
+	}
+}
+
 func TestResolveAutoReportsOperationalState(t *testing.T) {
 	// A CI host may have no physical IPv4 interface or more than one. Either
 	// result must be bounded and actionable; success must select IPv4.

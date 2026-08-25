@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/netbind"
 	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/protocol"
 )
@@ -50,23 +51,62 @@ const (
 // binds the socket and asks the routing table which source address this
 // destination gets.
 func (c *Client) currentUplink() string {
+	address, _ := c.currentUplinkState()
+	return address
+}
+
+// currentUplinkState distinguishes an observed loss of a configured dynamic
+// binding from an inconclusive route probe. That distinction matters when two
+// networks assign the same private address: the address before and after the
+// interruption is equal, but every connection and path measurement still
+// belongs to the network which disappeared.
+func (c *Client) currentUplinkState() (address string, unavailable bool) {
 	if c.cfg.LocalAddress != "" {
 		ip, err := resolveLocalAddress(c.cfg.LocalAddress)
 		if err != nil {
-			return ""
+			// A literal address is immutable, while if:NAME and auto are resolved
+			// from live interface state. Failure of the latter is positive
+			// evidence that the bound uplink is currently unavailable.
+			return "", netbind.IsDynamic(c.cfg.LocalAddress)
 		}
-		return ip.String()
+		return ip.String(), false
 	}
 	conn, err := (&net.Dialer{Control: c.cfg.SocketControl}).Dial("udp", c.cfg.RemoteAddr)
 	if err != nil {
-		return ""
+		// An unbound probe can fail for reasons unrelated to the local link
+		// (resolution, endpoint syntax, or policy), so it remains inconclusive.
+		return "", false
 	}
 	defer conn.Close()
-	return addressHost(conn.LocalAddr())
+	return addressHost(conn.LocalAddr()), false
+}
+
+type uplinkWatchState struct {
+	known       string
+	interrupted bool
+}
+
+// observe reports whether connections belonging to the previous path must be
+// discarded. A definite unavailable interval is itself a path boundary, even
+// if the address on the other side is textually identical. Inconclusive empty
+// observations stay harmless and do not churn a healthy pool.
+func (s *uplinkWatchState) observe(current string, unavailable bool) (from string, changed bool) {
+	if current == "" {
+		if unavailable {
+			s.interrupted = true
+		}
+		return s.known, false
+	}
+	from = s.known
+	changed = s.interrupted || current != s.known
+	s.known = current
+	s.interrupted = false
+	return from, changed
 }
 
 // watchUplink notices the machine changing how it reaches the server.
 func (c *Client) watchUplink(ctx context.Context, known string) {
+	state := uplinkWatchState{known: known}
 	ticker := time.NewTicker(uplinkPollInterval)
 	defer ticker.Stop()
 	for {
@@ -75,12 +115,12 @@ func (c *Client) watchUplink(ctx context.Context, known string) {
 			return
 		case <-ticker.C:
 		}
-		current := c.currentUplink()
-		if current == "" || current == known {
+		current, unavailable := c.currentUplinkState()
+		from, changed := state.observe(current, unavailable)
+		if !changed {
 			continue
 		}
-		c.cfg.Logger.Info("uplink changed", "from", known, "to", current)
-		known = current
+		c.cfg.Logger.Info("uplink changed", "from", from, "to", current)
 		c.onUplinkChanged(ctx)
 	}
 }
