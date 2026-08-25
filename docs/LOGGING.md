@@ -115,9 +115,25 @@ Prometheus `/metrics` names. They cover:
   transitions.
 
 The dashboard calculates interval packet loss from changes in sent and lost
-packet counters. QUIC can later recognize a packet previously declared lost,
-so its lost byte/packet counters are allowed to decrease; the dashboard skips
-that interval instead of displaying a fabricated negative loss rate.
+packet counters. Those counters are process-wide monotonic totals: they are
+accumulated from the forward movement of each QUIC connection, measured once
+per connection against a baseline the connection itself holds.
+
+That scoping is what makes the difference between two scrapes mean something.
+A QUIC connection here is pooled, so at any moment several lanes belonging to
+several flows are reading the same counters out of the same connection, and
+each of those flows publishes telemetry on its own timer. Adding up what the
+live flows currently report would count one connection once per flow
+referencing it, and would move the total up and down as flows start and end --
+so an interval difference would measure flow churn rather than the path, in
+both the numerator and the denominator. Neither a flow ending nor its
+telemetry expiring moves these counters now; both only retire gauges.
+
+Within one interval a counter can still fail to advance. QUIC may recognize a
+packet it previously declared lost, and a pooled connection replaced by a new
+generation restarts its counters at zero. Both are read as no forward
+movement rather than as a negative or a wrapped-around jump, and the
+connection is re-baselined at the new reading.
 
 A gateway that refuses a lane join writes `msg="lane join refused"` with the
 reason at `info`, or at `warn` for a flow or principal mismatch, which are a

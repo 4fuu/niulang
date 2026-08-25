@@ -95,8 +95,13 @@ type Registry struct {
 	// warning an operator gets that the aggregate is being held up by a
 	// measurement that is no longer being taken.
 	quicObservationsExpired atomic.Uint64
-	telemetryMu             sync.Mutex
-	quicFlows               map[uint64]quicObservation
+	// quicCounters are the process-wide monotonic QUIC totals.  They are
+	// accumulated from per-connection forward deltas rather than derived by
+	// summing the live flows, because the connections they measure are shared
+	// by many flows and outlive any one of them.  See QUICConnectionCounters.
+	quicCounters quicCounterTotals
+	telemetryMu  sync.Mutex
+	quicFlows    map[uint64]quicObservation
 	// clock is the time source for observation freshness. Tests replace it;
 	// production leaves it nil and reads the wall clock.
 	clock func() time.Time
@@ -204,6 +209,59 @@ type quicObservation struct {
 	updated time.Time
 }
 
+// quicCounterTotals holds the process-wide QUIC counters.  They are atomics
+// rather than fields under telemetryMu so that publishing a connection's
+// forward movement never contends with a scrape walking the flow map.
+type quicCounterTotals struct {
+	bytesSent               atomic.Uint64
+	bytesReceived           atomic.Uint64
+	packetsSent             atomic.Uint64
+	packetsReceived         atomic.Uint64
+	bytesLost               atomic.Uint64
+	packetsLost             atomic.Uint64
+	controllerBytesLost     atomic.Uint64
+	controllerPacketsLost   atomic.Uint64
+	controllerSamples       atomic.Uint64
+	controllerNonAppSamples atomic.Uint64
+	controllerAppSamples    atomic.Uint64
+	controllerStateMisses   atomic.Uint64
+	controllerZeroSamples   atomic.Uint64
+}
+
+func (t *quicCounterTotals) add(d QUICConnectionCounters) {
+	t.bytesSent.Add(d.BytesSent)
+	t.bytesReceived.Add(d.BytesReceived)
+	t.packetsSent.Add(d.PacketsSent)
+	t.packetsReceived.Add(d.PacketsReceived)
+	t.bytesLost.Add(d.BytesLost)
+	t.packetsLost.Add(d.PacketsLost)
+	t.controllerBytesLost.Add(d.ControllerBytesLost)
+	t.controllerPacketsLost.Add(d.ControllerPacketsLost)
+	t.controllerSamples.Add(d.ControllerSamples)
+	t.controllerNonAppSamples.Add(d.ControllerNonAppSamples)
+	t.controllerAppSamples.Add(d.ControllerAppSamples)
+	t.controllerStateMisses.Add(d.ControllerStateMisses)
+	t.controllerZeroSamples.Add(d.ControllerZeroSamples)
+}
+
+func (t *quicCounterTotals) load() QUICConnectionCounters {
+	return QUICConnectionCounters{
+		BytesSent:               t.bytesSent.Load(),
+		BytesReceived:           t.bytesReceived.Load(),
+		PacketsSent:             t.packetsSent.Load(),
+		PacketsReceived:         t.packetsReceived.Load(),
+		BytesLost:               t.bytesLost.Load(),
+		PacketsLost:             t.packetsLost.Load(),
+		ControllerBytesLost:     t.controllerBytesLost.Load(),
+		ControllerPacketsLost:   t.controllerPacketsLost.Load(),
+		ControllerSamples:       t.controllerSamples.Load(),
+		ControllerNonAppSamples: t.controllerNonAppSamples.Load(),
+		ControllerAppSamples:    t.controllerAppSamples.Load(),
+		ControllerStateMisses:   t.controllerStateMisses.Load(),
+		ControllerZeroSamples:   t.controllerZeroSamples.Load(),
+	}
+}
+
 type Snapshot struct {
 	ActiveFlows, FlowsStarted, FlowsCompleted, FlowsFailed        int64
 	BytesUp, BytesDown, LaneFailures, LaneReplacements, Fallbacks uint64
@@ -247,39 +305,119 @@ type Snapshot struct {
 
 // QUICObservation is a point-in-time aggregate over the lanes of one logical
 // flow.  RTT is represented as a maximum so an operator can see the worst
-// active lane without any user-controlled labels.  Byte and loss values are
-// the sum of the QUIC connection counters at that point.
+// active lane without any user-controlled labels.
+//
+// Everything here is a gauge: it describes the transport as it stands at the
+// moment of the observation, so replacing it wholesale on every publication
+// and dropping it when the flow ends are both correct.  The cumulative
+// counters a QUIC connection also reports are deliberately not in this type;
+// they are connection-scoped and are published separately.  See
+// QUICConnectionCounters.
 type QUICObservation struct {
 	Lanes                      int
 	LatestRTT                  time.Duration
 	SmoothedRTT                time.Duration
-	BytesSent                  uint64
-	BytesReceived              uint64
-	PacketsSent                uint64
-	PacketsReceived            uint64
-	BytesLost                  uint64
-	PacketsLost                uint64
 	ControllerKind             string
 	ControllerMode             uint32
 	ControllerMaxBandwidth     uint64
 	ControllerLatestSample     uint64
 	ControllerLatestAckRate    uint64
 	ControllerLatestSendRate   uint64
-	ControllerSamples          uint64
-	ControllerNonAppSamples    uint64
-	ControllerAppSamples       uint64
-	ControllerStateMisses      uint64
-	ControllerZeroSamples      uint64
 	ControllerRound            uint64
 	ControllerPacingRate       uint64
 	ControllerCongestionWindow uint64
 	ControllerBytesInFlight    uint64
-	ControllerBytesLost        uint64
-	ControllerPacketsLost      uint64
 	ControllerMinRTT           time.Duration
 	ControllerErasureFloor     float64
 	ControllerInRecovery       bool
 }
+
+// QUICConnectionCounters is the cumulative half of one QUIC connection's
+// telemetry.  Every field counts since that connection was established and
+// only ever moves forward.
+//
+// These are connection-scoped, and a connection is not a flow.  Connections
+// are pooled: many lanes belonging to many flows read the same numbers from
+// the same connection.  Summing what every live flow currently reports
+// therefore counts one connection once per flow that references it, and makes
+// the process total rise and fall as flows and lanes enter and leave the live
+// set.  A value that moves in both directions is not a counter, and a
+// dashboard differencing it reports whatever the churn happened to be rather
+// than what the path did -- a loss rate assembled from two such differences is
+// noise in both the numerator and the denominator.
+//
+// The process totals are accumulated from forward deltas measured once per
+// connection instead.  See AddQUICConnectionCounters.
+type QUICConnectionCounters struct {
+	BytesSent               uint64
+	BytesReceived           uint64
+	PacketsSent             uint64
+	PacketsReceived         uint64
+	BytesLost               uint64
+	PacketsLost             uint64
+	ControllerBytesLost     uint64
+	ControllerPacketsLost   uint64
+	ControllerSamples       uint64
+	ControllerNonAppSamples uint64
+	ControllerAppSamples    uint64
+	ControllerStateMisses   uint64
+	ControllerZeroSamples   uint64
+}
+
+// Advance returns the forward movement of every counter between two readings
+// of the same connection, which is what may be added to a process total.
+//
+// A field that did not move contributes nothing, and so does a field that
+// moved backwards.  Both cases are ordinary rather than defensive: quic-go is
+// allowed to un-declare a loss it later decides was reordering, and a pooled
+// connection replaced by a new generation restarts its counters at zero.  The
+// alternative -- treating a decrease as a huge increase by wrapping the
+// subtraction -- is how an unsigned counter reports a terabyte of loss for a
+// packet that arrived after all.
+func (c QUICConnectionCounters) Advance(previous QUICConnectionCounters) QUICConnectionCounters {
+	forward := func(now, before uint64) uint64 {
+		if now <= before {
+			return 0
+		}
+		return now - before
+	}
+	return QUICConnectionCounters{
+		BytesSent:               forward(c.BytesSent, previous.BytesSent),
+		BytesReceived:           forward(c.BytesReceived, previous.BytesReceived),
+		PacketsSent:             forward(c.PacketsSent, previous.PacketsSent),
+		PacketsReceived:         forward(c.PacketsReceived, previous.PacketsReceived),
+		BytesLost:               forward(c.BytesLost, previous.BytesLost),
+		PacketsLost:             forward(c.PacketsLost, previous.PacketsLost),
+		ControllerBytesLost:     forward(c.ControllerBytesLost, previous.ControllerBytesLost),
+		ControllerPacketsLost:   forward(c.ControllerPacketsLost, previous.ControllerPacketsLost),
+		ControllerSamples:       forward(c.ControllerSamples, previous.ControllerSamples),
+		ControllerNonAppSamples: forward(c.ControllerNonAppSamples, previous.ControllerNonAppSamples),
+		ControllerAppSamples:    forward(c.ControllerAppSamples, previous.ControllerAppSamples),
+		ControllerStateMisses:   forward(c.ControllerStateMisses, previous.ControllerStateMisses),
+		ControllerZeroSamples:   forward(c.ControllerZeroSamples, previous.ControllerZeroSamples),
+	}
+}
+
+// Add folds one connection's forward movement into a running total.
+func (c *QUICConnectionCounters) Add(delta QUICConnectionCounters) {
+	c.BytesSent += delta.BytesSent
+	c.BytesReceived += delta.BytesReceived
+	c.PacketsSent += delta.PacketsSent
+	c.PacketsReceived += delta.PacketsReceived
+	c.BytesLost += delta.BytesLost
+	c.PacketsLost += delta.PacketsLost
+	c.ControllerBytesLost += delta.ControllerBytesLost
+	c.ControllerPacketsLost += delta.ControllerPacketsLost
+	c.ControllerSamples += delta.ControllerSamples
+	c.ControllerNonAppSamples += delta.ControllerNonAppSamples
+	c.ControllerAppSamples += delta.ControllerAppSamples
+	c.ControllerStateMisses += delta.ControllerStateMisses
+	c.ControllerZeroSamples += delta.ControllerZeroSamples
+}
+
+// IsZero reports whether nothing moved, which lets a caller skip the atomic
+// writes entirely on the common idle publication.
+func (c QUICConnectionCounters) IsZero() bool { return c == QUICConnectionCounters{} }
 
 func New() *Registry { return &Registry{quicFlows: make(map[uint64]quicObservation)} }
 
@@ -431,6 +569,22 @@ func (r *Registry) ObserveQUIC(key uint64, o QUICObservation) {
 	r.telemetryMu.Unlock()
 }
 
+// AddQUICConnectionCounters folds one connection's forward movement into the
+// process totals.
+//
+// The caller measures the delta against a baseline held per connection, so
+// two flows sharing a pooled connection do not both contribute it: whichever
+// publishes first moves the baseline, and the other adds nothing.  That is
+// what makes these totals independent of how many flows happen to reference a
+// connection, and what lets a flow's telemetry be dropped the moment it ends
+// without the totals moving backwards.
+func (r *Registry) AddQUICConnectionCounters(delta QUICConnectionCounters) {
+	if r == nil || delta.IsZero() {
+		return
+	}
+	r.quicCounters.add(delta)
+}
+
 func (r *Registry) RemoveQUIC(key uint64) {
 	if key == 0 {
 		return
@@ -476,14 +630,12 @@ func (r *Registry) Snapshot() Snapshot {
 	r.telemetryMu.Lock()
 	var quicLanes int64
 	var latestRTT, smoothedRTT time.Duration
-	var bytesSent, bytesReceived, packetsSent, packetsReceived, bytesLost, packetsLost uint64
 	var controllerKind string
 	var controllerMode uint32
 	var controllerMaxBandwidth, controllerPacingRate, controllerCwnd, controllerBytesInFlight uint64
-	var controllerLatestSample, controllerSamples, controllerNonAppSamples, controllerAppSamples uint64
+	var controllerLatestSample uint64
 	var controllerLatestAckRate, controllerLatestSendRate uint64
-	var controllerStateMisses, controllerZeroSamples, controllerRound uint64
-	var controllerBytesLost, controllerPacketsLost uint64
+	var controllerRound uint64
 	var controllerMinRTT time.Duration
 	var controllerErasureFloor float64
 	var controllerRecovery bool
@@ -505,12 +657,6 @@ func (r *Registry) Snapshot() Snapshot {
 		if o.SmoothedRTT > smoothedRTT {
 			smoothedRTT = o.SmoothedRTT
 		}
-		bytesSent += o.BytesSent
-		bytesReceived += o.BytesReceived
-		packetsSent += o.PacketsSent
-		packetsReceived += o.PacketsReceived
-		bytesLost += o.BytesLost
-		packetsLost += o.PacketsLost
 		if o.ControllerKind != "" {
 			if controllerKind == "" {
 				controllerKind = o.ControllerKind
@@ -532,11 +678,6 @@ func (r *Registry) Snapshot() Snapshot {
 			if o.ControllerLatestSendRate > controllerLatestSendRate {
 				controllerLatestSendRate = o.ControllerLatestSendRate
 			}
-			controllerSamples += o.ControllerSamples
-			controllerNonAppSamples += o.ControllerNonAppSamples
-			controllerAppSamples += o.ControllerAppSamples
-			controllerStateMisses += o.ControllerStateMisses
-			controllerZeroSamples += o.ControllerZeroSamples
 			if o.ControllerRound > controllerRound {
 				controllerRound = o.ControllerRound
 			}
@@ -549,8 +690,6 @@ func (r *Registry) Snapshot() Snapshot {
 			if o.ControllerBytesInFlight > controllerBytesInFlight {
 				controllerBytesInFlight = o.ControllerBytesInFlight
 			}
-			controllerBytesLost += o.ControllerBytesLost
-			controllerPacketsLost += o.ControllerPacketsLost
 			if o.ControllerMinRTT > controllerMinRTT {
 				controllerMinRTT = o.ControllerMinRTT
 			}
@@ -568,29 +707,32 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICLanes = quicLanes
 	s.QUICLatestRTT = latestRTT
 	s.QUICSmoothedRTT = smoothedRTT
-	s.QUICBytesSent = bytesSent
-	s.QUICBytesReceived = bytesReceived
-	s.QUICPacketsSent = packetsSent
-	s.QUICPacketsReceived = packetsReceived
-	s.QUICBytesLost = bytesLost
-	s.QUICPacketsLost = packetsLost
+	// The counters come from the process totals, not from the flows above.
+	// They must not depend on which flows happen to be live at scrape time.
+	counters := r.quicCounters.load()
+	s.QUICBytesSent = counters.BytesSent
+	s.QUICBytesReceived = counters.BytesReceived
+	s.QUICPacketsSent = counters.PacketsSent
+	s.QUICPacketsReceived = counters.PacketsReceived
+	s.QUICBytesLost = counters.BytesLost
+	s.QUICPacketsLost = counters.PacketsLost
 	s.QUICControllerKind = controllerKind
 	s.QUICControllerMode = controllerMode
 	s.QUICControllerMaxBandwidth = controllerMaxBandwidth
 	s.QUICControllerLatestSample = controllerLatestSample
 	s.QUICControllerLatestAckRate = controllerLatestAckRate
 	s.QUICControllerLatestSendRate = controllerLatestSendRate
-	s.QUICControllerSamples = controllerSamples
-	s.QUICControllerNonAppSamples = controllerNonAppSamples
-	s.QUICControllerAppSamples = controllerAppSamples
-	s.QUICControllerStateMisses = controllerStateMisses
-	s.QUICControllerZeroSamples = controllerZeroSamples
+	s.QUICControllerSamples = counters.ControllerSamples
+	s.QUICControllerNonAppSamples = counters.ControllerNonAppSamples
+	s.QUICControllerAppSamples = counters.ControllerAppSamples
+	s.QUICControllerStateMisses = counters.ControllerStateMisses
+	s.QUICControllerZeroSamples = counters.ControllerZeroSamples
 	s.QUICControllerRound = controllerRound
 	s.QUICControllerPacingRate = controllerPacingRate
 	s.QUICControllerCongestionWindow = controllerCwnd
 	s.QUICControllerBytesInFlight = controllerBytesInFlight
-	s.QUICControllerBytesLost = controllerBytesLost
-	s.QUICControllerPacketsLost = controllerPacketsLost
+	s.QUICControllerBytesLost = counters.ControllerBytesLost
+	s.QUICControllerPacketsLost = counters.ControllerPacketsLost
 	s.QUICControllerMinRTT = controllerMinRTT
 	s.QUICControllerErasureFloor = controllerErasureFloor
 	s.QUICControllerInRecovery = controllerRecovery
