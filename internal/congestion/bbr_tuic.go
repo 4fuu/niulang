@@ -19,9 +19,21 @@ import (
 // per packet. ACK receive timestamps are used when the QUIC fork supplies them
 // and the congestion-event time otherwise.
 type TUICBBRSender struct {
-	rttStats        quiccongestion.RTTStatsProvider
-	maxDatagramSize quiccongestion.ByteCount
-	pacer           *pacer
+	rttStats quiccongestion.RTTStatsProvider
+	// lossIsCongestion decides whether a loss may put this sender into
+	// recovery. It is true for a sender used on its own, which is TUIC's
+	// behaviour and what the benchmark reference must keep. ErasureSender
+	// clears it: on a path that erases packets for reasons unrelated to the
+	// sending rate, a controller that reads every loss as congestion gives the
+	// path away, and the brake is the delay bound instead.
+	//
+	// Losses still reach this method either way. They have to: bytesInFlight
+	// below is priorInFlight less what was acknowledged and what was lost, so
+	// a sender that is not told about a loss believes the pipe is fuller than
+	// it is and throttles itself for a packet that is already gone.
+	lossIsCongestion bool
+	maxDatagramSize  quiccongestion.ByteCount
+	pacer            *pacer
 
 	mode                 tuicBbrMode
 	pacingGain           float64
@@ -143,16 +155,19 @@ func NewTUICBBRSender(initialPacketSize quiccongestion.ByteCount) *TUICBBRSender
 		// TUIC uses a 2.0 congestion-window gain in STARTUP.  The pacing gain
 		// remains highGain; applying that factor to cwnd as well overfills the
 		// initial flight before a delivery model exists.
-		cwndGain:      tuicCwndGain,
-		highCwndGain:  tuicCwndGain,
-		maxAckedPN:    quiccongestion.PacketNumber(-1),
-		maxSentPN:     quiccongestion.PacketNumber(-1),
-		endRecoveryPN: quiccongestion.PacketNumber(-1),
-		roundEndPN:    quiccongestion.PacketNumber(-1),
-		estimator:     newTUICBandwidthEstimator(),
-		ackAgg:        tuicAckAggregation{maxAckHeight: newTUICMinMax()},
-		randomState:   uint64(monotime.Now()) ^ uint64(initialPacketSize)<<17,
-		telemetry:     newTelemetryState("bbr-tuic"),
+		cwndGain:     tuicCwndGain,
+		highCwndGain: tuicCwndGain,
+		// A sender used on its own keeps TUIC's behaviour, which is what the
+		// benchmark reference and every non-erasure path expect.
+		lossIsCongestion: true,
+		maxAckedPN:       quiccongestion.PacketNumber(-1),
+		maxSentPN:        quiccongestion.PacketNumber(-1),
+		endRecoveryPN:    quiccongestion.PacketNumber(-1),
+		roundEndPN:       quiccongestion.PacketNumber(-1),
+		estimator:        newTUICBandwidthEstimator(),
+		ackAgg:           tuicAckAggregation{maxAckHeight: newTUICMinMax()},
+		randomState:      uint64(monotime.Now()) ^ uint64(initialPacketSize)<<17,
+		telemetry:        newTelemetryState("bbr-tuic"),
 	}
 	b.pacer = newTUICPacer(b.bandwidth)
 	b.publishTelemetry()
@@ -437,7 +452,7 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	// updates sampler/loss accounting, but waits for an ACK-clocked event before
 	// entering or advancing packet conservation.
 	if len(acked) != 0 {
-		b.updateRecoveryState(largestAck, hasLosses, isRoundStart)
+		b.updateRecoveryState(largestAck, hasLosses && b.lossIsCongestion, isRoundStart)
 	}
 	// Process the complete ACK batch as one sample. quic-go gives every packet
 	// in this callback the same receive/event time; updating the estimator once

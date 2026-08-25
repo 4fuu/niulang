@@ -112,7 +112,6 @@ func connectionCounters(stats laneTransportStats) metrics.QUICConnectionCounters
 		PacketsSent:             stats.packetsSent,
 		PacketsReceived:         stats.packetsReceived,
 		LossObservedPackets:     stats.controller.PacketsLostObserved,
-		LossSuppressedPackets:   stats.controller.PacketsLostSuppressed,
 		CodedSources:            stats.codedSources,
 		CodedRecovered:          stats.codedRecovered,
 		CodedLost:               stats.codedLost,

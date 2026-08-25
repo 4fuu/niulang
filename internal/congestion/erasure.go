@@ -63,20 +63,7 @@ type ErasureSender struct {
 	// packet number within each congestion event for the burst statistic.
 	estimator *lossmodel.Estimator
 
-	// forward carries the fractional part of how many losses to pass through,
-	// so a congestive share of a third forwards one loss in three rather than
-	// rounding to none.
-	forward  float64
 	outcomes []packetOutcome
-
-	// floorTrusted remembers that this lane has seen evidence of an
-	// independent channel. establishedFloor is the lowest such estimate seen
-	// by this connection. A physical erasure floor is a lower envelope: queue
-	// loss may raise an observation, but it cannot raise the channel floor.
-	// A replacement connection gets a fresh estimator and can establish a
-	// genuinely different floor after a path change.
-	floorTrusted     bool
-	establishedFloor float64
 
 	// erasure is the pooled measured erasure of the direction this sender
 	// sends into, in parts per million. It is what the code is sized from, and
@@ -97,8 +84,11 @@ type ErasureSender struct {
 	// the congestion window, which run outside the callback that computes it.
 	arrival atomic.Uint64 // arrival rate in parts per million
 
-	suppressed atomic.Uint64
-	passed     atomic.Uint64
+	// passed counts the losses handed to the inner controller, which is now
+	// all of them. It stays because the telemetry below is an assertion as
+	// much as a measurement: what this sender saw and what the controller was
+	// charged must agree, and a counter is how that is checked from outside.
+	passed atomic.Uint64
 
 	// path is shared with every other lane to the same endpoint pair, or nil
 	// for a lane that is on its own. share is this lane's allowance of the
@@ -119,17 +109,7 @@ const (
 	// delivered; below that the path is not one to push harder into, and an
 	// unbounded divisor would turn a measurement error into a flood.
 	erasureMinArrival = 0.15
-	// erasureMinSamples is how many packet fates must be decided before the
-	// early independence checks may establish a floor. Until then every loss
-	// is passed through, so an unmeasured path behaves exactly like BBR.
-	erasureMinSamples = 100
-	// erasureEarlyMaxFloor bounds only the pre-verdict bootstrap. Acting on a
-	// tiny sample that says more than two thirds of the path vanished would
-	// multiply the send rate by more than three, which is precisely the unsafe
-	// response to a full startup queue. A formally established floor may be
-	// higher and is still bounded by erasureMinArrival.
-	erasureEarlyMaxFloor = 0.65
-	partsPerMillion      = 1e6
+	partsPerMillion   = 1e6
 )
 
 // NewErasureSender returns a controller for a path whose loss is mostly not
@@ -166,17 +146,16 @@ func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmo
 		// seed only. Sharing one number for the two used to mean that the
 		// only lane on a path capped itself at whatever the last one managed.
 		state := path.Current()
-		// The floor is path knowledge too, so use it for the replacement's first
-		// pacing decision. Do not call it this connection's own established
-		// evidence, though: a fresh connection is also the safe point at which a
-		// changed physical path may establish a higher floor. The shared model
-		// retains the inherited value while this sender reports zero weight, then
-		// replaces it once this connection has trustworthy evidence of its own.
-		if state.Floor > 0 {
-			e.arrival.Store(uint64((1 - state.Floor) * partsPerMillion))
+		// The measured erasure is path knowledge, so a replacement lane paces
+		// from it rather than rediscovering it. On a channel that erases 42% of
+		// packets that rediscovery is expensive -- it is the same ramp that
+		// costs a loss-based controller the path in the first place -- and a
+		// lane opened because its predecessor died would pay it every time.
+		if state.Erasure > 0 {
+			e.arrival.Store(uint64((1 - state.Erasure) * partsPerMillion))
+			e.erasure.Store(uint64(state.Erasure * partsPerMillion))
 		}
 		if state.Seed > 0 {
-			e.arrival.Store(uint64((1 - state.Floor) * partsPerMillion))
 			if state.Share > 0 {
 				e.share.Store(uint64(state.Share))
 			}
@@ -187,8 +166,14 @@ func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmo
 }
 
 func newErasureSender(initialPacketSize quiccongestion.ByteCount) *ErasureSender {
+	inner := NewTUICBBRSender(initialPacketSize)
+	// Loss is not this path's congestion signal. Erasure scales delivery down
+	// proportionally at every rate and cannot produce a knee; congestion
+	// produces one, and the delivery-versus-rate curve is what separates them.
+	// The brake is the delay bound.
+	inner.lossIsCongestion = false
 	e := &ErasureSender{
-		inner:  NewTUICBBRSender(initialPacketSize),
+		inner:  inner,
 		member: pathmodel.Member(nextErasureMemberID.Add(1)),
 		// A reorder tolerance wide enough for QUIC's acknowledgement
 		// aggregation: packets are acked in batches, and a batch boundary must
@@ -323,9 +308,26 @@ func (e *ErasureSender) OnCongestionEvent(number quiccongestion.PacketNumber, lo
 	e.inner.OnCongestionEvent(number, lostBytes, priorInFlight)
 }
 
-// OnCongestionEventEx is where the two regimes are separated. Everything that
-// arrived updates the estimate of the channel; only the share of the losses
-// that the channel does not explain is passed to BBR.
+// OnCongestionEventEx measures the channel and passes every fate through.
+//
+// It used to be where the two regimes were separated: only the share of the
+// losses the channel did not explain reached BBR, so that erasure would not be
+// read as congestion. That separation is gone. It was a statistical answer to a
+// question the delivery-versus-rate curve answers directly -- erasure scales
+// delivery down proportionally at every rate and cannot produce a knee, while
+// congestion produces one -- and it was least reliable exactly when loss was
+// worst, because heavy erasure is bursty and the burst test then refused to
+// call it erasure at all.
+//
+// What replaced it is not a better classifier but a different signal. The inner
+// controller no longer enters recovery on loss, and the brake is the delay
+// bound: the round trip may not exceed twice the path's own minimum.
+//
+// Every loss is still handed to the inner controller, which matters for a
+// reason unrelated to congestion. Its bytesInFlight is priorInFlight less what
+// was acknowledged and what was lost, so a sender told about only a fraction of
+// the losses believes the pipe is fuller than it is and throttles itself for
+// packets that are already gone.
 func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCount, eventTime monotime.Time, acked []quiccongestion.AckedPacketInfo, lost []quiccongestion.LostPacketInfo) {
 	// QUIC has a separate packet-number space for Initial, Handshake and
 	// 1-RTT packets, but this public callback omits the space. Inferring losses
@@ -351,164 +353,44 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		e.estimator.ObserveOutcome(outcome.arrived)
 	}
 	snapshot := e.estimator.Snapshot()
-	floor, floorSamples := e.establishedErasureFloor(snapshot)
+	erasure := snapshot.Loss
 	if e.path != nil {
-		// Pool with the other lanes: the floor converges on all their samples
-		// together, and the share is what stops their probes compounding. An
-		// untrusted local estimate contributes zero weight rather than diluting
-		// a floor another lane has already established.
-		//
-		// The measured erasure is reported alongside it and is not the same
-		// number. This sender paces from the floor, which is conservative on
-		// purpose; the code is sized from the measurement, because a code that
-		// under-estimates erasure sends no parity into a channel that is
-		// erasing. Reporting only the floor is what left 97% of lossy flows
-		// uncoded -- see docs/CONTROL-REDESIGN.md.
+		// Pool with the other lanes: the estimate converges on all their
+		// samples together, and the share is what stops their probes
+		// compounding.
 		state := e.path.Report(e.id(), pathmodel.Observation{
-			Floor: floor, FloorSamples: floorSamples,
 			Erasure: snapshot.Loss, BurstFactor: snapshot.BurstFactor,
 			ObservedSamples: float64(snapshot.Decided),
 			Delivered:       float64(e.inner.bandwidth()),
 			RoundTrip:       e.inner.minRoundTrip(),
 		})
-		floor = state.Floor
+		erasure = state.Erasure
 		e.erasure.Store(uint64(state.Erasure * partsPerMillion))
 		e.share.Store(uint64(state.Share))
 	}
-	e.arrival.Store(uint64((1 - floor) * partsPerMillion))
-
-	// The pooled, established floor governs both compensation and which losses are
-	// forwarded. Using the raw local floor here would still suppress startup
-	// queue drops even though pacing correctly declined to compensate for them.
-	snapshot.Floor = floor
-	e.inner.OnCongestionEventEx(priorInFlight, eventTime, acked, e.congestive(snapshot, lost))
-}
-
-// establishedErasureFloor turns the stateless early discriminator into a
-// stable measurement. Once an independent floor has been seen, a later burst
-// of congestion must not make it vanish or raise it. The floor is a lower
-// envelope for the lifetime of this connection: allowing a completed but
-// congested measurement to increase it creates positive feedback, because
-// both the pacer and FEC then add traffic to an already overloaded path.
-//
-// A lower independent measurement may refine the floor downward. If the
-// physical path really changes to a higher erasure rate, lane recovery creates
-// a new connection and therefore a new estimator; guessing upward inside a
-// congested connection is the unsafe direction.
-func (e *ErasureSender) establishedErasureFloor(snapshot lossmodel.Snapshot) (floor, samples float64) {
-	candidate, _ := conservativeErasureFloor(snapshot)
-	if candidate > 0 {
-		// Before the first round, the conditional is the measurement that
-		// passed the independence check; the partial-round loss rate can
-		// already include a queue burst. Once the formal verdict is present,
-		// its windowed floor is the stronger evidence.
-		measured := candidate
-		if snapshot.Memoryless {
-			measured = snapshot.Floor
-		}
-		if measured <= 0 {
-			measured = snapshot.Floor
-		}
-		if measured > 0 && (!e.floorTrusted || measured < e.establishedFloor) {
-			e.establishedFloor = measured
-		}
-		e.floorTrusted = true
-	}
-	if !e.floorTrusted {
-		return 0, 0
-	}
-	return e.establishedFloor, snapshot.Samples
-}
-
-// conservativeErasureFloor separates evidence of an independent channel from
-// the first clustered queue drops of STARTUP.
-//
-// Waiting for the whole process to be declared memoryless is too late on the
-// 42% channel this controller exists for: plain BBR has already backed away
-// before that verdict and takes most of a short transfer to recover. The
-// useful early statistic is P(loss | previous packet arrived). Congestion
-// drops in runs, so this conditional is near zero even while a partial round's
-// raw loss rate is large; an independent channel keeps it near the floor.
-//
-// Before the formal memoryless verdict, require that conditional to agree
-// with the overall loss rate and require the observed burst length to agree as
-// well. The conditional itself is then the conservative bootstrap. Once the
-// verdict is available, the estimator's windowed minimum is authoritative.
-func conservativeErasureFloor(snapshot lossmodel.Snapshot) (floor, samples float64) {
-	if snapshot.Decided < erasureMinSamples || snapshot.Samples <= 0 {
-		return 0, 0
-	}
-	// Even the formal transition test can briefly call an overflowing queue
-	// memoryless when almost every packet in a small sample is lost. Do not
-	// turn that extreme result into a three-to-sevenfold send-rate increase
-	// until two complete floor rounds have given BBR time to drain and supply
-	// a lower observation. Ordinary erasure floors use the early path below.
-	if snapshot.Floor > erasureEarlyMaxFloor && snapshot.Decided < 2*lossmodel.DefaultRoundSamples {
-		return 0, 0
-	}
-	if snapshot.Memoryless {
-		return snapshot.Floor, snapshot.Samples
-	}
-	p := snapshot.LossAfterArrival
-	if p <= 0 {
-		return 0, 0
-	}
-	if snapshot.Loss > erasureEarlyMaxFloor || p > erasureEarlyMaxFloor {
-		return 0, 0
-	}
-	// A conditional below the overall loss rate is evidence that losses are
-	// clustered. Do not compensate until the two are close enough that the
-	// early sample is consistent with independence. The formal verdict below
-	// deliberately waits longer; this narrower bootstrap exists only to keep
-	// BBR from yielding a real erasure channel before that verdict arrives.
-	if p < 0.9*snapshot.Loss {
-		return 0, 0
-	}
-	// The second, independent view of the same question is the length of loss
-	// runs. A queue can briefly make the conditional probabilities look close
-	// in a small sample; its longer bursts still distinguish it from a
-	// memoryless channel.
-	if snapshot.BurstFactor > 1.1 {
-		return 0, 0
-	}
-	return p, snapshot.Samples
-}
-
-// congestive returns the share of these losses that the channel does not
-// explain, in whole packets.
-//
-// The share is a fraction, and a fraction of a loss cannot be reported, so the
-// remainder is carried rather than rounded away. Rounding down would suppress
-// every loss whenever the congestive share stayed below a half, which is
-// exactly the mild persistent congestion a controller most needs to see.
-func (e *ErasureSender) congestive(snapshot lossmodel.Snapshot, lost []quiccongestion.LostPacketInfo) []quiccongestion.LostPacketInfo {
-	if len(lost) == 0 {
-		return lost
-	}
-	if snapshot.Decided < erasureMinSamples || snapshot.Recent <= 0 {
-		e.passed.Add(uint64(len(lost)))
-		return lost
-	}
-	share := 1.0
-	if snapshot.Recent > snapshot.Floor {
-		share = (snapshot.Recent - snapshot.Floor) / snapshot.Recent
-	} else {
-		share = 0
+	// The compensation rides on the measurement rather than on a floor biased
+	// low for pacing. Under-compensating is not the safe direction it looks
+	// like: pacing a delivered-rate estimate makes the sending rate its own
+	// input, and the loop walks down to nothing rather than converging on the
+	// bottleneck.
+	//
+	// But it waits for the delay bound to be able to act. A first flight can
+	// overrun a clean path's queue before the controller has found its
+	// bottleneck, and compensating for those drops means sending twice as fast
+	// into a queue that is already overflowing -- the exact positive feedback
+	// the removed classifier was there to prevent. The bound would stop it,
+	// except that at that moment there is no minimum round trip to bound
+	// against, so the brake is inert.
+	//
+	// Gating on the minimum being measured is not a classifier returning. It
+	// makes no judgement about what kind of loss this is; it says only that
+	// compensation may not run ahead of the brake that bounds it.
+	if _, minRTT := e.queueDelay(); minRTT > 0 {
+		e.arrival.Store(uint64((1 - erasure) * partsPerMillion))
 	}
 
-	e.forward += share * float64(len(lost))
-	pass := int(e.forward)
-	if pass > len(lost) {
-		pass = len(lost)
-	}
-	e.forward -= float64(pass)
-
-	e.passed.Add(uint64(pass))
-	e.suppressed.Add(uint64(len(lost) - pass))
-	if pass == 0 {
-		return nil
-	}
-	return lost[:pass]
+	e.passed.Add(uint64(len(lost)))
+	e.inner.OnCongestionEventEx(priorInFlight, eventTime, acked, lost)
 }
 
 func (e *ErasureSender) OnRetransmissionTimeout(retransmitted bool) {
@@ -531,16 +413,17 @@ func (e *ErasureSender) Telemetry() ControllerTelemetry {
 	// The inner controller was charged only the congestive share, so its own
 	// figure cannot answer what the path did. Both halves are reported: what
 	// this sender saw, and what it withheld as erasure.
-	suppressed := e.suppressed.Load()
-	t.PacketsLostSuppressed = suppressed
-	t.PacketsLostObserved = t.PacketsLost + suppressed
+	// Every loss now reaches the inner controller, so what this sender saw and
+	// what the controller was charged are the same number. Publishing it from
+	// this sender's own counter rather than copying the controller's keeps the
+	// two independently derived, which is what lets a test assert they agree.
+	t.PacketsLostObserved = e.passed.Load()
 	t.Erasure = float64(e.erasure.Load()) / partsPerMillion
 	// Recomputed rather than read from the cached value, so a trace taken while
 	// nothing is sending still reflects the path rather than the last send.
 	e.delayBounded(1)
 	t.DelayBrake = float64(e.delayBrake.Load()) / partsPerMillion
 	arrival := e.arrivalRate()
-	t.ErasureFloor = 1 - arrival
 	t.PacingRate = uint64(float64(t.PacingRate) / arrival)
 	t.CongestionWindow = uint64(float64(t.CongestionWindow) / arrival)
 	return t
@@ -555,8 +438,8 @@ func (e *ErasureSender) id() pathmodel.Member { return e.member }
 // known.
 func (e *ErasureSender) Share() float64 { return float64(e.share.Load()) }
 
-// Channel reports what the controller believes about the path and how much
-// loss it has declined to treat as congestion.
-func (e *ErasureSender) Channel() (lossmodel.Snapshot, uint64, uint64) {
-	return e.estimator.Snapshot(), e.suppressed.Load(), e.passed.Load()
+// Channel reports what this sender has measured about the path and how many
+// losses it has handed to the controller.
+func (e *ErasureSender) Channel() (lossmodel.Snapshot, uint64) {
+	return e.estimator.Snapshot(), e.passed.Load()
 }

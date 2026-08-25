@@ -1,8 +1,9 @@
 # Control redesign: delay-bounded goodput
 
 > [!IMPORTANT]
-> **Status:** Partly implemented. The coding half and the bandwidth estimate
-> have landed; the delay bound and the receiver report have not. Nothing here
+> **Status:** Implemented except for the receiver report. The classifier is
+> gone, the estimate can fall, the code is sized from the measurement, and the
+> delay bound is the brake. Nothing here
 > is validated on a real path yet -- see [Falsification](#falsification).
 >
 > **Wire impact:** None for the controller and coding changes. The receiver
@@ -311,6 +312,31 @@ rejects **inferring** outbound erasure from inbound loss. A peer **reporting**
 what it measured on your outbound direction is not inference; it is a direct
 measurement relayed, and the reasoning does not extend to it.
 
+## What removing the classifier actually cost
+
+The classifier was protecting one thing that the delay bound does not, and the
+existing test suite caught it rather than a review.
+
+A first flight can overrun a clean path's queue before the controller has found
+its bottleneck. Those drops arrive in runs and are congestion, not erasure.
+With the compensation riding on the raw measurement, the sender compensates for
+its own queue drops and sends twice as fast into a queue that is already
+overflowing — the exact positive feedback the classifier existed to prevent.
+
+The delay bound would stop it, except that at that moment there is no minimum
+round trip to bound against, so the brake is inert. The two safeguards did not
+overlap the way the sequencing assumed.
+
+The resolution is a coupling rather than a restored classifier: **compensation
+waits for a measured minimum round trip**, which is exactly when the brake can
+act. It makes no judgement about what kind of loss it is seeing. Before that
+point the sender is plain BBR that ignores loss — it neither compensates nor
+collapses.
+
+`TestClusteredStartupLossDoesNotBecomeAnErasureFloor` predates this work and now
+holds the new arrangement unchanged, which is the strongest evidence available
+that the property survived the mechanism.
+
 ## A limit found while trying to validate it
 
 An attempt to check falsification case 1 end to end did not work, and why it
@@ -433,8 +459,9 @@ needed was an estimate that could fall.
    as congestion.
 5. **Done.** Delay bound added: the round trip may not exceed twice the path's
    own minimum.
-6. Loss suppression (`ErasureSender.congestive`) deleted and the arrival-rate
-   compensation moved onto the measurement, now that a brake exists.
+6. **Done.** Loss suppression deleted and the arrival-rate compensation moved
+   onto the measurement, gated on a measured round trip so it cannot run ahead
+   of the brake that bounds it.
 7. `kindReport` closes the residual loop.
 
 Steps 1-5 have no wire impact. Step 6 is additive and forward-compatible.

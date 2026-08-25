@@ -31,29 +31,22 @@ type ControllerTelemetry struct {
 	// so these count congestion and not erasure.
 	BytesLost   uint64
 	PacketsLost uint64
-	// PacketsLostObserved is every loss this sender detected, before any of it
-	// was classified, and PacketsLostSuppressed is the part withheld from the
-	// controller as erasure. The three satisfy
+	// PacketsLostObserved is every loss the sender detected. It is derived
+	// independently of PacketsLost above -- one from the sender's own counter,
+	// one from the controller's -- and the two now agree, because no loss is
+	// withheld from the controller any more.
 	//
-	//	observed = PacketsLost + suppressed
+	// They did not always agree. While loss was classified, only the share the
+	// channel could not explain reached the controller, and publishing the
+	// controller's figure alone let a gateway erasing a fifth of its downstream
+	// report single-digit loss. The pair is kept rather than collapsed to one
+	// field so that a divergence between them is visible rather than silent.
 	//
-	// and a controller that classifies nothing reports observed == PacketsLost
-	// with suppressed zero, so the identity holds for every kind.
-	//
-	// Observed is the only one of the three that answers "what is this path
-	// doing to my packets". Publishing the controller's figure alone is what
-	// let a gateway erasing a fifth of its downstream report single-digit
-	// loss: the rest had been correctly reclassified and then silently
-	// dropped from the record.
-	//
-	// They are packet counts and not byte counts because a loss rate is a
-	// count over a count of trials; the sender's own byte totals do not divide
-	// into the suppressed and charged shares without attributing bytes to a
-	// classification made per packet.
-	PacketsLostObserved   uint64
-	PacketsLostSuppressed uint64
-	MinRTT                time.Duration
-	InRecovery            bool
+	// It is a packet count and not a byte count because a loss rate is a count
+	// over a count of trials.
+	PacketsLostObserved uint64
+	MinRTT              time.Duration
+	InRecovery          bool
 	// DelayBrake is the share of the sending rate the delay bound is currently
 	// removing, in [0,1). It is non-zero only while the path is carrying more
 	// than one bandwidth-delay product of queue.
@@ -72,12 +65,6 @@ type ControllerTelemetry struct {
 	// connection, so it keeps what a clean window established while this
 	// follows the path. On the live incident the two read 1.76% and 19.9%.
 	Erasure float64
-	// ErasureFloor is the share of packets this path drops for reasons that
-	// have nothing to do with sending rate, as the controller currently
-	// believes it. Everything sized for the path is sized from this number --
-	// the pacing compensation, the congestion window, and the erasure code's
-	// rate -- so a trace that does not carry it cannot explain any of them.
-	ErasureFloor float64
 }
 
 const (

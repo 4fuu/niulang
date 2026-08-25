@@ -232,7 +232,7 @@ func TestThePrewarmLeavesTheUplinkMeasured(t *testing.T) {
 	key := pathKey(loopback, loopback)
 
 	// Start from nothing known about this uplink.
-	before := pathmodel.Shared(key).Current().Floor
+	before := pathmodel.Shared(key).Current().Erasure
 
 	// ServeListener starts the production uplink watcher, which performs one
 	// automatic prewarm. Calling prewarmPath here as well used to race a
@@ -244,7 +244,7 @@ func TestThePrewarmLeavesTheUplinkMeasured(t *testing.T) {
 	deadline := time.Now().Add(prewarmTimeout + 5*time.Second)
 	var after float64
 	for time.Now().Before(deadline) {
-		after = pathmodel.Shared(key).Current().Floor
+		after = pathmodel.Shared(key).Current().Erasure
 		if after > 0 {
 			break
 		}

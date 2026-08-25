@@ -752,20 +752,16 @@ func (p *Path) channel() lossmodel.Snapshot {
 		return lossmodel.Snapshot{BurstFactor: 1, ArrivalAfterLoss: 1}
 	}
 	state := p.cfg.Path.Current()
-	// The measured erasure, not the controller's floor. The floor is biased
-	// low on purpose so that pacing errs towards slowing down, and a code
-	// sized from it is sized for a fraction of what the channel is doing: the
-	// incident in docs/CONTROL-REDESIGN.md sized parity for 1.76% against a
-	// measured 19.9%. The floor also arrives here as a scalar, and building a
-	// snapshot whose every field is that one number is what killed Choose's
-	// own fallback -- it checks Loss when Floor is zero, and both were the
-	// same zero.
+	// The measured erasure. There is no longer a separate floor to choose
+	// wrongly between: the classifier that produced one is gone, and this is
+	// what the path is doing. Floor is set to the same figure because the
+	// snapshot type still carries the field for the estimator's own use.
 	burst := state.BurstFactor
 	if burst < 1 {
 		burst = 1
 	}
 	return lossmodel.Snapshot{
-		Loss: state.Erasure, Floor: state.Floor, Recent: state.Erasure,
+		Loss: state.Erasure, Floor: state.Erasure, Recent: state.Erasure,
 		BurstFactor: burst, ArrivalAfterLoss: 1 - state.Erasure,
 		Samples: state.ObservedSamples, Decided: uint64(state.ObservedSamples),
 	}

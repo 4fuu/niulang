@@ -68,8 +68,6 @@ type PathModel struct {
 }
 
 type pathKnowledge struct {
-	floor           float64
-	floorKnown      bool
 	erasure         float64
 	burst           float64
 	erasureKnown    bool
@@ -82,8 +80,6 @@ type pathKnowledge struct {
 type Member uint64
 
 type report struct {
-	floor     float64
-	samples   float64
 	erasure   float64
 	burst     float64
 	observed  float64
@@ -104,12 +100,6 @@ type report struct {
 // serve both, so the model pools both and each consumer reads the one whose
 // error it can survive.
 type Observation struct {
-	// Floor is the erasure this contributor's controller has established as
-	// independent of its sending rate, and FloorSamples is the weight behind
-	// it. A contributor with no trustworthy estimate reports zero weight
-	// rather than diluting a floor another lane has established.
-	Floor        float64
-	FloorSamples float64
 	// Erasure is the loss rate this contributor measured, unclassified, and
 	// BurstFactor is how much of it arrived in runs. Both are what a code has
 	// to be sized against; neither is safe to pace from.
@@ -128,11 +118,6 @@ type Observation struct {
 // State is what an endpoint pair has been measured to do, from the point of
 // view of one contributor.
 type State struct {
-	// Floor is the erasure rate that does not respond to sending more slowly,
-	// pooled across every lane's samples. It is deliberately conservative and
-	// is for pacing; a code sized from it under-protects the path. See
-	// Observation.
-	Floor float64
 	// Erasure is the loss rate the contributors measured on the direction they
 	// send into, pooled and unclassified, and BurstFactor is how much of it
 	// arrived in runs. This is what a code is sized against.
@@ -215,7 +200,6 @@ func (m *PathModel) Report(member Member, o Observation) State {
 		entry = &report{}
 		m.members[member] = entry
 	}
-	entry.floor, entry.samples = o.Floor, o.FloorSamples
 	entry.erasure, entry.burst = o.Erasure, o.BurstFactor
 	entry.observed, entry.delivered, entry.at = o.ObservedSamples, o.Delivered, now
 	if o.RoundTrip > 0 {
@@ -223,7 +207,7 @@ func (m *PathModel) Report(member Member, o Observation) State {
 	}
 
 	var state State
-	var weighted, weight, observed, sum float64
+	var observed, sum float64
 	var erasureWeighted, burstWeighted float64
 	live := 0
 	for key, other := range m.members {
@@ -235,21 +219,12 @@ func (m *PathModel) Report(member Member, o Observation) State {
 		sum += other.delivered
 		// A lane with few samples should not move the pooled estimate much,
 		// which is also what lets a new lane join without disturbing it.
-		weighted += other.floor * other.samples
-		weight += other.samples
 		erasureWeighted += other.erasure * other.observed
 		burstWeighted += other.burst * other.observed
 		observed += other.observed
 		if other.roundTrip > 0 && (state.RoundTrip == 0 || other.roundTrip < state.RoundTrip) {
 			state.RoundTrip = other.roundTrip
 		}
-	}
-	if weight > 0 {
-		state.Floor = weighted / weight
-		m.knowledge.floor = state.Floor
-		m.knowledge.floorKnown = true
-	} else if m.knowledge.floorKnown {
-		state.Floor = m.knowledge.floor
 	}
 	if observed > 0 {
 		state.Erasure = erasureWeighted / observed
@@ -320,7 +295,7 @@ func (m *PathModel) Current() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var state State
-	var weighted, weight, observed, bottleneck float64
+	var observed, bottleneck float64
 	var erasureWeighted, burstWeighted float64
 	live := 0
 	for key, entry := range m.members {
@@ -329,21 +304,12 @@ func (m *PathModel) Current() State {
 			continue
 		}
 		live++
-		weighted += entry.floor * entry.samples
-		weight += entry.samples
 		erasureWeighted += entry.erasure * entry.observed
 		burstWeighted += entry.burst * entry.observed
 		observed += entry.observed
 		if entry.roundTrip > 0 && (state.RoundTrip == 0 || entry.roundTrip < state.RoundTrip) {
 			state.RoundTrip = entry.roundTrip
 		}
-	}
-	if weight > 0 {
-		state.Floor = weighted / weight
-		m.knowledge.floor = state.Floor
-		m.knowledge.floorKnown = true
-	} else if m.knowledge.floorKnown {
-		state.Floor = m.knowledge.floor
 	}
 	if observed > 0 {
 		state.Erasure = erasureWeighted / observed

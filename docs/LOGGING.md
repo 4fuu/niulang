@@ -103,14 +103,13 @@ Prometheus `/metrics` names. They cover:
 
 - active/started/completed/failed flows and transferred bytes;
 - latest, smoothed, and controller-minimum RTT;
-- QUIC sent and received bytes and packets, and three loss counters that must
-  be read together: `queqiao_quic_loss_observed_packets_total` is every loss
-  the sender detected, `queqiao_quic_loss_suppressed_packets_total` is the part
-  withheld from the congestion controller as erasure, and
-  `queqiao_quic_controller_packets_lost` is the part charged as congestion.
-  Observed is the sum of the other two, and it is the one to divide by
-  `queqiao_quic_packets_sent` for a loss rate -- on an erasure path the charged
-  figure alone understates the channel by most of its loss;
+- QUIC sent and received bytes and packets, and two loss counters that are now
+  the same number derived two ways: `queqiao_quic_loss_observed_packets_total`
+  is every loss the sender detected, and `queqiao_quic_controller_packets_lost`
+  is what the congestion controller was charged. Nothing is withheld from the
+  controller any more, so they agree; they are both kept so that a divergence
+  is visible rather than silent. Divide either by `queqiao_quic_packets_sent`
+  for a loss rate;
 - delivery, ACK, send, pacing, and maximum-bandwidth estimates;
 - congestion window, bytes in flight, controller round/mode/recovery;
 - lanes, failures, replacements, reinjections, fallbacks, and timeouts;
@@ -126,12 +125,6 @@ Prometheus `/metrics` names. They cover:
   `queqiao_delay_brake_ratio`. It is non-zero only while the path is carrying
   more than one bandwidth-delay product of queue, and it separates a rate held
   back by the path's own queue from one that simply measured less;
-- the controller's erasure floor, which is the pacing-side view of the same
-  channel and is not a smaller version of the figure above. It is biased low on
-  purpose so that pacing errs towards slowing down, and it is a lower envelope
-  for a connection's lifetime, so it keeps what a clean window established while
-  the measurement follows the path. On one live incident the two read 1.76% and
-  19.9%; and
 - the receive direction, measured by this endpoint's decoders rather than
   inferred from acknowledgements: `queqiao_coded_symbols_total` split by
   outcome (`arrived`, `recovered`, `lost`), with
