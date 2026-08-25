@@ -55,6 +55,19 @@ type ControllerTelemetry struct {
 	// queue and a rate that simply measured less look identical otherwise, and
 	// the two call for opposite responses.
 	DelayBrake float64
+	// SampleMean, SampleMax, SampleMaxDelivered and SampleMaxInterval describe
+	// the delivery-rate samples the bandwidth estimate is built from, which the
+	// estimate alone cannot: a rate is high either because the path is fast or
+	// because the window it was measured over was short, and only the interval
+	// and the delivery behind it tell those apart.
+	//
+	// A maximum far above the mean is a tail rather than the path. This is here
+	// because that distinction could not be settled in a harness and has to be
+	// read off a real one.
+	SampleMean         uint64
+	SampleMax          uint64
+	SampleMaxDelivered uint64
+	SampleMaxInterval  time.Duration
 	// Erasure is the share of packets the path is measured to be erasing on
 	// the direction this controller sends into, pooled across the lanes that
 	// share it. It is what a code is sized from.
@@ -90,25 +103,30 @@ type TelemetryProvider interface {
 // callbacks are serialized by quic-go, but observation runs independently and
 // must not introduce a data race or a lock on the packet hot path.
 type telemetryState struct {
-	kind             string
-	mode             atomic.Uint32
-	maxBandwidth     atomic.Uint64
-	latestSample     atomic.Uint64
-	latestAckRate    atomic.Uint64
-	latestSendRate   atomic.Uint64
-	samples          atomic.Uint64
-	nonAppSamples    atomic.Uint64
-	appSamples       atomic.Uint64
-	stateMisses      atomic.Uint64
-	zeroSamples      atomic.Uint64
-	round            atomic.Uint64
-	pacingRate       atomic.Uint64
-	congestionWindow atomic.Uint64
-	bytesInFlight    atomic.Uint64
-	bytesLost        atomic.Uint64
-	packetsLost      atomic.Uint64
-	minRTTNS         atomic.Int64
-	inRecovery       atomic.Bool
+	kind           string
+	mode           atomic.Uint32
+	maxBandwidth   atomic.Uint64
+	latestSample   atomic.Uint64
+	latestAckRate  atomic.Uint64
+	latestSendRate atomic.Uint64
+	samples        atomic.Uint64
+	nonAppSamples  atomic.Uint64
+	appSamples     atomic.Uint64
+	stateMisses    atomic.Uint64
+	zeroSamples    atomic.Uint64
+	round          atomic.Uint64
+	// The shape of the samples behind the estimate; see ControllerTelemetry.
+	sampleMean          atomic.Uint64
+	sampleMax           atomic.Uint64
+	sampleMaxDelivered  atomic.Uint64
+	sampleMaxIntervalNS atomic.Int64
+	pacingRate          atomic.Uint64
+	congestionWindow    atomic.Uint64
+	bytesInFlight       atomic.Uint64
+	bytesLost           atomic.Uint64
+	packetsLost         atomic.Uint64
+	minRTTNS            atomic.Int64
+	inRecovery          atomic.Bool
 }
 
 func newTelemetryState(kind string) telemetryState {
@@ -144,6 +162,13 @@ func (t *telemetryState) update(mode uint32, maxBandwidth, pacingRate uint64, co
 
 // updateSampler publishes diagnostic delivery-sampler state. Controllers
 // that do not use the TUIC packet sampler leave these values at zero.
+func (t *telemetryState) updateSampleShape(mean, max, delivered uint64, interval time.Duration) {
+	t.sampleMean.Store(mean)
+	t.sampleMax.Store(max)
+	t.sampleMaxDelivered.Store(delivered)
+	t.sampleMaxIntervalNS.Store(int64(interval))
+}
+
 func (t *telemetryState) updateSampler(latestSample, latestAckRate, latestSendRate, samples, nonAppSamples, appSamples, stateMisses, zeroSamples, round uint64) {
 	t.latestSample.Store(latestSample)
 	t.latestAckRate.Store(latestAckRate)
