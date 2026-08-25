@@ -442,6 +442,23 @@ func Reset() {
 	clear(shared)
 }
 
+// Live reports the model for every endpoint pair this process is currently
+// measuring.
+//
+// It exists because the measured erasure is what a code is sized from and is
+// not exported as a metric, so a test that wants to know whether the stack
+// noticed a channel change has no other way to ask. Callers that know their
+// peer should use Shared; this is for the ones observing from outside.
+func Live() []*PathModel {
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	models := make([]*PathModel, 0, len(shared))
+	for _, model := range shared {
+		models = append(models, model)
+	}
+	return models
+}
+
 // Shared returns the model for an endpoint pair, creating it on first use.
 // The key should identify the peer rather than the connection: lanes to the
 // same peer are exactly the ones that must share.

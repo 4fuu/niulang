@@ -631,3 +631,81 @@ func TestPerFlowPolicerBucketFollowsItsOwnRate(t *testing.T) {
 		t.Fatalf("a source exceeding its own bucket was not policed: in=%d dropped=%d", up.PacketsIn, up.PacketsDropped)
 	}
 }
+
+// A path whose erasure never changes cannot express the case a transport most
+// needs to survive: a channel that moves under a live flow. The motivating
+// incident was exactly that, downstream erasure going from a few percent to
+// sixty over an afternoon, so the emulator has to be able to step it.
+func TestLossRateChangesUnderALiveFlow(t *testing.T) {
+	server := echoServer(t)
+	relay, err := New("127.0.0.1:0", server.LocalAddr().String(), Config{Seed: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	target, err := net.ResolveUDPAddr("udp", relay.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	measure := func(packets int) float64 {
+		t.Helper()
+		before, _ := relay.Stats()
+		for range packets {
+			if _, err := client.WriteTo([]byte("x"), target); err != nil {
+				t.Fatal(err)
+			}
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if up, _ := relay.Stats(); up.PacketsIn >= before.PacketsIn+uint64(packets) {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		after, _ := relay.Stats()
+		crossed := after.PacketsIn - before.PacketsIn
+		if crossed == 0 {
+			t.Fatal("no packets crossed the relay")
+		}
+		return float64(after.PacketsLost-before.PacketsLost) / float64(crossed)
+	}
+
+	if clean := measure(400); clean != 0 {
+		t.Fatalf("a path configured with no loss erased %.3f of its packets", clean)
+	}
+
+	relay.SetLossRate(0.5, 0)
+	if lossy := measure(1200); lossy < 0.35 || lossy > 0.65 {
+		t.Fatalf("after asking for 50%% upstream erasure the path erased %.3f", lossy)
+	}
+
+	relay.SetLossRate(0, 0)
+	if back := measure(600); back != 0 {
+		t.Fatalf("after returning to a clean path it still erased %.3f", back)
+	}
+
+	// A negative rate means "leave this direction alone", so one direction can
+	// be changed without the caller knowing the other.
+	relay.SetLossRate(0.5, -1)
+	if again := measure(1200); again < 0.35 {
+		t.Fatalf("a negative downstream rate disturbed the upstream change: %.3f", again)
+	}
+	relay.SetLossRate(-1, -1)
+	if held := measure(1200); held < 0.35 {
+		t.Fatalf("two negative rates changed the erasure: %.3f", held)
+	}
+
+	// Out-of-range rates are clamped rather than producing a probability above
+	// one, which the Gilbert chain would divide by.
+	relay.SetLossRate(2, -1)
+	if all := measure(400); all < 0.95 {
+		t.Fatalf("a rate above one erased only %.3f", all)
+	}
+}
