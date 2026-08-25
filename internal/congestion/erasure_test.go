@@ -488,3 +488,88 @@ func TestAnEmptiedPipeKeepsWhatItMeasured(t *testing.T) {
 			"and will spend cycles climbing back to what it already knew", peak, got)
 	}
 }
+
+// What the controller was charged is not what the path did, and until now only
+// the charged figure left the process. On the live gateway that meant a path
+// erasing a fifth of its downstream reported single-digit loss: the rest had
+// been correctly reclassified as erasure and then dropped from the record, so
+// no dashboard could show the erasure this transport exists to handle.
+//
+// The three counters have to satisfy observed = charged + suppressed, and
+// observed has to be the one that tracks the channel.
+func TestTheSenderReportsWhatThePathDidAndWhatItWasCharged(t *testing.T) {
+	e := NewErasureSender(1200)
+
+	// Establish a memoryless erasure floor the way a real channel does, then
+	// keep feeding it at that rate.
+	const erasure = 0.2
+	rng := rand.New(rand.NewSource(7))
+	number := quiccongestion.PacketNumber(0)
+	observedLost := 0
+	for round := 0; round < 40; round++ {
+		var acked []quiccongestion.AckedPacketInfo
+		var lost []quiccongestion.LostPacketInfo
+		for i := 0; i < 500; i++ {
+			if rng.Float64() < erasure {
+				lost = append(lost, quiccongestion.LostPacketInfo{PacketNumber: number, BytesLost: 1200})
+				observedLost++
+			} else {
+				acked = append(acked, quiccongestion.AckedPacketInfo{PacketNumber: number, BytesAcked: 1200})
+			}
+			number++
+		}
+		e.OnCongestionEventEx(0, monotime.Now(), acked, lost)
+	}
+
+	telemetry := e.Telemetry()
+	_, suppressed, passed := e.Channel()
+	t.Logf("observed=%d charged=%d suppressed=%d (channel lost %d of %d)",
+		telemetry.PacketsLostObserved, telemetry.PacketsLost, telemetry.PacketsLostSuppressed,
+		observedLost, number)
+
+	if telemetry.PacketsLostObserved != telemetry.PacketsLost+telemetry.PacketsLostSuppressed {
+		t.Fatalf("observed %d != charged %d + suppressed %d, so the three cannot be read together",
+			telemetry.PacketsLostObserved, telemetry.PacketsLost, telemetry.PacketsLostSuppressed)
+	}
+	if telemetry.PacketsLost != passed || telemetry.PacketsLostSuppressed != suppressed {
+		t.Fatalf("telemetry (charged=%d suppressed=%d) disagrees with the sender's own counters (%d/%d)",
+			telemetry.PacketsLost, telemetry.PacketsLostSuppressed, passed, suppressed)
+	}
+	if telemetry.PacketsLostObserved != uint64(observedLost) {
+		t.Fatalf("observed %d losses, the channel produced %d", telemetry.PacketsLostObserved, observedLost)
+	}
+	// The point of the split: a floor was established, so most of the loss was
+	// correctly withheld from the controller, and the charged figure alone
+	// would understate the channel by a wide margin.
+	if telemetry.PacketsLostSuppressed == 0 {
+		t.Fatal("nothing was suppressed on a 20% memoryless erasure channel; the floor never established")
+	}
+	if telemetry.PacketsLost >= telemetry.PacketsLostObserved/2 {
+		t.Fatalf("charged %d of %d observed: the controller absorbed most of an erasure channel",
+			telemetry.PacketsLost, telemetry.PacketsLostObserved)
+	}
+}
+
+// A controller that classifies nothing must still answer the same question, or
+// a dashboard cannot read one metric across the kinds this build ships.
+func TestControllersThatDoNotClassifyReportObservedEqualToCharged(t *testing.T) {
+	for name, sender := range map[string]interface {
+		OnCongestionEventEx(quiccongestion.ByteCount, monotime.Time, []quiccongestion.AckedPacketInfo, []quiccongestion.LostPacketInfo)
+		Telemetry() ControllerTelemetry
+	}{
+		"bbr-tuic": NewTUICBBRSender(1200),
+		"brutal":   NewBrutalSender(1_000_000, false),
+	} {
+		t.Run(name, func(t *testing.T) {
+			sender.OnCongestionEventEx(12_000, monotime.Now(), nil, losses(6))
+			got := sender.Telemetry()
+			if got.PacketsLostObserved != got.PacketsLost {
+				t.Fatalf("observed %d against charged %d for a controller that classifies nothing",
+					got.PacketsLostObserved, got.PacketsLost)
+			}
+			if got.PacketsLostSuppressed != 0 {
+				t.Fatalf("suppressed %d for a controller that suppresses nothing", got.PacketsLostSuppressed)
+			}
+		})
+	}
+}

@@ -442,6 +442,12 @@ func (e *ErasureSender) InRecovery() bool  { return e.inner.InRecovery() }
 func (e *ErasureSender) Telemetry() ControllerTelemetry {
 	t := e.inner.Telemetry()
 	t.Kind = "erasure"
+	// The inner controller was charged only the congestive share, so its own
+	// figure cannot answer what the path did. Both halves are reported: what
+	// this sender saw, and what it withheld as erasure.
+	suppressed := e.suppressed.Load()
+	t.PacketsLostSuppressed = suppressed
+	t.PacketsLostObserved = t.PacketsLost + suppressed
 	arrival := e.arrivalRate()
 	t.ErasureFloor = 1 - arrival
 	t.PacingRate = uint64(float64(t.PacingRate) / arrival)
