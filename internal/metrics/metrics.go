@@ -219,6 +219,9 @@ type quicCounterTotals struct {
 	packetsReceived         atomic.Uint64
 	lossObservedPackets     atomic.Uint64
 	lossSuppressedPackets   atomic.Uint64
+	codedSources            atomic.Uint64
+	codedRecovered          atomic.Uint64
+	codedLost               atomic.Uint64
 	controllerBytesLost     atomic.Uint64
 	controllerPacketsLost   atomic.Uint64
 	controllerSamples       atomic.Uint64
@@ -235,6 +238,9 @@ func (t *quicCounterTotals) add(d QUICConnectionCounters) {
 	t.packetsReceived.Add(d.PacketsReceived)
 	t.lossObservedPackets.Add(d.LossObservedPackets)
 	t.lossSuppressedPackets.Add(d.LossSuppressedPackets)
+	t.codedSources.Add(d.CodedSources)
+	t.codedRecovered.Add(d.CodedRecovered)
+	t.codedLost.Add(d.CodedLost)
 	t.controllerBytesLost.Add(d.ControllerBytesLost)
 	t.controllerPacketsLost.Add(d.ControllerPacketsLost)
 	t.controllerSamples.Add(d.ControllerSamples)
@@ -252,6 +258,9 @@ func (t *quicCounterTotals) load() QUICConnectionCounters {
 		PacketsReceived:         t.packetsReceived.Load(),
 		LossObservedPackets:     t.lossObservedPackets.Load(),
 		LossSuppressedPackets:   t.lossSuppressedPackets.Load(),
+		CodedSources:            t.codedSources.Load(),
+		CodedRecovered:          t.codedRecovered.Load(),
+		CodedLost:               t.codedLost.Load(),
 		ControllerBytesLost:     t.controllerBytesLost.Load(),
 		ControllerPacketsLost:   t.controllerPacketsLost.Load(),
 		ControllerSamples:       t.controllerSamples.Load(),
@@ -282,6 +291,7 @@ type Snapshot struct {
 	QUICBytesSent, QUICBytesReceived                              uint64
 	QUICPacketsSent, QUICPacketsReceived                          uint64
 	QUICLossObservedPackets, QUICLossSuppressedPackets            uint64
+	QUICCodedSources, QUICCodedRecovered, QUICCodedLost           uint64
 	QUICControllerKind                                            string
 	QUICControllerMode                                            uint32
 	QUICControllerMaxBandwidth, QUICControllerPacingRate          uint64
@@ -366,8 +376,20 @@ type QUICConnectionCounters struct {
 	// SetCongestionControl, so nothing ever moved them off zero. A counter
 	// that cannot be produced is worse than a missing one once it is
 	// monotonic, because it then looks like a measurement.
-	LossObservedPackets     uint64
-	LossSuppressedPackets   uint64
+	LossObservedPackets   uint64
+	LossSuppressedPackets uint64
+	// Coded receive-direction outcomes. Every source symbol the peer sent ends
+	// in exactly one of the three, so they are a denominator as well as three
+	// counters: arrived, reconstructed by the code, or left the window still
+	// missing and re-issued by the session a round trip later.
+	//
+	// These are the other direction from LossObservedPackets, which is what
+	// this sender detected on the direction it sends into. An endpoint has to
+	// publish both or a path's two halves cannot be told apart, and on the
+	// motivating incident they differed by a factor of five.
+	CodedSources            uint64
+	CodedRecovered          uint64
+	CodedLost               uint64
 	ControllerBytesLost     uint64
 	ControllerPacketsLost   uint64
 	ControllerSamples       uint64
@@ -401,6 +423,9 @@ func (c QUICConnectionCounters) Advance(previous QUICConnectionCounters) QUICCon
 		PacketsReceived:         forward(c.PacketsReceived, previous.PacketsReceived),
 		LossObservedPackets:     forward(c.LossObservedPackets, previous.LossObservedPackets),
 		LossSuppressedPackets:   forward(c.LossSuppressedPackets, previous.LossSuppressedPackets),
+		CodedSources:            forward(c.CodedSources, previous.CodedSources),
+		CodedRecovered:          forward(c.CodedRecovered, previous.CodedRecovered),
+		CodedLost:               forward(c.CodedLost, previous.CodedLost),
 		ControllerBytesLost:     forward(c.ControllerBytesLost, previous.ControllerBytesLost),
 		ControllerPacketsLost:   forward(c.ControllerPacketsLost, previous.ControllerPacketsLost),
 		ControllerSamples:       forward(c.ControllerSamples, previous.ControllerSamples),
@@ -419,6 +444,9 @@ func (c *QUICConnectionCounters) Add(delta QUICConnectionCounters) {
 	c.PacketsReceived += delta.PacketsReceived
 	c.LossObservedPackets += delta.LossObservedPackets
 	c.LossSuppressedPackets += delta.LossSuppressedPackets
+	c.CodedSources += delta.CodedSources
+	c.CodedRecovered += delta.CodedRecovered
+	c.CodedLost += delta.CodedLost
 	c.ControllerBytesLost += delta.ControllerBytesLost
 	c.ControllerPacketsLost += delta.ControllerPacketsLost
 	c.ControllerSamples += delta.ControllerSamples
@@ -736,6 +764,9 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICPacketsReceived = counters.PacketsReceived
 	s.QUICLossObservedPackets = counters.LossObservedPackets
 	s.QUICLossSuppressedPackets = counters.LossSuppressedPackets
+	s.QUICCodedSources = counters.CodedSources
+	s.QUICCodedRecovered = counters.CodedRecovered
+	s.QUICCodedLost = counters.CodedLost
 	s.QUICControllerKind = controllerKind
 	s.QUICControllerMode = controllerMode
 	s.QUICControllerMaxBandwidth = controllerMaxBandwidth
@@ -844,6 +875,19 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// downstream, which is the direction that was invisible when the only
 	// erasure figure published was the floor below.
 	fmt.Fprintf(w, "queqiao_erasure_ratio{direction=\"send\"} %.9f\n", s.QUICErasureSend)
+	// The receive direction, measured by this endpoint's decoders rather than
+	// inferred from acknowledgements. Every source symbol the peer sent ends in
+	// exactly one of the three outcomes below, so they are a denominator and
+	// the two ratios are derived from them rather than averaged across flows.
+	//
+	// The residual is what the code could not repair and the session has to
+	// re-issue a round trip later. It is the number the motivating incident was
+	// actually made of -- 11% of the payload -- and it had no metric at all.
+	fmt.Fprintf(w, "queqiao_coded_symbols_total{outcome=\"arrived\"} %d\n", s.QUICCodedSources)
+	fmt.Fprintf(w, "queqiao_coded_symbols_total{outcome=\"recovered\"} %d\n", s.QUICCodedRecovered)
+	fmt.Fprintf(w, "queqiao_coded_symbols_total{outcome=\"lost\"} %d\n", s.QUICCodedLost)
+	fmt.Fprintf(w, "queqiao_erasure_ratio{direction=\"receive\"} %.9f\n", s.ReceiveErasure())
+	fmt.Fprintf(w, "queqiao_erasure_residual_ratio{direction=\"receive\"} %.9f\n", s.ReceiveResidual())
 	// The floor is the conservative, pacing-side view of the same channel:
 	// biased low on purpose, and a lower envelope for a connection's lifetime.
 	// It is not a smaller version of the figure above and a code sized from it
@@ -867,4 +911,30 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	for i, value := range s.AccountAdmissionRefusals {
 		fmt.Fprintf(w, "queqiao_account_admission_refused_total{reason=\"%s\"} %d\n", AccountRefusal(i), value)
 	}
+}
+
+// ReceiveErasure is the share of the peer's source symbols that did not arrive,
+// whether the code repaired them or not: the wire loss this endpoint measured
+// on the direction it receives.
+//
+// It is derived from the counters rather than averaged across flows, because a
+// mean of per-flow ratios weights a flow that moved a kilobyte the same as one
+// that moved a gigabyte.
+func (s Snapshot) ReceiveErasure() float64 {
+	total := s.QUICCodedSources + s.QUICCodedRecovered + s.QUICCodedLost
+	if total == 0 {
+		return 0
+	}
+	return float64(s.QUICCodedRecovered+s.QUICCodedLost) / float64(total)
+}
+
+// ReceiveResidual is the share the code could not repair, which the session
+// above has to re-issue a round trip later. It is the cost the erasure actually
+// imposes once the code has done what it can.
+func (s Snapshot) ReceiveResidual() float64 {
+	total := s.QUICCodedSources + s.QUICCodedRecovered + s.QUICCodedLost
+	if total == 0 {
+		return 0
+	}
+	return float64(s.QUICCodedLost) / float64(total)
 }

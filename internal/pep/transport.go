@@ -238,10 +238,15 @@ type quicBidiStream interface {
 // connection counters.  Keeping the QUIC type out of the flow and metrics
 // packages lets TCP rescue lanes remain dependency-independent.
 type laneTransportStats struct {
-	latestRTT, smoothedRTT       time.Duration
-	bytesSent, bytesReceived     uint64
-	packetsSent, packetsReceived uint64
-	controller                   wancongestion.ControllerTelemetry
+	latestRTT, smoothedRTT   time.Duration
+	bytesSent, bytesReceived uint64
+	// Coded receive-direction symbol outcomes. Every source symbol the peer
+	// sent ends in exactly one of the three, which is what makes them a
+	// denominator: arrived, reconstructed by the code, or left the window
+	// still missing and re-issued by the session a round trip later.
+	codedSources, codedRecovered, codedLost uint64
+	packetsSent, packetsReceived            uint64
+	controller                              wancongestion.ControllerTelemetry
 }
 
 type laneStatsProvider interface {
@@ -319,6 +324,15 @@ func (c *quicStreamConn) transportStats() laneTransportStats {
 	}
 	if c.controller != nil {
 		stats.controller = c.controller.Telemetry()
+	}
+	if c.bulk != nil {
+		// The coded path belongs to the connection, not the stream, so these
+		// are connection-scoped like the counters above and fold once however
+		// many lanes share it.
+		coded := c.bulk.Stats()
+		stats.codedSources = coded.Sources
+		stats.codedRecovered = coded.Recovered
+		stats.codedLost = coded.Lost
 	}
 	return stats
 }

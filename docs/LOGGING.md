@@ -128,6 +128,15 @@ Prometheus `/metrics` names. They cover:
   for a connection's lifetime, so it keeps what a clean window established while
   the measurement follows the path. On one live incident the two read 1.76% and
   19.9%; and
+- the receive direction, measured by this endpoint's decoders rather than
+  inferred from acknowledgements: `queqiao_coded_symbols_total` split by
+  outcome (`arrived`, `recovered`, `lost`), with
+  `queqiao_erasure_ratio{direction="receive"}` and
+  `queqiao_erasure_residual_ratio{direction="receive"}` derived from them. Every
+  source symbol the peer sent ends in exactly one outcome, so the three are a
+  denominator and the ratios are counters over counters rather than a mean of
+  per-flow ratios. The residual is what the code could not repair and the
+  session re-issues a round trip later; and
 - sampler diagnostics and class transitions.
 
 Flow completion records also carry what the flow's lane replacements did:
