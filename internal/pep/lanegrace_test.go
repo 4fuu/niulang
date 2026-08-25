@@ -121,18 +121,20 @@ func TestAFlowRecordsWhatItsLaneReplacementsDid(t *testing.T) {
 		t.Fatalf("the flow waited %s but recorded %s", grace, waited)
 	}
 
-	// A second grace has to be visible as a second grace: the observed
-	// durations clustered at roughly twice laneReplacementWait, and a counter
-	// that saturated at one could not have shown that.
+	// A second waiter for the same missing lane has to be visible as a second
+	// waiter -- the counters are how a gateway record separates one call site
+	// giving up from four of them -- but it must not buy the flow a second
+	// grace. The observed durations clustered at roughly twice
+	// laneReplacementWait, which is what that used to cost.
 	if err := flow.waitForHealthyLane(context.Background(), grace); err == nil {
 		t.Fatal("the second wait succeeded with no healthy lane")
 	}
 	waits, timeouts, _, twice := flow.replacementDiagnostics()
 	if waits != 2 || timeouts != 2 {
-		t.Fatalf("two exhausted graces recorded waits=%d timeouts=%d, want 2 and 2", waits, timeouts)
+		t.Fatalf("two waiters recorded waits=%d timeouts=%d, want 2 and 2", waits, timeouts)
 	}
-	if twice <= waited {
-		t.Fatalf("two graces recorded %s, no more than one grace's %s", twice, waited)
+	if twice >= 2*grace {
+		t.Fatalf("two waiters on one outage spent %s, at least two graces of %s", twice, grace)
 	}
 
 	// And an exit that is not a timeout must not be counted as one, or the
@@ -143,5 +145,118 @@ func TestAFlowRecordsWhatItsLaneReplacementsDid(t *testing.T) {
 	}
 	if _, timeouts, _, _ := flow.replacementDiagnostics(); timeouts != 2 {
 		t.Fatalf("abandoning replacement counted as a timeout: timeouts=%d, want 2", timeouts)
+	}
+}
+
+// The grace is what a flow is prepared to wait for a lane that is not there.
+// It was being spent per waiter rather than per outage: run, the frame and
+// control writers and the acknowledgement loop all wait for the same missing
+// lane, so a flow that was never going to be rescued paid the whole grace
+// once for each of them. The live gateway showed it as failures clustered at
+// 76-106 s against a 45 s grace -- two of them, for flows that had finished
+// their work in the first second. See issue #53.
+func TestOneOutageSpendsOneGraceHoweverManyWaitersItHas(t *testing.T) {
+	flow := newGraceTestFlow(t)
+	const grace = 300 * time.Millisecond
+	const concurrent = 3
+
+	// Waiters that are already blocked when the grace runs out share it: a
+	// lane dying with writes in flight puts several of them here at once.
+	started := time.Now()
+	errs := make(chan error, concurrent)
+	for i := 0; i < concurrent; i++ {
+		go func() { errs <- flow.waitForHealthyLane(context.Background(), grace) }()
+	}
+	for i := 0; i < concurrent; i++ {
+		select {
+		case err := <-errs:
+			if !errors.Is(err, errLaneReplacementTimeout) {
+				t.Fatalf("wait error = %v, want %v", err, errLaneReplacementTimeout)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a waiter never returned")
+		}
+	}
+
+	// And a waiter that arrives afterwards is told at once. This is the one
+	// that cost the flows in the incident: run waits for the lane only after
+	// the failure reaches it, which on a flow whose writer was already blocked
+	// is one whole grace after the outage began. It used to start a second.
+	arrived := time.Now()
+	if err := flow.waitForHealthyLane(context.Background(), grace); !errors.Is(err, errLaneReplacementTimeout) {
+		t.Fatalf("wait error = %v, want %v", err, errLaneReplacementTimeout)
+	}
+	if late := time.Since(arrived); late > grace/2 {
+		t.Fatalf("a waiter arriving after the grace was spent waited %s of a fresh %s", late, grace)
+	}
+	if elapsed := time.Since(started); elapsed >= 2*grace {
+		t.Fatalf("one outage took %s, at least two graces of %s", elapsed, grace)
+	}
+
+	// Every waiter still has to be counted, or the record cannot say how many
+	// call sites were stuck on the same absent lane.
+	const waiters = concurrent + 1
+	if waits, timeouts, _, _ := flow.replacementDiagnostics(); waits != waiters || timeouts != waiters {
+		t.Fatalf("recorded waits=%d timeouts=%d, want %d and %d", waits, timeouts, waiters, waiters)
+	}
+}
+
+// Spending the grace once per outage must not mean spending it once per flow.
+// A long-lived flow that is genuinely being rescued loses a lane, gets one
+// back, and may lose another an hour later; that second outage is a new one
+// and is owed the whole grace.
+func TestANewOutageIsOwedAWholeGrace(t *testing.T) {
+	flow := newGraceTestFlow(t)
+	const grace = 200 * time.Millisecond
+
+	if err := flow.waitForHealthyLane(context.Background(), grace); !errors.Is(err, errLaneReplacementTimeout) {
+		t.Fatalf("wait error = %v, want %v", err, errLaneReplacementTimeout)
+	}
+
+	// A lane arriving is what ends an outage, and it ends it in startLane --
+	// the one point a lane starts carrying traffic -- rather than wherever a
+	// waiter next happens to look.
+	replacement := &mpLane{id: 7, kind: TransportQUIC, fc: newFrameConn(gracePipe(t))}
+	if err := flow.addLane(replacement); err != nil {
+		t.Fatalf("adding a replacement lane: %v", err)
+	}
+	if flow.replacementDeadline.Load() != 0 {
+		t.Fatal("a replacement lane arrived and the spent outage was still holding its deadline")
+	}
+
+	flow.failLane(replacement, errors.New("lane died again"))
+	started := time.Now()
+	if err := flow.waitForHealthyLane(context.Background(), grace); !errors.Is(err, errLaneReplacementTimeout) {
+		t.Fatalf("wait error = %v, want %v", err, errLaneReplacementTimeout)
+	}
+	if elapsed := time.Since(started); elapsed < grace {
+		t.Fatalf("the second outage waited %s of its %s grace", elapsed, grace)
+	}
+}
+
+func gracePipe(t *testing.T) net.Conn {
+	t.Helper()
+	local, remote := net.Pipe()
+	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
+	return local
+}
+
+// A deadline can outlive the outage it belonged to. A waiter that finds no
+// lane, and whose lane arrives before it records its deadline, writes that
+// deadline after the arriving lane has already cleared the outage, and nothing
+// is then left to remove it. Read as current, it would expire the flow's next
+// outage before that outage began -- failing in an instant a flow that had a
+// full grace coming to it.
+func TestAStaleDeadlineDoesNotDenyTheNextOutageItsGrace(t *testing.T) {
+	flow := newGraceTestFlow(t)
+	const grace = 200 * time.Millisecond
+	flow.replacementDeadline.Store(time.Now().Add(-time.Hour).UnixNano())
+
+	started := time.Now()
+	if err := flow.waitForHealthyLane(context.Background(), grace); !errors.Is(err, errLaneReplacementTimeout) {
+		t.Fatalf("wait error = %v, want %v", err, errLaneReplacementTimeout)
+	}
+	if elapsed := time.Since(started); elapsed < grace {
+		t.Fatalf("an outage inheriting a stale deadline waited %s of its %s grace", elapsed, grace)
 	}
 }

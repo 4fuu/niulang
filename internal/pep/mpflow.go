@@ -50,10 +50,26 @@ const (
 	// the combined queues at maxLaneWriteQueue.
 	maxLaneInteractiveReserve = 8
 	maxLaneBulkQueue          = maxLaneWriteQueue - maxLaneInteractiveReserve
-	// Must exceed QUIC dead-path detection plus TCP handshake time. The
-	// client normally detects a blackhole at ~15 s, then needs one scheduler
-	// tick and a bounded TCP handshake before the replacement can arrive.
-	laneReplacementWait = 45 * time.Second
+	// laneDeadPathDetection is how long QUIC spends deciding that a silent
+	// lane is dead: it is the MaxIdleTimeout every lane is configured with in
+	// quicConfig, named here because the replacement grace below is derived
+	// from it. The two are one budget in two halves, not two independent
+	// constants -- a flow cannot be given a replacement grace shorter than the
+	// time its peer needs to notice there is anything to replace, so raising
+	// the detection budget raises the grace with it.
+	laneDeadPathDetection = 15 * time.Second
+	// laneRescueHandshake is what a replacement lane still needs after the
+	// peer has noticed: one scheduler tick, and a bounded handshake on a path
+	// that has just proved hostile enough to kill a lane.
+	laneRescueHandshake = 30 * time.Second
+	// laneReplacementWait is the whole budget a flow spends with no healthy
+	// lane before it gives up. It is spent per outage rather than per wait:
+	// several call sites wait for the same missing lane, and each used to
+	// start its own copy of this grace, so a flow that was never going to be
+	// rescued burned the budget once per waiter. On the live gateway that was
+	// visible as failures clustered at 76-106 s -- two graces, not one -- for
+	// flows that had done their work in the first second. See issue #53.
+	laneReplacementWait = laneDeadPathDetection + laneRescueHandshake
 	// Once both FIN directions are observed, no additional application bytes
 	// can be delivered. This grace lets a healthy final ACK arrive, but bounds
 	// retention when the peer closes its last lane at exactly that point.
@@ -253,6 +269,12 @@ type multipathFlow struct {
 	replacementTimeouts  atomic.Uint64
 	replacementWaitNanos atomic.Int64
 	lanesJoined          atomic.Uint64
+	// replacementDeadline is when the current outage's grace runs out, in Unix
+	// nanoseconds, or zero when the flow is not in an outage. It is what makes
+	// laneReplacementWait a budget the flow spends once rather than one each
+	// waiter spends separately, and it is cleared in startLane so that a flow
+	// which really is being rescued gets a fresh grace for its next outage.
+	replacementDeadline atomic.Int64
 	// controlLaneShared reports whether another flow is currently using the
 	// pooled control connection. Nil means "no", which is what a flow on a
 	// dedicated connection should answer.
@@ -461,6 +483,13 @@ func (f *multipathFlow) activateLane(lane *mpLane) error {
 }
 
 func (f *multipathFlow) startLane(lane *mpLane) {
+	// This is the one point a lane actually begins carrying traffic, reached
+	// from addLane for an immediate lane and from activateLane for a staged
+	// one, so it is where an outage ends. Ending it here rather than where a
+	// waiter happens to observe the lane matters: nothing obliges a waiter to
+	// look again once it has what it wanted, and a deadline left behind by a
+	// recovered outage would expire the next one before it began.
+	f.endReplacementOutage()
 	// The policy is set before either goroutine exists. Setting it from the
 	// reader, as the first version did, meant the writer could already be
 	// asking for it.
@@ -1703,6 +1732,7 @@ func (f *multipathFlow) replacementDiagnostics() (waits, timeouts, joined uint64
 
 func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Duration) error {
 	if len(f.healthyLanes()) > 0 {
+		f.endReplacementOutage()
 		return nil
 	}
 	if f.resumeRefused.Load() {
@@ -1714,7 +1744,22 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 	f.replacementWaits.Add(1)
 	waitStarted := time.Now()
 	defer func() { f.replacementWaitNanos.Add(int64(time.Since(waitStarted))) }()
-	timer := time.NewTimer(timeout)
+	// The grace belongs to the outage, not to this call. Four call sites wait
+	// for the last lane -- run, the frame and control writers, and the
+	// acknowledgement loop -- and a lane that dies with a write in flight puts
+	// more than one of them here for the same missing lane. Each used to start
+	// a full grace of its own, so the flow's real willingness to wait was a
+	// multiple of this constant that depended on which writers happened to be
+	// blocked.
+	remaining := f.replacementBudget(waitStarted, timeout)
+	if remaining <= 0 {
+		// The outage already outlived its grace. Waiting again cannot produce
+		// a lane; it only holds the application open for another full grace
+		// before telling it what is already known.
+		f.replacementTimeouts.Add(1)
+		return errLaneReplacementTimeout
+	}
+	timer := time.NewTimer(remaining)
 	defer timer.Stop()
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
@@ -1722,6 +1767,7 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 		select {
 		case <-ticker.C:
 			if len(f.healthyLanes()) > 0 {
+				f.endReplacementOutage()
 				return nil
 			}
 			if f.resumeRefused.Load() {
@@ -1746,7 +1792,7 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 			}
 		case <-timer.C:
 			f.replacementTimeouts.Add(1)
-			return errors.New("lane replacement timeout")
+			return errLaneReplacementTimeout
 		case <-f.done:
 			return errors.New("flow closed while waiting for lane replacement")
 		case <-ctx.Done():
@@ -1754,6 +1800,41 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 		}
 	}
 }
+
+// replacementBudget reports what is left of the current outage's grace,
+// opening one at now+grace if this waiter is the first to find the flow
+// without a lane. A negative or zero result means the outage has already had
+// its whole grace and nothing is owed to a further waiter.
+//
+// A deadline more than a grace into the past is not this outage's. It is the
+// residue of one that ended in the narrow window between a waiter finding no
+// lane and the arriving lane clearing the outage, where the waiter's own
+// deadline lands after the clear and nothing is left to remove it. Reading it
+// as current would deny a whole grace to an outage that had not started, so
+// it is discarded. The cost of being wrong is the opposite and smaller: a
+// waiter that turns up more than a grace after the last one expired -- on a
+// flow the expiry has usually already failed -- gets one grace of its own
+// rather than none.
+func (f *multipathFlow) replacementBudget(now time.Time, grace time.Duration) time.Duration {
+	for {
+		if deadline := f.replacementDeadline.Load(); deadline != 0 {
+			remaining := time.Unix(0, deadline).Sub(now)
+			if remaining > -grace {
+				return remaining
+			}
+			if !f.replacementDeadline.CompareAndSwap(deadline, 0) {
+				continue
+			}
+		}
+		if f.replacementDeadline.CompareAndSwap(0, now.Add(grace).UnixNano()) {
+			return grace
+		}
+	}
+}
+
+// endReplacementOutage forgets the current outage's deadline, so the next one
+// starts from a full grace.
+func (f *multipathFlow) endReplacementOutage() { f.replacementDeadline.Store(0) }
 
 func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) error {
 	f.replayMu.Lock()
@@ -2562,6 +2643,11 @@ var errResumeRefused = errors.New("peer does not hold this session")
 // errReplacementAbandoned reports that this endpoint has stopped attempting
 // replacement lanes for the flow, so its grace has nothing left to wait for.
 var errReplacementAbandoned = errors.New("no replacement lane will be attempted")
+
+// errLaneReplacementTimeout reports that an outage outlived the whole
+// replacement grace. The text is what the live gateway's failure records
+// already say, and is kept verbatim so those records stay greppable.
+var errLaneReplacementTimeout = errors.New("lane replacement timeout")
 
 // retainClose keeps this flow's half-close so a replacement lane can be given
 // it when the lane that carried it dies first.
