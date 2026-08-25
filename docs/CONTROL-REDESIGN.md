@@ -26,11 +26,27 @@ That is also why the two attempts on the sampler changed nothing. Bounding the
 filter's memory fixed how long a *sample* survives, and this path was not
 supplying samples.
 
-**The pooled seed divides by the arrival rate.** A joining lane starts at
-`(aggregate bottleneck / lanes) / arrival`, and dividing by the arrival rate
-inflates it on exactly the lossy paths that can least afford it. Left alone for
-now: one change at a time, and the measurement above does not separate its
-contribution from the first.
+**The pooled seed is inflated twice, and neither is fixed here.** A joining
+lane starts at `(aggregate bottleneck / lanes) / arrival`, and the division is
+the wrong way round: `seedBandwidth` feeds the delivered-rate filter, and
+`ErasureSender.bandwidth` divides that filter's output by the arrival rate
+again when it paces, so a seed meant to produce a given pacing rate should be
+multiplied by arrival rather than divided by it. The error is `1/arrival`
+squared -- 3x on a channel erasing 42%, and 44x at the 0.15 arrival floor.
+
+Underneath it, what the pool is given as `Delivered` is `TUICBBRSender.bandwidth`,
+which returns the pacing rate. That is the same "it measured its own output"
+mistake found in the compensation gate and fixed there, still present one level
+up: `pathmodel` states that the bottleneck is measured from what contributors
+deliver, and it is being handed what they were told to send.
+
+Both predate this work -- v0.2.0 passes the same value, and the division dates
+to 2026-08-17 -- so neither is a regression, and both are left alone here for
+the reason the rest of this document argues for: one change at a time, measured
+on the live path, and the measurement above does not separate their
+contribution from the first. They fire only when a lane joins a path other
+lanes have already mapped, which is the replacement-lane case rather than the
+first-flow case.
 
 ### What it cost, and what it bought
 
