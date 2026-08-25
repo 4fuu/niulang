@@ -1,9 +1,9 @@
 # Control redesign: delay-bounded goodput
 
 > [!IMPORTANT]
-> **Status:** Proposed. Steps 2 and 3 of [Sequencing](#sequencing) are
-> implemented; the controller half is not. Nothing here is validated on a real
-> path yet -- see [Falsification](#falsification).
+> **Status:** Partly implemented. The coding half and the bandwidth estimate
+> have landed; the delay bound and the receiver report have not. Nothing here
+> is validated on a real path yet -- see [Falsification](#falsification).
 >
 > **Wire impact:** None for the controller and coding changes. The receiver
 > report in [Closing the residual loop](#closing-the-residual-loop) is additive
@@ -85,6 +85,14 @@ is dead code, because `Loss` *is* `Floor`. When the floor is zero both are zero.
 whenever loss clusters.
 
 ### The bandwidth filter ratchets up
+
+> [!NOTE]
+> Fixed. A sample now expires on rounds or on wall time, whichever comes first,
+> with the wall-clock window derived from the measured round trip. An
+> application-limited sample may also replace an estimate that has already
+> expired, without which an always-application-limited connection would have
+> emptied its own model. What follows is what shipped and what it did.
+
 
 `tuicMinMax` is a three-sample max filter with a **ten-round** window, and
 `updateMax` collapses all three samples to the newest whenever it is the
@@ -225,20 +233,38 @@ B = S + R
 ```
 
 Congestion control owns how much goes on the wire. Coding owns how that budget
-is spent. Repair symbols are charged to the same aggregate budget as source
-payload, so raising the erasure estimate can never add a byte of load — it can
-only shift the mix.
+is spent. Raising the erasure estimate then changes the mix -- more parity,
+less payload -- and never the total.
 
-`B` is produced by the controller, not configured, so `--aggregate-bytes-per-sec`
-is not the mechanism. What is needed is the aggregate *enforcement point*: one
-place where every lane draws from a single controller-set rate instead of
-pacing independently. `internal/limiter` already provides it and is currently
-fed by a flag.
+**This mechanism already existed, and an earlier draft of this document was
+wrong about it.** The draft said parity was additive and that an aggregate
+enforcement point had to be built, pointing at `internal/limiter` and the
+`aggregate_bytes_per_second` flag that reads zero on the live gateway. That is
+an optional application-level pacer and it is not the budget. The budget is the
+congestion window:
 
-The honest cost: under heavy erasure, goodput visibly drops, because budget is
-openly spent on parity. That cost is already being paid as retransmissions at
-one round trip each; this makes it visible and latency-free. On a 194–430 ms
-path that is the trade this project exists to make.
+- `coded.QUICCarrier` runs the coded path over QUIC datagrams, and *"the
+  congestion controller, the pacer and the loss detector on the connection all
+  still apply"*. A repair symbol crosses the same window as a source symbol.
+- `ErasureSender.bandwidth` caps that window at this lane's share of the
+  endpoint pair's measured bottleneck, *"so the aggregate on the wire is what a
+  single sender would have put there"*. Lanes cannot compound.
+
+What was actually broken is that the window was not fixed in practice. The
+bandwidth estimate behind the cap could be latched at a burst rate for the
+better part of an hour, so the share was computed from a figure the path had
+never sustained, and a cap computed from a fantasy never binds. That is a
+defect in the estimate, not a missing mechanism, and it is fixed in the filter.
+
+`TestParityCostsACodeRateAndNotAByteRate` holds the invariant directly: the
+same payload through a carrier with a fixed byte allowance puts 408,955 bytes
+on the wire uncoded and 409,573 coded for 19.9% erasure, against a 409,600
+allowance. The parity was spent out of the window rather than added to it.
+
+The honest cost stands: under heavy erasure, goodput visibly drops, because
+budget is openly spent on parity. That cost is already being paid as
+retransmissions at one round trip each, invisibly. On a 194-430 ms path that is
+the trade this project exists to make.
 
 ## Closing the residual loop
 
@@ -332,9 +358,9 @@ implementation before the change lands.
 
 | # | Case | Passes if |
 | --- | --- | --- |
-| 1 | Token bucket, deep burst allowance | `B` converges on the sustained shaping rate, not the bucket drain rate |
-| 2 | Step change 5% → 50% erasure mid-flow | The erasure estimate rises within one filter window; the code rate follows |
-| 3 | Throttle that tightens under load | `B` walks down and settles; no sustained oscillation |
+| 1 | Token bucket, deep burst allowance | `B` converges on the sustained shaping rate, not the bucket drain rate. **Filter-level test passing**; end-to-end needs a burst-depth knob in `internal/pathsim`, which has none |
+| 2 | Step change 5% → 50% erasure mid-flow | The erasure estimate rises within one filter window; the code rate follows. **Open** |
+| 3 | Throttle that tightens under load | `B` walks down and settles; no sustained oscillation. **Filter-level test passing** |
 | 4 | Shallow-buffered dropper, no queue | The delay bound still brakes, or the case is documented as unbraked |
 | 5 | Clean path, no erasure | `r = 1`; no parity is sent, without a `minCodedLoss` constant |
 | 6 | Self-limiting claim | The climb stops; `B` does not grow without bound |
@@ -347,33 +373,33 @@ to document the path class as unbraked rather than to reintroduce a classifier.
 
 ## Sequencing
 
-Ratchet removal is only safe once parity is budgeted, which fixes the order.
+An earlier draft opened with "aggregate enforcement point driven by the
+controller, not a flag". That step does not exist: the enforcement point is the
+congestion window capped at the pooled share, and it was already there. What it
+needed was an estimate that could fall.
 
-1. Aggregate enforcement point driven by the controller, not a flag.
-2. Parity charged to that budget; objective switched to maximum goodput;
+1. **Done.** Bandwidth filter expires on rounds or wall time, whichever first;
+   an application-limited sample may replace an expired estimate.
+2. **Done.** The shared path model carries the measured erasure and burst
+   alongside the controller's floor, and `channel()` reads the measurement
+   instead of fabricating a snapshot from one scalar.
+3. **Done.** Parity sized by the rate that delivers a block soonest;
    `TargetResidual` and `minCodedLoss` deleted.
-3. The shared path model carries the measured erasure and burst alongside the
-   controller's floor, and `channel()` reads the measurement.
-4. Bandwidth filter replaced with one that can fall; delay bound added.
-5. Loss suppression (`ErasureSender.congestive`) deleted, and the arrival-rate
-   compensation moved onto the measurement.
-
-Steps 3 and 5 were one step in an earlier draft, and splitting them is not
-cosmetic. Deleting loss suppression hands every erasure to BBR as congestion,
-and on a 42% erasure channel that is the collapse to 0.39 Mbit/s this
-controller exists to avoid. Nothing may remove it until the delay bound is in
-place to brake instead. Until then the two consumers simply read different
-numbers from the same model, which is what the design argues for anyway: the
-controller keeps its conservative floor, the code reads the measurement.
+4. **Done.** The loss the path caused is exported, not only the share charged
+   as congestion.
+5. Delay bound added, then loss suppression (`ErasureSender.congestive`)
+   deleted and the arrival-rate compensation moved onto the measurement.
 6. `kindReport` closes the residual loop.
-7. Metrics: monotonic accumulators, direction tags, dead counter wired or
-   deleted.
 
-Steps 1–5 have no wire impact. Step 6 is additive and forward-compatible. Step
-7 is independent and can proceed in parallel — and while the controller reads
-its goodput signal from its own acknowledgement path rather than from
-Prometheus, step 7 is a prerequisite for *believing* any measurement of the
-rest.
+Steps 1-5 have no wire impact. Step 6 is additive and forward-compatible.
+
+Splitting the delay bound from the removal of loss suppression is not cosmetic.
+Deleting suppression hands every erasure to BBR as congestion, and on a 42%
+erasure channel that is the collapse to 0.39 Mbit/s this controller exists to
+avoid. Nothing may remove it until the delay bound is in place to brake
+instead. Until then the two consumers read different numbers from the same
+model, which is what the design argues for anyway: the controller keeps its
+conservative floor, the code reads the measurement.
 
 ## Open questions
 

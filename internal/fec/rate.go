@@ -92,14 +92,29 @@ const (
 // Choose sizes a code for the erasure the path is measured to be applying to
 // the direction this endpoint sends into.
 //
-// It sizes for the measured erasure rather than for a filtered floor. A floor
-// is the part of the loss that does not respond to sending more slowly, and
-// separating it from congestion mattered while parity was added on top of the
-// sending rate: coding for a queue's drops put more traffic into the queue
-// that was already overflowing. Parity is now drawn from the same byte budget
-// as data, so raising the estimate can only change how the budget is spent and
-// never how much is spent. The classification has no consumer left, and the
-// number that is actually measurable is the one used.
+// It sizes for the measured erasure rather than for a filtered floor, and that
+// is only safe because parity costs a code rate rather than a byte rate.
+//
+// A floor is the part of the loss that does not respond to sending more
+// slowly. Separating it from congestion would matter if coding for a queue's
+// drops put more traffic into the queue that was already overflowing -- and
+// that is what the floor was defending against. It does not, because a repair
+// symbol is not additional load. It crosses the same congestion window as a
+// source symbol: coded.QUICCarrier runs on QUIC datagrams, whose congestion
+// controller, pacer and loss detector all apply, and ErasureSender.bandwidth
+// caps that window at this lane's share of the endpoint pair's measured
+// bottleneck so that lanes cannot compound. Raising this estimate therefore
+// changes how a fixed window is spent -- more parity, less payload -- and
+// never how much is put on the wire.
+//
+// What made the floor look necessary was that the window was not fixed in
+// practice: the bandwidth estimate behind it could be latched at a burst rate
+// for the better part of an hour, so the cap was computed from a figure the
+// path had never sustained and never bound. That is a defect in the estimate
+// rather than a reason to under-size a code, and it is fixed in the filter.
+//
+// So the classification has no consumer left here, and the number that is
+// actually measurable is the one used.
 //
 // The rate is the one that delivers a block soonest, not one that meets a
 // residual target. A target cannot be checked -- the sender never observes the

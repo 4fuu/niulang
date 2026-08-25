@@ -488,3 +488,138 @@ func TestTheCodeIsSizedFromTheMeasurementNotTheFloor(t *testing.T) {
 		t.Fatalf("%.1f%% erasure bought only %.2fx overhead", measured*100, overhead)
 	}
 }
+
+// budgetedPipe is a carrier with a fixed byte allowance, which is what a
+// congestion window is. It refuses once the allowance is gone, exactly as a
+// QUIC connection stops packing datagrams once SendMode reports it may not
+// send.
+type budgetedPipe struct {
+	mu        sync.Mutex
+	remaining int
+	sent      int
+	bytes     int
+	refused   int
+	out       chan []byte
+	in        chan []byte
+	done      chan struct{}
+	closed    bool
+}
+
+func newBudgetedPipes(budget int) (*budgetedPipe, *budgetedPipe) {
+	a2b, b2a := make(chan []byte, 8192), make(chan []byte, 8192)
+	return &budgetedPipe{remaining: budget, out: a2b, in: b2a, done: make(chan struct{})},
+		&budgetedPipe{remaining: budget, out: b2a, in: a2b, done: make(chan struct{})}
+}
+
+func (p *budgetedPipe) Send(d []byte) error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return errors.New("closed")
+	}
+	if len(d) > p.remaining {
+		p.refused++
+		p.mu.Unlock()
+		// A window that is full is not a broken carrier. Report the datagram
+		// as too large, which is the one refusal this layer already absorbs
+		// without failing the path.
+		return ErrDatagramTooLarge
+	}
+	p.remaining -= len(d)
+	p.sent++
+	p.bytes += len(d)
+	p.mu.Unlock()
+	select {
+	case p.out <- append([]byte(nil), d...):
+	default:
+	}
+	return nil
+}
+
+func (p *budgetedPipe) Receive() ([]byte, error) {
+	select {
+	case d := <-p.in:
+		return d, nil
+	case <-p.done:
+		return nil, errors.New("closed")
+	}
+}
+
+func (p *budgetedPipe) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.closed {
+		p.closed = true
+		close(p.done)
+	}
+	return nil
+}
+
+func (p *budgetedPipe) MaxDatagramSize() int { return 1200 }
+
+func (p *budgetedPipe) totals() (datagrams, bytes int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sent, p.bytes
+}
+
+// Parity costs a code rate, not a byte rate. This is the property the erasure
+// floor was defending, and the reason sizing the code from the measured
+// erasure instead of from a filtered floor is safe: a repair symbol crosses the
+// same congestion window as a source symbol, so raising the estimate changes
+// how a fixed window is spent and never how much goes on the wire.
+//
+// If it were false, sizing for 19.9% rather than 1.76% would be a 30% increase
+// in offered load on a path that was already dropping packets -- which is the
+// feedback loop 9aad61c records, the repair ratio climbing from 11% to 27% to
+// 63% of sent bytes.
+func TestParityCostsACodeRateAndNotAByteRate(t *testing.T) {
+	const budget = 400 * 1024
+	send := func(erasure float64) (wireBytes, payloadFrames int) {
+		m := pathmodel.NewPathModel()
+		m.Report(1, pathmodel.Observation{
+			Floor: erasure, FloorSamples: 5000, Erasure: erasure, BurstFactor: 1,
+			ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 200 * time.Millisecond,
+		})
+		pa, _ := newBudgetedPipes(budget)
+		p := New(pa, Config{SymbolBytes: 1100, RoundTrip: 200 * time.Millisecond, Path: m})
+		defer p.Close()
+
+		frame := make([]byte, 900)
+		for i := 0; i < 2000; i++ {
+			if err := p.Send(frame); err != nil {
+				break
+			}
+			payloadFrames++
+		}
+		// Let the send loop drain what it accepted.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, b := pa.totals(); b >= budget-2*1200 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		_, wireBytes = pa.totals()
+		return wireBytes, payloadFrames
+	}
+
+	cleanWire, _ := send(0)
+	lossyWire, _ := send(0.199)
+	t.Logf("clean path put %d bytes on the wire; a 19.9%% erasure path put %d, against a %d budget",
+		cleanWire, lossyWire, budget)
+
+	if lossyWire > budget {
+		t.Fatalf("a coded path put %d bytes through a %d byte window: parity is being added "+
+			"on top of the budget rather than spent out of it", lossyWire, budget)
+	}
+	if cleanWire > budget {
+		t.Fatalf("an uncoded path put %d bytes through a %d byte window", cleanWire, budget)
+	}
+	// And the coded path really did buy parity with that window rather than
+	// simply sending less: it should have used essentially all of it.
+	if lossyWire < budget/2 {
+		t.Fatalf("the coded path used only %d of a %d byte window, so this proves nothing "+
+			"about what it would do with a full one", lossyWire, budget)
+	}
+}
