@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -505,5 +506,67 @@ func TestErasureFoldsAcrossEndpointPairsNotLanes(t *testing.T) {
 	r.ObserveQUIC(3, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.10, ControllerErasureFloor: 0.03})
 	if s := r.Snapshot(); s.QUICErasureSend != 0.30 {
 		t.Fatalf("send erasure = %v across three pairs, want the worst at 0.30", s.QUICErasureSend)
+	}
+}
+
+// The residual is what the code could not repair and the session has to
+// re-issue a round trip later. It is the number the motivating incident was
+// made of -- 11% of the downstream payload -- and it had no metric at all: the
+// decoders measured it per flow and it never left the process.
+func TestTheReceiveDirectionIsPublishedFromItsOwnCounters(t *testing.T) {
+	r := New()
+	// A thousand symbols the peer sent: 800 arrived, 150 the code rebuilt, 50
+	// left the window missing. That is 20% erasure with a 5% residual.
+	r.AddQUICConnectionCounters(QUICConnectionCounters{
+		CodedSources: 800, CodedRecovered: 150, CodedLost: 50,
+	})
+	s := r.Snapshot()
+	if got := s.ReceiveErasure(); math.Abs(got-0.2) > 1e-9 {
+		t.Fatalf("receive erasure = %v, want 0.2", got)
+	}
+	if got := s.ReceiveResidual(); math.Abs(got-0.05) > 1e-9 {
+		t.Fatalf("receive residual = %v, want 0.05", got)
+	}
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`queqiao_coded_symbols_total{outcome="arrived"} 800`,
+		`queqiao_coded_symbols_total{outcome="recovered"} 150`,
+		`queqiao_coded_symbols_total{outcome="lost"} 50`,
+		`queqiao_erasure_ratio{direction="receive"} 0.200000000`,
+		`queqiao_erasure_residual_ratio{direction="receive"} 0.050000000`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition is missing %q", want)
+		}
+	}
+}
+
+// The ratios are derived from summed counters rather than averaged over flows,
+// because a mean of per-flow ratios weights a flow that moved a kilobyte the
+// same as one that moved a gigabyte.
+func TestReceiveRatiosAreCountersOverCountersNotMeansOfRatios(t *testing.T) {
+	r := New()
+	// One tiny connection erasing everything, one large one erasing nothing.
+	r.AddQUICConnectionCounters(QUICConnectionCounters{CodedSources: 0, CodedLost: 10})
+	r.AddQUICConnectionCounters(QUICConnectionCounters{CodedSources: 9990, CodedLost: 0})
+	s := r.Snapshot()
+	// A mean of the two ratios would be 0.5. The honest figure is 10 in 10000.
+	if got := s.ReceiveErasure(); got > 0.01 {
+		t.Fatalf("receive erasure = %v; a mean of per-connection ratios would give 0.5, "+
+			"the counters give 0.001", got)
+	}
+	if s.QUICCodedSources+s.QUICCodedRecovered+s.QUICCodedLost != 10000 {
+		t.Fatalf("the denominator lost symbols: %d", s.QUICCodedSources+s.QUICCodedRecovered+s.QUICCodedLost)
+	}
+}
+
+// An endpoint with no coded traffic reports zero rather than dividing by it.
+func TestReceiveRatiosOnAPathWithNoCodedTraffic(t *testing.T) {
+	s := New().Snapshot()
+	if s.ReceiveErasure() != 0 || s.ReceiveResidual() != 0 {
+		t.Fatalf("erasure %v residual %v with no symbols", s.ReceiveErasure(), s.ReceiveResidual())
 	}
 }

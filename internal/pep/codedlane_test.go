@@ -460,6 +460,22 @@ func TestTheCodeFollowsAChannelThatGetsWorseMidFlow(t *testing.T) {
 	// fail for it: what is under contract here is that the measurement follows.
 	t.Logf("the floor the code used to be sized from reads %.4f against a measured %.4f",
 		degradedFloor, degradedErasure)
+
+	// And the damage the erasure actually does has to be visible from outside
+	// the process. The client receives the degraded direction, so its decoders
+	// are what measured it; during the live incident that figure existed only
+	// in per-flow records and the 11% residual it showed had no metric at all.
+	snapshot := lastClient.Metrics().Snapshot()
+	symbols := snapshot.QUICCodedSources + snapshot.QUICCodedRecovered + snapshot.QUICCodedLost
+	t.Logf("client decoders: %d symbols, receive erasure %.4f, residual %.4f",
+		symbols, snapshot.ReceiveErasure(), snapshot.ReceiveResidual())
+	if symbols == 0 {
+		t.Fatal("no coded symbols reached the metrics, so the receive direction is still invisible")
+	}
+	if snapshot.ReceiveErasure() <= 0 {
+		t.Fatalf("the client received a degraded channel and reports %.4f receive erasure",
+			snapshot.ReceiveErasure())
+	}
 }
 
 // measuredErasure is the largest erasure any live endpoint pair in this process
