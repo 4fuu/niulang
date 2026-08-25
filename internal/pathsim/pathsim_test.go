@@ -709,3 +709,127 @@ func TestLossRateChangesUnderALiveFlow(t *testing.T) {
 		t.Fatalf("a rate above one erased only %.3f", all)
 	}
 }
+
+// A shaped path has two rates, not one. A short probe drains the bucket and
+// measures the line rate; sustained load measures the shaping rate. Emulating
+// only the second makes a shaped path indistinguishable from a slower one, and
+// the case a bandwidth estimate gets wrong by construction is exactly the gap
+// between them.
+func TestADeepBucketPassesABurstThenShapes(t *testing.T) {
+	server := echoServer(t)
+	const (
+		shaped = 200_000 // bytes per second
+		burst  = 120_000
+		packet = 1200
+	)
+	relay, err := New("127.0.0.1:0", server.LocalAddr().String(), Config{
+		RateBytesPerSec: shaped, PolicerRefillPeriod: 8 * time.Millisecond,
+		PolicerBurstBytes: burst, Seed: 11,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	target, err := net.ResolveUDPAddr("udp", relay.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := make([]byte, packet)
+	// One burst, sent as fast as the socket takes it. A bucket this deep must
+	// let most of it through: that is what a burst allowance is.
+	const burstPackets = burst / packet
+	for range burstPackets {
+		if _, err := client.WriteTo(payload, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if up, _ := relay.Stats(); up.PacketsIn >= burstPackets {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	afterBurst, _ := relay.Stats()
+	if afterBurst.PacketsDropped > burstPackets/4 {
+		t.Fatalf("a %d byte bucket dropped %d of a %d packet burst; it is not a burst allowance",
+			burst, afterBurst.PacketsDropped, burstPackets)
+	}
+
+	// Now sustained load well above the shaping rate. The bucket is empty, so
+	// what gets through is the rate rather than the line.
+	const sustainedPackets = 2000
+	for range sustainedPackets {
+		if _, err := client.WriteTo(payload, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if up, _ := relay.Stats(); up.PacketsIn >= afterBurst.PacketsIn+sustainedPackets {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	end, _ := relay.Stats()
+	sustainedDropped := end.PacketsDropped - afterBurst.PacketsDropped
+	if sustainedDropped == 0 {
+		t.Fatal("sustained load far above the shaping rate was not policed at all")
+	}
+	// The two regimes have to be visibly different, which is the whole point:
+	// a path with only one rate cannot express what a max filter gets wrong.
+	burstDropRate := float64(afterBurst.PacketsDropped) / float64(burstPackets)
+	sustainedDropRate := float64(sustainedDropped) / float64(sustainedPackets)
+	t.Logf("burst dropped %.3f, sustained dropped %.3f", burstDropRate, sustainedDropRate)
+	if sustainedDropRate <= burstDropRate {
+		t.Fatalf("the bucket shaped the burst as hard as the sustained load (%.3f vs %.3f), "+
+			"so there is no burst allowance to drain", burstDropRate, sustainedDropRate)
+	}
+}
+
+// A path that asks for no burst keeps the shallow bucket that models the live
+// policer, so existing campaigns are unaffected.
+func TestNoBurstAllowanceKeepsTheShallowBucket(t *testing.T) {
+	server := echoServer(t)
+	relay, err := New("127.0.0.1:0", server.LocalAddr().String(), Config{
+		RateBytesPerSec: 200_000, PolicerRefillPeriod: 8 * time.Millisecond, Seed: 11,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	target, err := net.ResolveUDPAddr("udp", relay.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 1200)
+	const packets = 100
+	for range packets {
+		if _, err := client.WriteTo(payload, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if up, _ := relay.Stats(); up.PacketsIn >= packets {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	up, _ := relay.Stats()
+	if up.PacketsDropped == 0 {
+		t.Fatal("a shallow bucket passed a 100 packet burst without policing any of it")
+	}
+}

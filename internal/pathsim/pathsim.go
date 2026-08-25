@@ -121,6 +121,17 @@ type Config struct {
 	// so a model that under-reports it would certify a code rate that fails on
 	// the real path.
 	PolicerRefillPeriod time.Duration
+	// PolicerBurstBytes is the token bucket's depth: how much a sender may put
+	// through after an idle period before the shaping rate shows through.
+	// Zero keeps the shallow bucket that models the live path, one refill
+	// quantum plus a packet.
+	//
+	// A deep bucket is what makes a shaped path something other than a slower
+	// one. A short probe drains the bucket and measures the line rate, while
+	// sustained load measures the shaping rate, so the path has two rates and
+	// no single bandwidth -- which is the case a max filter reports wrongly by
+	// construction, and the reason a bandwidth estimate has to be able to fall.
+	PolicerBurstBytes int
 	// Seed makes the loss pattern reproducible across runs.
 	Seed int64
 	// MTU bounds a single datagram. Zero selects 1500.
@@ -334,9 +345,14 @@ func (d *direction) policeLocked(now time.Time, size int, cfg Config) bool {
 	// passed two packets per period instead of two and a half, which measured
 	// as 19 Mbit/s out of a 25 Mbit/s limiter.
 	bucket := quantum + float64(cfg.MTU)
+	if burst := float64(cfg.PolicerBurstBytes); burst > bucket {
+		bucket = burst
+	}
 	if d.tokenAt.IsZero() {
 		d.tokenAt = now
-		d.tokens = quantum
+		// A bucket a sender has not touched yet is full, which is what gives
+		// the first burst its allowance.
+		d.tokens = bucket
 	}
 	// Bounded because an idle path can leave an arbitrary gap since the last
 	// packet, and the bucket saturates after two refills anyway.

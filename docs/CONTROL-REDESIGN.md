@@ -292,6 +292,31 @@ rejects **inferring** outbound erasure from inbound loss. A peer **reporting**
 what it measured on your outbound direction is not inference; it is a direct
 measurement relayed, and the reasoning does not extend to it.
 
+## A limit found while trying to validate it
+
+An attempt to check falsification case 1 end to end did not work, and why it
+did not is worth recording.
+
+**Expiry is driven by arriving samples, not by reading the estimate.** A sample
+that has outlived its window is replaced by the next one; `get` returns what is
+stored. A lane that carried a burst and then went silent keeps its figure until
+it sends again. For the lane that is harmless — its estimate only governs what
+it puts on the wire, and it is not putting anything there. For a trace it is
+not: `queqiao_quic_controller_max_bandwidth_bytes_per_second` folds the maximum
+across lanes, so **one idle lane can report a peak the path has not sustained
+for minutes.** Reading that metric as the path's bandwidth is the same mistake
+the filter was fixed for, one level up.
+
+The attempted test also showed that a shaped path is harder to hold in an
+emulator than it looks: a load modest enough to be "sustained" fits inside a
+bucket that refills between writes, so the path never shapes it and the
+estimate rises rather than settling. Expressing case 1 end to end needs a
+runtime change to the shaping *rate*, in the way `SetLossRate` changes erasure.
+`PolicerBurstBytes` is in place; the rate knob is not.
+
+The test was removed rather than kept, because it passed — on a comparison wide
+enough that it would have passed with the filter disabled too.
+
 ## Measurement plane and inference plane
 
 Every defect in the incident, including the ones outside the controller, is the
@@ -358,7 +383,7 @@ implementation before the change lands.
 
 | # | Case | Passes if |
 | --- | --- | --- |
-| 1 | Token bucket, deep burst allowance | `B` converges on the sustained shaping rate, not the bucket drain rate. **Filter-level test passing**; end-to-end still needs a burst-depth knob in `internal/pathsim`, which now has runtime loss control but no bucket |
+| 1 | Token bucket, deep burst allowance | `B` converges on the sustained shaping rate, not the bucket drain rate. **Filter-level test passing.** `internal/pathsim` now has the burst allowance (`PolicerBurstBytes`), but the end-to-end version also needs a runtime *rate* change, which it does not have — see [A limit found while trying to validate it](#a-limit-found-while-trying-to-validate-it) |
 | 2 | Step change 5% → 50% erasure mid-flow | The erasure estimate rises within one filter window; the code rate follows. **Passing end to end** — `TestTheCodeFollowsAChannelThatGetsWorseMidFlow` steps an emulated path from 2% to 45% downstream under a live flow, and the measurement the code is sized from moves from 0.034 to 0.224 while the controller's floor stays at 0.031 |
 | 3 | Throttle that tightens under load | `B` walks down and settles; no sustained oscillation. **Filter-level test passing** |
 | 4 | Shallow-buffered dropper, no queue | The delay bound still brakes, or the case is documented as unbraked |
