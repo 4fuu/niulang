@@ -786,6 +786,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 		"coded_substrate", codedSubstrateFields(substrate, hasCoded),
 		"class", classifier.Class(flow.class.Load())}
 	logFields = append(logFields, codedSubstrateLogFields(substrate, hasCoded)...)
+	logFields = append(logFields, flow.replacementLogFields()...)
 	if !flowComplete && err != nil && !errors.Is(err, context.Canceled) {
 		s.cfg.Logger.Warn("remote flow ended with error", append(logFields, "error", err)...)
 		return

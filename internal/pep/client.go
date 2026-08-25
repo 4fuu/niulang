@@ -822,6 +822,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 		"coded_substrate", codedSubstrateFields(substrate, hasCoded),
 		"class", classifier.Class(flowSession.class.Load())}
 	logFields = append(logFields, codedSubstrateLogFields(substrate, hasCoded)...)
+	logFields = append(logFields, flowSession.replacementLogFields()...)
 	if !flowComplete && err != nil && !errors.Is(err, context.Canceled) {
 		c.cfg.Logger.Warn("local flow ended with error", append(logFields, "error", err)...)
 		return

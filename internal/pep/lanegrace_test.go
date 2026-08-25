@@ -91,3 +91,57 @@ func newGraceTestFlow(t *testing.T) *multipathFlow {
 	t.Cleanup(func() { _ = inner.Close(); _ = peer.Close() })
 	return newMultipathFlow(context.Background(), inner, [16]byte{2}, 3, defaultChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
 }
+
+// A flow that fails with "lane replacement timeout" used to say only that it
+// gave up. The live gateway produced 521 of those in two hours, all of them
+// ordinary small exchanges that had already moved a few kilobytes, and the
+// record could not say whether a replacement lane had ever been offered or how
+// many graces the flow burned before failing. That is the difference between a
+// pool that will not rebuild and a path that will not carry a handshake, and
+// neither the flow's own log nor the gateway's could distinguish them. See
+// issue #53.
+func TestAFlowRecordsWhatItsLaneReplacementsDid(t *testing.T) {
+	flow := newGraceTestFlow(t)
+
+	if waits, timeouts, joined, waited := flow.replacementDiagnostics(); waits != 0 || timeouts != 0 || joined != 0 || waited != 0 {
+		t.Fatalf("a flow that has not waited reports waits=%d timeouts=%d joined=%d waited=%s",
+			waits, timeouts, joined, waited)
+	}
+
+	// A grace that runs out is the case the incident was made of.
+	const grace = 200 * time.Millisecond
+	if err := flow.waitForHealthyLane(context.Background(), grace); err == nil {
+		t.Fatal("the wait succeeded with no healthy lane")
+	}
+	waits, timeouts, _, waited := flow.replacementDiagnostics()
+	if waits != 1 || timeouts != 1 {
+		t.Fatalf("one exhausted grace recorded waits=%d timeouts=%d, want 1 and 1", waits, timeouts)
+	}
+	if waited < grace {
+		t.Fatalf("the flow waited %s but recorded %s", grace, waited)
+	}
+
+	// A second grace has to be visible as a second grace: the observed
+	// durations clustered at roughly twice laneReplacementWait, and a counter
+	// that saturated at one could not have shown that.
+	if err := flow.waitForHealthyLane(context.Background(), grace); err == nil {
+		t.Fatal("the second wait succeeded with no healthy lane")
+	}
+	waits, timeouts, _, twice := flow.replacementDiagnostics()
+	if waits != 2 || timeouts != 2 {
+		t.Fatalf("two exhausted graces recorded waits=%d timeouts=%d, want 2 and 2", waits, timeouts)
+	}
+	if twice <= waited {
+		t.Fatalf("two graces recorded %s, no more than one grace's %s", twice, waited)
+	}
+
+	// And an exit that is not a timeout must not be counted as one, or the
+	// field cannot separate "nothing came" from "we stopped waiting".
+	flow.noteReplacementAbandoned()
+	if err := flow.waitForHealthyLane(context.Background(), grace); !errors.Is(err, errReplacementAbandoned) {
+		t.Fatalf("wait error = %v, want %v", err, errReplacementAbandoned)
+	}
+	if _, timeouts, _, _ := flow.replacementDiagnostics(); timeouts != 2 {
+		t.Fatalf("abandoning replacement counted as a timeout: timeouts=%d, want 2", timeouts)
+	}
+}

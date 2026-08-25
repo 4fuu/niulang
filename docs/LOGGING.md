@@ -114,6 +114,14 @@ Prometheus `/metrics` names. They cover:
 - the controller's measured erasure floor, sampler diagnostics, and class
   transitions.
 
+Flow completion records also carry what the flow's lane replacements did:
+`lane_replacement_waits`, `lane_replacement_timeouts`, `lane_replacement_wait`,
+and `lanes_joined`. They are written on every flow record, not only on
+failures, because a replacement that succeeded is the control case for one that
+did not. A flow that never lost its last healthy lane reports zeroes. Both
+endpoints use the same names, so a client record and a gateway record about the
+same failure can be read side by side.
+
 The dashboard calculates interval packet loss from changes in sent and lost
 packet counters. Those counters are process-wide monotonic totals: they are
 accumulated from the forward movement of each QUIC connection, measured once
