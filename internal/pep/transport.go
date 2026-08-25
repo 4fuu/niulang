@@ -540,7 +540,13 @@ func quicConfig(windows flowWindows) *quic.Config {
 		// Existing-flow TCP rescue cannot begin until QUIC declares the
 		// black-holed lane dead. Keep this bound well below application-level
 		// request timeouts while allowing several PTOs on a 200 ms WAN.
-		MaxIdleTimeout:                 15 * time.Second,
+		//
+		// laneReplacementWait is derived from this, because a flow's grace has
+		// to cover the time its peer spends reaching this same conclusion
+		// before it can even begin opening a replacement. Changing the number
+		// here changes what a flow waits; it is not a knob local to one
+		// connection.
+		MaxIdleTimeout:                 laneDeadPathDetection,
 		KeepAlivePeriod:                5 * time.Second,
 		InitialStreamReceiveWindow:     streamWindow,
 		MaxStreamReceiveWindow:         streamMax,

@@ -144,6 +144,15 @@ did not. A flow that never lost its last healthy lane reports zeroes. Both
 endpoints use the same names, so a client record and a gateway record about the
 same failure can be read side by side.
 
+`lane_replacement_waits` counts waiters, not graces. The flow's run loop, its
+frame and control writers, and its acknowledgement loop all wait for a missing
+lane, so a lane that dies with writes in flight leaves several of them waiting
+for the same replacement, and a count above one says how much of the flow was
+stuck rather than how long it waited. The grace belongs to the outage: reading
+`lane_replacement_wait` against it tells you whether the flow waited out a
+whole outage or ended early, and `lanes_joined` tells you whether anything ever
+arrived to end one.
+
 The dashboard calculates interval packet loss from changes in
 `queqiao_quic_packets_sent` and `queqiao_quic_loss_observed_packets_total`.
 `queqiao_quic_packets_lost` and `queqiao_quic_bytes_lost` were removed: they
