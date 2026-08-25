@@ -153,6 +153,17 @@ did not. A flow that never lost its last healthy lane reports zeroes. Both
 endpoints use the same names, so a client record and a gateway record about the
 same failure can be read side by side.
 
+`lane_replacement_attempts` and `lane_replacement_failures` say what the
+endpoint that opens replacements actually did, and are the pair that separates
+a client pool which will not rebuild from a path which will not carry a
+handshake. No attempts means nothing was dialled; attempts equal to failures
+means every dial was made and none completed; attempts above failures means
+dials are still outstanding. They are written by both endpoints under the same
+names, and a gateway reports zeroes because it opens nothing -- the replacement
+is the client's to send. `lanes_joined` cannot answer this on its own: a dial
+whose handshake never completes never reaches lane admission, so it leaves the
+record identical to a flow where nothing was tried.
+
 `lane_replacement_waits` counts waiters, not graces. The flow's run loop, its
 frame and control writers, and its acknowledgement loop all wait for a missing
 lane, so a lane that dies with writes in flight leaves several of them waiting

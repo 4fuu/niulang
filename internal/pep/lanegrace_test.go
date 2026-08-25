@@ -260,3 +260,57 @@ func TestAStaleDeadlineDoesNotDenyTheNextOutageItsGrace(t *testing.T) {
 		t.Fatalf("an outage inheriting a stale deadline waited %s of its %s grace", elapsed, grace)
 	}
 }
+
+// The gateway's failing flows say a replacement never arrived: 84% of its
+// lane-replacement-timeout failures ended with no replacement lane ever
+// admitted. The record could not say why, and the two reasons need different
+// fixes -- a client pool that will not rebuild opens nothing, and a path that
+// will not carry a handshake opens attempts that never complete. A dial that
+// fails never reaches addLane, so `lanes_joined` reads the same either way.
+// See issue #53.
+func TestAFlowRecordsWhetherAReplacementWasEvenAttempted(t *testing.T) {
+	fields := func(f *multipathFlow) map[string]any {
+		raw := f.replacementLogFields()
+		out := map[string]any{}
+		for i := 0; i+1 < len(raw); i += 2 {
+			out[raw[i].(string)] = raw[i+1]
+		}
+		return out
+	}
+
+	// Nothing tried: the pool never rebuilt.
+	quiet := newGraceTestFlow(t)
+	got := fields(quiet)
+	if got["lane_replacement_attempts"] != uint64(0) || got["lane_replacement_failures"] != uint64(0) {
+		t.Fatalf("a flow that attempted nothing reports attempts=%v failures=%v",
+			got["lane_replacement_attempts"], got["lane_replacement_failures"])
+	}
+
+	// Tried and could not finish a handshake: the path will not carry one.
+	refused := newGraceTestFlow(t)
+	for i := 0; i < 3; i++ {
+		refused.noteReplacementAttempt()
+		refused.noteReplacementFailure()
+	}
+	got = fields(refused)
+	if got["lane_replacement_attempts"] != uint64(3) || got["lane_replacement_failures"] != uint64(3) {
+		t.Fatalf("three failed dials reported attempts=%v failures=%v, want 3 and 3",
+			got["lane_replacement_attempts"], got["lane_replacement_failures"])
+	}
+
+	// Both flows are indistinguishable by the fields that existed before: they
+	// waited for nothing and nothing joined. That is the gap being closed.
+	if fields(quiet)["lanes_joined"] != fields(refused)["lanes_joined"] {
+		t.Fatal("the test no longer exercises the case the attempt counts were added for")
+	}
+
+	// A dial still outstanding is not yet a failure, or "nothing came back
+	// yet" would read as "the path refused it".
+	pending := newGraceTestFlow(t)
+	pending.noteReplacementAttempt()
+	got = fields(pending)
+	if got["lane_replacement_attempts"] != uint64(1) || got["lane_replacement_failures"] != uint64(0) {
+		t.Fatalf("an outstanding dial reported attempts=%v failures=%v, want 1 and 0",
+			got["lane_replacement_attempts"], got["lane_replacement_failures"])
+	}
+}

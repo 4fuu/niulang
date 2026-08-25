@@ -275,6 +275,18 @@ type multipathFlow struct {
 	// waiter spends separately, and it is cleared in startLane so that a flow
 	// which really is being rescued gets a fresh grace for its next outage.
 	replacementDeadline atomic.Int64
+	// Replacement attempts, counted only for a flow that has no lane left.
+	// `lanes_joined` says whether a replacement was ever admitted, and for
+	// 84% of the gateway's lane-replacement-timeout failures the answer is no
+	// -- but it cannot say why, because a dial whose handshake never completes
+	// never reaches addLane and leaves the record identical to a flow where
+	// nothing was ever dialled. Those are the two faults #53 needs separated:
+	// a client pool that will not rebuild, against a path that will not carry
+	// a handshake. Only the endpoint that opens replacements can tell them
+	// apart, and only while it is trying. The other endpoint reports zeroes,
+	// which is the true answer there: it opens nothing.
+	replacementAttempts atomic.Uint64
+	replacementFailures atomic.Uint64
 	// controlLaneShared reports whether another flow is currently using the
 	// pooled control connection. Nil means "no", which is what a flow on a
 	// dedicated connection should answer.
@@ -1727,8 +1739,22 @@ func (f *multipathFlow) replacementLogFields() []any {
 		"lane_replacement_timeouts", timeouts,
 		"lane_replacement_wait", waited,
 		"lanes_joined", joined,
+		"lane_replacement_attempts", f.replacementAttempts.Load(),
+		"lane_replacement_failures", f.replacementFailures.Load(),
 	}
 }
+
+// noteReplacementAttempt records that this endpoint has begun opening a
+// replacement lane for a flow that has none. It is counted at the point the
+// dial starts rather than when it finishes, because a dial that never returns
+// is exactly the case the count exists to make visible.
+func (f *multipathFlow) noteReplacementAttempt() { f.replacementAttempts.Add(1) }
+
+// noteReplacementFailure records that one such attempt did not produce a lane.
+// Attempts without failures mean the dials are still outstanding; attempts
+// equal to failures mean the path is refusing to carry a handshake; no
+// attempts at all means nothing tried.
+func (f *multipathFlow) noteReplacementFailure() { f.replacementFailures.Add(1) }
 
 // replacementDiagnostics reports what this flow's lane replacements did, for
 // the record written when a flow ends. Zero waits is the ordinary case and
