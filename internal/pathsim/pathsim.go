@@ -512,6 +512,49 @@ func newRelay(listen, target string, cfg Config, shared *Bottleneck) (*Relay, er
 // LocalAddr is the address clients should use in place of the real server.
 func (r *Relay) LocalAddr() string { return r.local.LocalAddr().String() }
 
+// SetLossRate changes what the path erases, in each direction, while traffic
+// is already crossing it.
+//
+// A path that only ever erases what it was constructed with cannot express the
+// case a transport most needs to survive: one whose channel changes under a
+// live flow. The motivating incident was exactly that -- downstream erasure
+// moving from a few percent to sixty over a working afternoon -- and a
+// controller that reads a floor established during the clean window will size
+// its code for a channel that no longer exists. Emulating the step is the only
+// way to test that the estimate follows.
+//
+// A negative rate leaves that direction alone, so a caller may change one
+// without knowing the other.
+func (r *Relay) SetLossRate(upstream, downstream float64) {
+	r.upstream.setLossRate(upstream)
+	r.downstream.setLossRate(downstream)
+}
+
+// SetLossRate changes what a shared bottleneck erases, for every relay
+// attached to it.
+func (b *Bottleneck) SetLossRate(upstream, downstream float64) {
+	b.up.setLossRate(upstream)
+	b.down.setLossRate(downstream)
+}
+
+// setLossRate takes the same lock the drop decision is made under, so a change
+// lands between packets rather than during one.
+func (d *direction) setLossRate(rate float64) {
+	if rate < 0 {
+		return
+	}
+	if rate > 1 {
+		rate = 1
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lossRate = rate
+	// A Gilbert chain mid-burst would otherwise carry the old regime's bad
+	// state across the change and erase everything until it happened to
+	// recover, which reads as the new rate arriving late.
+	d.inBurst = false
+}
+
 // Stats returns the upstream (client to server) and downstream counters.
 func (r *Relay) Stats() (up, down Stats) { return r.upstream.stats(), r.downstream.stats() }
 

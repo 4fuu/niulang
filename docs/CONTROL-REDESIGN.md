@@ -358,8 +358,8 @@ implementation before the change lands.
 
 | # | Case | Passes if |
 | --- | --- | --- |
-| 1 | Token bucket, deep burst allowance | `B` converges on the sustained shaping rate, not the bucket drain rate. **Filter-level test passing**; end-to-end needs a burst-depth knob in `internal/pathsim`, which has none |
-| 2 | Step change 5% → 50% erasure mid-flow | The erasure estimate rises within one filter window; the code rate follows. **Open** |
+| 1 | Token bucket, deep burst allowance | `B` converges on the sustained shaping rate, not the bucket drain rate. **Filter-level test passing**; end-to-end still needs a burst-depth knob in `internal/pathsim`, which now has runtime loss control but no bucket |
+| 2 | Step change 5% → 50% erasure mid-flow | The erasure estimate rises within one filter window; the code rate follows. **Passing end to end** — `TestTheCodeFollowsAChannelThatGetsWorseMidFlow` steps an emulated path from 2% to 45% downstream under a live flow, and the measurement the code is sized from moves from 0.034 to 0.224 while the controller's floor stays at 0.031 |
 | 3 | Throttle that tightens under load | `B` walks down and settles; no sustained oscillation. **Filter-level test passing** |
 | 4 | Shallow-buffered dropper, no queue | The delay bound still brakes, or the case is documented as unbraked |
 | 5 | Clean path, no erasure | `r = 1`; no parity is sent, without a `minCodedLoss` constant |
