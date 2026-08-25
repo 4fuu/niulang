@@ -27,6 +27,16 @@ import (
 // first. The two express the same intent -- a bandwidth estimate should not
 // outlive the window in which a path change ought to be believed -- and the
 // time bound is what keeps the round bound honest when rounds stall.
+//
+// Expiry is driven by arriving samples rather than by reading the estimate: a
+// sample that has outlived its window is replaced by the next one, and get
+// returns what is stored. A lane that carried a burst and then went silent
+// therefore keeps its figure until it sends again. That is harmless for the
+// lane, whose estimate only governs what it puts on the wire, but it is not
+// harmless for a trace: queqiao_quic_controller_max_bandwidth_bytes_per_second
+// folds the maximum across lanes, so one idle lane can report a peak the path
+// has not sustained for minutes. Reading the metric as the path's bandwidth is
+// the same mistake this filter was fixed for, one level up.
 type tuicMinMax struct {
 	window uint64
 	// timeWindow is how long a sample may stand in wall time. It is derived
