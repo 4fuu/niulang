@@ -54,6 +54,14 @@ type ControllerTelemetry struct {
 	PacketsLostSuppressed uint64
 	MinRTT                time.Duration
 	InRecovery            bool
+	// DelayBrake is the share of the sending rate the delay bound is currently
+	// removing, in [0,1). It is non-zero only while the path is carrying more
+	// than one bandwidth-delay product of queue.
+	//
+	// It is published because a rate that has been held back by the path's own
+	// queue and a rate that simply measured less look identical otherwise, and
+	// the two call for opposite responses.
+	DelayBrake float64
 	// Erasure is the share of packets the path is measured to be erasing on
 	// the direction this controller sends into, pooled across the lanes that
 	// share it. It is what a code is sized from.

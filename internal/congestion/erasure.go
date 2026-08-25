@@ -3,6 +3,7 @@ package congestion
 import (
 	"sort"
 	"sync/atomic"
+	"time"
 
 	quiccongestion "github.com/apernet/quic-go/congestion"
 	"github.com/apernet/quic-go/monotime"
@@ -82,6 +83,15 @@ type ErasureSender struct {
 	// it is published because a floor is not a substitute for it: on the live
 	// path the floor read a seventh of what the channel was doing.
 	erasure atomic.Uint64
+
+	// rttStats is the connection's round-trip measurements, kept here as well
+	// as on the inner controller because the delay bound is this sender's.
+	rttStats quiccongestion.RTTStatsProvider
+
+	// delayBrake is how much the delay bound is currently removing from the
+	// rate, in parts per million, so a trace can tell a path being held back
+	// by its own queue from one that simply measured less.
+	delayBrake atomic.Uint64
 
 	// arrival is the last computed arrival rate, published for the pacer and
 	// the congestion window, which run outside the callback that computes it.
@@ -204,7 +214,9 @@ func (e *ErasureSender) bandwidth() quiccongestion.ByteCount {
 	if share := float64(e.share.Load()); share > 0 && share < delivered {
 		delivered = share
 	}
-	return quiccongestion.ByteCount(delivered / e.arrivalRate())
+	// The delay bound is applied after the erasure compensation rather than
+	// before it, because the queue holds what was sent and not what arrived.
+	return quiccongestion.ByteCount(e.delayBounded(delivered / e.arrivalRate()))
 }
 
 func (e *ErasureSender) arrivalRate() float64 {
@@ -219,7 +231,62 @@ func (e *ErasureSender) arrivalRate() float64 {
 }
 
 func (e *ErasureSender) SetRTTStatsProvider(provider quiccongestion.RTTStatsProvider) {
+	e.rttStats = provider
 	e.inner.SetRTTStatsProvider(provider)
+}
+
+// queueDelay is how much delay the path is carrying beyond its own minimum,
+// which at the bottleneck rate is the data sitting in its queue.
+//
+// The smoothed round trip is used rather than the latest because a single
+// sample carries reordering and one ACK's scheduling; a brake that fires on
+// those would back off for a jittery path rather than a full one.
+func (e *ErasureSender) queueDelay() (queue, minRTT time.Duration) {
+	minRTT = e.inner.minRoundTrip()
+	if minRTT <= 0 || e.rttStats == nil {
+		return 0, minRTT
+	}
+	smoothed := e.rttStats.SmoothedRTT()
+	if smoothed <= minRTT {
+		return 0, minRTT
+	}
+	return smoothed - minRTT, minRTT
+}
+
+// delayBounded scales a rate down while the path is holding more than one
+// bandwidth-delay product of queue.
+//
+// The bound is that the round trip may not exceed twice the path's own
+// minimum, which is the same statement as "the queue may hold at most one
+// bandwidth-delay product" and the same rule as the controller's 2.0
+// congestion-window gain, in the time domain rather than the window domain.
+// It is a ratio rather than a duration on purpose: a duration would have to be
+// chosen, and any choice is a latency policy smuggled into a congestion
+// controller. Interactive latency is protected by the aggregate budget's
+// reserve and the lanes' priority queues, which is where an absolute guarantee
+// belongs; this bound exists only to stop the path being overdriven.
+//
+// The scaling is continuous rather than a step. At exactly one round trip of
+// queue the factor is one, so a sender that has just reached the bound is not
+// punished for arriving there; past it the factor falls as the queue grows,
+// which is what makes the response proportional to the overshoot rather than
+// to the fact of it.
+//
+// This is a measurement where the window gain is an estimate. The gain bounds
+// the window using a bandwidth this sender believes in, and on an erasure path
+// that window is divided by the arrival rate so that what arrives is a full
+// one -- which means what is *sent* can be several times the bottleneck's
+// worth. The queue is downstream of that division and does not care why the
+// bytes were sent.
+func (e *ErasureSender) delayBounded(rate float64) float64 {
+	queue, minRTT := e.queueDelay()
+	if queue <= minRTT || minRTT <= 0 {
+		e.delayBrake.Store(0)
+		return rate
+	}
+	factor := float64(minRTT) / float64(queue)
+	e.delayBrake.Store(uint64((1 - factor) * partsPerMillion))
+	return rate * factor
 }
 
 func (e *ErasureSender) TimeUntilSend(quiccongestion.ByteCount) monotime.Time {
@@ -468,6 +535,10 @@ func (e *ErasureSender) Telemetry() ControllerTelemetry {
 	t.PacketsLostSuppressed = suppressed
 	t.PacketsLostObserved = t.PacketsLost + suppressed
 	t.Erasure = float64(e.erasure.Load()) / partsPerMillion
+	// Recomputed rather than read from the cached value, so a trace taken while
+	// nothing is sending still reflects the path rather than the last send.
+	e.delayBounded(1)
+	t.DelayBrake = float64(e.delayBrake.Load()) / partsPerMillion
 	arrival := e.arrivalRate()
 	t.ErasureFloor = 1 - arrival
 	t.PacingRate = uint64(float64(t.PacingRate) / arrival)

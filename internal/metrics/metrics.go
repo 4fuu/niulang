@@ -304,6 +304,7 @@ type Snapshot struct {
 	QUICControllerBytesLost, QUICControllerPacketsLost            uint64
 	QUICControllerMinRTT                                          time.Duration
 	QUICErasureSend, QUICControllerErasureFloor                   float64
+	QUICDelayBrake                                                float64
 	QUICControllerInRecovery                                      bool
 	// QUICObservationsExpired counts flow telemetry entries dropped because
 	// they stopped being refreshed. See quicObservationsExpired.
@@ -340,6 +341,7 @@ type QUICObservation struct {
 	ControllerBytesInFlight    uint64
 	ControllerMinRTT           time.Duration
 	ControllerErasure          float64
+	ControllerDelayBrake       float64
 	ControllerErasureFloor     float64
 	ControllerInRecovery       bool
 }
@@ -678,7 +680,7 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerLatestAckRate, controllerLatestSendRate uint64
 	var controllerRound uint64
 	var controllerMinRTT time.Duration
-	var controllerErasure, controllerErasureFloor float64
+	var controllerErasure, controllerErasureFloor, controllerDelayBrake float64
 	var controllerRecovery bool
 	for key, entry := range r.quicFlows {
 		// An entry nobody refreshes is not a measurement of anything. Because
@@ -741,6 +743,9 @@ func (r *Registry) Snapshot() Snapshot {
 			if o.ControllerErasure > controllerErasure {
 				controllerErasure = o.ControllerErasure
 			}
+			if o.ControllerDelayBrake > controllerDelayBrake {
+				controllerDelayBrake = o.ControllerDelayBrake
+			}
 			if o.ControllerErasureFloor > controllerErasureFloor {
 				controllerErasureFloor = o.ControllerErasureFloor
 			}
@@ -786,6 +791,7 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICControllerPacketsLost = counters.ControllerPacketsLost
 	s.QUICControllerMinRTT = controllerMinRTT
 	s.QUICErasureSend = controllerErasure
+	s.QUICDelayBrake = controllerDelayBrake
 	s.QUICControllerErasureFloor = controllerErasureFloor
 	s.QUICControllerInRecovery = controllerRecovery
 	return s
@@ -888,6 +894,11 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_coded_symbols_total{outcome=\"lost\"} %d\n", s.QUICCodedLost)
 	fmt.Fprintf(w, "queqiao_erasure_ratio{direction=\"receive\"} %.9f\n", s.ReceiveErasure())
 	fmt.Fprintf(w, "queqiao_erasure_residual_ratio{direction=\"receive\"} %.9f\n", s.ReceiveResidual())
+	// How much of the sending rate the delay bound is removing. Non-zero means
+	// the path is carrying more than one bandwidth-delay product of queue and
+	// is being held back by it, which is a different condition from a path that
+	// simply measured less.
+	fmt.Fprintf(w, "queqiao_delay_brake_ratio %.9f\n", s.QUICDelayBrake)
 	// The floor is the conservative, pacing-side view of the same channel:
 	// biased low on purpose, and a lower envelope for a connection's lifetime.
 	// It is not a smaller version of the figure above and a code sized from it

@@ -696,6 +696,9 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 			if controller.Erasure > observation.ControllerErasure {
 				observation.ControllerErasure = controller.Erasure
 			}
+			if controller.DelayBrake > observation.ControllerDelayBrake {
+				observation.ControllerDelayBrake = controller.DelayBrake
+			}
 			if controller.ErasureFloor > observation.ControllerErasureFloor {
 				observation.ControllerErasureFloor = controller.ErasureFloor
 			}
