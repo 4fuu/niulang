@@ -205,5 +205,9 @@ func (t *telemetryState) snapshot() ControllerTelemetry {
 		PacketsLostObserved: t.packetsLost.Load(),
 		MinRTT:              time.Duration(t.minRTTNS.Load()),
 		InRecovery:          t.inRecovery.Load(),
+		SampleMean:          t.sampleMean.Load(),
+		SampleMax:           t.sampleMax.Load(),
+		SampleMaxDelivered:  t.sampleMaxDelivered.Load(),
+		SampleMaxInterval:   time.Duration(t.sampleMaxIntervalNS.Load()),
 	}
 }
