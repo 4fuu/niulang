@@ -14,14 +14,15 @@ qualification items are still open.
   drops what it cannot pass and holds nothing, so it produces loss and no
   delay -- and that design uses delay as its congestion signal and ignores
   loss. Measured against an emulated policer shaped to 250 KB/s, a sender
-  reached 42 times the path's capacity at 72.5% loss with the brake reading
+  reached 7.3 times the path's capacity at 49.8% loss with the brake reading
   zero throughout. The live path this project targets is a policer, so this is
   the ordinary case rather than an edge one. The redesign is not deployed and
-  should not be until the bandwidth estimate stops reporting a token bucket's
-  burst as its rate; the shipping controller still treats loss as congestion
-  and does not have this behaviour. Two approaches to that estimate have been
-  tried and rejected, and are recorded in the redesign document so that a third
-  does not repeat them.
+  should not be until a policed path has a brake; the shipping controller still
+  treats loss as congestion and does not have this behaviour. The bandwidth
+  estimate turned out not to be the fault -- measured in isolation it is within
+  one per cent of a policer's rate -- and the erasure compensation was.
+  Bounding that took the overdrive from 42 times the path to 7.3. The redesign
+  document records what was tried, in what order, and which of it was wrong.
 - Queqiao is a WAN optimization data plane, not an anonymity network. The
   desktop ingress is SOCKS5, the released Android app exports an authenticated
   SOCKS5 endpoint to a separate routing client, and the iOS app is a

@@ -22,7 +22,12 @@ import (
 // benefits from per-packet receive times when a future fork supplies them.
 // Memory is bounded even if a peer stops acknowledging packets.
 type tuicBandwidthEstimator struct {
-	totalAcked     uint64
+	totalAcked uint64
+	// sampleTrace, when set, receives every delivery-rate sample the estimator
+	// considered for the filter. It is nil in production and exists because
+	// three attempts to fix the estimate on a policed path were made by
+	// reasoning about what these numbers should be, and each was wrong.
+	sampleTrace    func(bandwidthSampleTrace)
 	totalSent      uint64
 	latestSample   uint64
 	latestAckRate  uint64
@@ -163,6 +168,22 @@ func (e *tuicBandwidthEstimator) removeObsolete(leastUnacked quiccongestion.Pack
 	}
 }
 
+// bandwidthSampleTrace is one delivery-rate sample with the two quantities it
+// was computed from, which is what a maximum filter hides: the rate alone
+// cannot say whether it is high because the path is fast or because the window
+// it was measured over was short.
+type bandwidthSampleTrace struct {
+	Round        uint64
+	AckRate      uint64
+	SendRate     uint64
+	Sample       uint64
+	AckInterval  time.Duration
+	SendInterval time.Duration
+	AckedDelta   uint64
+	SentDelta    uint64
+	AppLimited   bool
+}
+
 type tuicAckSample struct {
 	lastAppLimited   bool
 	hasSample        bool
@@ -216,6 +237,26 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 		sendRate := uint64(0)
 		if !state.lastAckedSentTime.IsZero() && state.sentTime.After(state.lastAckedSentTime) && state.totalSentAtSend >= state.totalSentAtAck {
 			sendRate = rateFromDelta(state.totalSentAtSend-state.totalSentAtAck, state.sentTime.Sub(state.lastAckedSentTime))
+		}
+		if e.sampleTrace != nil {
+			trace := bandwidthSampleTrace{Round: round, AckRate: ackRate, SendRate: sendRate, AppLimited: state.appLimited}
+			if !state.lastAckedAckTime.IsZero() && ackTime.After(state.lastAckedAckTime) {
+				trace.AckInterval = ackTime.Sub(state.lastAckedAckTime)
+				if e.totalAcked >= state.totalAckedAtSend {
+					trace.AckedDelta = e.totalAcked - state.totalAckedAtSend
+				}
+			}
+			if !state.lastAckedSentTime.IsZero() && state.sentTime.After(state.lastAckedSentTime) {
+				trace.SendInterval = state.sentTime.Sub(state.lastAckedSentTime)
+				if state.totalSentAtSend >= state.totalSentAtAck {
+					trace.SentDelta = state.totalSentAtSend - state.totalSentAtAck
+				}
+			}
+			trace.Sample = ackRate
+			if sendRate > 0 && (trace.Sample == 0 || sendRate < trace.Sample) {
+				trace.Sample = sendRate
+			}
+			e.sampleTrace(trace)
 		}
 		sample := ackRate
 		e.latestAckRate = ackRate
