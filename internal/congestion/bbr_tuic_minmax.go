@@ -44,6 +44,10 @@ type tuicMinMaxSample struct {
 }
 
 const (
+	// tuicMinMaxWindow is the filter's memory in rounds. It is untyped so that
+	// deriving a duration from it needs no conversion from the uint64 the
+	// round arithmetic uses.
+	tuicMinMaxWindow = 10
 	// minBandwidthTimeWindow keeps a spuriously small round-trip sample from
 	// collapsing the filter's memory to nothing. Below this the round window
 	// binds first in any case, because samples cannot arrive faster than the
@@ -57,7 +61,7 @@ const (
 )
 
 func newTUICMinMax() tuicMinMax {
-	return tuicMinMax{window: 10, timeWindow: maxBandwidthTimeWindow}
+	return tuicMinMax{window: tuicMinMaxWindow, timeWindow: maxBandwidthTimeWindow}
 }
 
 func (m *tuicMinMax) get() uint64 { return m.samples[0].value }
@@ -79,12 +83,17 @@ func (m *tuicMinMax) setRoundTrip(rtt time.Duration) {
 	if rtt <= 0 {
 		return
 	}
-	window := time.Duration(m.window) * rtt
+	// Clamp before multiplying rather than after. The round trip is a
+	// measurement, and a large enough one overflows the product before either
+	// bound could be applied to it -- which would set the memory from a sign
+	// bit instead of from the path.
+	if rtt >= maxBandwidthTimeWindow/tuicMinMaxWindow {
+		m.timeWindow = maxBandwidthTimeWindow
+		return
+	}
+	window := tuicMinMaxWindow * rtt
 	if window < minBandwidthTimeWindow {
 		window = minBandwidthTimeWindow
-	}
-	if window > maxBandwidthTimeWindow {
-		window = maxBandwidthTimeWindow
 	}
 	m.timeWindow = window
 }
