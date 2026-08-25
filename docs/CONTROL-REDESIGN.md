@@ -171,10 +171,29 @@ misclassification is catastrophic in one direction: no parity into a 50%
 erasure channel. Under a fixed budget, getting it wrong costs some goodput and
 nothing else.
 
-**The delay bound does double duty.** It protects the interactive latency this
-transport exists to preserve, and it is the brake that replaces loss-based
-backoff. A pure goodput objective would happily fill a queue, which contradicts
-the reserve the design already maintains.
+**The delay bound is the brake that replaces loss-based backoff.** A pure
+goodput objective would happily fill a queue.
+
+An earlier draft had it doing double duty, protecting interactive latency as
+well, and that was wrong in a way worth recording: it is the same mistake as
+the erasure floor serving both the pacer and the code. Interactive latency is
+an absolute quantity and is already protected by the aggregate budget's reserve
+and the lanes' priority queues. Once that job belongs elsewhere the bound has
+one job, and for that job the right frame is relative.
+
+So the bound is `RTT <= 2 x min_rtt`, which is the same statement as "the queue
+may hold at most one bandwidth-delay product" and the same rule as the
+controller's existing 2.0 congestion-window gain, in the time domain rather
+than the window domain. It is a ratio and not a duration on purpose: a duration
+would have to be chosen, and the choice would be a latency policy smuggled into
+a congestion controller.
+
+It is a measurement where the window gain is an estimate. The gain bounds the
+window using a bandwidth the sender believes in; on an erasure path that window
+is then divided by the arrival rate so a full one arrives, which means what is
+*sent* can be several times the bottleneck's worth. The queue is downstream of
+that division and does not care why the bytes were sent, so the bound is
+applied after the compensation.
 
 ### Why the classifier is redundant
 
@@ -386,10 +405,10 @@ implementation before the change lands.
 | 1 | Token bucket, deep burst allowance | `B` converges on the sustained shaping rate, not the bucket drain rate. **Filter-level test passing.** `internal/pathsim` now has the burst allowance (`PolicerBurstBytes`), but the end-to-end version also needs a runtime *rate* change, which it does not have — see [A limit found while trying to validate it](#a-limit-found-while-trying-to-validate-it) |
 | 2 | Step change 5% → 50% erasure mid-flow | The erasure estimate rises within one filter window; the code rate follows. **Passing end to end** — `TestTheCodeFollowsAChannelThatGetsWorseMidFlow` steps an emulated path from 2% to 45% downstream under a live flow, and the measurement the code is sized from moves from 0.034 to 0.224 while the controller's floor stays at 0.031 |
 | 3 | Throttle that tightens under load | `B` walks down and settles; no sustained oscillation. **Filter-level test passing** |
-| 4 | Shallow-buffered dropper, no queue | The delay bound still brakes, or the case is documented as unbraked |
+| 4 | Shallow-buffered dropper, no queue | The delay bound still brakes, or the case is documented as unbraked. **Still open, and still the one expected to fail** -- a dropper that erases at capacity without building a queue gives the bound no signal |
 | 5 | Clean path, no erasure | `r = 1`; no parity is sent, without a `minCodedLoss` constant |
 | 6 | Self-limiting claim | The climb stops; `B` does not grow without bound |
-| 7 | Bulk flow alongside interactive | Interactive latency stays inside the delay bound |
+| 7 | Bulk flow alongside interactive | Interactive latency stays inside the delay bound. **Partly covered**: `TestABulkTransferIsHeldBackByADeepQueue` shows the brake engaging on a deeply buffered bottleneck at 415 ms of queue against a 313 ms minimum, removing 24.7% of the rate. The interactive half is not covered |
 
 **Case 4 is the one expected to fail.** A dropper that erases at capacity
 without building a queue gives the delay bound no signal, and with loss removed
@@ -412,9 +431,11 @@ needed was an estimate that could fall.
    `TargetResidual` and `minCodedLoss` deleted.
 4. **Done.** The loss the path caused is exported, not only the share charged
    as congestion.
-5. Delay bound added, then loss suppression (`ErasureSender.congestive`)
-   deleted and the arrival-rate compensation moved onto the measurement.
-6. `kindReport` closes the residual loop.
+5. **Done.** Delay bound added: the round trip may not exceed twice the path's
+   own minimum.
+6. Loss suppression (`ErasureSender.congestive`) deleted and the arrival-rate
+   compensation moved onto the measurement, now that a brake exists.
+7. `kindReport` closes the residual loop.
 
 Steps 1-5 have no wire impact. Step 6 is additive and forward-compatible.
 

@@ -500,3 +500,75 @@ func measuredErasureAndFloor(t *testing.T) (erasure, floor float64) {
 	}
 	return erasure, floor
 }
+
+// The delay bound, against a real queue rather than a supplied round trip.
+//
+// A deeply buffered bottleneck is the case a loss-based controller cannot see
+// at all: the queue absorbs the overload instead of dropping it, so there is no
+// loss signal and the only evidence is the delay. The bound is that the round
+// trip may not exceed twice the path's own minimum, which is one
+// bandwidth-delay product of queue.
+func TestABulkTransferIsHeldBackByADeepQueue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("brings up QUIC across an emulated 300 ms path")
+	}
+	requireStableImpairmentClock(t)
+	path := pathsim.Config{
+		OneWayDelay:     150 * time.Millisecond,
+		RateBytesPerSec: 250_000,
+		// A bandwidth-delay product here is 75 KB. Ten times that is a router
+		// with far more buffer than it needs, which is the ordinary case and
+		// the one that produces delay instead of loss.
+		QueueBytes: 750_000,
+		Seed:       41,
+	}
+	socks, destination := codedPair(t, false, &path)
+	conn := socksDial(t, socks, destination, erasureChannelBudget(180*time.Second))
+	defer conn.Close()
+
+	// Enough bulk to fill the buffer and keep it full.
+	payload := make([]byte, 512*1024)
+	rand.New(rand.NewSource(17)).Read(payload)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 3; i++ {
+			if _, err := conn.Write(payload); err != nil {
+				return
+			}
+		}
+	}()
+	got := make([]byte, len(payload)*3)
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("bulk across a deeply buffered path: %v", err)
+	}
+	<-done
+
+	s := lastClient.Metrics().Snapshot()
+	minRTT, smoothed := s.QUICControllerMinRTT, s.QUICSmoothedRTT
+	t.Logf("min_rtt=%v smoothed=%v queue=%v brake=%.4f",
+		minRTT.Round(time.Millisecond), smoothed.Round(time.Millisecond),
+		(smoothed - minRTT).Round(time.Millisecond), s.QUICDelayBrake)
+
+	if minRTT <= 0 {
+		t.Fatal("the path was never measured, so there was no bound to apply")
+	}
+	// The contract: past one round trip of queue the brake must be engaged.
+	// Below it the bound is silent by design, and a run that never filled the
+	// buffer has nothing to say -- but it must not be silent above it.
+	queue := smoothed - minRTT
+	if queue <= minRTT {
+		t.Skipf("the buffer never filled past the bound (queue %v against a %v minimum), "+
+			"so this run cannot test the brake", queue, minRTT)
+	}
+	if s.QUICDelayBrake == 0 {
+		t.Fatalf("the path is carrying %v of queue against a %v minimum and the brake reads "+
+			"zero, so nothing is holding the sender back", queue, minRTT)
+	}
+	// And the brake has to match the overshoot rather than being a flag.
+	want := 1 - float64(minRTT)/float64(queue)
+	if s.QUICDelayBrake < want*0.5 || s.QUICDelayBrake > want*1.5+0.05 {
+		t.Fatalf("brake reads %.4f against an overshoot implying about %.4f",
+			s.QUICDelayBrake, want)
+	}
+}

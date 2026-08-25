@@ -122,6 +122,10 @@ Prometheus `/metrics` names. They cover:
   endpoint sends into, published as `queqiao_erasure_ratio{direction="send"}`
   and as `queqiao_erasure_ratio_send` in the log. A gateway's send direction is
   its downstream. This is what a code is sized from;
+- how much of the sending rate the delay bound is removing, as
+  `queqiao_delay_brake_ratio`. It is non-zero only while the path is carrying
+  more than one bandwidth-delay product of queue, and it separates a rate held
+  back by the path's own queue from one that simply measured less;
 - the controller's erasure floor, which is the pacing-side view of the same
   channel and is not a smaller version of the figure above. It is biased low on
   purpose so that pacing errs towards slowing down, and it is a lower envelope

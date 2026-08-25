@@ -1002,6 +1002,7 @@ func logPerformanceSnapshot(logger *slog.Logger, s metrics.Snapshot, interval ti
 		slog.Uint64("queqiao_quic_controller_packets_lost", s.QUICControllerPacketsLost),
 		slog.Float64("queqiao_quic_controller_min_rtt_seconds", s.QUICControllerMinRTT.Seconds()),
 		slog.Float64("queqiao_erasure_ratio_send", s.QUICErasureSend),
+		slog.Float64("queqiao_delay_brake_ratio", s.QUICDelayBrake),
 		slog.Uint64("queqiao_coded_symbols_arrived_total", s.QUICCodedSources),
 		slog.Uint64("queqiao_coded_symbols_recovered_total", s.QUICCodedRecovered),
 		slog.Uint64("queqiao_coded_symbols_lost_total", s.QUICCodedLost),
