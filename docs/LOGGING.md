@@ -118,8 +118,17 @@ Prometheus `/metrics` names. They cover:
 - flow telemetry entries expired because nothing refreshed them, which is how
   a round-trip aggregate frozen at a stale constant announces itself;
 - lane joins refused and account flow opens refused, each split by reason; and
-- the controller's measured erasure floor, sampler diagnostics, and class
-  transitions.
+- the erasure the path is measured to be applying to the direction this
+  endpoint sends into, published as `queqiao_erasure_ratio{direction="send"}`
+  and as `queqiao_erasure_ratio_send` in the log. A gateway's send direction is
+  its downstream. This is what a code is sized from;
+- the controller's erasure floor, which is the pacing-side view of the same
+  channel and is not a smaller version of the figure above. It is biased low on
+  purpose so that pacing errs towards slowing down, and it is a lower envelope
+  for a connection's lifetime, so it keeps what a clean window established while
+  the measurement follows the path. On one live incident the two read 1.76% and
+  19.9%; and
+- sampler diagnostics and class transitions.
 
 Flow completion records also carry what the flow's lane replacements did:
 `lane_replacement_waits`, `lane_replacement_timeouts`, `lane_replacement_wait`,

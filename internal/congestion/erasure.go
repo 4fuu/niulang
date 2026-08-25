@@ -77,6 +77,12 @@ type ErasureSender struct {
 	floorTrusted     bool
 	establishedFloor float64
 
+	// erasure is the pooled measured erasure of the direction this sender
+	// sends into, in parts per million. It is what the code is sized from, and
+	// it is published because a floor is not a substitute for it: on the live
+	// path the floor read a seventh of what the channel was doing.
+	erasure atomic.Uint64
+
 	// arrival is the last computed arrival rate, published for the pacer and
 	// the congestion window, which run outside the callback that computes it.
 	arrival atomic.Uint64 // arrival rate in parts per million
@@ -299,6 +305,7 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 			RoundTrip:       e.inner.minRoundTrip(),
 		})
 		floor = state.Floor
+		e.erasure.Store(uint64(state.Erasure * partsPerMillion))
 		e.share.Store(uint64(state.Share))
 	}
 	e.arrival.Store(uint64((1 - floor) * partsPerMillion))
@@ -460,6 +467,7 @@ func (e *ErasureSender) Telemetry() ControllerTelemetry {
 	suppressed := e.suppressed.Load()
 	t.PacketsLostSuppressed = suppressed
 	t.PacketsLostObserved = t.PacketsLost + suppressed
+	t.Erasure = float64(e.erasure.Load()) / partsPerMillion
 	arrival := e.arrivalRate()
 	t.ErasureFloor = 1 - arrival
 	t.PacingRate = uint64(float64(t.PacingRate) / arrival)

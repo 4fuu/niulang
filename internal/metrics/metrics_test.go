@@ -462,3 +462,48 @@ func TestLossTotalsOnlyMoveForward(t *testing.T) {
 		t.Fatalf("suppressed total fell from %d to %d", before.QUICLossSuppressedPackets, after.QUICLossSuppressedPackets)
 	}
 }
+
+// An erasure figure without a direction cannot be read. The one that used to be
+// published was the controller's floor: biased low for pacing, a lower envelope
+// for a connection's lifetime, and the only erasure number that left the
+// process. On the live incident it read 1.76% while the channel erased 19.9%,
+// so nothing on a dashboard could show what the code was being sized for.
+func TestTheMeasuredErasureIsPublishedBesideTheFloorAndLabelledByDirection(t *testing.T) {
+	r := New()
+	r.ObserveQUIC(1, QUICObservation{
+		ControllerKind: "erasure", ControllerErasure: 0.199, ControllerErasureFloor: 0.0176,
+	})
+	s := r.Snapshot()
+	if s.QUICErasureSend != 0.199 {
+		t.Fatalf("measured send erasure = %v, want 0.199", s.QUICErasureSend)
+	}
+	if s.QUICControllerErasureFloor != 0.0176 {
+		t.Fatalf("floor = %v, want 0.0176", s.QUICControllerErasureFloor)
+	}
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`queqiao_erasure_ratio{direction="send"} 0.199000000`,
+		"queqiao_quic_controller_erasure_floor_ratio 0.017600000",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition is missing %q", want)
+		}
+	}
+}
+
+// Both figures arrive already pooled across the lanes of one endpoint pair, so
+// folding several observations must select the worst pair rather than turning
+// into a maximum over lanes -- which is what made the floor read "the worst
+// single lane right now" and jump between 1.8% and 6.9% within minutes.
+func TestErasureFoldsAcrossEndpointPairsNotLanes(t *testing.T) {
+	r := New()
+	r.ObserveQUIC(1, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.05, ControllerErasureFloor: 0.01})
+	r.ObserveQUIC(2, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.30, ControllerErasureFloor: 0.02})
+	r.ObserveQUIC(3, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.10, ControllerErasureFloor: 0.03})
+	if s := r.Snapshot(); s.QUICErasureSend != 0.30 {
+		t.Fatalf("send erasure = %v across three pairs, want the worst at 0.30", s.QUICErasureSend)
+	}
+}
