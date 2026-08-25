@@ -475,7 +475,7 @@ func TestAnEmptiedPipeKeepsWhatItMeasured(t *testing.T) {
 	sender.seedBandwidth(peak, sender.minRTT)
 	sender.peakBandwidth = peak
 	sender.estimator.maxFilter.reset()
-	sender.estimator.maxFilter.updateMax(sender.round, peak/32)
+	sender.estimator.maxFilter.updateMax(sender.round, monotime.Time(0), peak/32)
 	if before := sender.estimator.estimate(); before >= peak {
 		t.Fatalf("the filter still holds %d; this test is not testing decay", before)
 	}

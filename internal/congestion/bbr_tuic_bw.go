@@ -270,8 +270,21 @@ func (e *tuicBandwidthEstimator) onAckBatch(eventTime monotime.Time, acked []qui
 	}
 	// App-limited samples cannot lower the model, but an app-limited event
 	// above the current best is still proof of higher deliverable bandwidth.
-	if result.maxBandwidth > 0 && (!result.sampleAppLimited || result.maxBandwidth > e.maxFilter.get()) {
-		e.maxFilter.updateMax(round, result.maxBandwidth)
+	//
+	// The exception is a standing estimate that has outlived its window. That
+	// rule protects a live estimate from a sender that had nothing to send and
+	// therefore learned nothing; once the estimate has expired there is
+	// nothing left to protect, and refusing the only samples on offer is how
+	// the filter would keep a value it has already decided not to trust. On a
+	// connection that is application limited essentially always -- 99.98% of
+	// samples on the path this was measured against -- that exception is the
+	// only way the estimate ever comes down.
+	if result.maxBandwidth > 0 &&
+		(!result.sampleAppLimited || result.maxBandwidth > e.maxFilter.get() || e.maxFilter.stale(eventTime)) {
+		if result.minRTT > 0 {
+			e.maxFilter.setRoundTrip(result.minRTT)
+		}
+		e.maxFilter.updateMax(round, eventTime, result.maxBandwidth)
 	}
 	return result
 }
@@ -300,7 +313,10 @@ func (e *tuicBandwidthEstimator) onAck(now monotime.Time, bytes, round uint64, a
 	sendRate := rateFromDelta(e.totalSent-e.legacyPrevSent, e.legacySentTime.Sub(e.legacyPrevSentTime))
 	ackRate := rateFromDelta(e.totalAcked-e.legacyPrevAcked, e.legacyAckedTime.Sub(e.legacyPrevAckTime))
 	if !appLimited && sendRate > 0 && ackRate > 0 {
-		e.maxFilter.updateMax(round, minUint64(sendRate, ackRate))
+		// The aggregate helpers are for deterministic tests and callers with no
+		// packet numbers, and carry no event time; a zero leaves the sample on
+		// the round clock alone.
+		e.maxFilter.updateMax(round, monotime.Time(0), minUint64(sendRate, ackRate))
 	}
 }
 
