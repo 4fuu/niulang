@@ -50,8 +50,10 @@ Wi-Fi to cellular creates a new path model because it changes the bottleneck.
 
 Rate-independent erasure below a capacity knee is not relieved by backing off.
 Loss that appears or becomes clustered as offered rate crosses the knee is
-congestion. The controller estimates the erasure floor separately from excess
-loss instead of giving every missing packet the same meaning.
+congestion. Rather than give every missing packet the same meaning, the sender
+declines to read loss as congestion at all and brakes on queueing delay
+instead, while the erasure it measures is what sizes its code and compensates
+its window. The regime, not the packet, is what separates the two.
 
 ### Control total traffic at the bottleneck
 

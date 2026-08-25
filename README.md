@@ -51,9 +51,14 @@ Queqiao is built around a few practical observations:
 - **Flows sharing one bottleneck should share one model.** Flows to different final
   destinations can still share one client-to-gateway path, so Queqiao shares
   delivery, loss, RTT, pacing, and latency-reserve state across them.
-- **Not all packet loss means congestion.** The controller distinguishes a measured
-  erasure floor from loss caused by an overloaded bottleneck instead of treating
-  every missing packet as congestion.
+- **Not all packet loss means congestion.** A path that erases packets
+  independently of the sending rate is not an overloaded one, and backing off
+  does not make an erasure channel drop less. So loss is not the congestion
+  signal here: the brake is a delay bound, the round trip may not exceed twice
+  the path's own minimum, and the measured erasure is what sizes the code and
+  compensates the window instead. A policer, which drops without queueing, is
+  the case this does not yet brake -- see the [known
+  limitations](docs/KNOWN-LIMITATIONS.md).
 - **Choose recovery for the path.** On a long-RTT path, forward-error
   correction can recover a gap sooner than another round trip; as a flow grows,
   retransmission can become the more efficient choice.

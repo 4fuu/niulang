@@ -105,13 +105,31 @@ The path key includes the local uplink as well as the remote gateway. A switch
 from Wi-Fi to cellular creates a new model because it changes the path, even
 though the gateway address remains the same.
 
-### 2. Separate congestion from the erasure floor
+### 2. Separate congestion from erasure, by what each does to delivery
 
-The erasure controller corrects its loss response for the measured
-rate-independent floor. Congestive behavior is the delivery/queue regime above
-that floor, not a count of individual lost packets. Coding is sized from the
-floor; adding parity to loss created by an overflowing bottleneck would only
-add more offered load to that bottleneck.
+Congestive behavior is a delivery/queue regime, not a count of individual lost
+packets. Erasure scales delivery down proportionally at every rate and cannot
+produce a knee; congestion produces one.
+
+Queqiao no longer tries to tell them apart packet by packet. It once classified
+each loss and forwarded only the share the channel could not explain, which was
+a statistical answer to a question the delivery-versus-rate curve answers
+directly, and it was least reliable exactly when loss was worst. Every loss now
+reaches the congestion controller, and the brake is a delay bound instead: the
+round trip may not exceed twice the path's own minimum. What the measured
+erasure is used for is the two things that are proportional to it -- sizing the
+code, and compensating the congestion window so that a full one arrives.
+
+The path model still carries two numbers for the channel, because their
+consumers fail in opposite directions. A controller must under-estimate
+erasure, since mistaking erasure for congestion only makes it slow down; a code
+must not, since mistaking erasure for congestion makes it send no parity into a
+channel that is erasing. Sizing the code from the controller's conservative
+floor is the defect [the control redesign](CONTROL-REDESIGN.md) was written
+about.
+
+A policer drops without queueing, so it offers neither signal. That case is
+open; see the [known limitations](KNOWN-LIMITATIONS.md).
 
 ### 3. Keep total traffic within the bottleneck
 
