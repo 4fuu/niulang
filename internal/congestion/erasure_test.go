@@ -67,36 +67,49 @@ func TestClusteredStartupLossDoesNotBecomeAnErasureFloor(t *testing.T) {
 	}
 }
 
-// Compensation must still converge on the channel's actual arrival rate.
-// Without it, pacing a delivered-rate estimate makes the sending rate its own
-// input and the loop walks down to nothing rather than to the bottleneck.
+// Compensation is a bet that sending more delivers more, and it is now taken
+// one step at a time with each step tested against the delivered rate.
 //
-// It now waits for a measured minimum round trip, because that is when the
-// delay bound can act, and compensation may not run ahead of the brake that
-// bounds it. Before then the sender behaves as plain BBR that ignores loss:
-// it neither compensates nor collapses.
-func TestCompensationConvergesOnTheMeasuredArrivalRate(t *testing.T) {
+// Where the bet pays -- a channel that erases independently of the sending
+// rate -- it must still get there, or pacing a delivered-rate estimate makes
+// the sending rate its own input and the loop walks down to nothing.
+func TestCompensationGrowsWhileItBuysDelivery(t *testing.T) {
 	e := NewErasureSender(1200)
 	e.inner.minRTT = 200 * time.Millisecond
 	e.SetRTTStatsProvider(&fixedRTT{min: 200 * time.Millisecond, smoothed: 200 * time.Millisecond})
 
-	rng := rand.New(rand.NewSource(3))
-	number := quiccongestion.PacketNumber(0)
-	for round := 0; round < 20; round++ {
-		var acked []quiccongestion.AckedPacketInfo
-		var lost []quiccongestion.LostPacketInfo
-		for i := 0; i < 500; i++ {
-			if rng.Float64() < 0.42 {
-				lost = append(lost, quiccongestion.LostPacketInfo{PacketNumber: number, BytesLost: 1200})
-			} else {
-				acked = append(acked, quiccongestion.AckedPacketInfo{PacketNumber: number, BytesAcked: 1200})
-			}
-			number++
-		}
-		e.OnCongestionEventEx(0, monotime.Now(), acked, lost)
+	// Delivery improves every round, which is what compensating for genuine
+	// erasure looks like.
+	delivered := uint64(100_000)
+	for round := uint64(1); round <= 12; round++ {
+		e.inner.round = round
+		delivered += 20_000
+		e.inner.estimator.maxFilter.updateMax(round, monotime.Now(), delivered)
+		e.compensationFor(0.58)
 	}
-	if got := e.arrivalRate(); got < 0.5 || got > 0.66 {
-		t.Fatalf("arrival rate %.3f on a 42%% erasure channel, want about 0.58", got)
+	if got := e.appliedArrival; got > 0.62 || got < 0.55 {
+		t.Fatalf("applied arrival %.3f after twelve rounds of improving delivery, want about 0.58", got)
+	}
+}
+
+// Where the bet does not pay -- a policer, which drops because of the sending
+// rate rather than independently of it -- compensation must stay where it is.
+// Sending harder there raises the loss that asks for more compensation, which
+// is a loop that ends at many times the path's capacity.
+func TestCompensationHoldsWhenItBuysNothing(t *testing.T) {
+	e := NewErasureSender(1200)
+	e.inner.minRTT = 200 * time.Millisecond
+	e.SetRTTStatsProvider(&fixedRTT{min: 200 * time.Millisecond, smoothed: 200 * time.Millisecond})
+
+	// Delivery is flat however hard the sender is asked to try.
+	e.inner.estimator.maxFilter.updateMax(1, monotime.Now(), 250_000)
+	for round := uint64(1); round <= 12; round++ {
+		e.inner.round = round
+		e.compensationFor(0.28)
+	}
+	if got := e.appliedArrival; got < 0.85 {
+		t.Fatalf("applied arrival fell to %.3f on a path whose delivery never improved; "+
+			"that is the policer feedback loop", got)
 	}
 }
 

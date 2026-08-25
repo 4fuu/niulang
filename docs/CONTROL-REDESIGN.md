@@ -464,34 +464,40 @@ shows arrival runs averaging 2.3 packets and loss runs averaging 5.7 ... a
 limiter which passes everything for a while and then drops everything for a
 while."*
 
-### Two amplifiers, needing two fixes
+### Where the overdrive comes from
 
-**The bandwidth estimate reads the burst, not the rate.** A token bucket passes
-a burst at line rate, and a max filter reports that burst as the path's
-bandwidth. Bounding the filter's memory in time did not help, because the bursts
-recur every refill period so there is always a recent high sample. The
-*statistic* is the problem, not its age -- which is what "any max filter
-structurally measures the first and reports it as the second" already said, and
-which the time bound only half addressed.
+An earlier reading blamed the bandwidth estimate, on the grounds that a token
+bucket passes a burst at line rate and a maximum filter reports that burst as
+the path's bandwidth. **Measurement says otherwise.** Driven directly against a
+simulated policer -- 9 MB/s offered into a 250 KB/s bucket, every event in
+timestamp order -- the estimator reports **252,521 B/s, 1.01x the path**, with
+the median sample at 0.99x and acknowledgement intervals at about one round
+trip. The estimator is not the fault.
 
-**The erasure compensation is a feedback loop on a policed path.** Loss rises,
-the arrival rate falls, the compensation asks to send proportionally more, the
-policer drops proportionally more, and the arrival rate falls again.
+`TestWhatTheSamplerSeesOnAPolicedPath` is that measurement, kept so that the
+next reading of this starts from evidence rather than from the same guess. It
+was reached only after two attempts on the estimator that changed nothing --
+bounding the filter's memory in wall time, which is worth having and is
+irrelevant here because a policer's bursts recur every refill period, and
+averaging the sample within a round, which measured no better -- and one
+synthetic harness whose own ack pacing was wrong and which reported 4,000 B/s
+on a 250 KB/s path.
 
-The second is now bounded: compensation may only increase while it is buying
-delivery, which is a measurement rather than a classification and is the same
-question the design's own argument rests on. It reduces the overdrive but does
-not remove it, because the first amplifier is the larger one and remains.
+The fault is the erasure compensation. It is a bet that losses are independent
+of the sending rate, so that sending 1/arrival times as much delivers a full
+window. On a policer the losses are *caused* by the sending rate, so the bet
+feeds itself: send more, get dropped more, measure a lower arrival rate, ask to
+send more again.
 
-### What would resolve it
+Two things kept the first attempt at bounding that bet from working, and both
+were mistakes in the bound rather than in the diagnosis.
 
-Replacing the max filter with a statistic that estimates a *sustained* rate
-rather than the peak of a bursty delivery process. That is a change to the core
-of the bandwidth model and affects every path rather than only policed ones.
+Nothing, as it turns out, needed replacing. Two attempts were made on the
+estimator before it was measured, and both are recorded below because they are
+still true about the estimator and because they are how the diagnosis stayed
+wrong for as long as it did.
 
-### What has been tried and does not work
-
-Recorded so that the next attempt starts further along than this one did.
+### Two attempts on the wrong component
 
 **Bounding the filter's memory in wall time.** The filter kept a sample for ten
 packet-timed rounds, which on an application-limited connection was sixty-six
@@ -501,36 +507,47 @@ period, so there is always a recent high sample and the estimate never has to
 fall back to anything. **Age was not the problem.**
 
 **Averaging the sample within a round.** The filter is fed the largest
-per-packet delivery rate in an acknowledgement batch. Each of those is bytes
-delivered over one packet's own send-to-ack window, and on a path that releases
-traffic in quanta those windows land unevenly across the releases, so their
-distribution has an upper tail and a maximum reports the tail. Feeding the
-filter one rate per round -- bytes delivered over the whole round -- should
-remove the tail while keeping what the maximum is for.
+per-packet delivery rate in an acknowledgement batch, each measured over one
+packet's own send-to-ack window; on a path that releases traffic in quanta
+those windows land unevenly, so the distribution has an upper tail and a
+maximum reports the tail. Feeding one rate per round should have removed the
+tail. It measured no better -- 2.7x the shaped rate became 3.6x -- and was not
+shipped.
 
-It does not. Measured against the same emulated policer, the estimate moved
-from 2.7x the shaped rate to 3.6x and peak pacing from 42x to 37x, which is
-within run-to-run variation. **Not an improvement, and not shipped.** Why it
-fails is not established: the typical sample should already be about one round
-trip of delivery over about one round trip of time, which is the right answer,
-so either rounds are advancing faster than assumed or the delta and the
-interval are not the ones this reasoning assumes.
+**A synthetic estimator harness** reported 4,000 B/s on a known 250 KB/s
+schedule. The harness's own acknowledgement pacing was wrong. That failure is
+what made the next one careful enough to be right.
 
-**A synthetic estimator harness.** An attempt to drive the estimator directly
-with a known 250 KB/s delivery schedule reported 4,000 B/s. The harness was
-wrong, not the estimator, but the point stands: building a faithful path model
-inside a unit test is its own project, which is what `internal/pathsim` exists
-for. The emulator measures end to end and cannot isolate the estimator.
+**It accepted the first proposal whole.** By the time erasure is first measured
+the sender has already burst and been policed, so the first request is for
+several times the rate, with no evidence yet to test it against. Compensation
+now starts at none and takes a tenth of the remaining distance per round, so
+each step is small enough that the next round's delivery can be attributed to
+it.
 
-### What the next attempt needs first
+**It measured its own output.** The bet was judged against
+`TUICBBRSender.bandwidth`, which returns the *pacing rate* -- a value this
+compensation is an input to. Every increase therefore appeared to have worked.
+It now reads the delivered-rate estimate.
 
-Instrumentation, not a hypothesis. The sample interval and the delivered delta
-that produce each filter update, recorded on the emulated policer, would say in
-one run which of the two reasonings above is wrong. Three attempts have now been
-made by reasoning about what the code should be doing; each was refuted by
-measurement, and the third was refuted by a measurement that was itself broken.
-Measure the sampler before changing it again.
+With both corrected, the overdrive on the emulated policer falls from **42x the
+path to 7.3x** and the loss from 72.5% to 49.8%. The 42% erasure channel is
+unaffected at a median 1.18 s against a 1.10 s baseline, which is what says the
+bound has not simply been switched off.
 
+### What is left
+
+7.3x is not braked, it is less unbraked. The remaining terms are the startup
+gain of 2.77, which is BBR probing and should end when delivery stops growing,
+and a bandwidth estimate that reads 2.0x the path in the full stack against
+1.01x when the estimator is driven in isolation. **That gap is the next thing to
+measure rather than the next thing to guess**: the two differ by everything the
+real stack adds, and which part matters is not established.
+
+Four attempts have now been made on this. The first three reasoned about what
+the code should be doing and were each refuted by measurement, the third by a
+measurement that was itself broken. The fourth started by measuring and found
+the fault somewhere none of the three had looked.
 Until then, **a policed path is unbraked**, and this design should not be
 deployed on one.
 

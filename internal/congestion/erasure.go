@@ -122,6 +122,13 @@ const (
 	// sender already puts nearly seven packets on the wire per packet
 	// delivered; below that the path is not one to push harder into, and an
 	// unbounded divisor would turn a measurement error into a flood.
+	// compensationStep is how much of the remaining compensation one round may
+	// take. Erasure compensation is a bet that sending more delivers more, and
+	// a bet is only checkable if each increase is small enough that the next
+	// round's delivery can be attributed to it. A tenth of the remainder per
+	// round reaches a 42% channel's 1.72x in about six rounds, which on a long
+	// path is under two seconds.
+	compensationStep  = 0.9
 	erasureMinArrival = 0.15
 	partsPerMillion   = 1e6
 )
@@ -242,26 +249,49 @@ func (e *ErasureSender) compensationFor(want float64) float64 {
 	if want < erasureMinArrival {
 		want = erasureMinArrival
 	}
-	delivered := float64(e.inner.bandwidth())
+	if e.appliedArrival == 0 {
+		// Start at no compensation and earn the rest. Accepting the first
+		// proposal whole is what made an earlier version of this useless: on a
+		// policed path the first measurement is already taken after the sender
+		// has burst and been policed, so it asks for several times the rate
+		// before there is any evidence to test that request against.
+		e.appliedArrival = 1
+	}
+	// The delivered-rate estimate, not the sender's own bandwidth: that method
+	// returns the pacing rate, which this compensation is an input to. Judging
+	// the bet against it would be judging the bet against its own effect, and
+	// every increase would appear to have worked.
+	delivered := float64(e.inner.estimator.estimate())
 	round := e.inner.round
-	if e.appliedArrival == 0 || want >= e.appliedArrival {
+	if want >= e.appliedArrival {
+		// Asking for no more than is applied can only reduce what goes on the
+		// wire, so it is taken at once.
 		e.appliedArrival, e.deliveredAtCompensation, e.compensationRound = want, delivered, round
 		return want
 	}
-	// More compensation than is applied. Give the previous increase a round to
-	// show an effect before judging it, then require that it showed one.
+	// More compensation than is applied. Give the previous step a round to show
+	// an effect before judging it, then require that it showed one.
 	if round == e.compensationRound {
 		return e.appliedArrival
 	}
 	if delivered <= e.deliveredAtCompensation {
-		// Sending harder did not deliver more. Hold where we are, and re-arm
-		// the probe against what the path is doing now so that a path which
-		// later improves can still be followed.
+		// Sending harder did not deliver more. Hold, and re-arm against what
+		// the path is doing now so a path that later improves is still
+		// followed.
 		e.deliveredAtCompensation, e.compensationRound = delivered, round
 		return e.appliedArrival
 	}
-	e.appliedArrival, e.deliveredAtCompensation, e.compensationRound = want, delivered, round
-	return want
+	// It did deliver more, so take a step towards what is being asked for
+	// rather than the whole of it. A step keeps every increase small enough
+	// that the next round's delivery can be attributed to it; a jump to the
+	// full request would be one large bet with no way to tell afterwards
+	// whether it paid.
+	next := e.appliedArrival * compensationStep
+	if next < want {
+		next = want
+	}
+	e.appliedArrival, e.deliveredAtCompensation, e.compensationRound = next, delivered, round
+	return next
 }
 
 func (e *ErasureSender) arrivalRate() float64 {
