@@ -109,7 +109,7 @@ func (p *lossyPipe) stats() (sent, lost int) {
 // connection.
 func measuredPath(floor float64) *pathmodel.PathModel {
 	m := pathmodel.NewPathModel()
-	m.Report(1, floor, 5000, 5000, 2e6, 0)
+	m.Report(1, pathmodel.Observation{Floor: floor, FloorSamples: 5000, Erasure: floor, BurstFactor: 1, ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 0})
 	return m
 }
 
@@ -442,5 +442,49 @@ func TestAPathDoesNotInferItsOutboundFloorFromReverseLoss(t *testing.T) {
 	time.Sleep(codingTTL + 20*time.Millisecond)
 	if quiet.Coding() {
 		t.Errorf("reverse loss selected outbound coding without outbound evidence: %+v", quiet.Stats())
+	}
+}
+
+// The incident in docs/CONTROL-REDESIGN.md happened here, between a path model
+// that knew what the channel was doing and a code that was sized from
+// something else. The controller's floor is biased low on purpose, and
+// channel() used to build the code's whole view of the channel out of that one
+// scalar -- Loss, Floor and Recent all set to it, and BurstFactor asserted to
+// be 1. On the live path that meant parity sized for 1.76% while the far
+// decoder measured 19.9%, and 11% of the payload handed back to the session.
+//
+// This holds the wiring rather than the arithmetic: given a model whose floor
+// and measurement disagree the way the live one did, the code must be sized
+// from the measurement.
+func TestTheCodeIsSizedFromTheMeasurementNotTheFloor(t *testing.T) {
+	const measured, conservativeFloor = 0.199, 0.0176
+	m := pathmodel.NewPathModel()
+	m.Report(1, pathmodel.Observation{
+		Floor: conservativeFloor, FloorSamples: 5000,
+		Erasure: measured, BurstFactor: 1,
+		ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 250 * time.Millisecond,
+	})
+
+	pa, _ := newPipes(1, measured)
+	p := New(pa, Config{SymbolBytes: 1100, RoundTrip: 250 * time.Millisecond, Path: m})
+	t.Cleanup(func() { p.Close() })
+
+	channel := p.channel()
+	if channel.Loss != measured {
+		t.Fatalf("the code is reading %.4f from a path measured at %.4f", channel.Loss, measured)
+	}
+	plan := p.coding().plan
+	t.Logf("floor %.4f, measured %.4f: coded=%v rate=%.3f sized_for=%.4f residual=%.2e",
+		conservativeFloor, measured, plan.Code, plan.Rate, plan.LossCoded, plan.Residual)
+	if !plan.Code {
+		t.Fatalf("a channel erasing %.1f%% was left uncoded: %s", measured*100, plan.Why)
+	}
+	if plan.LossCoded < measured {
+		t.Fatalf("sized for %.4f on a channel measured at %.4f", plan.LossCoded, measured)
+	}
+	// The parity the incident actually shipped was 4.9% of the wire against
+	// this erasure. Anything near that is the same failure with new code.
+	if overhead := plan.Overhead(); overhead < 1.15 {
+		t.Fatalf("%.1f%% erasure bought only %.2fx overhead", measured*100, overhead)
 	}
 }

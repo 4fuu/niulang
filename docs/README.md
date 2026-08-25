@@ -45,6 +45,9 @@ you choose the next document based on what you want to do.
 - [Path characterization](PATH-CHARACTER-20260813.md) — the open-loop
   measurement that exposed the motivating path's erasure floor and congestion
   knee.
+- [Control redesign](CONTROL-REDESIGN.md) — proposed delay-bounded goodput
+  objective, the two latched estimators it removes, what it does not solve, and
+  the cases that would falsify it.
 
 ## Measure and qualify
 

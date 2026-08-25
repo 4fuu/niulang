@@ -165,6 +165,15 @@ func TestWindowRecoversAtTheMeasuredRate(t *testing.T) {
 // stated rate is one paying for a residual nobody asked for, which on this
 // path is bandwidth taken from data.
 func TestTheWindowRateIsWhatTheWindowNeeds(t *testing.T) {
+	// There is no residual target any more, so the rate is held to what it is
+	// for: it must protect the window it was chosen for, and it must not be
+	// buying protection the objective never asked for. Both bounds are the
+	// simulation's own, an order of magnitude apart, so the test fails on a
+	// rate that has drifted rather than on sampling noise.
+	const (
+		protects       = 5e-3
+		wasteIsVisible = 2e-2
+	)
 	const loss, count = 0.42, 20000
 	channel := lossmodel.Snapshot{
 		Loss: loss, Floor: loss, Recent: loss,
@@ -172,7 +181,7 @@ func TestTheWindowRateIsWhatTheWindowNeeds(t *testing.T) {
 	}
 	params := Params{
 		Class: ClassBulk, ShardBytes: 1100, RateBytesPerSec: 2e6,
-		RoundTrip: 300 * time.Millisecond, TargetResidual: 1e-3,
+		RoundTrip: 300 * time.Millisecond,
 	}
 	for _, capacity := range []int{16, 32, 64, 128} {
 		rate := WindowRate(capacity, channel, params)
@@ -188,15 +197,13 @@ func TestTheWindowRateIsWhatTheWindowNeeds(t *testing.T) {
 		}
 		t.Logf("capacity %3d: %.2f repairs per symbol gives a residual of %.4f, "+
 			"and three quarters of it gives %.4f", capacity, rate, residual, slack)
-		if residual > 2*params.TargetResidual {
-			t.Errorf("capacity %d: the rate asks for %.2f repairs and delivers a "+
-				"residual of %.4f against a target of %.4f", capacity, rate,
-				residual, params.TargetResidual)
+		if residual > protects {
+			t.Errorf("capacity %d: %.2f repairs per symbol still loses %.4f of them",
+				capacity, rate, residual)
 		}
-		if slack <= params.TargetResidual {
-			t.Errorf("capacity %d: three quarters of the rate still meets the "+
-				"target (%.4f); the rate is buying a residual nobody asked for",
-				capacity, slack)
+		if slack < wasteIsVisible {
+			t.Errorf("capacity %d: three quarters of the rate loses only %.4f, so the "+
+				"chosen rate is spending wire on a residual nobody needs", capacity, slack)
 		}
 	}
 }
@@ -210,6 +217,9 @@ func TestTheWindowRateIsWhatTheWindowNeeds(t *testing.T) {
 // runs that case as the coded path runs it: an isolated burst, the repairs
 // ShardsFor buys, and nothing else on the wire.
 func TestATailBurstSurvivesTheRepairsItIsGiven(t *testing.T) {
+	// The block arithmetic is an estimate, so the tail is held to surviving
+	// rather than to a rate it was never given a target for.
+	const survives = 1e-2
 	const loss, trials = 0.42, 5000
 	channel := lossmodel.Snapshot{
 		Loss: loss, Floor: loss, Recent: loss,
@@ -217,7 +227,7 @@ func TestATailBurstSurvivesTheRepairsItIsGiven(t *testing.T) {
 	}
 	params := Params{
 		Class: ClassBulk, ShardBytes: 1100, RateBytesPerSec: 2e6,
-		RoundTrip: 300 * time.Millisecond, TargetResidual: 1e-3,
+		RoundTrip: 300 * time.Millisecond,
 	}
 	for _, burst := range []int{1, 4, 16, 32} {
 		total, ok := ShardsFor(burst, channel, params)
@@ -230,9 +240,9 @@ func TestATailBurstSurvivesTheRepairsItIsGiven(t *testing.T) {
 		// The estimate is an estimate, so it is held to an order of magnitude
 		// rather than exactly; what must not happen is a tail failing far more
 		// often than the parity it was given says it should.
-		if residual > 10*params.TargetResidual {
-			t.Errorf("a burst of %d with %d repairs lost a symbol %.4f of the time, "+
-				"against a target of %.4f", burst, total-burst, residual, params.TargetResidual)
+		if residual > survives {
+			t.Errorf("a burst of %d with %d repairs lost a symbol %.4f of the time",
+				burst, total-burst, residual)
 		}
 	}
 }

@@ -112,10 +112,6 @@ type Config struct {
 	// holds symbols whose repair would arrive later than a retransmission, and
 	// coding was for avoiding exactly that.
 	RoundTrip time.Duration
-	// TargetResidual is the share of symbols allowed to arrive unrepairable.
-	// It should not be zero: driving it down costs parity geometrically, and
-	// the residual is what the session above is good at.
-	TargetResidual float64
 	// Path is what the endpoint pair has been measured to do, shared with
 	// everything else sending to it -- above all the congestion controller,
 	// whose own acknowledgements reveal the erasure rate of exactly this
@@ -132,9 +128,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RoundTrip <= 0 {
 		c.RoundTrip = 300 * time.Millisecond
-	}
-	if c.TargetResidual <= 0 {
-		c.TargetResidual = 1e-3
 	}
 	if c.Pending <= 0 {
 		c.Pending = 256
@@ -755,13 +748,26 @@ func (p *Path) symbolPayload() int {
 // those observations cannot distinguish physical erasure from congestion the
 // peer caused by its sending rate.
 func (p *Path) channel() lossmodel.Snapshot {
-	floor := 0.0
-	if p.cfg.Path != nil {
-		floor = p.cfg.Path.Current().Floor
+	if p.cfg.Path == nil {
+		return lossmodel.Snapshot{BurstFactor: 1, ArrivalAfterLoss: 1}
+	}
+	state := p.cfg.Path.Current()
+	// The measured erasure, not the controller's floor. The floor is biased
+	// low on purpose so that pacing errs towards slowing down, and a code
+	// sized from it is sized for a fraction of what the channel is doing: the
+	// incident in docs/CONTROL-REDESIGN.md sized parity for 1.76% against a
+	// measured 19.9%. The floor also arrives here as a scalar, and building a
+	// snapshot whose every field is that one number is what killed Choose's
+	// own fallback -- it checks Loss when Floor is zero, and both were the
+	// same zero.
+	burst := state.BurstFactor
+	if burst < 1 {
+		burst = 1
 	}
 	return lossmodel.Snapshot{
-		Loss: floor, Floor: floor, Recent: floor,
-		BurstFactor: 1, ArrivalAfterLoss: 1 - floor,
+		Loss: state.Erasure, Floor: state.Floor, Recent: state.Erasure,
+		BurstFactor: burst, ArrivalAfterLoss: 1 - state.Erasure,
+		Samples: state.ObservedSamples, Decided: uint64(state.ObservedSamples),
 	}
 }
 
@@ -771,7 +777,6 @@ func (p *Path) params() fec.Params {
 		ShardBytes:      p.symbolBytes(),
 		RateBytesPerSec: p.rate(),
 		RoundTrip:       p.roundTrip(),
-		TargetResidual:  p.cfg.TargetResidual,
 	}
 }
 

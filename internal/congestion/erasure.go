@@ -284,8 +284,20 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		// together, and the share is what stops their probes compounding. An
 		// untrusted local estimate contributes zero weight rather than diluting
 		// a floor another lane has already established.
-		state := e.path.Report(e.id(), floor, floorSamples, float64(snapshot.Decided),
-			float64(e.inner.bandwidth()), e.inner.minRoundTrip())
+		//
+		// The measured erasure is reported alongside it and is not the same
+		// number. This sender paces from the floor, which is conservative on
+		// purpose; the code is sized from the measurement, because a code that
+		// under-estimates erasure sends no parity into a channel that is
+		// erasing. Reporting only the floor is what left 97% of lossy flows
+		// uncoded -- see docs/CONTROL-REDESIGN.md.
+		state := e.path.Report(e.id(), pathmodel.Observation{
+			Floor: floor, FloorSamples: floorSamples,
+			Erasure: snapshot.Loss, BurstFactor: snapshot.BurstFactor,
+			ObservedSamples: float64(snapshot.Decided),
+			Delivered:       float64(e.inner.bandwidth()),
+			RoundTrip:       e.inner.minRoundTrip(),
+		})
 		floor = state.Floor
 		e.share.Store(uint64(state.Share))
 	}
