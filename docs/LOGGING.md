@@ -103,7 +103,14 @@ Prometheus `/metrics` names. They cover:
 
 - active/started/completed/failed flows and transferred bytes;
 - latest, smoothed, and controller-minimum RTT;
-- QUIC sent, received, and lost bytes plus sent, received, and lost packets;
+- QUIC sent and received bytes and packets, and three loss counters that must
+  be read together: `queqiao_quic_loss_observed_packets_total` is every loss
+  the sender detected, `queqiao_quic_loss_suppressed_packets_total` is the part
+  withheld from the congestion controller as erasure, and
+  `queqiao_quic_controller_packets_lost` is the part charged as congestion.
+  Observed is the sum of the other two, and it is the one to divide by
+  `queqiao_quic_packets_sent` for a loss rate -- on an erasure path the charged
+  figure alone understates the channel by most of its loss;
 - delivery, ACK, send, pacing, and maximum-bandwidth estimates;
 - congestion window, bytes in flight, controller round/mode/recovery;
 - lanes, failures, replacements, reinjections, fallbacks, and timeouts;
@@ -122,8 +129,14 @@ did not. A flow that never lost its last healthy lane reports zeroes. Both
 endpoints use the same names, so a client record and a gateway record about the
 same failure can be read side by side.
 
-The dashboard calculates interval packet loss from changes in sent and lost
-packet counters. Those counters are process-wide monotonic totals: they are
+The dashboard calculates interval packet loss from changes in
+`queqiao_quic_packets_sent` and `queqiao_quic_loss_observed_packets_total`.
+`queqiao_quic_packets_lost` and `queqiao_quic_bytes_lost` were removed: they
+were quic-go's own counters, incremented only inside its cubic sender, and this
+transport installs its own controller, so nothing ever moved them off zero
+while the dashboard divided by them. A counter that cannot be produced is worse
+than a missing one once it is monotonic, because it then reads as a
+measurement. Those counters are process-wide monotonic totals: they are
 accumulated from the forward movement of each QUIC connection, measured once
 per connection against a baseline the connection itself holds.
 

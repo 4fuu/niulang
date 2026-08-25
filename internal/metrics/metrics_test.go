@@ -34,7 +34,7 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	})
 	r.AddQUICConnectionCounters(QUICConnectionCounters{
 		BytesSent: 100, BytesReceived: 200, PacketsSent: 80, PacketsReceived: 75,
-		BytesLost: 3, PacketsLost: 4, ControllerSamples: 12,
+		LossSuppressedPackets: 3, LossObservedPackets: 4, ControllerSamples: 12,
 		ControllerNonAppSamples: 10, ControllerAppSamples: 2,
 		ControllerStateMisses: 1, ControllerZeroSamples: 3,
 	})
@@ -48,7 +48,7 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	if s.UDPPathUnavailable != 1 || s.EndpointTransportRaceFailures != 1 || s.TransientUDPSendErrors != 1 {
 		t.Fatalf("unexpected endpoint transport snapshot: %+v", s)
 	}
-	if s.QUICPacketsSent != 80 || s.QUICPacketsReceived != 75 || s.QUICPacketsLost != 4 || s.QUICControllerErasureFloor != 0.0475 {
+	if s.QUICPacketsSent != 80 || s.QUICPacketsReceived != 75 || s.QUICLossObservedPackets != 4 || s.QUICControllerErasureFloor != 0.0475 {
 		t.Fatalf("unexpected loss telemetry snapshot: %+v", s)
 	}
 	rec := httptest.NewRecorder()
@@ -285,7 +285,7 @@ func TestLaneJoinRefusalsAreCountedByReason(t *testing.T) {
 func TestQUICCountersDoNotFallWhenTheFlowsReportingThemEnd(t *testing.T) {
 	r := New()
 	r.AddQUICConnectionCounters(QUICConnectionCounters{
-		BytesSent: 4096, PacketsSent: 40, PacketsLost: 2, ControllerPacketsLost: 3,
+		BytesSent: 4096, PacketsSent: 40, LossObservedPackets: 2, ControllerPacketsLost: 3,
 	})
 	r.ObserveQUIC(1, QUICObservation{Lanes: 2, SmoothedRTT: 200 * time.Millisecond})
 	before := r.Snapshot()
@@ -301,7 +301,7 @@ func TestQUICCountersDoNotFallWhenTheFlowsReportingThemEnd(t *testing.T) {
 		t.Fatalf("counters fell when the flow ended: before=%d/%d after=%d/%d",
 			before.QUICBytesSent, before.QUICPacketsSent, after.QUICBytesSent, after.QUICPacketsSent)
 	}
-	if after.QUICPacketsLost != 2 || after.QUICControllerPacketsLost != 3 {
+	if after.QUICLossObservedPackets != 2 || after.QUICControllerPacketsLost != 3 {
 		t.Fatalf("loss counters fell when the flow ended: %+v", after)
 	}
 	if after.QUICLanes != 0 {
@@ -337,7 +337,7 @@ func TestFlowObservationsDoNotContributeToTheCounters(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		r.ObserveQUIC(uint64(i+1), QUICObservation{Lanes: 3, SmoothedRTT: time.Second})
 	}
-	if got := r.Snapshot(); got.QUICBytesSent != 0 || got.QUICPacketsSent != 0 || got.QUICPacketsLost != 0 {
+	if got := r.Snapshot(); got.QUICBytesSent != 0 || got.QUICPacketsSent != 0 || got.QUICLossObservedPackets != 0 {
 		t.Fatalf("flow gauges leaked into the counters: %+v", got)
 	}
 }
@@ -348,15 +348,15 @@ func TestFlowObservationsDoNotContributeToTheCounters(t *testing.T) {
 // an enormous forward jump, which is the same fabricated-traffic failure this
 // change exists to remove.
 func TestConnectionCountersIgnoreBackwardMovement(t *testing.T) {
-	first := QUICConnectionCounters{BytesSent: 10_000, PacketsSent: 100, PacketsLost: 9}
+	first := QUICConnectionCounters{BytesSent: 10_000, PacketsSent: 100, LossObservedPackets: 9}
 	// The peer acknowledges a packet previously declared lost.
-	second := QUICConnectionCounters{BytesSent: 11_000, PacketsSent: 110, PacketsLost: 7}
+	second := QUICConnectionCounters{BytesSent: 11_000, PacketsSent: 110, LossObservedPackets: 7}
 	delta := second.Advance(first)
 	if delta.BytesSent != 1000 || delta.PacketsSent != 10 {
 		t.Fatalf("forward movement mismeasured: %+v", delta)
 	}
-	if delta.PacketsLost != 0 {
-		t.Fatalf("withdrawn loss reported as %d packets of new loss", delta.PacketsLost)
+	if delta.LossObservedPackets != 0 {
+		t.Fatalf("withdrawn loss reported as %d packets of new loss", delta.LossObservedPackets)
 	}
 
 	// A fresh connection generation restarts every counter at zero.
@@ -380,5 +380,85 @@ func TestRepublishingTheSameConnectionReadingCountsOnce(t *testing.T) {
 	if got := r.Snapshot(); got.QUICBytesSent != 5000 || got.QUICPacketsSent != 50 {
 		t.Fatalf("one connection reading counted %d bytes / %d packets, want 5000/50",
 			got.QUICBytesSent, got.QUICPacketsSent)
+	}
+}
+
+// quic-go increments its own loss counters only inside its cubic sender, and
+// this transport installs its own controller through SetCongestionControl, so
+// queqiao_quic_packets_lost and queqiao_quic_bytes_lost could never leave zero.
+// They were published anyway, and the dashboard divided by them. A counter
+// that cannot be produced is worse than a missing one once it is monotonic,
+// because it then reads as a measurement rather than as an absence.
+func TestTheExpositionPublishesNoCounterItCannotProduce(t *testing.T) {
+	r := New()
+	r.AddQUICConnectionCounters(QUICConnectionCounters{
+		PacketsSent: 1000, LossObservedPackets: 200, LossSuppressedPackets: 160,
+		ControllerPacketsLost: 40,
+	})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+
+	for _, dead := range []string{"queqiao_quic_packets_lost", "queqiao_quic_bytes_lost"} {
+		for _, line := range strings.Split(body, "\n") {
+			if name, _, ok := strings.Cut(line, " "); ok && name == dead {
+				t.Errorf("%s is still published, and nothing can move it off zero", dead)
+			}
+		}
+	}
+	for _, want := range []string{
+		"queqiao_quic_loss_observed_packets_total 200",
+		"queqiao_quic_loss_suppressed_packets_total 160",
+		"queqiao_quic_controller_packets_lost 40",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition is missing %q", want)
+		}
+	}
+}
+
+// The three loss figures are only readable together if they add up, and they
+// have to keep adding up after the per-connection folding that banks them.
+func TestObservedLossIsTheSumOfChargedAndSuppressedAcrossConnections(t *testing.T) {
+	r := New()
+	for _, c := range []QUICConnectionCounters{
+		{PacketsSent: 500, LossObservedPackets: 100, LossSuppressedPackets: 80, ControllerPacketsLost: 20},
+		{PacketsSent: 300, LossObservedPackets: 60, LossSuppressedPackets: 45, ControllerPacketsLost: 15},
+	} {
+		r.AddQUICConnectionCounters(c)
+	}
+	s := r.Snapshot()
+	if s.QUICLossObservedPackets != 160 {
+		t.Fatalf("observed = %d, want 160", s.QUICLossObservedPackets)
+	}
+	if s.QUICLossObservedPackets != s.QUICLossSuppressedPackets+s.QUICControllerPacketsLost {
+		t.Fatalf("observed %d != suppressed %d + charged %d",
+			s.QUICLossObservedPackets, s.QUICLossSuppressedPackets, s.QUICControllerPacketsLost)
+	}
+	// And the loss rate a dashboard would derive is the channel's, not the
+	// controller's. Publishing only the charged figure understated a fifth of
+	// downstream erasure as a few percent.
+	observed := 100 * float64(s.QUICLossObservedPackets) / float64(s.QUICPacketsSent)
+	charged := 100 * float64(s.QUICControllerPacketsLost) / float64(s.QUICPacketsSent)
+	if observed <= charged*2 {
+		t.Fatalf("observed %.1f%% and charged %.1f%% are too close to be distinguishable", observed, charged)
+	}
+}
+
+// A dead counter must not come back as a silently-zero one either: the totals
+// only ever move forward from what a connection actually reported.
+func TestLossTotalsOnlyMoveForward(t *testing.T) {
+	r := New()
+	r.AddQUICConnectionCounters(QUICConnectionCounters{LossObservedPackets: 50, LossSuppressedPackets: 40})
+	before := r.Snapshot()
+	// quic-go may withdraw a loss it decides was reordering, and a pooled
+	// connection replaced by a fresh generation restarts at zero.
+	r.AddQUICConnectionCounters(QUICConnectionCounters{})
+	after := r.Snapshot()
+	if after.QUICLossObservedPackets < before.QUICLossObservedPackets {
+		t.Fatalf("observed total fell from %d to %d", before.QUICLossObservedPackets, after.QUICLossObservedPackets)
+	}
+	if after.QUICLossSuppressedPackets < before.QUICLossSuppressedPackets {
+		t.Fatalf("suppressed total fell from %d to %d", before.QUICLossSuppressedPackets, after.QUICLossSuppressedPackets)
 	}
 }

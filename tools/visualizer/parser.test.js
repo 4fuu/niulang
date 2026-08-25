@@ -65,21 +65,23 @@ test("prefers typed production FEC telemetry over the compatibility summary", ()
   assert.equal(data.flows[0].fec.reason, "sized for the loss floor");
 });
 
-test("parses timestamped metrics JSONL and derives goodput and byte loss", () => {
+test("parses timestamped metrics JSONL and derives goodput and loss", () => {
   const data = Parser.parseText("metrics.jsonl", [
     JSON.stringify({ type: "metrics", started_utc: "2026-08-18T10:00:00Z", metrics: {
       queqiao_quic_bytes_received: 1000, queqiao_quic_bytes_sent: 500,
-      queqiao_quic_bytes_lost: 10, queqiao_quic_smoothed_rtt_seconds: 0.2,
+      queqiao_quic_packets_sent: 100, queqiao_quic_loss_observed_packets_total: 10,
+      queqiao_quic_smoothed_rtt_seconds: 0.2,
     }}),
     JSON.stringify({ type: "metrics", started_utc: "2026-08-18T10:00:02Z", metrics: {
       queqiao_quic_bytes_received: 3001000, queqiao_quic_bytes_sent: 1000500,
-      queqiao_quic_bytes_lost: 20010, queqiao_quic_smoothed_rtt_seconds: 0.25,
+      queqiao_quic_packets_sent: 1100, queqiao_quic_loss_observed_packets_total: 30,
+      queqiao_quic_smoothed_rtt_seconds: 0.25,
     }}),
   ].join("\n"));
   assert.equal(data.points.length, 2);
   assert.equal(data.points[1].metrics.throughput_down_bps, 12_000_000);
   assert.equal(data.points[1].metrics.throughput_up_bps, 4_000_000);
-  assert.equal(data.points[1].metrics.byte_loss_percent, 2);
+  assert.equal(data.points[1].metrics.packet_loss_percent, 2);
   assert.equal(data.points[1].metrics.smoothed_rtt_ms, 250);
   assert.equal(data.points[1].group, "metrics.jsonl");
   assert.equal(data.events.length, 0);
@@ -87,8 +89,8 @@ test("parses timestamped metrics JSONL and derives goodput and byte loss", () =>
 
 test("parses production runtime telemetry in JSON and text formats", () => {
   const jsonLog = Parser.parseText("client.log", [
-    JSON.stringify({ time: "2026-08-18T10:00:00Z", msg: "performance snapshot", type: "metrics", role: "client", telemetry_schema: 1, queqiao_quic_bytes_received: 1000, queqiao_bytes_down_total: 0, queqiao_quic_packets_sent: 100, queqiao_quic_packets_lost: 2, queqiao_quic_smoothed_rtt_seconds: .2, queqiao_quic_controller_erasure_floor_ratio: .03, queqiao_quic_controller_in_recovery: false }),
-    JSON.stringify({ time: "2026-08-18T10:00:05Z", msg: "performance snapshot", type: "metrics", role: "client", telemetry_schema: 1, queqiao_quic_bytes_received: 5001000, queqiao_bytes_down_total: 2500000, queqiao_quic_packets_sent: 1100, queqiao_quic_packets_lost: 52, queqiao_quic_smoothed_rtt_seconds: .25, queqiao_quic_controller_erasure_floor_ratio: .04, queqiao_quic_controller_in_recovery: true }),
+    JSON.stringify({ time: "2026-08-18T10:00:00Z", msg: "performance snapshot", type: "metrics", role: "client", telemetry_schema: 1, queqiao_quic_bytes_received: 1000, queqiao_bytes_down_total: 0, queqiao_quic_packets_sent: 100, queqiao_quic_loss_observed_packets_total: 2, queqiao_quic_smoothed_rtt_seconds: .2, queqiao_quic_controller_erasure_floor_ratio: .03, queqiao_quic_controller_in_recovery: false }),
+    JSON.stringify({ time: "2026-08-18T10:00:05Z", msg: "performance snapshot", type: "metrics", role: "client", telemetry_schema: 1, queqiao_quic_bytes_received: 5001000, queqiao_bytes_down_total: 2500000, queqiao_quic_packets_sent: 1100, queqiao_quic_loss_observed_packets_total: 52, queqiao_quic_smoothed_rtt_seconds: .25, queqiao_quic_controller_erasure_floor_ratio: .04, queqiao_quic_controller_in_recovery: true }),
   ].join("\n"));
   assert.equal(jsonLog.points.length, 2);
   assert.equal(jsonLog.points[1].group, "client");
@@ -170,4 +172,37 @@ test("reports unsupported content instead of fabricating records", () => {
   const data = Parser.parseText("unknown.txt", "this is not a transport log");
   assert.equal(data.points.length, 0);
   assert.match(data.warnings[0], /no supported performance records/);
+});
+
+test("derives packet loss from what the path did, not from what the controller was charged", () => {
+  // On an erasure path these differ by most of the loss: the controller is
+  // charged only the congestive share. A dashboard that divides by the charged
+  // figure reports single-digit loss on a channel erasing a fifth.
+  const data = Parser.parseText("client.log", [
+    JSON.stringify({ time: "2026-08-25T10:00:00Z", msg: "performance snapshot", type: "metrics", role: "client", telemetry_schema: 1,
+      queqiao_quic_packets_sent: 1000, queqiao_quic_loss_observed_packets_total: 0,
+      queqiao_quic_loss_suppressed_packets_total: 0, queqiao_quic_controller_packets_lost: 0 }),
+    JSON.stringify({ time: "2026-08-25T10:00:01Z", msg: "performance snapshot", type: "metrics", role: "client", telemetry_schema: 1,
+      queqiao_quic_packets_sent: 2000, queqiao_quic_loss_observed_packets_total: 200,
+      queqiao_quic_loss_suppressed_packets_total: 180, queqiao_quic_controller_packets_lost: 20 }),
+  ].join("\n"));
+  const point = data.points[1];
+  assert.equal(point.metrics.packet_loss_percent, 20);
+  assert.equal(point.metrics.loss_packets_per_second, 200);
+  assert.equal(point.metrics.loss_suppressed_packets_per_second, 180);
+  assert.equal(point.metrics.controller_loss_packets_per_second, 20);
+});
+
+test("publishes no series derived from a counter that no longer exists", () => {
+  const data = Parser.parseText("client.log", [
+    JSON.stringify({ time: "2026-08-25T10:00:00Z", msg: "performance snapshot", type: "metrics", role: "client", telemetry_schema: 1,
+      queqiao_quic_bytes_sent: 1000, queqiao_quic_packets_sent: 100, queqiao_quic_loss_observed_packets_total: 0 }),
+    JSON.stringify({ time: "2026-08-25T10:00:01Z", msg: "performance snapshot", type: "metrics", role: "client", telemetry_schema: 1,
+      queqiao_quic_bytes_sent: 3000, queqiao_quic_packets_sent: 200, queqiao_quic_loss_observed_packets_total: 10 }),
+  ].join("\n"));
+  const point = data.points[1];
+  // byte_loss_percent had only quic_bytes_lost_total behind it, which was
+  // structurally zero. It is gone rather than reported as a confident 0%.
+  assert.equal(point.metrics.byte_loss_percent, undefined);
+  assert.equal(point.metrics.packet_loss_percent, 10);
 });

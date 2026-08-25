@@ -176,7 +176,7 @@ func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
 	})
 	registry.AddQUICConnectionCounters(metrics.QUICConnectionCounters{
 		BytesSent: 1234, BytesReceived: 5678,
-		PacketsSent: 123, PacketsReceived: 119, PacketsLost: 3,
+		PacketsSent: 123, PacketsReceived: 119, LossObservedPackets: 3,
 	})
 	logPerformanceSnapshot(logger, registry.Snapshot(), 5*time.Second)
 	var record map[string]any

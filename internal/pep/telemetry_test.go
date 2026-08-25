@@ -88,10 +88,10 @@ func TestPooledConnectionCountsOncePerConnectionNotPerLane(t *testing.T) {
 	shared := &connTelemetry{id: 1}
 	stats := laneTransportStats{
 		smoothedRTT: 200 * time.Millisecond,
-		bytesSent:   10_000, packetsSent: 100, packetsLost: 4,
+		bytesSent:   10_000, packetsSent: 100,
 		controller: wancongestion.ControllerTelemetry{
 			Kind: "erasure", CongestionWindow: 400_000, PacingRate: 1_250_000,
-			PacketsLost: 4, Samples: 12,
+			PacketsLost: 4, PacketsLostObserved: 4, Samples: 12,
 		},
 	}
 	flow.lanes[0] = pooledLane(0, shared, stats)
@@ -108,9 +108,9 @@ func TestPooledConnectionCountsOncePerConnectionNotPerLane(t *testing.T) {
 		t.Fatalf("three lanes on one connection counted %d bytes / %d packets, want 10000/100",
 			got.QUICBytesSent, got.QUICPacketsSent)
 	}
-	if got.QUICPacketsLost != 4 || got.QUICControllerPacketsLost != 4 {
+	if got.QUICLossObservedPackets != 4 || got.QUICControllerPacketsLost != 4 {
 		t.Fatalf("loss multiplied by the lane count: packets=%d controller=%d, want 4/4",
-			got.QUICPacketsLost, got.QUICControllerPacketsLost)
+			got.QUICLossObservedPackets, got.QUICControllerPacketsLost)
 	}
 	if got.QUICControllerSamples != 12 {
 		t.Fatalf("controller samples = %d, want 12", got.QUICControllerSamples)

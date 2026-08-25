@@ -45,8 +45,9 @@
     sent: "quic_bytes_sent_total",
     pktsent: "quic_packets_sent_total",
     pktrecv: "quic_packets_received_total",
-    lostbytes: "quic_bytes_lost_total",
-    lost: "quic_packets_lost_total",
+    lost: "quic_loss_observed_packets_total",
+    lostsupp: "quic_loss_suppressed_packets_total",
+    lostcong: "controller_packets_lost_total",
     mode: "controller_mode",
   };
 
@@ -210,10 +211,10 @@
     copy("queqiao_quic_controller_erasure_floor_ratio", "erasure_floor_ratio");
     copy("queqiao_quic_bytes_sent", "quic_bytes_sent_total");
     copy("queqiao_quic_bytes_received", "quic_bytes_received_total");
-    copy("queqiao_quic_bytes_lost", "quic_bytes_lost_total");
     copy("queqiao_quic_packets_sent", "quic_packets_sent_total");
     copy("queqiao_quic_packets_received", "quic_packets_received_total");
-    copy("queqiao_quic_packets_lost", "quic_packets_lost_total");
+    copy("queqiao_quic_loss_observed_packets_total", "quic_loss_observed_packets_total");
+    copy("queqiao_quic_loss_suppressed_packets_total", "quic_loss_suppressed_packets_total");
     copy("queqiao_quic_controller_in_recovery", "controller_in_recovery");
     copy("queqiao_quic_controller_mode", "controller_mode");
     copy("queqiao_active_flows", "active_flows");
@@ -603,10 +604,10 @@
       ["quic_bytes_sent_total", "throughput_up_bps", 8],
       ["application_bytes_down_total", "application_throughput_down_bps", 8],
       ["application_bytes_up_total", "application_throughput_up_bps", 8],
-      ["quic_bytes_lost_total", "loss_bytes_per_second", 1],
       ["quic_packets_sent_total", "packets_sent_per_second", 1],
       ["quic_packets_received_total", "packets_received_per_second", 1],
-      ["quic_packets_lost_total", "loss_packets_per_second", 1],
+      ["quic_loss_observed_packets_total", "loss_packets_per_second", 1],
+      ["quic_loss_suppressed_packets_total", "loss_suppressed_packets_per_second", 1],
       ["controller_bytes_lost_total", "controller_loss_bytes_per_second", 1],
       ["controller_packets_lost_total", "controller_loss_packets_per_second", 1],
       ["bytes_reissued_total", "reissued_bytes_per_second", 1],
@@ -624,13 +625,8 @@
           if (!Number.isFinite(before) || !Number.isFinite(after) || after < before) continue;
           current.metrics[rate] = (after - before) * factor / seconds;
         }
-        const sent = current.metrics.quic_bytes_sent_total - previous.metrics.quic_bytes_sent_total;
-        const lost = current.metrics.quic_bytes_lost_total - previous.metrics.quic_bytes_lost_total;
-        if (Number.isFinite(sent) && Number.isFinite(lost) && sent > 0 && sent >= 0 && lost >= 0) {
-          current.metrics.byte_loss_percent = 100 * lost / sent;
-        }
         const packetsSent = current.metrics.quic_packets_sent_total - previous.metrics.quic_packets_sent_total;
-        const packetsLost = current.metrics.quic_packets_lost_total - previous.metrics.quic_packets_lost_total;
+        const packetsLost = current.metrics.quic_loss_observed_packets_total - previous.metrics.quic_loss_observed_packets_total;
         if (Number.isFinite(packetsSent) && Number.isFinite(packetsLost) && packetsSent > 0 && packetsLost >= 0) {
           current.metrics.packet_loss_percent = 100 * packetsLost / packetsSent;
         }

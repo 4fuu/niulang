@@ -241,7 +241,6 @@ type laneTransportStats struct {
 	latestRTT, smoothedRTT       time.Duration
 	bytesSent, bytesReceived     uint64
 	packetsSent, packetsReceived uint64
-	bytesLost, packetsLost       uint64
 	controller                   wancongestion.ControllerTelemetry
 }
 
@@ -317,7 +316,6 @@ func (c *quicStreamConn) transportStats() laneTransportStats {
 		latestRTT: s.LatestRTT, smoothedRTT: s.SmoothedRTT,
 		bytesSent: s.BytesSent, bytesReceived: s.BytesReceived,
 		packetsSent: s.PacketsSent, packetsReceived: s.PacketsReceived,
-		bytesLost: s.BytesLost, packetsLost: s.PacketsLost,
 	}
 	if c.controller != nil {
 		stats.controller = c.controller.Telemetry()

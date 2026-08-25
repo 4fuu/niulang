@@ -25,10 +25,35 @@ type ControllerTelemetry struct {
 	PacingRate       uint64
 	CongestionWindow uint64
 	BytesInFlight    uint64
-	BytesLost        uint64
-	PacketsLost      uint64
-	MinRTT           time.Duration
-	InRecovery       bool
+	// BytesLost and PacketsLost are what reached the congestion controller,
+	// which on an erasure path is not what the path did. ErasureSender charges
+	// the controller only the share of each loss the channel does not explain,
+	// so these count congestion and not erasure.
+	BytesLost   uint64
+	PacketsLost uint64
+	// PacketsLostObserved is every loss this sender detected, before any of it
+	// was classified, and PacketsLostSuppressed is the part withheld from the
+	// controller as erasure. The three satisfy
+	//
+	//	observed = PacketsLost + suppressed
+	//
+	// and a controller that classifies nothing reports observed == PacketsLost
+	// with suppressed zero, so the identity holds for every kind.
+	//
+	// Observed is the only one of the three that answers "what is this path
+	// doing to my packets". Publishing the controller's figure alone is what
+	// let a gateway erasing a fifth of its downstream report single-digit
+	// loss: the rest had been correctly reclassified and then silently
+	// dropped from the record.
+	//
+	// They are packet counts and not byte counts because a loss rate is a
+	// count over a count of trials; the sender's own byte totals do not divide
+	// into the suppressed and charged shares without attributing bytes to a
+	// classification made per packet.
+	PacketsLostObserved   uint64
+	PacketsLostSuppressed uint64
+	MinRTT                time.Duration
+	InRecovery            bool
 	// ErasureFloor is the share of packets this path drops for reasons that
 	// have nothing to do with sending rate, as the controller currently
 	// believes it. Everything sized for the path is sized from this number --
@@ -145,7 +170,10 @@ func (t *telemetryState) snapshot() ControllerTelemetry {
 		BytesInFlight:    t.bytesInFlight.Load(),
 		BytesLost:        t.bytesLost.Load(),
 		PacketsLost:      t.packetsLost.Load(),
-		MinRTT:           time.Duration(t.minRTTNS.Load()),
-		InRecovery:       t.inRecovery.Load(),
+		// A controller that does not classify loss observed exactly what it
+		// was charged. ErasureSender overrides both of these because it does.
+		PacketsLostObserved: t.packetsLost.Load(),
+		MinRTT:              time.Duration(t.minRTTNS.Load()),
+		InRecovery:          t.inRecovery.Load(),
 	}
 }

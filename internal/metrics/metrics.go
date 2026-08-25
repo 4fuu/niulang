@@ -217,8 +217,8 @@ type quicCounterTotals struct {
 	bytesReceived           atomic.Uint64
 	packetsSent             atomic.Uint64
 	packetsReceived         atomic.Uint64
-	bytesLost               atomic.Uint64
-	packetsLost             atomic.Uint64
+	lossObservedPackets     atomic.Uint64
+	lossSuppressedPackets   atomic.Uint64
 	controllerBytesLost     atomic.Uint64
 	controllerPacketsLost   atomic.Uint64
 	controllerSamples       atomic.Uint64
@@ -233,8 +233,8 @@ func (t *quicCounterTotals) add(d QUICConnectionCounters) {
 	t.bytesReceived.Add(d.BytesReceived)
 	t.packetsSent.Add(d.PacketsSent)
 	t.packetsReceived.Add(d.PacketsReceived)
-	t.bytesLost.Add(d.BytesLost)
-	t.packetsLost.Add(d.PacketsLost)
+	t.lossObservedPackets.Add(d.LossObservedPackets)
+	t.lossSuppressedPackets.Add(d.LossSuppressedPackets)
 	t.controllerBytesLost.Add(d.ControllerBytesLost)
 	t.controllerPacketsLost.Add(d.ControllerPacketsLost)
 	t.controllerSamples.Add(d.ControllerSamples)
@@ -250,8 +250,8 @@ func (t *quicCounterTotals) load() QUICConnectionCounters {
 		BytesReceived:           t.bytesReceived.Load(),
 		PacketsSent:             t.packetsSent.Load(),
 		PacketsReceived:         t.packetsReceived.Load(),
-		BytesLost:               t.bytesLost.Load(),
-		PacketsLost:             t.packetsLost.Load(),
+		LossObservedPackets:     t.lossObservedPackets.Load(),
+		LossSuppressedPackets:   t.lossSuppressedPackets.Load(),
 		ControllerBytesLost:     t.controllerBytesLost.Load(),
 		ControllerPacketsLost:   t.controllerPacketsLost.Load(),
 		ControllerSamples:       t.controllerSamples.Load(),
@@ -279,8 +279,9 @@ type Snapshot struct {
 	ReplayBytesInUse                                              int64
 	QUICLanes                                                     int64
 	QUICLatestRTT, QUICSmoothedRTT                                time.Duration
-	QUICBytesSent, QUICBytesReceived, QUICBytesLost               uint64
-	QUICPacketsSent, QUICPacketsReceived, QUICPacketsLost         uint64
+	QUICBytesSent, QUICBytesReceived                              uint64
+	QUICPacketsSent, QUICPacketsReceived                          uint64
+	QUICLossObservedPackets, QUICLossSuppressedPackets            uint64
 	QUICControllerKind                                            string
 	QUICControllerMode                                            uint32
 	QUICControllerMaxBandwidth, QUICControllerPacingRate          uint64
@@ -349,12 +350,23 @@ type QUICObservation struct {
 // The process totals are accumulated from forward deltas measured once per
 // connection instead.  See AddQUICConnectionCounters.
 type QUICConnectionCounters struct {
-	BytesSent               uint64
-	BytesReceived           uint64
-	PacketsSent             uint64
-	PacketsReceived         uint64
-	BytesLost               uint64
-	PacketsLost             uint64
+	BytesSent       uint64
+	BytesReceived   uint64
+	PacketsSent     uint64
+	PacketsReceived uint64
+	// LossObservedPackets is every loss the sender detected on this
+	// connection. LossSuppressedPackets is the part it withheld from the
+	// congestion controller as erasure, and ControllerPacketsLost is the part
+	// it charged as congestion; the first is the sum of the other two.
+	//
+	// quic-go's own BytesLost and PacketsLost used to be carried here and are
+	// deliberately absent. They are incremented only inside its cubic sender,
+	// and this transport installs its own controller through
+	// SetCongestionControl, so nothing ever moved them off zero. A counter
+	// that cannot be produced is worse than a missing one once it is
+	// monotonic, because it then looks like a measurement.
+	LossObservedPackets     uint64
+	LossSuppressedPackets   uint64
 	ControllerBytesLost     uint64
 	ControllerPacketsLost   uint64
 	ControllerSamples       uint64
@@ -386,8 +398,8 @@ func (c QUICConnectionCounters) Advance(previous QUICConnectionCounters) QUICCon
 		BytesReceived:           forward(c.BytesReceived, previous.BytesReceived),
 		PacketsSent:             forward(c.PacketsSent, previous.PacketsSent),
 		PacketsReceived:         forward(c.PacketsReceived, previous.PacketsReceived),
-		BytesLost:               forward(c.BytesLost, previous.BytesLost),
-		PacketsLost:             forward(c.PacketsLost, previous.PacketsLost),
+		LossObservedPackets:     forward(c.LossObservedPackets, previous.LossObservedPackets),
+		LossSuppressedPackets:   forward(c.LossSuppressedPackets, previous.LossSuppressedPackets),
 		ControllerBytesLost:     forward(c.ControllerBytesLost, previous.ControllerBytesLost),
 		ControllerPacketsLost:   forward(c.ControllerPacketsLost, previous.ControllerPacketsLost),
 		ControllerSamples:       forward(c.ControllerSamples, previous.ControllerSamples),
@@ -404,8 +416,8 @@ func (c *QUICConnectionCounters) Add(delta QUICConnectionCounters) {
 	c.BytesReceived += delta.BytesReceived
 	c.PacketsSent += delta.PacketsSent
 	c.PacketsReceived += delta.PacketsReceived
-	c.BytesLost += delta.BytesLost
-	c.PacketsLost += delta.PacketsLost
+	c.LossObservedPackets += delta.LossObservedPackets
+	c.LossSuppressedPackets += delta.LossSuppressedPackets
 	c.ControllerBytesLost += delta.ControllerBytesLost
 	c.ControllerPacketsLost += delta.ControllerPacketsLost
 	c.ControllerSamples += delta.ControllerSamples
@@ -714,8 +726,8 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICBytesReceived = counters.BytesReceived
 	s.QUICPacketsSent = counters.PacketsSent
 	s.QUICPacketsReceived = counters.PacketsReceived
-	s.QUICBytesLost = counters.BytesLost
-	s.QUICPacketsLost = counters.PacketsLost
+	s.QUICLossObservedPackets = counters.LossObservedPackets
+	s.QUICLossSuppressedPackets = counters.LossSuppressedPackets
 	s.QUICControllerKind = controllerKind
 	s.QUICControllerMode = controllerMode
 	s.QUICControllerMaxBandwidth = controllerMaxBandwidth
@@ -786,10 +798,14 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_quic_smoothed_rtt_seconds %.9f\n", s.QUICSmoothedRTT.Seconds())
 	fmt.Fprintf(w, "queqiao_quic_bytes_sent %d\n", s.QUICBytesSent)
 	fmt.Fprintf(w, "queqiao_quic_bytes_received %d\n", s.QUICBytesReceived)
-	fmt.Fprintf(w, "queqiao_quic_bytes_lost %d\n", s.QUICBytesLost)
 	fmt.Fprintf(w, "queqiao_quic_packets_sent %d\n", s.QUICPacketsSent)
 	fmt.Fprintf(w, "queqiao_quic_packets_received %d\n", s.QUICPacketsReceived)
-	fmt.Fprintf(w, "queqiao_quic_packets_lost %d\n", s.QUICPacketsLost)
+	// What the path did, and what the controller was told about it. Observed
+	// is the one to divide by packets_sent for a loss rate; the controller
+	// figure below is congestion only, and on an erasure path the two differ
+	// by most of the loss.
+	fmt.Fprintf(w, "queqiao_quic_loss_observed_packets_total %d\n", s.QUICLossObservedPackets)
+	fmt.Fprintf(w, "queqiao_quic_loss_suppressed_packets_total %d\n", s.QUICLossSuppressedPackets)
 	// A rising expiry count means some flow's telemetry stopped being
 	// refreshed without being removed. The RTT values above are maxima, so
 	// that is the failure mode which freezes them at a stale constant.

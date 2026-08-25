@@ -133,7 +133,7 @@
     throughputs.push(...tables.map((row) => Number.isFinite(row.mbits_per_sec) ? row.mbits_per_sec * 1e6 : (Number.isFinite(row.speed_bytes_per_sec) ? row.speed_bytes_per_sec * 8 : null)));
     const rtts = metricValues(points, ["smoothed_rtt_ms", "latest_rtt_ms", "probe_latency_ms"]);
     for (const benchmark of reports) if (Number.isFinite(benchmark.report.path.rtt_ms)) rtts.push(benchmark.report.path.rtt_ms);
-    const losses = metricValues(points, ["packet_loss_percent", "byte_loss_percent", "configured_loss_percent"]);
+    const losses = metricValues(points, ["packet_loss_percent", "configured_loss_percent"]);
     for (const benchmark of reports) if (Number.isFinite(benchmark.report.path.loss_percent)) losses.push(benchmark.report.path.loss_percent);
     const fecFlow = latestFECFlow(flows);
     const fec = fecFlow && fecFlow.fec;
@@ -193,11 +193,11 @@
       title: "Loss and path erasure", unit: "% / packets·s⁻¹", format: (value) => value.toFixed(value >= 10 ? 1 : 2),
       series: [
         ["packet_loss_percent", "Packet loss %"],
-        ["byte_loss_percent", "Byte loss %"],
         ["configured_loss_percent", "Configured loss %"],
         ["erasure_floor_ratio", "Erasure floor %", (value) => value * 100],
         ["loss_packets_per_second", "Packet loss / s"],
-        ["controller_loss_packets_per_second", "Controller loss / s"],
+        ["loss_suppressed_packets_per_second", "Erasure (not charged) / s"],
+        ["controller_loss_packets_per_second", "Congestion (charged) / s"],
       ],
     },
     {
