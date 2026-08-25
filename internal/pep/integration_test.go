@@ -334,22 +334,49 @@ func mustUDPAddr(t *testing.T, address string) *net.UDPAddr {
 	return addr
 }
 
+// listenTCPAndUDPOnOnePort reserves one port number for both TCP and UDP.
+//
 // The port is chosen by the UDP allocator, and TCP is bound onto it -- not the
 // other way around. Windows reserves contiguous excluded port ranges at boot,
 // Hyper-V and WinNAT among them, and a bind inside one fails with WSAEACCES
 // even though nothing holds the port. Asking TCP for an ephemeral port and then
 // forcing UDP onto that number walked into them: the ephemeral allocator hands
 // out ports close to sequentially, so all twenty retries landed in the same
-// excluded band and every one of them failed. A :0 UDP bind never returns a
-// UDP-excluded port, so the side that was failing now cannot, and a retry gets
-// a fresh kernel-chosen port rather than the next number up.
+// excluded band and every one of them failed.
+//
+// Letting UDP choose the port only moved which side fails. The exclusions are
+// per protocol, so a kernel-chosen UDP port can still be excluded for TCP, and
+// then the retry walks the same band for the same reason: 49737, 49757, 49777
+// and 49827 on one Windows runner, four attempts marching through one
+// reservation. The port has to be free in both protocols, and retrying next to
+// the last failure will not find one while the reservation is wider than the
+// walk.
+//
+// So the retry escapes the band rather than walking it. Sockets that failed are
+// held open until the loop finishes, which stops the allocator from offering
+// the same number twice; and once the kernel's own range has disappointed us
+// several times, the remaining attempts pick a port at random from below that
+// range, where the dynamic reservations are not. Random rather than sequential,
+// because the thing being avoided is contiguous.
 func listenTCPAndUDPOnOnePort(t *testing.T) (net.Listener, net.PacketConn) {
 	t.Helper()
 	var lastErr error
-	for range 20 {
-		packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	var held []net.PacketConn
+	defer func() {
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	}()
+	const kernelChosenAttempts = 8
+	for attempt := range 40 {
+		address := "127.0.0.1:0"
+		if attempt >= kernelChosenAttempts {
+			address = "127.0.0.1:" + strconv.Itoa(portBelowTheDynamicRange(t))
+		}
+		packetConn, err := net.ListenPacket("udp", address)
 		if err != nil {
-			t.Fatal(err)
+			lastErr = err
+			continue
 		}
 		listener, err := net.Listen("tcp", packetConn.LocalAddr().String())
 		if err == nil {
@@ -360,10 +387,25 @@ func listenTCPAndUDPOnOnePort(t *testing.T) (net.Listener, net.PacketConn) {
 			return listener, packetConn
 		}
 		lastErr = err
-		_ = packetConn.Close()
+		held = append(held, packetConn)
 	}
 	t.Fatalf("could not reserve one TCP/UDP test port: %v", lastErr)
 	return nil, nil
+}
+
+// portBelowTheDynamicRange returns a port under 49152, which is where the
+// Windows dynamic range begins and therefore where the reservations inside it
+// begin. A port down here may well be in use by something else on the machine,
+// which is what the caller's retry is for; what it is not is administratively
+// excluded before anything binds it.
+func portBelowTheDynamicRange(t *testing.T) int {
+	t.Helper()
+	const low, span = 20000, 25000
+	var pick [2]byte
+	if _, err := rand.Read(pick[:]); err != nil {
+		t.Fatal(err)
+	}
+	return low + int(binary.BigEndian.Uint16(pick[:]))%span
 }
 
 func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
