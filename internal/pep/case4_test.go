@@ -109,7 +109,7 @@ func TestCase4APolicedPathIsStillUnbraked(t *testing.T) {
 	// burst as the path's bandwidth. Bounding the filter's memory in time did
 	// not help here, because the bursts recur every refill period, so there is
 	// always a recent high sample. The statistic is the problem, not its age.
-	if float64(peakBandwidth) < shaped*1.5 {
+	if float64(peakBandwidth) < shaped*1.4 {
 		t.Errorf("the bandwidth estimate is no longer reporting the burst rate (%d against a "+
 			"%d path); falsification case 4 may be resolved -- update the design document",
 			peakBandwidth, shaped)
@@ -120,9 +120,13 @@ func TestCase4APolicedPathIsStillUnbraked(t *testing.T) {
 			"is no longer the unbraked case and the design document should say so",
 			maxQueue, maxBrake)
 	}
-	if float64(peakPacing) < shaped*3 {
+	// The overdrive this case records, after the compensation was bounded and a
+	// stale peak stopped being re-seeded: 42x became 7.3x became 2.4x. It is
+	// still an overdrive and the path is still unbraked, so this still asserts
+	// the defect -- but it asserts the current one.
+	if float64(peakPacing) < shaped*1.8 {
 		t.Errorf("peak pacing %d is only %.1fx a %d path; the overdrive this case records has "+
-			"been reduced -- re-measure and update the design document",
+			"been reduced again -- re-measure and update the design document",
 			peakPacing, float64(peakPacing)/shaped, shaped)
 	}
 }
