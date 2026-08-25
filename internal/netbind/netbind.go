@@ -35,6 +35,13 @@ type candidate struct {
 	address       netip.Addr
 }
 
+// IsDynamic reports whether resolving spec depends on live interface state.
+// Literal addresses are stable configuration; automatic and interface-bound
+// specifications can disappear and reappear as links change.
+func IsDynamic(spec string) bool {
+	return spec == "auto" || strings.HasPrefix(spec, "if:")
+}
+
 // Resolve returns the address selected by a literal IP, "if:NAME", or
 // "auto". Automatic and interface modes deliberately consider only IPv4
 // addresses on active, non-loopback, non-point-to-point interfaces. Excluding
@@ -44,7 +51,7 @@ func Resolve(spec string) (netip.Addr, error) {
 	if err := Validate(spec); err != nil {
 		return netip.Addr{}, err
 	}
-	if spec != "" && spec != "auto" && !strings.HasPrefix(spec, "if:") {
+	if spec != "" && !IsDynamic(spec) {
 		return netip.ParseAddr(spec)
 	}
 
