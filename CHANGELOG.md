@@ -27,6 +27,253 @@ to `changelog.d/` instead, as [`CONTRIBUTING.md`](CONTRIBUTING.md) describes.
   keeps every existing device working while refusing every new enrollment, so
   nothing else in the flow counters moves when it happens.
 
+## v0.3.0 - 2026-08-25
+
+### Added
+
+- The sender is now held back when the path is carrying more than one
+  bandwidth-delay product of queue. The bound is that the round trip may not
+  exceed twice the path's own minimum, which is the same rule as the
+  controller's 2.0 congestion-window gain expressed in the time domain, and it
+  is a ratio rather than a duration on purpose: a duration would have to be
+  chosen, and the choice would be a latency policy smuggled into a congestion
+  controller.
+
+  It matters because a deeply buffered bottleneck absorbs an overload instead
+  of dropping it, so there is no loss to respond to and delay is the only
+  evidence. It also catches something the window gain cannot: on an erasure
+  path the window is divided by the arrival rate so that a full one arrives,
+  which means what is sent can be several times the bottleneck's worth, and
+  the queue is downstream of that division. The bound is therefore applied
+  after the compensation rather than before it. queqiao_delay_brake_ratio
+  publishes how much of the rate the bound is currently removing, so a path
+  held back by its own queue can be told from one that simply measured less.
+- The path emulator can model a token bucket with a burst allowance, through
+  Config.PolicerBurstBytes. A shaped path has two rates rather than one: a
+  short probe drains the bucket and measures the line, while sustained load
+  measures the shaping rate, and a path emulated with only the second is
+  indistinguishable from a slower one. The existing shallow bucket, one refill
+  quantum plus a packet, still models the live path and remains the default.
+- The path emulator can change what it erases while traffic is crossing it, in
+  each direction independently, through Relay.SetLossRate and
+  Bottleneck.SetLossRate. A path that only ever erases what it was constructed
+  with cannot express the case a transport most needs to survive: a channel
+  that moves under a live flow, which is what the motivating incident was. A
+  negative rate leaves a direction alone so one can be changed without knowing
+  the other, and a change clears any correlated-loss burst state rather than
+  carrying the old regime across it.
+- The erasure a path is measured to be applying is now published, labelled by
+  the direction it was measured on: queqiao_erasure_ratio{direction="send"} in
+  the metrics and queqiao_erasure_ratio_send in the performance snapshot. A
+  gateway's send direction is its downstream, which is the direction that had
+  no metric at all. The only erasure figure that used to leave the process was
+  the congestion controller's floor, and a floor is not a smaller version of
+  the measurement: it is biased low so that pacing errs towards slowing down,
+  and it is a lower envelope for a connection's lifetime, so it keeps whatever
+  a clean window established while the channel moves. On one live incident the
+  two read 1.76% and 19.9%, and nothing on a dashboard could show which one
+  the code was being sized for.
+- The erasure an endpoint receives is now published as well as the erasure it
+  sends into. queqiao_coded_symbols_total is split by outcome -- arrived,
+  recovered by the code, or left the window still missing -- with
+  queqiao_erasure_ratio{direction="receive"} and
+  queqiao_erasure_residual_ratio{direction="receive"} derived from those
+  counters. The residual is what the code could not repair and the session re-
+  issues a round trip later, and it is the figure the motivating incident was
+  actually made of: 11% of the downstream payload, measured by the client's
+  decoders on every flow and never leaving the process. Because every source
+  symbol the peer sent ends in exactly one outcome, the three counters are a
+  denominator, so the ratios are counters over counters rather than a mean of
+  per-flow ratios that would weight a kilobyte flow the same as a gigabyte
+  one.
+- The delivery-rate samples behind the bandwidth estimate are now described in
+  the telemetry: their mean and their widest, and the interval and delivery
+  that produced the widest one. The estimate is a maximum over those samples,
+  and a maximum on its own cannot be read -- a rate is high either because the
+  path is fast or because the window it was measured over was short, and only
+  the interval and the delivery behind it tell those apart. A maximum far
+  above the mean is a tail rather than the path.
+
+  It is published because the question it answers could not be settled in a
+  harness. An estimator driven directly against a simulated policer reports
+  within one per cent of the path, while the same estimator in the full stack
+  reported twice it, and three explanations for that gap were measured and
+  ruled out before this existed. Deployed to a live gateway it answered the
+  question in one reading: the estimate stood at four times the widest sample
+  the connection had ever taken, which a maximum over samples cannot do, so
+  the fault was not in the sampling at all but in a second path that was
+  putting a number into the filter without it having been a sample. That is
+  the re-seeded peak fixed below.
+
+### Changed
+
+- Loss is no longer a congestion signal. The controller previously separated
+  erasure from congestion statistically and forwarded only the share the
+  channel could not explain, so that a path erasing packets independently of
+  the sending rate would not be read as an overloaded one. That separation is
+  gone: it was a statistical answer to a question the delivery-versus-rate
+  curve answers directly, and it was least reliable exactly when loss was
+  worst, because heavy erasure is bursty and the burst test then refused to
+  call it erasure at all. The brake is the delay bound instead.
+
+  Every loss now reaches the congestion controller, which matters for a reason
+  unrelated to congestion: its in-flight accounting is what was sent less what
+  was acknowledged and what was lost, so a controller told about only a
+  fraction of the losses believes the pipe is fuller than it is. The erasure
+  compensation rides on the measured erasure rather than on a floor biased low
+  for pacing, and waits for a measured round trip before engaging, because
+  that is when the delay bound can bound it.
+
+  queqiao_quic_controller_erasure_floor_ratio and
+  queqiao_quic_loss_suppressed_packets_total are removed. There is no floor
+  any more, and nothing is withheld from the controller, so neither figure can
+  be produced. queqiao_erasure_ratio{direction="send"} is the measurement that
+  replaced the first.
+
+### Fixed
+
+- The bandwidth estimate can now come down. Its max filter kept a sample for
+  ten packet-timed rounds, which is the right clock only while rounds advance
+  -- and a round advances when a packet sent in the previous round is
+  acknowledged, so a connection with nothing to send advances none. Measured
+  on a live gateway, 99.98% of samples were application limited and the round
+  counter moved about nine times an hour, turning a ten-round memory into
+  sixty-six minutes of wall time. One burst through a shaper therefore set the
+  estimate for the rest of the hour: the gateway held 519 Mbit/s against a
+  measured sustained 17.6 and paced and sized its congestion window from that.
+
+  A sample now expires on rounds or on wall time, whichever comes first, with
+  the wall-clock window derived from the measured minimum round trip rather
+  than configured -- ten rounds and the time ten rounds takes are the same
+  statement on a path whose rounds are advancing. An application-limited
+  sample may also replace a standing estimate once that estimate has expired,
+  which it previously could not; without that a connection which is
+  application limited essentially always would have expired its estimate with
+  nothing able to take its place.
+- A bandwidth estimate is no longer restored from a peak the filter would
+  already have expired. When the pipe empties, the sender re-seeds itself from
+  the best rate it has ever measured, so that a reused connection does not
+  repeat a discovery that is expensive on a lossy path. That peak only ever
+  rose, and the re-seed fires every time the pipe empties -- which on a
+  connection that is application limited essentially always is constantly --
+  so the estimate was re-armed faster than the filter could retire it.
+  Measured on a live gateway, the estimate stood at four times the widest
+  delivery sample the connection had ever taken, which a maximum over samples
+  cannot do. The peak now carries the time it was observed and is not put back
+  once a measurement of that age would have expired.
+
+  On an emulated policer this takes the overdrive from 7.3 times the path's
+  capacity to 2.4, and the loss from 49.8% to 36%. It costs about 15% on a 42%
+  erasure channel, which is the price of not pacing from data the filter has
+  already decided not to trust; the alternative bound was measured and costs
+  the same 15% while leaving the policer at 9.5 times.
+- Keep concurrent bulk isolation within its configured connection budget instead
+  of bypassing a full pool with dedicated QUIC dials.
+- Forward error correction is now sized for the erasure the path is measured to
+  be applying, and no longer for the congestion controller's floor. The floor is
+  biased low so that pacing errs towards slowing down, and the coded layer built
+  its whole view of the channel out of that one number, so on a path erasing
+  19.9% it sized parity for 1.76% and handed 11% of the payload back to the
+  session to re-issue a round trip later. Of the flows measured during the
+  incident that saw more than 5% erasure, every one ran a code sized for less
+  than half of it and 97% ran no code at all. The shared path model now carries
+  the measured erasure and its burstiness alongside the floor, and each consumer
+  reads the one whose error it can survive.
+
+  The code rate is also chosen differently. There is no residual target any
+  more -- a sender never observes the residual it chose, so it was an
+  unverifiable setpoint -- and no minimum coded loss below which parity was
+  refused. Both are replaced by choosing the rate that delivers a block soonest,
+  counting what an unrepairable block costs in round trips before its data
+  arrives, so a clean path buys no parity and a lossy one buys as much as it is
+  worth without either case needing a constant. A channel too lossy for any
+  allowed rate to repair a block more often than not is now reported as such
+  rather than being given a code that cannot work.
+- The erasure compensation now starts at none and earns each increase. It is a
+  bet that losses are independent of the sending rate, so that sending more
+  delivers proportionally more; on a path that drops because it is policed
+  rather than because it erases, the bet is wrong in a way that feeds itself,
+  because sending more is what raises the loss that then asks for more
+  compensation. Each step is now a tenth of the remaining distance, small
+  enough that the next round's delivery can be attributed to it, and is kept
+  only if the delivered rate actually improved. It makes no judgement about
+  the nature of the loss, only about whether sending harder delivered more.
+
+  Two things had to be right for that test to mean anything, and neither was.
+  The compensation accepted its first proposal whole, and by the time erasure
+  is first measured the sender has already burst and been policed, so that
+  proposal is for several times the rate with no evidence yet to test it
+  against. And it judged the bet against the sender's pacing rate, which the
+  compensation is itself an input to, so every increase appeared to have
+  worked. It now reads the delivered-rate estimate, and waits for a measured
+  round trip before engaging at all, so that the delay bound is in place to
+  bound it.
+
+  Measured against an emulated policer the overdrive falls from 42 times the
+  path's capacity to 7.3, and the loss from 72.5% to 49.8%. A 42% erasure
+  channel is unaffected, which is what says the compensation has not simply
+  been switched off. This bounds the loop without closing it: the bandwidth
+  estimate was a second and larger amplifier, fixed separately in this
+  release, and the known limitations record what is still left after both.
+- The metrics now report the loss the path actually caused.
+  `queqiao_quic_loss_observed_packets_total` counts every loss the sender
+  detected. Only the share charged to the congestion controller used to leave
+  the process, and on an erasure path that is a small fraction of what
+  happened: against a channel erasing a fifth of its packets the exported
+  figure read under two percent, because the rest had been reclassified as
+  erasure and then dropped from the record. Divide the observed count by
+  `queqiao_quic_packets_sent` for a loss rate. That reclassification is itself
+  gone in this release, so the two figures now agree; the observed counter is
+  what stays true if a controller ever again declines to count something.
+
+  `queqiao_quic_packets_lost` and `queqiao_quic_bytes_lost` are removed, along
+  with the visualizer's byte-loss series that was derived from them. They were
+  quic-go's own counters, which it increments only inside its cubic sender,
+  and this transport replaces the congestion controller -- so nothing could
+  ever move them off zero while the dashboard divided by them for its loss
+  chart. A counter that cannot be produced is worse than a missing one once it
+  is monotonic, because it then reads as a measurement rather than as an
+  absence.
+- Flow completion records now report what the flow's lane replacements did:
+  `lane_replacement_waits`, `lane_replacement_timeouts`, `lane_replacement_wait`
+  and `lanes_joined`, written by both the client and the gateway under the same
+  names. A flow that fails with "lane replacement timeout" previously recorded
+  only that it had given up, which was 94% of the failures observed on a live
+  gateway over two hours and could not be diagnosed after the fact: the record
+  did not say whether a replacement lane had ever been offered, how many graces
+  the flow burned before failing, or how long it spent with no lane at all.
+  Distinguishing a pool that will not rebuild from a path that will not carry a
+  handshake needs all four, and none of them could be recovered from the logs as
+  they stood.
+- A flow that loses its last lane now spends one replacement grace on the
+  outage, rather than one for each part of the flow that happens to be waiting
+  for the lane. Four call sites wait for a lane that is not there — the flow's
+  own run loop, the frame and control writers, and the acknowledgement loop —
+  and a lane that dies with writes in flight leaves more than one of them
+  waiting for the same absent replacement. Each started a fresh 45-second grace
+  of its own, so a flow that was never going to be rescued failed only after
+  some multiple of the grace that depended on which writers were blocked when
+  its lane died. A live gateway showed this as failures clustered at 76–106
+  seconds against a 45-second grace, for flows that had finished their work in
+  the first second and were then held open by the application. The grace is
+  unchanged; what changed is that it is now the whole of what a flow waits, and
+  a flow that really is given a replacement lane is owed a full grace again for
+  any later outage.
+- Recover UDP associations after a pooled QUIC stream stops making progress, and
+  replace connections bound to a DHCP address which disappeared after a network
+  change. An observed interface outage also starts a new path when the address
+  after reconnect is unchanged, instead of leaving any of these paths stalled
+  until the client restarts.
+- Fixed a data race between the flow telemetry goroutine and the congestion
+  controller's packet goroutine. The delay brake was recomputed each time
+  telemetry was collected, so that a trace taken while nothing was sending
+  would report a fresh figure rather than the last one, and recomputing it
+  read the inner sender's minimum round trip -- which the packet goroutine
+  writes. Every other value telemetry reports comes from an atomic for exactly
+  this reason. It is now read rather than recomputed, which costs a stale
+  figure on an idle connection and is the right trade against an
+  unsynchronised read of the controller's state.
+
 ## v0.2.0 - 2026-08-23
 
 ### Added

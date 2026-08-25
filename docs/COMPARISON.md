@@ -54,7 +54,7 @@ that path. The table is useful precisely because it includes that counterexample
 
 kcptun is the comparator closest to what Queqiao actually does differently.
 Both spend parity to avoid a round trip, and they choose how much in opposite
-ways: Queqiao sizes its code from a measured erasure floor and revises it while
+ways: Queqiao sizes its code from the erasure it measures and revises it while
 a flow runs, while a kcptun deployment fixes a ratio in advance. TUIC and
 Hysteria 2 do not cover that axis.
 

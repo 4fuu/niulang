@@ -12,17 +12,26 @@ qualification items are still open.
 - The congestion control described in [the control
   redesign](CONTROL-REDESIGN.md) has no brake on a policed path. A policer
   drops what it cannot pass and holds nothing, so it produces loss and no
-  delay -- and that design uses delay as its congestion signal and ignores
-  loss. Measured against an emulated policer shaped to 250 KB/s, a sender
-  reached 2.4 times the path's capacity at 36% loss with the brake reading
-  zero throughout. The live path this project targets is a policer, so this is
-  the ordinary case rather than an edge one. The redesign is not deployed and
-  should not be until a policed path has a brake; the shipping controller still
-  treats loss as congestion and does not have this behaviour. The bandwidth
-  estimate turned out not to be the fault -- measured in isolation it is within
-  one per cent of a policer's rate -- and the erasure compensation was.
-  Bounding that took the overdrive from 42 times the path to 7.3. The redesign
-  document records what was tried, in what order, and which of it was wrong.
+  delay -- and that design uses delay as its congestion signal and no longer
+  treats loss as one. Measured against an emulated policer shaped to 250 KB/s,
+  a sender reaches 2.4 times the path's capacity at 36% loss with the brake
+  reading zero throughout. The live path this project targets is a policer, so
+  this is the ordinary case rather than an edge one.
+
+  This is shipping. It is the controller in the release, not a proposal, and
+  the honest summary is that a policed path is less overdriven than it was
+  during this work and is still overdriven: 42 times the path became 7.3 and
+  then 2.4, each step a separate fault found by measuring rather than by
+  reasoning. The bandwidth estimate turned out not to be one of them -- driven
+  in isolation it reads within one per cent of a policer's rate -- and the two
+  that were are an erasure compensation that fed itself and an all-time peak
+  bandwidth that was re-seeded faster than the filter could retire it. What a
+  policed path does not yet have is a signal that stops the remaining
+  overdrive, and the transport will keep pushing into one until it does.
+
+  `internal/pep/case4_test.go` asserts this behaviour rather than the fix, so
+  it cannot change silently in either direction, and the redesign document
+  records what was tried, in what order, and which of it was wrong.
 - Queqiao is a WAN optimization data plane, not an anonymity network. The
   desktop ingress is SOCKS5, the released Android app exports an authenticated
   SOCKS5 endpoint to a separate routing client, and the iOS app is a

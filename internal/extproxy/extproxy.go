@@ -180,7 +180,7 @@ type KCPParams struct {
 	// fast3.
 	Mode string
 	// DataShards and ParityShards are the FEC ratio, fixed for the whole run.
-	// Queqiao sizes its parity from a measured erasure floor and revises it
+	// Queqiao sizes its parity from the erasure it measures and revises it
 	// while a flow runs, so one ratio here is a comparison against one guess:
 	// sweep it. See docs/BENCHMARKING.md.
 	DataShards, ParityShards int

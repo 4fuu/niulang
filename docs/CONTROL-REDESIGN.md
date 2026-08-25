@@ -26,11 +26,27 @@ That is also why the two attempts on the sampler changed nothing. Bounding the
 filter's memory fixed how long a *sample* survives, and this path was not
 supplying samples.
 
-**The pooled seed divides by the arrival rate.** A joining lane starts at
-`(aggregate bottleneck / lanes) / arrival`, and dividing by the arrival rate
-inflates it on exactly the lossy paths that can least afford it. Left alone for
-now: one change at a time, and the measurement above does not separate its
-contribution from the first.
+**The pooled seed is inflated twice, and neither is fixed here.** A joining
+lane starts at `(aggregate bottleneck / lanes) / arrival`, and the division is
+the wrong way round: `seedBandwidth` feeds the delivered-rate filter, and
+`ErasureSender.bandwidth` divides that filter's output by the arrival rate
+again when it paces, so a seed meant to produce a given pacing rate should be
+multiplied by arrival rather than divided by it. The error is `1/arrival`
+squared -- 3x on a channel erasing 42%, and 44x at the 0.15 arrival floor.
+
+Underneath it, what the pool is given as `Delivered` is `TUICBBRSender.bandwidth`,
+which returns the pacing rate. That is the same "it measured its own output"
+mistake found in the compensation gate and fixed there, still present one level
+up: `pathmodel` states that the bottleneck is measured from what contributors
+deliver, and it is being handed what they were told to send.
+
+Both predate this work -- v0.2.0 passes the same value, and the division dates
+to 2026-08-17 -- so neither is a regression, and both are left alone here for
+the reason the rest of this document argues for: one change at a time, measured
+on the live path, and the measurement above does not separate their
+contribution from the first. They fire only when a lane joins a path other
+lanes have already mapped, which is the replacement-lane case rather than the
+first-flow case.
 
 ### What it cost, and what it bought
 
@@ -90,21 +106,32 @@ path to 7.3x** and the loss from 72.5% to 49.8%. The 42% erasure channel is
 unaffected at a median 1.18 s against a 1.10 s baseline, which is what says the
 bound has not simply been switched off.
 
-### What is left
+### What was left at 7.3x, and what became of it
 
-7.3x is not braked, it is less unbraked. The remaining terms are the startup
-gain of 2.77, which is BBR probing and should end when delivery stops growing,
-and a bandwidth estimate that reads 2.0x the path in the full stack against
-1.01x when the estimator is driven in isolation. **That gap is the next thing to
-measure rather than the next thing to guess**: the two differ by everything the
-real stack adds, and which part matters is not established.
+Two terms were named here when the case stood at 7.3x: the startup gain of
+2.77, which is BBR probing and should end when delivery stops growing, and a
+bandwidth estimate that read 2.0x the path in the full stack against 1.01x when
+the estimator was driven in isolation. That gap was called *the next thing to
+measure rather than the next thing to guess*, and measuring it is what produced
+the section at the top of this document: the estimate stood at four times the
+widest sample the connection had ever taken, which a maximum over samples
+cannot do, and the second path putting a number into the filter was
+`restartFromIdle`. That took the case to 2.4x. The startup gain has not been
+revisited.
 
-Four attempts have now been made on this. The first three reasoned about what
+Five attempts have now been made on this. The first three reasoned about what
 the code should be doing and were each refuted by measurement, the third by a
-measurement that was itself broken. The fourth started by measuring and found
-the fault somewhere none of the three had looked.
-Until then, **a policed path is unbraked**, and this design should not be
-deployed on one.
+measurement that was itself broken. The fourth and fifth started by measuring,
+and each found the fault somewhere none of the earlier ones had looked.
+
+**A policed path is still unbraked at 2.4x, and this design is deployed on
+one.** An earlier draft of this line said it should not be, which was the right
+call while the delay bound was the only brake being built and the compensation
+was still feeding itself. It is shipped now because the alternative was worse
+in the case that was actually hurting users -- a downstream residual of 11%,
+against 0.16% measured on the live path after this work -- and because the
+policed overdrive was reduced by a factor of eighteen on the way. Neither of
+those makes 2.4x braked. `internal/pep/case4_test.go` holds the case open.
 
 ## Sequencing
 

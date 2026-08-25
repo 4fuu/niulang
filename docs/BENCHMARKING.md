@@ -234,7 +234,7 @@ an error that says nothing about why.
 
 A transport with FEC in the matrix is worth having, and it needs one thing said
 about the comparison before the numbers are taken. Queqiao chooses its parity
-from a measured erasure floor, and it revises that choice while a flow runs; a
+from the erasure it measures, and it revises that choice while a flow runs; a
 kcptun-style code rate is a constant chosen in advance. A single configuration
 is therefore a comparison against one guess, and whichever way it lands the
 result is mostly about the guess.

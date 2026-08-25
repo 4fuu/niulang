@@ -51,9 +51,14 @@ Queqiao is built around a few practical observations:
 - **Flows sharing one bottleneck should share one model.** Flows to different final
   destinations can still share one client-to-gateway path, so Queqiao shares
   delivery, loss, RTT, pacing, and latency-reserve state across them.
-- **Not all packet loss means congestion.** The controller distinguishes a measured
-  erasure floor from loss caused by an overloaded bottleneck instead of treating
-  every missing packet as congestion.
+- **Not all packet loss means congestion.** A path that erases packets
+  independently of the sending rate is not an overloaded one, and backing off
+  does not make an erasure channel drop less. So loss is not the congestion
+  signal here: the brake is a delay bound, the round trip may not exceed twice
+  the path's own minimum, and the measured erasure is what sizes the code and
+  compensates the window instead. A policer, which drops without queueing, is
+  the case this does not yet brake -- see the [known
+  limitations](docs/KNOWN-LIMITATIONS.md).
 - **Choose recovery for the path.** On a long-RTT path, forward-error
   correction can recover a gap sooner than another round trip; as a flow grows,
   retransmission can become the more efficient choice.
@@ -125,21 +130,21 @@ All of it ships as a prebuilt binary. Download it below, or from the
 ## Platform availability
 
 Every release publishes reproducible, signed binaries for six native targets.
-The links below are v0.2.0, the current release; the
+The links below are v0.3.0, the current release; the
 [releases page](https://github.com/bojieli/queqiao/releases/latest) always has the newest.
 
 | Platform | Status | Download |
 | --- | --- | --- |
-| macOS, Apple silicon | Desktop and gateway, ready to use | [`darwin_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.2.0/queqiaod_v0.2.0_darwin_arm64_signed.zip), notarized |
-| macOS, Intel | Desktop and gateway, ready to use | [`darwin_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.2.0/queqiaod_v0.2.0_darwin_amd64_signed.zip), notarized |
-| Linux, x86-64 | Desktop and gateway, ready to use | [`linux_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.2.0/queqiaod_v0.2.0_linux_amd64.tar.gz) |
-| Linux, arm64 | Desktop and gateway, ready to use | [`linux_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.2.0/queqiaod_v0.2.0_linux_arm64.tar.gz) |
-| Windows, x86-64 | Native target built; under testing, not production-ready | [`windows_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.2.0/queqiaod_v0.2.0_windows_amd64.zip) |
-| Windows, arm64 | Native target built; under testing, not production-ready | [`windows_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.2.0/queqiaod_v0.2.0_windows_arm64.zip) |
+| macOS, Apple silicon | Desktop and gateway, ready to use | [`darwin_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.3.0/queqiaod_v0.3.0_darwin_arm64_signed.zip), notarized |
+| macOS, Intel | Desktop and gateway, ready to use | [`darwin_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.3.0/queqiaod_v0.3.0_darwin_amd64_signed.zip), notarized |
+| Linux, x86-64 | Desktop and gateway, ready to use | [`linux_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.3.0/queqiaod_v0.3.0_linux_amd64.tar.gz) |
+| Linux, arm64 | Desktop and gateway, ready to use | [`linux_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.3.0/queqiaod_v0.3.0_linux_arm64.tar.gz) |
+| Windows, x86-64 | Native target built; under testing, not production-ready | [`windows_amd64`](https://github.com/bojieli/queqiao/releases/download/v0.3.0/queqiaod_v0.3.0_windows_amd64.zip) |
+| Windows, arm64 | Native target built; under testing, not production-ready | [`windows_arm64`](https://github.com/bojieli/queqiao/releases/download/v0.3.0/queqiaod_v0.3.0_windows_arm64.zip) |
 | Android and iOS | Same protocol-1 core, under testing; not yet production-ready mobile apps | -- |
 
 Check a download against its release's
-[`SHA256SUMS`](https://github.com/bojieli/queqiao/releases/download/v0.2.0/SHA256SUMS)
+[`SHA256SUMS`](https://github.com/bojieli/queqiao/releases/download/v0.3.0/SHA256SUMS)
 before running it. Each archive carries its own CycloneDX SBOM and the complete
 license text for every module linked into the binary.
 
