@@ -240,6 +240,19 @@ type multipathFlow struct {
 	// replacements; the other end keeps waiting for a rescue that is still
 	// somebody's to send.
 	replacementAbandoned atomic.Bool
+
+	// Replacement diagnostics. A flow that fails with "lane replacement
+	// timeout" records only that it gave up, and the live gateway produced 521
+	// of those in two hours without the log saying whether a replacement lane
+	// was ever offered, how many graces were burned, or how long the flow
+	// spent with no lane at all. Distinguishing "nothing was opened" from
+	// "lanes were opened and never became ready" is the difference between a
+	// pool that will not rebuild and a path that will not carry a handshake,
+	// and it cannot be recovered after the fact. See issue #53.
+	replacementWaits     atomic.Uint64
+	replacementTimeouts  atomic.Uint64
+	replacementWaitNanos atomic.Int64
+	lanesJoined          atomic.Uint64
 	// controlLaneShared reports whether another flow is currently using the
 	// pooled control connection. Nil means "no", which is what a flow on a
 	// dedicated connection should answer.
@@ -414,6 +427,7 @@ func (f *multipathFlow) addLane(lane *mpLane) error {
 	}
 	lane.admitted = time.Now()
 	f.lanes[lane.id] = lane
+	f.lanesJoined.Add(1)
 	if lane.id >= f.nextJoinID {
 		f.nextJoinID = lane.id + 1
 	}
@@ -1643,6 +1657,32 @@ func (f *multipathFlow) tryEnqueueFrameClass(lane *mpLane, frame protocol.Frame,
 // longer cannot produce a lane nobody is going to open.
 func (f *multipathFlow) noteReplacementAbandoned() { f.replacementAbandoned.Store(true) }
 
+// replacementLogFields is what this flow's lane replacements did, named the
+// same way on both endpoints so a client record and a gateway record about the
+// same failure can be read side by side.
+//
+// They are emitted on every flow record rather than only on failures. A
+// replacement that succeeded is the control case for one that did not, and a
+// field that appears only when something went wrong cannot be compared against
+// the ordinary run of flows.
+func (f *multipathFlow) replacementLogFields() []any {
+	waits, timeouts, joined, waited := f.replacementDiagnostics()
+	return []any{
+		"lane_replacement_waits", waits,
+		"lane_replacement_timeouts", timeouts,
+		"lane_replacement_wait", waited,
+		"lanes_joined", joined,
+	}
+}
+
+// replacementDiagnostics reports what this flow's lane replacements did, for
+// the record written when a flow ends. Zero waits is the ordinary case and
+// says the flow never lost its last healthy lane.
+func (f *multipathFlow) replacementDiagnostics() (waits, timeouts, joined uint64, waited time.Duration) {
+	return f.replacementWaits.Load(), f.replacementTimeouts.Load(), f.lanesJoined.Load(),
+		time.Duration(f.replacementWaitNanos.Load())
+}
+
 func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Duration) error {
 	if len(f.healthyLanes()) > 0 {
 		return nil
@@ -1653,6 +1693,9 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 	if f.replacementAbandoned.Load() {
 		return errReplacementAbandoned
 	}
+	f.replacementWaits.Add(1)
+	waitStarted := time.Now()
+	defer func() { f.replacementWaitNanos.Add(int64(time.Since(waitStarted))) }()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	ticker := time.NewTicker(25 * time.Millisecond)
@@ -1684,6 +1727,7 @@ func (f *multipathFlow) waitForHealthyLane(ctx context.Context, timeout time.Dur
 				return errReplacementAbandoned
 			}
 		case <-timer.C:
+			f.replacementTimeouts.Add(1)
 			return errors.New("lane replacement timeout")
 		case <-f.done:
 			return errors.New("flow closed while waiting for lane replacement")
