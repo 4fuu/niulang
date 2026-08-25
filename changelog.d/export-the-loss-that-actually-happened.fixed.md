@@ -1,14 +1,13 @@
-The metrics now report the loss the path actually caused. Three counters are
-published together: `queqiao_quic_loss_observed_packets_total` is every loss
-the sender detected, `queqiao_quic_loss_suppressed_packets_total` is the
-part withheld from the congestion controller as erasure, and the existing
-`queqiao_quic_controller_packets_lost` is the part charged as congestion,
-with observed being the sum of the other two. Only the charged figure used
-to leave the process, and on an erasure path that is a small fraction of
-what happened: against a channel erasing a fifth of its packets the exported
-figure reads under two percent, because the rest had been correctly
-reclassified as erasure and then dropped from the record. Divide observed by
-`queqiao_quic_packets_sent` for a loss rate.
+The metrics now report the loss the path actually caused.
+`queqiao_quic_loss_observed_packets_total` counts every loss the sender
+detected. Only the share charged to the congestion controller used to leave
+the process, and on an erasure path that is a small fraction of what
+happened: against a channel erasing a fifth of its packets the exported
+figure read under two percent, because the rest had been reclassified as
+erasure and then dropped from the record. Divide the observed count by
+`queqiao_quic_packets_sent` for a loss rate. That reclassification is itself
+gone in this release, so the two figures now agree; the observed counter is
+what stays true if a controller ever again declines to count something.
 
 `queqiao_quic_packets_lost` and `queqiao_quic_bytes_lost` are removed, along
 with the visualizer's byte-loss series that was derived from them. They were
