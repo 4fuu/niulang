@@ -1001,6 +1001,7 @@ func logPerformanceSnapshot(logger *slog.Logger, s metrics.Snapshot, interval ti
 		slog.Uint64("queqiao_quic_controller_bytes_lost", s.QUICControllerBytesLost),
 		slog.Uint64("queqiao_quic_controller_packets_lost", s.QUICControllerPacketsLost),
 		slog.Float64("queqiao_quic_controller_min_rtt_seconds", s.QUICControllerMinRTT.Seconds()),
+		slog.Float64("queqiao_erasure_ratio_send", s.QUICErasureSend),
 		slog.Float64("queqiao_quic_controller_erasure_floor_ratio", s.QUICControllerErasureFloor),
 		slog.Bool("queqiao_quic_controller_in_recovery", s.QUICControllerInRecovery),
 		// A refused lane join is a peer's flow about to fail. Flat names,

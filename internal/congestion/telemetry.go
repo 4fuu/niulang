@@ -54,6 +54,16 @@ type ControllerTelemetry struct {
 	PacketsLostSuppressed uint64
 	MinRTT                time.Duration
 	InRecovery            bool
+	// Erasure is the share of packets the path is measured to be erasing on
+	// the direction this controller sends into, pooled across the lanes that
+	// share it. It is what a code is sized from.
+	//
+	// ErasureFloor below is not a substitute for it and is not a smaller
+	// version of it. The floor is biased low on purpose so that pacing errs
+	// towards slowing down, and it is a lower envelope for the lifetime of a
+	// connection, so it keeps what a clean window established while this
+	// follows the path. On the live incident the two read 1.76% and 19.9%.
+	Erasure float64
 	// ErasureFloor is the share of packets this path drops for reasons that
 	// have nothing to do with sending rate, as the controller currently
 	// believes it. Everything sized for the path is sized from this number --

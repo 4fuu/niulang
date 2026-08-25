@@ -293,7 +293,7 @@ type Snapshot struct {
 	QUICControllerCongestionWindow, QUICControllerBytesInFlight   uint64
 	QUICControllerBytesLost, QUICControllerPacketsLost            uint64
 	QUICControllerMinRTT                                          time.Duration
-	QUICControllerErasureFloor                                    float64
+	QUICErasureSend, QUICControllerErasureFloor                   float64
 	QUICControllerInRecovery                                      bool
 	// QUICObservationsExpired counts flow telemetry entries dropped because
 	// they stopped being refreshed. See quicObservationsExpired.
@@ -329,6 +329,7 @@ type QUICObservation struct {
 	ControllerCongestionWindow uint64
 	ControllerBytesInFlight    uint64
 	ControllerMinRTT           time.Duration
+	ControllerErasure          float64
 	ControllerErasureFloor     float64
 	ControllerInRecovery       bool
 }
@@ -649,7 +650,7 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerLatestAckRate, controllerLatestSendRate uint64
 	var controllerRound uint64
 	var controllerMinRTT time.Duration
-	var controllerErasureFloor float64
+	var controllerErasure, controllerErasureFloor float64
 	var controllerRecovery bool
 	for key, entry := range r.quicFlows {
 		// An entry nobody refreshes is not a measurement of anything. Because
@@ -705,6 +706,13 @@ func (r *Registry) Snapshot() Snapshot {
 			if o.ControllerMinRTT > controllerMinRTT {
 				controllerMinRTT = o.ControllerMinRTT
 			}
+			// Both are already pooled across the lanes of one endpoint pair,
+			// so a maximum here selects the worst pair this process is
+			// serving rather than the worst lane, which is what a maximum over
+			// per-lane estimates would have meant.
+			if o.ControllerErasure > controllerErasure {
+				controllerErasure = o.ControllerErasure
+			}
 			if o.ControllerErasureFloor > controllerErasureFloor {
 				controllerErasureFloor = o.ControllerErasureFloor
 			}
@@ -746,6 +754,7 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICControllerBytesLost = counters.ControllerBytesLost
 	s.QUICControllerPacketsLost = counters.ControllerPacketsLost
 	s.QUICControllerMinRTT = controllerMinRTT
+	s.QUICErasureSend = controllerErasure
 	s.QUICControllerErasureFloor = controllerErasureFloor
 	s.QUICControllerInRecovery = controllerRecovery
 	return s
@@ -830,6 +839,15 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_quic_controller_bytes_lost %d\n", s.QUICControllerBytesLost)
 	fmt.Fprintf(w, "queqiao_quic_controller_packets_lost %d\n", s.QUICControllerPacketsLost)
 	fmt.Fprintf(w, "queqiao_quic_controller_min_rtt_seconds %.9f\n", s.QUICControllerMinRTT.Seconds())
+	// The erasure the path is measured to be applying, labelled by the
+	// direction it was measured on. A gateway's send direction is its
+	// downstream, which is the direction that was invisible when the only
+	// erasure figure published was the floor below.
+	fmt.Fprintf(w, "queqiao_erasure_ratio{direction=\"send\"} %.9f\n", s.QUICErasureSend)
+	// The floor is the conservative, pacing-side view of the same channel:
+	// biased low on purpose, and a lower envelope for a connection's lifetime.
+	// It is not a smaller version of the figure above and a code sized from it
+	// is sized for a channel that may no longer exist.
 	fmt.Fprintf(w, "queqiao_quic_controller_erasure_floor_ratio %.9f\n", s.QUICControllerErasureFloor)
 	if s.QUICControllerInRecovery {
 		fmt.Fprintln(w, "queqiao_quic_controller_in_recovery 1")

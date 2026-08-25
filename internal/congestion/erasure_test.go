@@ -573,3 +573,34 @@ func TestControllersThatDoNotClassifyReportObservedEqualToCharged(t *testing.T) 
 		})
 	}
 }
+
+// The code is sized from the measured erasure and the pacer from the floor, and
+// the two are different numbers about the same channel. A trace that carries
+// only the floor cannot explain a code rate, which is what made the live
+// incident unreadable: the floor read 1.76% while the channel erased 19.9%.
+func TestTheSenderPublishesTheMeasurementItsCodeIsSizedFrom(t *testing.T) {
+	model := pathmodel.NewPathModel()
+	// A model whose floor and measurement disagree the way the live one did.
+	model.Report(2, pathmodel.Observation{
+		Floor: 0.0176, FloorSamples: 5000,
+		Erasure: 0.199, BurstFactor: 1,
+		ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 200 * time.Millisecond,
+	})
+	e := NewErasureSenderOn(1200, model)
+
+	// One congestion event is enough to make this sender a member and pull the
+	// pooled state through.
+	e.OnCongestionEventEx(0, monotime.Now(), []quiccongestion.AckedPacketInfo{
+		{PacketNumber: 1, BytesAcked: 1200},
+	}, nil)
+
+	got := e.Telemetry()
+	t.Logf("published erasure %.4f against floor %.4f", got.Erasure, got.ErasureFloor)
+	if got.Erasure < 0.1 {
+		t.Fatalf("the sender published %.4f on a path measured at 0.199", got.Erasure)
+	}
+	if got.Erasure <= got.ErasureFloor {
+		t.Fatalf("published erasure %.4f is not above the floor %.4f, so the two cannot be "+
+			"told apart in a trace", got.Erasure, got.ErasureFloor)
+	}
+}
