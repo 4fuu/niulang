@@ -64,7 +64,11 @@ type TUICBBRSender struct {
 	lastSampleAppLimited bool
 	// peakBandwidth is the most this connection has ever been measured to
 	// deliver, which outlives the filter's ten-round memory of it.
-	peakBandwidth     uint64
+	peakBandwidth uint64
+	// peakBandwidthAt is when peakBandwidth was observed. Without it the peak
+	// is an all-time maximum, and restartFromIdle puts an all-time maximum
+	// back into a filter whose whole purpose is to forget.
+	peakBandwidthAt   monotime.Time
 	lossEventsInRound uint64
 	bytesLostInRound  uint64
 
@@ -317,10 +321,33 @@ func (b *TUICBBRSender) minRoundTrip() time.Duration { return b.minRTT }
 // disproves it within ten rounds, which is what the filter is for -- where
 // being wrong the other way costs nineteen seconds every time a connection is
 // reused, which is exactly what pooling connections is meant to make cheap.
-func (b *TUICBBRSender) restartFromIdle() {
-	if b.peakBandwidth > b.estimator.estimate() {
-		b.seedBandwidth(b.peakBandwidth, b.minRTT)
+func (b *TUICBBRSender) restartFromIdle(now monotime.Time) {
+	if b.peakBandwidth <= b.estimator.estimate() {
+		return
 	}
+	// A peak the filter would already have dropped must not be put back.
+	//
+	// The bet above -- that a path which delivered 12 Mbit/s a minute ago still
+	// does -- is only safe because "the filter's own window disproves it within
+	// ten rounds". It cannot. This fires whenever the pipe empties, which on a
+	// connection that is application limited essentially always is constantly,
+	// so the peak is re-armed faster than any window can retire it. Measured on
+	// a live gateway, the estimate stood at four times the widest delivery
+	// sample the connection had ever taken -- arithmetically impossible for a
+	// maximum over samples, and the proof that this path was supplying it.
+	//
+	// Bounding it by the filter's own window is what makes the sentence above
+	// true rather than aspirational: a seed is a hypothesis about the path
+	// standing in for a measurement, so it expires when a measurement of that
+	// age would have.
+	//
+	// The alternative, the filter's ten-second ceiling, was measured and is
+	// worse: it costs the same on an erasure channel and leaves the policed
+	// path at 9.5 times its capacity where this leaves it at 2.4.
+	if b.estimator.maxFilter.expired(tuicMinMaxSample{at: b.peakBandwidthAt, value: b.peakBandwidth}, now) {
+		return
+	}
+	b.seedBandwidth(b.peakBandwidth, b.minRTT)
 }
 
 func (b *TUICBBRSender) initialPacingRate() uint64 {
@@ -361,7 +388,7 @@ func (b *TUICBBRSender) OnPacketSent(sentTime monotime.Time, bytesInFlight quicc
 	preSendFlight := preSendBytesInFlight(bytesInFlight, bytes, retransmittable)
 	if preSendFlight == 0 {
 		b.exitingQuiescence = true
-		b.restartFromIdle()
+		b.restartFromIdle(sentTime)
 	}
 	// Keep the controller telemetry in the same post-send units as quic-go.
 	b.bytesInFlight = maxByteCount(0, bytesInFlight)
@@ -493,7 +520,7 @@ func (b *TUICBBRSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	// memory of it, so that a pipe which empties can be refilled from what it
 	// already knows rather than from what a trickle left behind.
 	if bw := b.estimator.estimate(); bw > b.peakBandwidth {
-		b.peakBandwidth = bw
+		b.peakBandwidth, b.peakBandwidthAt = bw, eventTime
 	}
 	lastSendState := sample.lastSendState
 	if lastLostState.valid && (!lastSendState.valid || lastLostState.packetNumber > lastSendState.packetNumber) {

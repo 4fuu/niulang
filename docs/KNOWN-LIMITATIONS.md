@@ -14,7 +14,7 @@ qualification items are still open.
   drops what it cannot pass and holds nothing, so it produces loss and no
   delay -- and that design uses delay as its congestion signal and ignores
   loss. Measured against an emulated policer shaped to 250 KB/s, a sender
-  reached 7.3 times the path's capacity at 49.8% loss with the brake reading
+  reached 2.4 times the path's capacity at 36% loss with the brake reading
   zero throughout. The live path this project targets is a policer, so this is
   the ordinary case rather than an edge one. The redesign is not deployed and
   should not be until a policed path has a brake; the shipping controller still
