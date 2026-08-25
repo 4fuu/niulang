@@ -431,7 +431,7 @@ implementation before the change lands.
 | 1 | Token bucket, deep burst allowance | `B` converges on the sustained shaping rate, not the bucket drain rate. **Filter-level test passing.** `internal/pathsim` now has the burst allowance (`PolicerBurstBytes`), but the end-to-end version also needs a runtime *rate* change, which it does not have — see [A limit found while trying to validate it](#a-limit-found-while-trying-to-validate-it) |
 | 2 | Step change 5% → 50% erasure mid-flow | The erasure estimate rises within one filter window; the code rate follows. **Passing end to end** — `TestTheCodeFollowsAChannelThatGetsWorseMidFlow` steps an emulated path from 2% to 45% downstream under a live flow, and the measurement the code is sized from moves from 0.034 to 0.224 while the controller's floor stays at 0.031 |
 | 3 | Throttle that tightens under load | `B` walks down and settles; no sustained oscillation. **Filter-level test passing** |
-| 4 | Shallow-buffered dropper, no queue | The delay bound still brakes, or the case is documented as unbraked. **Still open, and still the one expected to fail** -- a dropper that erases at capacity without building a queue gives the bound no signal |
+| 4 | Shallow-buffered dropper, no queue | **Fails.** See [Case 4 fails](#case-4-fails). Held by `TestCase4APolicedPathIsStillUnbraked` as a characterization test |
 | 5 | Clean path, no erasure | `r = 1`; no parity is sent, without a `minCodedLoss` constant |
 | 6 | Self-limiting claim | The climb stops; `B` does not grow without bound |
 | 7 | Bulk flow alongside interactive | Interactive latency stays inside the delay bound. **Partly covered**: `TestABulkTransferIsHeldBackByADeepQueue` shows the brake engaging on a deeply buffered bottleneck at 415 ms of queue against a 313 ms minimum, removing 24.7% of the rate. The interactive half is not covered |
@@ -440,6 +440,59 @@ implementation before the change lands.
 without building a queue gives the delay bound no signal, and with loss removed
 as a congestion input there is nothing else. If it fails, the honest outcome is
 to document the path class as unbraked rather than to reintroduce a classifier.
+
+## Case 4 fails
+
+A policer drops what it cannot pass and holds nothing, so overload produces loss
+and no delay. Loss is no longer a congestion signal and there is no queue for
+the delay bound to measure, so neither brake can act. This was predicted to
+fail. It fails by more than was predicted.
+
+Against an emulated policer shaped to 250 KB/s:
+
+| | |
+| --- | --- |
+| Peak pacing rate | **10,506,238 B/s — 42x the path** |
+| Bandwidth estimate | 665,178 B/s — 2.7x the path |
+| Worst queue | 2 ms |
+| Strongest brake | **0.0000** |
+| Sustained loss | 72.5% |
+
+**This is not a hypothetical path class.** `internal/pathsim` records that the
+live path this project targets is a policer: *"at twice the bottleneck rate it
+shows arrival runs averaging 2.3 packets and loss runs averaging 5.7 ... a
+limiter which passes everything for a while and then drops everything for a
+while."*
+
+### Two amplifiers, needing two fixes
+
+**The bandwidth estimate reads the burst, not the rate.** A token bucket passes
+a burst at line rate, and a max filter reports that burst as the path's
+bandwidth. Bounding the filter's memory in time did not help, because the bursts
+recur every refill period so there is always a recent high sample. The
+*statistic* is the problem, not its age -- which is what "any max filter
+structurally measures the first and reports it as the second" already said, and
+which the time bound only half addressed.
+
+**The erasure compensation is a feedback loop on a policed path.** Loss rises,
+the arrival rate falls, the compensation asks to send proportionally more, the
+policer drops proportionally more, and the arrival rate falls again.
+
+The second is now bounded: compensation may only increase while it is buying
+delivery, which is a measurement rather than a classification and is the same
+question the design's own argument rests on. It reduces the overdrive but does
+not remove it, because the first amplifier is the larger one and remains.
+
+### What would resolve it
+
+Replacing the max filter with a statistic that estimates a *sustained* rate
+rather than the peak of a bursty delivery process. That is a change to the core
+of the bandwidth model, it affects every path rather than only policed ones, and
+it should not be attempted without measurement on a real path. It is the
+outstanding work this design has left.
+
+Until then, **a policed path is unbraked**, and this design should not be
+deployed on one.
 
 ## Sequencing
 

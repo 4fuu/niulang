@@ -9,6 +9,17 @@ them before treating a successful local test as evidence that a different
 network will behave the same way. The [project status](STATUS.md) tracks which
 qualification items are still open.
 
+- The congestion control described in [the control
+  redesign](CONTROL-REDESIGN.md) has no brake on a policed path. A policer
+  drops what it cannot pass and holds nothing, so it produces loss and no
+  delay -- and that design uses delay as its congestion signal and ignores
+  loss. Measured against an emulated policer shaped to 250 KB/s, a sender
+  reached 42 times the path's capacity at 72.5% loss with the brake reading
+  zero throughout. The live path this project targets is a policer, so this is
+  the ordinary case rather than an edge one. The redesign is not deployed and
+  should not be until the bandwidth estimate stops reporting a token bucket's
+  burst as its rate; the shipping controller still treats loss as congestion
+  and does not have this behaviour.
 - Queqiao is a WAN optimization data plane, not an anonymity network. The
   desktop ingress is SOCKS5, the released Android app exports an authenticated
   SOCKS5 endpoint to a separate routing client, and the iOS app is a
