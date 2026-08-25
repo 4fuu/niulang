@@ -65,6 +65,20 @@ type ErasureSender struct {
 
 	outcomes []packetOutcome
 
+	// compensationRound, deliveredAtCompensation and appliedArrival are the
+	// probe behind the compensation: what the path was delivering when this
+	// sender last agreed to send faster to make up for erasure, and when.
+	//
+	// Compensating is a bet that the losses are independent of the sending
+	// rate, so that sending 1/arrival times as much delivers a full window.
+	// The bet is checkable, and it has to be checked: on a path that drops
+	// because it is policed rather than because it erases, sending more
+	// delivers no more and simply raises the loss, which lowers the arrival
+	// rate, which asks for more compensation again.
+	compensationRound       uint64
+	deliveredAtCompensation float64
+	appliedArrival          float64
+
 	// erasure is the pooled measured erasure of the direction this sender
 	// sends into, in parts per million. It is what the code is sized from, and
 	// it is published because a floor is not a substitute for it: on the live
@@ -202,6 +216,52 @@ func (e *ErasureSender) bandwidth() quiccongestion.ByteCount {
 	// The delay bound is applied after the erasure compensation rather than
 	// before it, because the queue holds what was sent and not what arrived.
 	return quiccongestion.ByteCount(e.delayBounded(delivered / e.arrivalRate()))
+}
+
+// compensationFor decides how much of a proposed compensation to apply, by
+// asking whether the last one bought any delivery.
+//
+// Less compensation is always allowed at once: it can only reduce what goes on
+// the wire. More is a claim that the path will deliver proportionally more if
+// this sender sends proportionally more, and that claim is tested against the
+// delivered rate rather than assumed. If the previous increase did not raise
+// delivery, this one is refused and the compensation stands where it is.
+//
+// This is not the classifier returning. It makes no judgement about the nature
+// of the loss and reads no burst statistics; it observes only whether sending
+// harder delivered more, which is the question the design's own argument rests
+// on -- erasure scales delivery down at every rate and cannot produce a knee,
+// congestion produces one. Without it a policed path is a positive feedback
+// loop: measured against an emulated policer the sender reached eleven times
+// the path's capacity at 63% loss with nothing to brake it, because a policer
+// drops rather than queues and so offers the delay bound no signal either.
+func (e *ErasureSender) compensationFor(want float64) float64 {
+	if want > 1 {
+		want = 1
+	}
+	if want < erasureMinArrival {
+		want = erasureMinArrival
+	}
+	delivered := float64(e.inner.bandwidth())
+	round := e.inner.round
+	if e.appliedArrival == 0 || want >= e.appliedArrival {
+		e.appliedArrival, e.deliveredAtCompensation, e.compensationRound = want, delivered, round
+		return want
+	}
+	// More compensation than is applied. Give the previous increase a round to
+	// show an effect before judging it, then require that it showed one.
+	if round == e.compensationRound {
+		return e.appliedArrival
+	}
+	if delivered <= e.deliveredAtCompensation {
+		// Sending harder did not deliver more. Hold where we are, and re-arm
+		// the probe against what the path is doing now so that a path which
+		// later improves can still be followed.
+		e.deliveredAtCompensation, e.compensationRound = delivered, round
+		return e.appliedArrival
+	}
+	e.appliedArrival, e.deliveredAtCompensation, e.compensationRound = want, delivered, round
+	return want
 }
 
 func (e *ErasureSender) arrivalRate() float64 {
@@ -386,7 +446,7 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	// makes no judgement about what kind of loss this is; it says only that
 	// compensation may not run ahead of the brake that bounds it.
 	if _, minRTT := e.queueDelay(); minRTT > 0 {
-		e.arrival.Store(uint64((1 - erasure) * partsPerMillion))
+		e.arrival.Store(uint64(e.compensationFor(1-erasure) * partsPerMillion))
 	}
 
 	e.passed.Add(uint64(len(lost)))
