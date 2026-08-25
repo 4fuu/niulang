@@ -583,9 +583,12 @@ func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCre
 // after the route returns. The negotiated idle timeout remains the finite
 // bound for a path that does not return.
 //
-// The wrapper deliberately recognizes only local availability and buffer
-// errors. Permission, descriptor, message-size and peer/protocol errors still
-// reach quic-go and close the unusable transport.
+// The wrapper deliberately recognizes only errors a socket can outlive.
+// EADDRNOTAVAIL / WSAEADDRNOTAVAIL reaches quic-go: a socket explicitly bound
+// to a DHCP address which disappeared cannot migrate to its replacement, and
+// pretending its writes succeeded leaves every stream on it stalled until a
+// process restart. Permission, descriptor, message-size and peer/protocol
+// errors likewise close the unusable transport.
 type transientRoutePacketConn struct {
 	net.PacketConn
 	observe func(error)

@@ -3,15 +3,129 @@ package pep
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/metrics"
+	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/bojieli/queqiao/internal/session"
 	"github.com/bojieli/queqiao/internal/socks5"
 )
+
+type observedUDPAssociationConn struct {
+	net.Conn
+	failure chan error
+}
+
+func (c *observedUDPAssociationConn) transportFailed(err error) {
+	c.failure <- err
+}
+
+func TestUDPAssociationOpenTimeoutRetiresLaneAndFastRetriesOnTCP(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := &Client{
+		cfg: ClientConfig{
+			Transport: TransportAuto, FallbackDelay: time.Second,
+			HandshakeTimeout: 25 * time.Millisecond, Logger: logger,
+		},
+		udpHealth: newUDPHealth(1, time.Minute),
+		metrics:   metrics.New(),
+	}
+
+	var dialMu sync.Mutex
+	var dialed []TransportKind
+	transportFailure := make(chan error, 1)
+	client.dialAuthenticatedLaneForTest = func(_ context.Context, kind TransportKind) (*authenticatedLane, error) {
+		dialMu.Lock()
+		dialed = append(dialed, kind)
+		dialMu.Unlock()
+
+		local, remote := net.Pipe()
+		if kind == TransportQUIC {
+			observed := &observedUDPAssociationConn{Conn: local, failure: transportFailure}
+			go func() {
+				defer remote.Close()
+				// Consume OPEN but deliberately never acknowledge it. This is the
+				// half-alive pooled-stream state that used to poison every later
+				// UDP association.
+				_, _ = newFrameConn(remote).Read()
+				time.Sleep(100 * time.Millisecond)
+			}()
+			return &authenticatedLane{fc: newFrameConn(observed), outer: observed, kind: kind}, nil
+		}
+
+		go func() {
+			defer remote.Close()
+			frames := newFrameConn(remote)
+			request, err := frames.Read()
+			if err != nil {
+				return
+			}
+			var token [session.UDPResumeTokenSize]byte
+			token[0] = 1
+			_ = frames.Write(protocol.Frame{Header: protocol.Header{
+				Version: protocol.Version, Type: protocol.TypeOpenOK,
+				SessionID: request.Header.SessionID, FlowID: request.Header.FlowID,
+			}, Payload: session.EncodeUDPResumeGrant(false, token)})
+		}()
+		return &authenticatedLane{fc: newFrameConn(local), outer: local, kind: kind}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	association, err := client.openUDPAssociation(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer association.lane.fc.Close()
+	if association.lane.kind != TransportTCP {
+		t.Fatalf("fast-retry transport = %s, want TCP", association.lane.kind)
+	}
+	select {
+	case failure := <-transportFailure:
+		var openErr *udpAssociationOpenTransportError
+		if !errors.As(failure, &openErr) || !pooledTransportTimedOut(failure) {
+			t.Fatalf("reported failure = %T %v, want timed-out UDP open", failure, failure)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed-out UDP open was not reported to pooled transport")
+	}
+
+	dialMu.Lock()
+	gotDialed := append([]TransportKind(nil), dialed...)
+	dialMu.Unlock()
+	if len(gotDialed) != 2 || gotDialed[0] != TransportQUIC || gotDialed[1] != TransportTCP {
+		t.Fatalf("dial sequence = %v, want [quic tcp]", gotDialed)
+	}
+	if got := client.metrics.Snapshot().Fallbacks; got != 1 {
+		t.Fatalf("fallbacks = %d, want 1", got)
+	}
+}
+
+func TestPooledTransportTimeoutClassification(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "deadline", err: context.DeadlineExceeded, want: true},
+		{name: "wrapped deadline", err: errors.Join(errors.New("read failed"), context.DeadlineExceeded), want: true},
+		{name: "EOF", err: io.EOF, want: false},
+		{name: "application close", err: net.ErrClosed, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pooledTransportTimedOut(test.err); got != test.want {
+				t.Fatalf("pooledTransportTimedOut(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
 
 // TestUDPAssociationRescuesToTCP keeps the SOCKS UDP endpoint fixed while the
 // established QUIC listener is deliberately withdrawn. The second datagram

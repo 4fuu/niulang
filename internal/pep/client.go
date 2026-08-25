@@ -1707,10 +1707,26 @@ type controlPoolStreamConn struct {
 	once       sync.Once
 }
 
-func (s *controlPoolStreamConn) transportFailed(error) {
-	if s.generation != nil && s.generation.conn.Context().Err() != nil {
+func (s *controlPoolStreamConn) transportFailed(err error) {
+	if s.generation == nil {
+		return
+	}
+	// A QUIC connection can remain superficially open after one of its streams
+	// has stopped making progress. In that state Context().Err() is still nil,
+	// so keeping the generation makes every later flow reuse the same poisoned
+	// pool. A real I/O timeout is sufficient evidence to retire the generation;
+	// ordinary per-stream EOFs and application closes must not evict it.
+	if s.generation.conn.Context().Err() != nil || pooledTransportTimedOut(err) {
 		s.owner.retireControlQUICGeneration(s.generation, "queqiao pooled connection failed")
 	}
+}
+
+func pooledTransportTimedOut(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 func (s *controlPoolStreamConn) Close() error {

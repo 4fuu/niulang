@@ -11,9 +11,9 @@ var (
 		{"network unreachable", syscall.ENETUNREACH},
 		{"host down", syscall.EHOSTDOWN},
 		{"host unreachable", syscall.EHOSTUNREACH},
-		{"source address gone", syscall.EADDRNOTAVAIL},
 		{"send queue full", syscall.ENOBUFS},
 	}
+	staleSourceWriteSample  = errnoSample{"source address gone", syscall.EADDRNOTAVAIL}
 	unreachableRouteSamples = []errnoSample{
 		{"network down", syscall.ENETDOWN},
 		{"network unreachable", syscall.ENETUNREACH},
