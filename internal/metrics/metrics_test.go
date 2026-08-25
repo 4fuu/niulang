@@ -24,16 +24,19 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	r.FlowTimeout()
 	r.ObserveQUIC(1, QUICObservation{
 		Lanes: 2, LatestRTT: 250 * time.Millisecond, SmoothedRTT: 200 * time.Millisecond,
-		BytesSent: 100, BytesReceived: 200, PacketsSent: 80, PacketsReceived: 75, BytesLost: 3, PacketsLost: 4,
 		ControllerKind: "bbr", ControllerMode: 3, ControllerMaxBandwidth: 1_000_000,
 		ControllerLatestSample: 900_000, ControllerLatestAckRate: 1_100_000,
-		ControllerLatestSendRate: 900_000, ControllerSamples: 12,
-		ControllerNonAppSamples: 10, ControllerAppSamples: 2,
-		ControllerStateMisses: 1, ControllerZeroSamples: 3, ControllerRound: 7,
+		ControllerLatestSendRate: 900_000, ControllerRound: 7,
 		ControllerPacingRate: 1_250_000, ControllerCongestionWindow: 400_000,
 		ControllerBytesInFlight: 200_000, ControllerMinRTT: 190 * time.Millisecond,
 		ControllerErasureFloor: 0.0475,
 		ControllerInRecovery:   true,
+	})
+	r.AddQUICConnectionCounters(QUICConnectionCounters{
+		BytesSent: 100, BytesReceived: 200, PacketsSent: 80, PacketsReceived: 75,
+		BytesLost: 3, PacketsLost: 4, ControllerSamples: 12,
+		ControllerNonAppSamples: 10, ControllerAppSamples: 2,
+		ControllerStateMisses: 1, ControllerZeroSamples: 3,
 	})
 	r.FlowFinished(10, 20, false)
 	r.FlowStarted()
@@ -271,4 +274,111 @@ func TestLaneJoinRefusalsAreCountedByReason(t *testing.T) {
 
 	var nilRegistry *Registry
 	nilRegistry.LaneJoinRefused(LaneJoinUnknownSession)
+}
+
+// The QUIC counters used to be derived by summing what every live flow
+// reported, and each flow reported the cumulative counters of the connections
+// its lanes sat on. That made the exported total a function of which flows
+// happened to be live at scrape time: it rose when a long-lived flow appeared
+// and fell when one ended, so a dashboard differencing consecutive scrapes
+// read the churn rather than the path. A counter that falls is not a counter.
+func TestQUICCountersDoNotFallWhenTheFlowsReportingThemEnd(t *testing.T) {
+	r := New()
+	r.AddQUICConnectionCounters(QUICConnectionCounters{
+		BytesSent: 4096, PacketsSent: 40, PacketsLost: 2, ControllerPacketsLost: 3,
+	})
+	r.ObserveQUIC(1, QUICObservation{Lanes: 2, SmoothedRTT: 200 * time.Millisecond})
+	before := r.Snapshot()
+	if before.QUICBytesSent != 4096 || before.QUICPacketsSent != 40 {
+		t.Fatalf("counters not exported: %+v", before)
+	}
+
+	// Every flow ends. The connections they were reading may well still be
+	// open, and what they already carried certainly still happened.
+	r.RemoveQUIC(1)
+	after := r.Snapshot()
+	if after.QUICBytesSent != before.QUICBytesSent || after.QUICPacketsSent != before.QUICPacketsSent {
+		t.Fatalf("counters fell when the flow ended: before=%d/%d after=%d/%d",
+			before.QUICBytesSent, before.QUICPacketsSent, after.QUICBytesSent, after.QUICPacketsSent)
+	}
+	if after.QUICPacketsLost != 2 || after.QUICControllerPacketsLost != 3 {
+		t.Fatalf("loss counters fell when the flow ended: %+v", after)
+	}
+	if after.QUICLanes != 0 {
+		t.Fatalf("lane gauge = %d after the flow ended, want 0", after.QUICLanes)
+	}
+}
+
+// A flow's telemetry entry expiring must not disturb the counters either. The
+// gauges it was holding up go away, which is the point of the expiry; the
+// bytes the connection carried do not.
+func TestExpiringFlowTelemetryLeavesTheCountersAlone(t *testing.T) {
+	r := New()
+	now := time.Now()
+	r.clock = func() time.Time { return now }
+	r.ObserveQUIC(1, QUICObservation{Lanes: 1, SmoothedRTT: 300 * time.Millisecond})
+	r.AddQUICConnectionCounters(QUICConnectionCounters{BytesSent: 900, PacketsSent: 9})
+	now = now.Add(quicObservationTTL + time.Second)
+
+	got := r.Snapshot()
+	if got.QUICObservationsExpired != 1 || got.QUICLanes != 0 || got.QUICSmoothedRTT != 0 {
+		t.Fatalf("stale gauges survived expiry: %+v", got)
+	}
+	if got.QUICBytesSent != 900 || got.QUICPacketsSent != 9 {
+		t.Fatalf("expiry moved the counters: %+v", got)
+	}
+}
+
+// Observing flows must not move the counters at all. Their numbers come from
+// the connections, published once each, and a flow republishing every second
+// would otherwise multiply them by the scrape rate.
+func TestFlowObservationsDoNotContributeToTheCounters(t *testing.T) {
+	r := New()
+	for i := 0; i < 20; i++ {
+		r.ObserveQUIC(uint64(i+1), QUICObservation{Lanes: 3, SmoothedRTT: time.Second})
+	}
+	if got := r.Snapshot(); got.QUICBytesSent != 0 || got.QUICPacketsSent != 0 || got.QUICPacketsLost != 0 {
+		t.Fatalf("flow gauges leaked into the counters: %+v", got)
+	}
+}
+
+// quic-go is allowed to withdraw a loss it later decides was reordering, and a
+// pooled connection replaced by a new generation restarts at zero. Measuring
+// the distance between two readings with unsigned arithmetic turns either into
+// an enormous forward jump, which is the same fabricated-traffic failure this
+// change exists to remove.
+func TestConnectionCountersIgnoreBackwardMovement(t *testing.T) {
+	first := QUICConnectionCounters{BytesSent: 10_000, PacketsSent: 100, PacketsLost: 9}
+	// The peer acknowledges a packet previously declared lost.
+	second := QUICConnectionCounters{BytesSent: 11_000, PacketsSent: 110, PacketsLost: 7}
+	delta := second.Advance(first)
+	if delta.BytesSent != 1000 || delta.PacketsSent != 10 {
+		t.Fatalf("forward movement mismeasured: %+v", delta)
+	}
+	if delta.PacketsLost != 0 {
+		t.Fatalf("withdrawn loss reported as %d packets of new loss", delta.PacketsLost)
+	}
+
+	// A fresh connection generation restarts every counter at zero.
+	restarted := QUICConnectionCounters{BytesSent: 12, PacketsSent: 1}
+	if delta := restarted.Advance(second); !delta.IsZero() {
+		t.Fatalf("a restarted connection reported movement: %+v", delta)
+	}
+}
+
+// The same reading published twice -- which is exactly what two flows sharing
+// one pooled connection produce -- must count once.
+func TestRepublishingTheSameConnectionReadingCountsOnce(t *testing.T) {
+	r := New()
+	reading := QUICConnectionCounters{BytesSent: 5000, PacketsSent: 50}
+	var baseline QUICConnectionCounters
+	for i := 0; i < 5; i++ {
+		delta := reading.Advance(baseline)
+		baseline = reading
+		r.AddQUICConnectionCounters(delta)
+	}
+	if got := r.Snapshot(); got.QUICBytesSent != 5000 || got.QUICPacketsSent != 50 {
+		t.Fatalf("one connection reading counted %d bytes / %d packets, want 5000/50",
+			got.QUICBytesSent, got.QUICPacketsSent)
+	}
 }

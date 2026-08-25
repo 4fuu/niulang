@@ -171,9 +171,12 @@ func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
 	registry := metrics.New()
 	registry.FlowStarted()
 	registry.ObserveQUIC(1, metrics.QUICObservation{
-		Lanes: 1, SmoothedRTT: 210 * time.Millisecond, BytesSent: 1234, BytesReceived: 5678,
-		PacketsSent: 123, PacketsReceived: 119, PacketsLost: 3, ControllerKind: "bbr-tuic",
+		Lanes: 1, SmoothedRTT: 210 * time.Millisecond, ControllerKind: "bbr-tuic",
 		ControllerPacingRate: 9999, ControllerErasureFloor: 0.025,
+	})
+	registry.AddQUICConnectionCounters(metrics.QUICConnectionCounters{
+		BytesSent: 1234, BytesReceived: 5678,
+		PacketsSent: 123, PacketsReceived: 119, PacketsLost: 3,
 	})
 	logPerformanceSnapshot(logger, registry.Snapshot(), 5*time.Second)
 	var record map[string]any

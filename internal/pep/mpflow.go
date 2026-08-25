@@ -615,6 +615,17 @@ func (f *multipathFlow) noteRemoteAbort() {
 
 func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 	var observation metrics.QUICObservation
+	// moved is how far the connections under this flow travelled since anyone
+	// last read them. It is not a per-flow quantity: the connections are
+	// pooled, so it is measured against a baseline the connection itself
+	// holds, and a connection two flows share contributes to whichever of
+	// them reads it first rather than to both.
+	var moved metrics.QUICConnectionCounters
+	// folded names the connections whose connection-scoped values have already
+	// been added to this observation. Several lanes of one flow routinely sit
+	// on one pooled connection, and a congestion window or pacing rate added
+	// once per lane describes a transport that does not exist.
+	var folded map[uint64]struct{}
 	for _, lane := range lanes {
 		provider, ok := lane.fc.transport().(laneStatsProvider)
 		if !ok {
@@ -628,12 +639,17 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 		if stats.smoothedRTT > observation.SmoothedRTT {
 			observation.SmoothedRTT = stats.smoothedRTT
 		}
-		observation.BytesSent += stats.bytesSent
-		observation.BytesReceived += stats.bytesReceived
-		observation.PacketsSent += stats.packetsSent
-		observation.PacketsReceived += stats.packetsReceived
-		observation.BytesLost += stats.bytesLost
-		observation.PacketsLost += stats.packetsLost
+		if counted, ok := provider.(laneConnectionProvider); ok {
+			id, delta := counted.connectionTelemetry(stats)
+			moved.Add(delta)
+			if _, seen := folded[id]; seen {
+				continue
+			}
+			if folded == nil {
+				folded = make(map[uint64]struct{}, len(lanes))
+			}
+			folded[id] = struct{}{}
+		}
 		controller := stats.controller
 		if controller.Kind != "" {
 			if observation.ControllerKind == "" {
@@ -654,19 +670,12 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 			if controller.LatestSendRate > observation.ControllerLatestSendRate {
 				observation.ControllerLatestSendRate = controller.LatestSendRate
 			}
-			observation.ControllerSamples += controller.Samples
-			observation.ControllerNonAppSamples += controller.NonAppSamples
-			observation.ControllerAppSamples += controller.AppSamples
-			observation.ControllerStateMisses += controller.StateMisses
-			observation.ControllerZeroSamples += controller.ZeroSamples
 			if controller.Round > observation.ControllerRound {
 				observation.ControllerRound = controller.Round
 			}
 			observation.ControllerPacingRate += controller.PacingRate
 			observation.ControllerCongestionWindow += controller.CongestionWindow
 			observation.ControllerBytesInFlight += controller.BytesInFlight
-			observation.ControllerBytesLost += controller.BytesLost
-			observation.ControllerPacketsLost += controller.PacketsLost
 			if controller.MinRTT > observation.ControllerMinRTT {
 				observation.ControllerMinRTT = controller.MinRTT
 			}
@@ -680,6 +689,12 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 		f.currentRTTNS.Store(observation.SmoothedRTT.Nanoseconds())
 		f.baselineRTTNS.CompareAndSwap(0, observation.SmoothedRTT.Nanoseconds())
 	}
+	// The connection totals are banked whether or not this flow may still
+	// publish its own gauges. They are monotonic and belong to the connection,
+	// so a late reading can neither pin nor inflate them, and discarding it
+	// would drop bytes the connection really did carry. A nil registry counts
+	// nothing at all, and the call is a no-op against one.
+	f.metrics.AddQUICConnectionCounters(moved)
 	// A finished flow must not publish again. Its registry entry is removed
 	// during teardown, and the lane managers keep polling this snapshot for a
 	// moment after that; a late publication would reinstate an entry with
