@@ -218,7 +218,6 @@ type quicCounterTotals struct {
 	packetsSent             atomic.Uint64
 	packetsReceived         atomic.Uint64
 	lossObservedPackets     atomic.Uint64
-	lossSuppressedPackets   atomic.Uint64
 	codedSources            atomic.Uint64
 	codedRecovered          atomic.Uint64
 	codedLost               atomic.Uint64
@@ -237,7 +236,6 @@ func (t *quicCounterTotals) add(d QUICConnectionCounters) {
 	t.packetsSent.Add(d.PacketsSent)
 	t.packetsReceived.Add(d.PacketsReceived)
 	t.lossObservedPackets.Add(d.LossObservedPackets)
-	t.lossSuppressedPackets.Add(d.LossSuppressedPackets)
 	t.codedSources.Add(d.CodedSources)
 	t.codedRecovered.Add(d.CodedRecovered)
 	t.codedLost.Add(d.CodedLost)
@@ -257,7 +255,6 @@ func (t *quicCounterTotals) load() QUICConnectionCounters {
 		PacketsSent:             t.packetsSent.Load(),
 		PacketsReceived:         t.packetsReceived.Load(),
 		LossObservedPackets:     t.lossObservedPackets.Load(),
-		LossSuppressedPackets:   t.lossSuppressedPackets.Load(),
 		CodedSources:            t.codedSources.Load(),
 		CodedRecovered:          t.codedRecovered.Load(),
 		CodedLost:               t.codedLost.Load(),
@@ -290,7 +287,7 @@ type Snapshot struct {
 	QUICLatestRTT, QUICSmoothedRTT                                time.Duration
 	QUICBytesSent, QUICBytesReceived                              uint64
 	QUICPacketsSent, QUICPacketsReceived                          uint64
-	QUICLossObservedPackets, QUICLossSuppressedPackets            uint64
+	QUICLossObservedPackets                                       uint64
 	QUICCodedSources, QUICCodedRecovered, QUICCodedLost           uint64
 	QUICControllerKind                                            string
 	QUICControllerMode                                            uint32
@@ -303,7 +300,7 @@ type Snapshot struct {
 	QUICControllerCongestionWindow, QUICControllerBytesInFlight   uint64
 	QUICControllerBytesLost, QUICControllerPacketsLost            uint64
 	QUICControllerMinRTT                                          time.Duration
-	QUICErasureSend, QUICControllerErasureFloor                   float64
+	QUICErasureSend                                               float64
 	QUICDelayBrake                                                float64
 	QUICControllerInRecovery                                      bool
 	// QUICObservationsExpired counts flow telemetry entries dropped because
@@ -342,7 +339,6 @@ type QUICObservation struct {
 	ControllerMinRTT           time.Duration
 	ControllerErasure          float64
 	ControllerDelayBrake       float64
-	ControllerErasureFloor     float64
 	ControllerInRecovery       bool
 }
 
@@ -424,7 +420,6 @@ func (c QUICConnectionCounters) Advance(previous QUICConnectionCounters) QUICCon
 		PacketsSent:             forward(c.PacketsSent, previous.PacketsSent),
 		PacketsReceived:         forward(c.PacketsReceived, previous.PacketsReceived),
 		LossObservedPackets:     forward(c.LossObservedPackets, previous.LossObservedPackets),
-		LossSuppressedPackets:   forward(c.LossSuppressedPackets, previous.LossSuppressedPackets),
 		CodedSources:            forward(c.CodedSources, previous.CodedSources),
 		CodedRecovered:          forward(c.CodedRecovered, previous.CodedRecovered),
 		CodedLost:               forward(c.CodedLost, previous.CodedLost),
@@ -445,7 +440,6 @@ func (c *QUICConnectionCounters) Add(delta QUICConnectionCounters) {
 	c.PacketsSent += delta.PacketsSent
 	c.PacketsReceived += delta.PacketsReceived
 	c.LossObservedPackets += delta.LossObservedPackets
-	c.LossSuppressedPackets += delta.LossSuppressedPackets
 	c.CodedSources += delta.CodedSources
 	c.CodedRecovered += delta.CodedRecovered
 	c.CodedLost += delta.CodedLost
@@ -680,7 +674,7 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerLatestAckRate, controllerLatestSendRate uint64
 	var controllerRound uint64
 	var controllerMinRTT time.Duration
-	var controllerErasure, controllerErasureFloor, controllerDelayBrake float64
+	var controllerErasure, controllerDelayBrake float64
 	var controllerRecovery bool
 	for key, entry := range r.quicFlows {
 		// An entry nobody refreshes is not a measurement of anything. Because
@@ -746,9 +740,6 @@ func (r *Registry) Snapshot() Snapshot {
 			if o.ControllerDelayBrake > controllerDelayBrake {
 				controllerDelayBrake = o.ControllerDelayBrake
 			}
-			if o.ControllerErasureFloor > controllerErasureFloor {
-				controllerErasureFloor = o.ControllerErasureFloor
-			}
 			controllerRecovery = controllerRecovery || o.ControllerInRecovery
 		}
 	}
@@ -768,7 +759,6 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICPacketsSent = counters.PacketsSent
 	s.QUICPacketsReceived = counters.PacketsReceived
 	s.QUICLossObservedPackets = counters.LossObservedPackets
-	s.QUICLossSuppressedPackets = counters.LossSuppressedPackets
 	s.QUICCodedSources = counters.CodedSources
 	s.QUICCodedRecovered = counters.CodedRecovered
 	s.QUICCodedLost = counters.CodedLost
@@ -792,7 +782,6 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICControllerMinRTT = controllerMinRTT
 	s.QUICErasureSend = controllerErasure
 	s.QUICDelayBrake = controllerDelayBrake
-	s.QUICControllerErasureFloor = controllerErasureFloor
 	s.QUICControllerInRecovery = controllerRecovery
 	return s
 }
@@ -851,7 +840,6 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// figure below is congestion only, and on an erasure path the two differ
 	// by most of the loss.
 	fmt.Fprintf(w, "queqiao_quic_loss_observed_packets_total %d\n", s.QUICLossObservedPackets)
-	fmt.Fprintf(w, "queqiao_quic_loss_suppressed_packets_total %d\n", s.QUICLossSuppressedPackets)
 	// A rising expiry count means some flow's telemetry stopped being
 	// refreshed without being removed. The RTT values above are maxima, so
 	// that is the failure mode which freezes them at a stale constant.
@@ -899,11 +887,6 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// is being held back by it, which is a different condition from a path that
 	// simply measured less.
 	fmt.Fprintf(w, "queqiao_delay_brake_ratio %.9f\n", s.QUICDelayBrake)
-	// The floor is the conservative, pacing-side view of the same channel:
-	// biased low on purpose, and a lower envelope for a connection's lifetime.
-	// It is not a smaller version of the figure above and a code sized from it
-	// is sized for a channel that may no longer exist.
-	fmt.Fprintf(w, "queqiao_quic_controller_erasure_floor_ratio %.9f\n", s.QUICControllerErasureFloor)
 	if s.QUICControllerInRecovery {
 		fmt.Fprintln(w, "queqiao_quic_controller_in_recovery 1")
 	} else {

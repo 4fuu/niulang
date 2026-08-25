@@ -109,7 +109,7 @@ func (p *lossyPipe) stats() (sent, lost int) {
 // connection.
 func measuredPath(floor float64) *pathmodel.PathModel {
 	m := pathmodel.NewPathModel()
-	m.Report(1, pathmodel.Observation{Floor: floor, FloorSamples: 5000, Erasure: floor, BurstFactor: 1, ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 0})
+	m.Report(1, pathmodel.Observation{Erasure: floor, BurstFactor: 1, ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 0})
 	return m
 }
 
@@ -460,7 +460,6 @@ func TestTheCodeIsSizedFromTheMeasurementNotTheFloor(t *testing.T) {
 	const measured, conservativeFloor = 0.199, 0.0176
 	m := pathmodel.NewPathModel()
 	m.Report(1, pathmodel.Observation{
-		Floor: conservativeFloor, FloorSamples: 5000,
 		Erasure: measured, BurstFactor: 1,
 		ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 250 * time.Millisecond,
 	})
@@ -578,7 +577,7 @@ func TestParityCostsACodeRateAndNotAByteRate(t *testing.T) {
 	send := func(erasure float64) (wireBytes, payloadFrames int) {
 		m := pathmodel.NewPathModel()
 		m.Report(1, pathmodel.Observation{
-			Floor: erasure, FloorSamples: 5000, Erasure: erasure, BurstFactor: 1,
+			Erasure: erasure, BurstFactor: 1,
 			ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 200 * time.Millisecond,
 		})
 		pa, _ := newBudgetedPipes(budget)

@@ -492,13 +492,11 @@ func measuredErasure(t *testing.T) float64 {
 func measuredErasureAndFloor(t *testing.T) (erasure, floor float64) {
 	t.Helper()
 	for _, model := range pathmodel.Live() {
-		state := model.Current()
-		if state.Erasure > erasure {
+		if state := model.Current(); state.Erasure > erasure {
 			erasure = state.Erasure
-			floor = state.Floor
 		}
 	}
-	return erasure, floor
+	return erasure, 0
 }
 
 // The delay bound, against a real queue rather than a supplied round trip.

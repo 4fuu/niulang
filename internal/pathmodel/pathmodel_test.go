@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// The floor is pooled so that four lanes reach a usable estimate on four
+// The erasure is pooled so that four lanes reach a usable estimate on four
 // lanes' worth of samples rather than each waiting for its own, and so that
 // they agree. Lanes that disagree compensate differently and the aggregate
 // stops being predictable.
@@ -14,18 +14,18 @@ func TestTheFloorIsPooledAcrossLanes(t *testing.T) {
 	m := NewPathModel()
 	// Three lanes with plenty of samples agree on 0.42; a fourth has just
 	// started and has seen almost nothing.
-	m.Report(1, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
-	m.Report(2, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
-	m.Report(3, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
-	floor := m.Report(4, Observation{Floor: 0.05, FloorSamples: 20, Erasure: 0.05, BurstFactor: 1, ObservedSamples: 20, Delivered: 1e6, RoundTrip: 0}).Floor
+	m.Report(1, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
+	m.Report(2, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
+	m.Report(3, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
+	erasure := m.Report(4, Observation{Erasure: 0.05, BurstFactor: 1, ObservedSamples: 20, Delivered: 1e6}).Erasure
 
-	if math.Abs(floor-0.42) > 0.01 {
-		t.Fatalf("pooled floor %.3f, want the weight of the measured lanes at about 0.42", floor)
+	if math.Abs(erasure-0.42) > 0.01 {
+		t.Fatalf("pooled erasure %.3f, want the weight of the measured lanes at about 0.42", erasure)
 	}
 	// And the new lane is handed that estimate rather than its own, so it does
 	// not have to rediscover the path.
-	if floor < 0.4 {
-		t.Fatalf("a joining lane was left with its own uninformed floor of %.3f", floor)
+	if erasure < 0.4 {
+		t.Fatalf("a joining lane was left with its own uninformed erasure of %.3f", erasure)
 	}
 }
 
@@ -35,10 +35,10 @@ func TestTheFloorIsPooledAcrossLanes(t *testing.T) {
 func TestTheShareDividesTheBottleneck(t *testing.T) {
 	m := NewPathModel()
 	const perLane = 1e6 // bytes per second
-	m.Report(1, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perLane, RoundTrip: 0})
-	m.Report(2, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perLane, RoundTrip: 0})
-	m.Report(3, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perLane, RoundTrip: 0})
-	share := m.Report(4, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perLane, RoundTrip: 0}).Share
+	m.Report(1, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perLane, RoundTrip: 0})
+	m.Report(2, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perLane, RoundTrip: 0})
+	m.Report(3, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perLane, RoundTrip: 0})
+	share := m.Report(4, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perLane, RoundTrip: 0}).Share
 
 	if m.Members() != 4 {
 		t.Fatalf("model counts %d lanes, want 4", m.Members())
@@ -60,26 +60,26 @@ func TestTheShareDividesTheBottleneck(t *testing.T) {
 // A lane on its own must not be capped by a bottleneck nobody has measured.
 func TestAnUnknownBottleneckDoesNotCap(t *testing.T) {
 	m := NewPathModel()
-	if share := m.Report(1, Observation{Floor: 0, FloorSamples: 0, Erasure: 0, BurstFactor: 1, ObservedSamples: 0, Delivered: 0, RoundTrip: 0}).Share; share != 0 {
+	if share := m.Report(1, Observation{Erasure: 0, BurstFactor: 1, ObservedSamples: 0, Delivered: 0, RoundTrip: 0}).Share; share != 0 {
 		t.Fatalf("share %.0f before any delivered rate was reported, want 0 for no cap", share)
 	}
 }
 
 func TestObservationProgressDoesNotWeightAnUntrustedFloor(t *testing.T) {
 	m := NewPathModel()
-	m.Report(1, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
-	state := m.Report(2, Observation{Floor: 0, FloorSamples: 0, Erasure: 0, BurstFactor: 1, ObservedSamples: 120, Delivered: 0, RoundTrip: 0})
+	m.Report(1, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
+	state := m.Report(2, Observation{Erasure: 0, BurstFactor: 1, ObservedSamples: 120, Delivered: 0, RoundTrip: 0})
 	if state.ObservedSamples != 5120 {
 		t.Fatalf("observed samples = %.0f, want 5120", state.ObservedSamples)
 	}
-	if math.Abs(state.Floor-0.42) > 0.001 {
-		t.Fatalf("untrusted zero diluted established floor to %.3f", state.Floor)
+	if math.Abs(state.Erasure-0.42) > 0.02 {
+		t.Fatalf("a contributor with few samples diluted the pooled erasure to %.3f", state.Erasure)
 	}
 }
 
 func TestPathKnowledgeOutlivesTheConnectionThatMeasuredIt(t *testing.T) {
 	m := NewPathModel()
-	m.Report(1, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 240 * time.Millisecond})
+	m.Report(1, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 240 * time.Millisecond})
 
 	// Membership governs only concurrent bandwidth sharing. Simulate a lane
 	// going idle without making a five-second unit test: the measurement must
@@ -89,8 +89,8 @@ func TestPathKnowledgeOutlivesTheConnectionThatMeasuredIt(t *testing.T) {
 	m.mu.Unlock()
 
 	state := m.Current()
-	if state.Floor != 0.42 {
-		t.Fatalf("retained floor = %.3f, want 0.420", state.Floor)
+	if state.Erasure != 0.42 {
+		t.Fatalf("retained erasure = %.3f, want 0.420", state.Erasure)
 	}
 	if state.ObservedSamples != 5000 {
 		t.Fatalf("retained observations = %.0f, want 5000", state.ObservedSamples)
@@ -104,9 +104,9 @@ func TestPathKnowledgeOutlivesTheConnectionThatMeasuredIt(t *testing.T) {
 
 	// Retained knowledge is a handoff, not a permanent verdict. Once a new
 	// connection supplies trusted evidence, it becomes the path's knowledge.
-	changed := m.Report(2, Observation{Floor: 0.55, FloorSamples: 5000, Erasure: 0.55, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 300 * time.Millisecond})
-	if changed.Floor != 0.55 {
-		t.Fatalf("new generation floor = %.3f, want 0.550", changed.Floor)
+	changed := m.Report(2, Observation{Erasure: 0.55, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 300 * time.Millisecond})
+	if changed.Erasure != 0.55 {
+		t.Fatalf("new generation erasure = %.3f, want 0.550", changed.Erasure)
 	}
 }
 
@@ -115,8 +115,8 @@ func TestPathKnowledgeOutlivesTheConnectionThatMeasuredIt(t *testing.T) {
 // controller, so membership has to expire.
 func TestAnIdleLaneStopsCounting(t *testing.T) {
 	m := NewPathModel()
-	m.Report(1, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
-	m.Report(2, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
+	m.Report(1, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
+	m.Report(2, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
 	if m.Members() != 2 {
 		t.Fatalf("members = %d, want 2", m.Members())
 	}
@@ -125,7 +125,7 @@ func TestAnIdleLaneStopsCounting(t *testing.T) {
 	m.members[1].at = time.Now().Add(-2 * memberIdle)
 	m.mu.Unlock()
 
-	state := m.Report(2, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
+	state := m.Report(2, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 1e6, RoundTrip: 0})
 	if m.Members() != 1 {
 		t.Fatalf("members = %d after one went idle, want 1", m.Members())
 	}
@@ -156,7 +156,7 @@ func TestSharedPathIsPerPeer(t *testing.T) {
 func TestASingleSharedLaneIsNotPenalised(t *testing.T) {
 	m := NewPathModel()
 	const rate = 2e6
-	state := m.Report(1, Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: rate, RoundTrip: 0})
+	state := m.Report(1, Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: rate, RoundTrip: 0})
 	// Not capped at its own rate: not capped at all. A lone lane has nothing
 	// to compound with, and a ceiling equal to what it has already delivered
 	// is one it can never probe past.
@@ -202,7 +202,7 @@ func TestTheShareDoesNotRatchetDown(t *testing.T) {
 			var share float64
 			for round := 0; round < 40; round++ {
 				for i := 0; i < lanes; i++ {
-					share = m.Report(Member(i+1), Observation{Floor: 0.1, FloorSamples: 5000, Erasure: 0.1, BurstFactor: 1, ObservedSamples: 5000, Delivered: delivered[i], RoundTrip: 0}).Share
+					share = m.Report(Member(i+1), Observation{Erasure: 0.1, BurstFactor: 1, ObservedSamples: 5000, Delivered: delivered[i], RoundTrip: 0}).Share
 					// The next round delivers what this one is allowed to,
 					// bounded by the path itself.
 					next := capacity / float64(lanes)

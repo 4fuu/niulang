@@ -981,7 +981,6 @@ func logPerformanceSnapshot(logger *slog.Logger, s metrics.Snapshot, interval ti
 		slog.Uint64("queqiao_quic_packets_sent", s.QUICPacketsSent),
 		slog.Uint64("queqiao_quic_packets_received", s.QUICPacketsReceived),
 		slog.Uint64("queqiao_quic_loss_observed_packets_total", s.QUICLossObservedPackets),
-		slog.Uint64("queqiao_quic_loss_suppressed_packets_total", s.QUICLossSuppressedPackets),
 		slog.Uint64("queqiao_quic_observations_expired_total", s.QUICObservationsExpired),
 		slog.String("queqiao_quic_controller_kind", s.QUICControllerKind),
 		slog.Uint64("queqiao_quic_controller_mode", uint64(s.QUICControllerMode)),
@@ -1008,7 +1007,6 @@ func logPerformanceSnapshot(logger *slog.Logger, s metrics.Snapshot, interval ti
 		slog.Uint64("queqiao_coded_symbols_lost_total", s.QUICCodedLost),
 		slog.Float64("queqiao_erasure_ratio_receive", s.ReceiveErasure()),
 		slog.Float64("queqiao_erasure_residual_ratio_receive", s.ReceiveResidual()),
-		slog.Float64("queqiao_quic_controller_erasure_floor_ratio", s.QUICControllerErasureFloor),
 		slog.Bool("queqiao_quic_controller_in_recovery", s.QUICControllerInRecovery),
 		// A refused lane join is a peer's flow about to fail. Flat names,
 		// one per reason, matching the labelled /metrics series.

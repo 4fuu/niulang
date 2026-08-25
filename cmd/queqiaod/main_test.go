@@ -172,7 +172,7 @@ func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
 	registry.FlowStarted()
 	registry.ObserveQUIC(1, metrics.QUICObservation{
 		Lanes: 1, SmoothedRTT: 210 * time.Millisecond, ControllerKind: "bbr-tuic",
-		ControllerPacingRate: 9999, ControllerErasureFloor: 0.025,
+		ControllerPacingRate: 9999,
 	})
 	registry.AddQUICConnectionCounters(metrics.QUICConnectionCounters{
 		BytesSent: 1234, BytesReceived: 5678,
@@ -189,7 +189,6 @@ func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
 		"queqiao_quic_smoothed_rtt_seconds": 0.21, "queqiao_quic_bytes_received": float64(5678),
 		"queqiao_quic_packets_sent": float64(123), "queqiao_quic_packets_received": float64(119),
 		"queqiao_quic_controller_kind": "bbr-tuic", "queqiao_quic_controller_pacing_rate_bytes_per_second": float64(9999),
-		"queqiao_quic_controller_erasure_floor_ratio": 0.025,
 	} {
 		if record[key] != want {
 			t.Fatalf("%s = %#v, want %#v in %#v", key, record[key], want, record)
