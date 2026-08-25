@@ -109,7 +109,7 @@ func (p *lossyPipe) stats() (sent, lost int) {
 // connection.
 func measuredPath(floor float64) *pathmodel.PathModel {
 	m := pathmodel.NewPathModel()
-	m.Report(1, floor, 5000, 5000, 2e6, 0)
+	m.Report(1, pathmodel.Observation{Floor: floor, FloorSamples: 5000, Erasure: floor, BurstFactor: 1, ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 0})
 	return m
 }
 
@@ -442,5 +442,184 @@ func TestAPathDoesNotInferItsOutboundFloorFromReverseLoss(t *testing.T) {
 	time.Sleep(codingTTL + 20*time.Millisecond)
 	if quiet.Coding() {
 		t.Errorf("reverse loss selected outbound coding without outbound evidence: %+v", quiet.Stats())
+	}
+}
+
+// The incident in docs/CONTROL-REDESIGN.md happened here, between a path model
+// that knew what the channel was doing and a code that was sized from
+// something else. The controller's floor is biased low on purpose, and
+// channel() used to build the code's whole view of the channel out of that one
+// scalar -- Loss, Floor and Recent all set to it, and BurstFactor asserted to
+// be 1. On the live path that meant parity sized for 1.76% while the far
+// decoder measured 19.9%, and 11% of the payload handed back to the session.
+//
+// This holds the wiring rather than the arithmetic: given a model whose floor
+// and measurement disagree the way the live one did, the code must be sized
+// from the measurement.
+func TestTheCodeIsSizedFromTheMeasurementNotTheFloor(t *testing.T) {
+	const measured, conservativeFloor = 0.199, 0.0176
+	m := pathmodel.NewPathModel()
+	m.Report(1, pathmodel.Observation{
+		Floor: conservativeFloor, FloorSamples: 5000,
+		Erasure: measured, BurstFactor: 1,
+		ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 250 * time.Millisecond,
+	})
+
+	pa, _ := newPipes(1, measured)
+	p := New(pa, Config{SymbolBytes: 1100, RoundTrip: 250 * time.Millisecond, Path: m})
+	t.Cleanup(func() { p.Close() })
+
+	channel := p.channel()
+	if channel.Loss != measured {
+		t.Fatalf("the code is reading %.4f from a path measured at %.4f", channel.Loss, measured)
+	}
+	plan := p.coding().plan
+	t.Logf("floor %.4f, measured %.4f: coded=%v rate=%.3f sized_for=%.4f residual=%.2e",
+		conservativeFloor, measured, plan.Code, plan.Rate, plan.LossCoded, plan.Residual)
+	if !plan.Code {
+		t.Fatalf("a channel erasing %.1f%% was left uncoded: %s", measured*100, plan.Why)
+	}
+	if plan.LossCoded < measured {
+		t.Fatalf("sized for %.4f on a channel measured at %.4f", plan.LossCoded, measured)
+	}
+	// The parity the incident actually shipped was 4.9% of the wire against
+	// this erasure. Anything near that is the same failure with new code.
+	if overhead := plan.Overhead(); overhead < 1.15 {
+		t.Fatalf("%.1f%% erasure bought only %.2fx overhead", measured*100, overhead)
+	}
+}
+
+// budgetedPipe is a carrier with a fixed byte allowance, which is what a
+// congestion window is. It refuses once the allowance is gone, exactly as a
+// QUIC connection stops packing datagrams once SendMode reports it may not
+// send.
+type budgetedPipe struct {
+	mu        sync.Mutex
+	remaining int
+	sent      int
+	bytes     int
+	refused   int
+	out       chan []byte
+	in        chan []byte
+	done      chan struct{}
+	closed    bool
+}
+
+func newBudgetedPipes(budget int) (*budgetedPipe, *budgetedPipe) {
+	a2b, b2a := make(chan []byte, 8192), make(chan []byte, 8192)
+	return &budgetedPipe{remaining: budget, out: a2b, in: b2a, done: make(chan struct{})},
+		&budgetedPipe{remaining: budget, out: b2a, in: a2b, done: make(chan struct{})}
+}
+
+func (p *budgetedPipe) Send(d []byte) error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return errors.New("closed")
+	}
+	if len(d) > p.remaining {
+		p.refused++
+		p.mu.Unlock()
+		// A window that is full is not a broken carrier. Report the datagram
+		// as too large, which is the one refusal this layer already absorbs
+		// without failing the path.
+		return ErrDatagramTooLarge
+	}
+	p.remaining -= len(d)
+	p.sent++
+	p.bytes += len(d)
+	p.mu.Unlock()
+	select {
+	case p.out <- append([]byte(nil), d...):
+	default:
+	}
+	return nil
+}
+
+func (p *budgetedPipe) Receive() ([]byte, error) {
+	select {
+	case d := <-p.in:
+		return d, nil
+	case <-p.done:
+		return nil, errors.New("closed")
+	}
+}
+
+func (p *budgetedPipe) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.closed {
+		p.closed = true
+		close(p.done)
+	}
+	return nil
+}
+
+func (p *budgetedPipe) MaxDatagramSize() int { return 1200 }
+
+func (p *budgetedPipe) totals() (datagrams, bytes int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sent, p.bytes
+}
+
+// Parity costs a code rate, not a byte rate. This is the property the erasure
+// floor was defending, and the reason sizing the code from the measured
+// erasure instead of from a filtered floor is safe: a repair symbol crosses the
+// same congestion window as a source symbol, so raising the estimate changes
+// how a fixed window is spent and never how much goes on the wire.
+//
+// If it were false, sizing for 19.9% rather than 1.76% would be a 30% increase
+// in offered load on a path that was already dropping packets -- which is the
+// feedback loop 9aad61c records, the repair ratio climbing from 11% to 27% to
+// 63% of sent bytes.
+func TestParityCostsACodeRateAndNotAByteRate(t *testing.T) {
+	const budget = 400 * 1024
+	send := func(erasure float64) (wireBytes, payloadFrames int) {
+		m := pathmodel.NewPathModel()
+		m.Report(1, pathmodel.Observation{
+			Floor: erasure, FloorSamples: 5000, Erasure: erasure, BurstFactor: 1,
+			ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 200 * time.Millisecond,
+		})
+		pa, _ := newBudgetedPipes(budget)
+		p := New(pa, Config{SymbolBytes: 1100, RoundTrip: 200 * time.Millisecond, Path: m})
+		defer p.Close()
+
+		frame := make([]byte, 900)
+		for i := 0; i < 2000; i++ {
+			if err := p.Send(frame); err != nil {
+				break
+			}
+			payloadFrames++
+		}
+		// Let the send loop drain what it accepted.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, b := pa.totals(); b >= budget-2*1200 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		_, wireBytes = pa.totals()
+		return wireBytes, payloadFrames
+	}
+
+	cleanWire, _ := send(0)
+	lossyWire, _ := send(0.199)
+	t.Logf("clean path put %d bytes on the wire; a 19.9%% erasure path put %d, against a %d budget",
+		cleanWire, lossyWire, budget)
+
+	if lossyWire > budget {
+		t.Fatalf("a coded path put %d bytes through a %d byte window: parity is being added "+
+			"on top of the budget rather than spent out of it", lossyWire, budget)
+	}
+	if cleanWire > budget {
+		t.Fatalf("an uncoded path put %d bytes through a %d byte window", cleanWire, budget)
+	}
+	// And the coded path really did buy parity with that window rather than
+	// simply sending less: it should have used essentially all of it.
+	if lossyWire < budget/2 {
+		t.Fatalf("the coded path used only %d of a %d byte window, so this proves nothing "+
+			"about what it would do with a full one", lossyWire, budget)
 	}
 }

@@ -368,8 +368,8 @@ func TestTheCongestionWindowIsCompensated(t *testing.T) {
 func TestAJoiningSenderStartsFromWhatIsAlreadyKnown(t *testing.T) {
 	model := pathmodel.NewPathModel()
 	const perMember = 2e6
-	model.Report(1, 0.42, 5000, 5000, perMember, 0)
-	model.Report(2, 0.42, 5000, 5000, perMember, 0)
+	model.Report(1, pathmodel.Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perMember, RoundTrip: 0})
+	model.Report(2, pathmodel.Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perMember, RoundTrip: 0})
 
 	seeded := NewErasureSenderOn(1200, model)
 	if seeded.Share() <= 0 {
@@ -384,7 +384,7 @@ func TestAJoiningSenderStartsFromWhatIsAlreadyKnown(t *testing.T) {
 
 func TestAJoiningSenderUsesButDoesNotClaimTheInheritedFloor(t *testing.T) {
 	model := pathmodel.NewPathModel()
-	model.Report(1, 0.42, 5000, 5000, 2e6, 250*time.Millisecond)
+	model.Report(1, pathmodel.Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 250 * time.Millisecond})
 
 	seeded := NewErasureSenderOn(1200, model)
 	if seeded.floorTrusted || seeded.establishedFloor != 0 {
@@ -401,7 +401,7 @@ func TestAJoiningSenderUsesButDoesNotClaimTheInheritedFloor(t *testing.T) {
 	if floor != 0 || samples != 0 {
 		t.Fatalf("first replacement report = floor %.3f samples %.0f, want no local verdict", floor, samples)
 	}
-	if got := model.Report(seeded.id(), floor, samples, 12, 0, 0).Floor; got != 0.42 {
+	if got := model.Report(seeded.id(), pathmodel.Observation{Floor: floor, FloorSamples: samples, Erasure: floor, BurstFactor: 1, ObservedSamples: 12}).Floor; got != 0.42 {
 		t.Fatalf("untrusted replacement report erased retained floor: %.3f", got)
 	}
 
@@ -429,7 +429,7 @@ func TestAJoiningSenderUsesButDoesNotClaimTheInheritedFloor(t *testing.T) {
 func TestAJoiningSenderStartsWithTheWindowItsRateImplies(t *testing.T) {
 	const rate, roundTrip = 2e6, 250 * time.Millisecond
 	model := pathmodel.NewPathModel()
-	model.Report(1, 0.42, 5000, 5000, rate, roundTrip)
+	model.Report(1, pathmodel.Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: rate, RoundTrip: roundTrip})
 
 	seeded := NewErasureSenderOn(1200, model)
 	fresh := NewErasureSender(1200)
@@ -449,7 +449,7 @@ func TestAJoiningSenderStartsWithTheWindowItsRateImplies(t *testing.T) {
 	// sender must still start from the rate rather than refusing to start.
 	blind := NewErasureSenderOn(1200, func() *pathmodel.PathModel {
 		m := pathmodel.NewPathModel()
-		m.Report(1, 0.42, 5000, 5000, rate, 0)
+		m.Report(1, pathmodel.Observation{Floor: 0.42, FloorSamples: 5000, Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: rate, RoundTrip: 0})
 		return m
 	}())
 	if blind.bandwidth() <= NewErasureSender(1200).bandwidth() {

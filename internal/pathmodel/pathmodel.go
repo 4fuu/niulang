@@ -70,6 +70,9 @@ type PathModel struct {
 type pathKnowledge struct {
 	floor           float64
 	floorKnown      bool
+	erasure         float64
+	burst           float64
+	erasureKnown    bool
 	observedSamples float64
 	roundTrip       time.Duration
 }
@@ -81,18 +84,60 @@ type Member uint64
 type report struct {
 	floor     float64
 	samples   float64
+	erasure   float64
+	burst     float64
 	observed  float64
 	delivered float64
 	roundTrip time.Duration
 	at        time.Time
 }
 
+// Observation is what one contributor has measured about the direction it
+// sends into.
+//
+// Floor and Erasure are the same channel seen with opposite bias, and they are
+// carried separately because their consumers fail in opposite directions.
+// A congestion controller must under-estimate erasure: believing loss is
+// congestion makes it slow down, which is safe. A code must not: believing
+// loss is congestion makes it send no parity into a channel that is erasing,
+// which is what docs/CONTROL-REDESIGN.md was written about. One number cannot
+// serve both, so the model pools both and each consumer reads the one whose
+// error it can survive.
+type Observation struct {
+	// Floor is the erasure this contributor's controller has established as
+	// independent of its sending rate, and FloorSamples is the weight behind
+	// it. A contributor with no trustworthy estimate reports zero weight
+	// rather than diluting a floor another lane has established.
+	Floor        float64
+	FloorSamples float64
+	// Erasure is the loss rate this contributor measured, unclassified, and
+	// BurstFactor is how much of it arrived in runs. Both are what a code has
+	// to be sized against; neither is safe to pace from.
+	Erasure     float64
+	BurstFactor float64
+	// ObservedSamples records measurement progress even while the floor is
+	// still unknown, which is what distinguishes a measured clean path from an
+	// unmeasured one.
+	ObservedSamples float64
+	// Delivered is this contributor's delivered rate in bytes per second, and
+	// RoundTrip the smallest round trip it has seen.
+	Delivered float64
+	RoundTrip time.Duration
+}
+
 // State is what an endpoint pair has been measured to do, from the point of
 // view of one contributor.
 type State struct {
 	// Floor is the erasure rate that does not respond to sending more slowly,
-	// pooled across every lane's samples.
+	// pooled across every lane's samples. It is deliberately conservative and
+	// is for pacing; a code sized from it under-protects the path. See
+	// Observation.
 	Floor float64
+	// Erasure is the loss rate the contributors measured on the direction they
+	// send into, pooled and unclassified, and BurstFactor is how much of it
+	// arrived in runs. This is what a code is sized against.
+	Erasure     float64
+	BurstFactor float64
 	// ObservedSamples is how many packet outcomes contributors have measured,
 	// including outcomes not yet sufficient to establish a non-zero erasure
 	// floor. It distinguishes a measured clean path from an unmeasured one
@@ -160,7 +205,7 @@ func NewPathModel() *PathModel {
 // endpoint pair believes. floorSamples weights only established floor
 // evidence; observedSamples records measurement progress even while the floor
 // is still unknown.
-func (m *PathModel) Report(member Member, floor, floorSamples, observedSamples, delivered float64, roundTrip time.Duration) State {
+func (m *PathModel) Report(member Member, o Observation) State {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -170,13 +215,16 @@ func (m *PathModel) Report(member Member, floor, floorSamples, observedSamples, 
 		entry = &report{}
 		m.members[member] = entry
 	}
-	entry.floor, entry.samples, entry.observed, entry.delivered, entry.at = floor, floorSamples, observedSamples, delivered, now
-	if roundTrip > 0 {
-		entry.roundTrip = roundTrip
+	entry.floor, entry.samples = o.Floor, o.FloorSamples
+	entry.erasure, entry.burst = o.Erasure, o.BurstFactor
+	entry.observed, entry.delivered, entry.at = o.ObservedSamples, o.Delivered, now
+	if o.RoundTrip > 0 {
+		entry.roundTrip = o.RoundTrip
 	}
 
 	var state State
 	var weighted, weight, observed, sum float64
+	var erasureWeighted, burstWeighted float64
 	live := 0
 	for key, other := range m.members {
 		if now.Sub(other.at) > memberIdle {
@@ -189,6 +237,8 @@ func (m *PathModel) Report(member Member, floor, floorSamples, observedSamples, 
 		// which is also what lets a new lane join without disturbing it.
 		weighted += other.floor * other.samples
 		weight += other.samples
+		erasureWeighted += other.erasure * other.observed
+		burstWeighted += other.burst * other.observed
 		observed += other.observed
 		if other.roundTrip > 0 && (state.RoundTrip == 0 || other.roundTrip < state.RoundTrip) {
 			state.RoundTrip = other.roundTrip
@@ -200,6 +250,20 @@ func (m *PathModel) Report(member Member, floor, floorSamples, observedSamples, 
 		m.knowledge.floorKnown = true
 	} else if m.knowledge.floorKnown {
 		state.Floor = m.knowledge.floor
+	}
+	if observed > 0 {
+		state.Erasure = erasureWeighted / observed
+		state.BurstFactor = burstWeighted / observed
+		m.knowledge.erasure, m.knowledge.burst = state.Erasure, state.BurstFactor
+		m.knowledge.erasureKnown = true
+	} else if m.knowledge.erasureKnown {
+		state.Erasure, state.BurstFactor = m.knowledge.erasure, m.knowledge.burst
+	}
+	if state.BurstFactor < 1 {
+		// A burst factor below one is not a channel, it is an unmeasured or
+		// half-filled report. Independent loss is the assumption that makes a
+		// code weakest, so it is the safe one to fall back to.
+		state.BurstFactor = 1
 	}
 	if observed > m.knowledge.observedSamples {
 		m.knowledge.observedSamples = observed
@@ -257,6 +321,7 @@ func (m *PathModel) Current() State {
 	defer m.mu.Unlock()
 	var state State
 	var weighted, weight, observed, bottleneck float64
+	var erasureWeighted, burstWeighted float64
 	live := 0
 	for key, entry := range m.members {
 		if now.Sub(entry.at) > memberIdle {
@@ -266,6 +331,8 @@ func (m *PathModel) Current() State {
 		live++
 		weighted += entry.floor * entry.samples
 		weight += entry.samples
+		erasureWeighted += entry.erasure * entry.observed
+		burstWeighted += entry.burst * entry.observed
 		observed += entry.observed
 		if entry.roundTrip > 0 && (state.RoundTrip == 0 || entry.roundTrip < state.RoundTrip) {
 			state.RoundTrip = entry.roundTrip
@@ -277,6 +344,20 @@ func (m *PathModel) Current() State {
 		m.knowledge.floorKnown = true
 	} else if m.knowledge.floorKnown {
 		state.Floor = m.knowledge.floor
+	}
+	if observed > 0 {
+		state.Erasure = erasureWeighted / observed
+		state.BurstFactor = burstWeighted / observed
+		m.knowledge.erasure, m.knowledge.burst = state.Erasure, state.BurstFactor
+		m.knowledge.erasureKnown = true
+	} else if m.knowledge.erasureKnown {
+		state.Erasure, state.BurstFactor = m.knowledge.erasure, m.knowledge.burst
+	}
+	if state.BurstFactor < 1 {
+		// A burst factor below one is not a channel, it is an unmeasured or
+		// half-filled report. Independent loss is the assumption that makes a
+		// code weakest, so it is the safe one to fall back to.
+		state.BurstFactor = 1
 	}
 	if observed > m.knowledge.observedSamples {
 		m.knowledge.observedSamples = observed
