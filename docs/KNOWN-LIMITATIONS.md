@@ -19,7 +19,9 @@ qualification items are still open.
   the ordinary case rather than an edge one. The redesign is not deployed and
   should not be until the bandwidth estimate stops reporting a token bucket's
   burst as its rate; the shipping controller still treats loss as congestion
-  and does not have this behaviour.
+  and does not have this behaviour. Two approaches to that estimate have been
+  tried and rejected, and are recorded in the redesign document so that a third
+  does not repeat them.
 - Queqiao is a WAN optimization data plane, not an anonymity network. The
   desktop ingress is SOCKS5, the released Android app exports an authenticated
   SOCKS5 endpoint to a separate routing client, and the iOS app is a

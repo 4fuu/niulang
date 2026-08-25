@@ -487,9 +487,49 @@ not remove it, because the first amplifier is the larger one and remains.
 
 Replacing the max filter with a statistic that estimates a *sustained* rate
 rather than the peak of a bursty delivery process. That is a change to the core
-of the bandwidth model, it affects every path rather than only policed ones, and
-it should not be attempted without measurement on a real path. It is the
-outstanding work this design has left.
+of the bandwidth model and affects every path rather than only policed ones.
+
+### What has been tried and does not work
+
+Recorded so that the next attempt starts further along than this one did.
+
+**Bounding the filter's memory in wall time.** The filter kept a sample for ten
+packet-timed rounds, which on an application-limited connection was sixty-six
+minutes; expiring samples in time as well as in rounds fixed that, and it is
+worth having. It does nothing for a policer. The bursts recur every refill
+period, so there is always a recent high sample and the estimate never has to
+fall back to anything. **Age was not the problem.**
+
+**Averaging the sample within a round.** The filter is fed the largest
+per-packet delivery rate in an acknowledgement batch. Each of those is bytes
+delivered over one packet's own send-to-ack window, and on a path that releases
+traffic in quanta those windows land unevenly across the releases, so their
+distribution has an upper tail and a maximum reports the tail. Feeding the
+filter one rate per round -- bytes delivered over the whole round -- should
+remove the tail while keeping what the maximum is for.
+
+It does not. Measured against the same emulated policer, the estimate moved
+from 2.7x the shaped rate to 3.6x and peak pacing from 42x to 37x, which is
+within run-to-run variation. **Not an improvement, and not shipped.** Why it
+fails is not established: the typical sample should already be about one round
+trip of delivery over about one round trip of time, which is the right answer,
+so either rounds are advancing faster than assumed or the delta and the
+interval are not the ones this reasoning assumes.
+
+**A synthetic estimator harness.** An attempt to drive the estimator directly
+with a known 250 KB/s delivery schedule reported 4,000 B/s. The harness was
+wrong, not the estimator, but the point stands: building a faithful path model
+inside a unit test is its own project, which is what `internal/pathsim` exists
+for. The emulator measures end to end and cannot isolate the estimator.
+
+### What the next attempt needs first
+
+Instrumentation, not a hypothesis. The sample interval and the delivered delta
+that produce each filter update, recorded on the emulated policer, would say in
+one run which of the two reasonings above is wrong. Three attempts have now been
+made by reasoning about what the code should be doing; each was refuted by
+measurement, and the third was refuted by a measurement that was itself broken.
+Measure the sampler before changing it again.
 
 Until then, **a policed path is unbraked**, and this design should not be
 deployed on one.
