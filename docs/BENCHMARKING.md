@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > **Status:** Current benchmark methodology for public protocol 1
-> **Last reviewed:** 2026-08-20
+> **Last reviewed:** 2026-08-26
 
 This is the reproducibility guide for the measurement rig. It exists because the motivating
 link moved between roughly 0% and 50% packet loss within minutes, so
@@ -45,6 +45,8 @@ relay in place of the server. It applies, per direction:
 | `LossBurstPackets` | correlated loss: a Gilbert chain with this mean burst |
 | `RateBytesPerSec` | a bottleneck with tail-drop queueing |
 | `PerFlowRateBytesPerSec` | a policer applied per source address, with a bucket scaled from its own rate |
+| `PolicerRefillPeriod` | replace the queue with a token-bucket policer refilled in fixed quanta |
+| `PolicerBurstBytes` | policer bucket depth; zero is one quantum plus one packet |
 | `DelayWander` | amplitude of a correlated random walk on the one-way delay |
 | `QueueBytes` | the bottleneck buffer; zero selects one BDP |
 | `Seed` | makes the loss pattern reproducible |
@@ -210,11 +212,12 @@ with the commit, dirty bit, Go toolchain, target, module graph, exact
 arguments, and seeded path parameters, which is what makes a cell reproducible
 by somebody who was not there.
 
-Nothing reads a stack's own telemetry. Queqiao's counters reach the report
-because the harness runs it in-process; an external stack is a pair of
-processes whose logs are captured only to explain a failure. So a claim that
-depends on what the transport did internally -- parity share of bytes sent,
-retransmissions, window behaviour -- has to be recorded alongside the run by
+The harness records Queqiao's bounded wire-cap telemetry because it runs that
+stack in-process. It does not read arbitrary controller internals, and an
+external stack is a pair of processes whose logs are captured only to explain
+a failure. So a claim that depends on what the transport did internally --
+parity share of bytes sent, retransmissions, window behaviour -- has to be
+recorded alongside the run by
 hand, from that implementation's own output. The fixed-parity section below is
 one instance of that requirement rather than an exception to it.
 
@@ -297,6 +300,137 @@ splits their latency into connect and first-byte. Those are different defects
 with different fixes: a slow connect is flow setup, a slow first byte is
 queueing behind the bulk transfer.
 
+The JSON record also keeps per-trial upstream and downstream path counters.
+`packets_erased` is seeded ambient loss; `bottleneck_dropped` is queue or
+policer overshoot. A controller has not reduced loss merely because useful
+goodput rose -- it must be checked against both counters and interactive tail.
+
+## Low-latency and policer experiments
+
+Four focused scripts cover the cases a throughput-only matrix misses:
+
+```sh
+# Current erasure control, aggregate application budget, compensating Brutal,
+# and a fixed wire-rate control on an 8 ms token-bucket policer.
+./scripts/bench_policer_controls.sh /tmp/queqiao-policer
+
+# Fresh versus reused QUIC connections across clean and lossy RTTs.
+./scripts/bench_connection_reuse.sh /tmp/queqiao-reuse
+
+# Independent loss, burst loss, and delay wander. Optionally add the real
+# Hysteria2 implementation from sing-box.
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_loss_resilience.sh /tmp/queqiao-resilience
+
+# Application UDP delivery and latency over datagrams versus ordered streams;
+# optionally include Hysteria2 in the same seeded path matrix.
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_udp_delivery.sh /tmp/queqiao-udp
+
+# A serial low-loss campaign for latency and relatively high bandwidth. Key
+# cells use ten trials, other cells use five, and CPU/peak RSS are retained.
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_low_latency_bandwidth.sh /tmp/queqiao-low-loss
+```
+
+The combined campaign makes 0%, 1%, and 5% independent loss its primary
+regime. It covers 50--400 ms RTT, 50--100 Mbit/s bottlenecks, 256- and
+1200-byte UDP payloads, three policer refill quanta, connection reuse, and a
+small burst-loss boundary. One 15% UDP cell is retained only to quantify
+ordered-stream head-of-line delay; it is not part of the low-loss verdict.
+Each cell runs serially so another benchmark process cannot distort its tail or
+resource data. `resources.tsv` reports wall, user and system CPU time plus peak
+RSS for the whole cell, including external transports reaped by the harness.
+
+Each in-process trial resets the shared path model before it starts. The
+Queqiao client binds `127.0.0.2` while the server remains on `127.0.0.1`, so
+the client and server directions cannot collapse into the same production
+`local->peer` model key merely because both endpoints are loopback. Omitting
+either isolation contaminates later erasure/FEC trials with observations from
+earlier seeds or from the reverse direction. Controllers that do not consume
+the path model can hide this error, so a clean BBR or Brutal control is not
+evidence that erasure-controller isolation is correct.
+
+The fixed-rate control is `--congestion brutal-no-comp --brutal-rate N`.
+It borrows one narrow idea from Hysteria2's Brutal controller: capacity is an
+operator-supplied budget, not a number inferred from a short burst. Unlike the
+normal `brutal` mode, it does not divide that budget by the ACK rate. Normal
+Brutal's compensation is bounded to 1.25x, but even that is the wrong direction
+at a policer: its additional packets become additional policer drops.
+
+This mode is intentionally a **per-lane wire rate**, not an automatic path
+controller and not an aggregate guarantee. Several active lanes can offer the
+rate several times. `--aggregate-rate` and `--interactive-reserve` exercise the
+existing shared application-frame budget, but that budget does not count QUIC
+headers or FEC repairs and therefore is not a strict wire cap. The policer
+script measures both controls rather than presenting either approximation as a
+finished automatic brake.
+
+Both Brutal modes also replace the erasure controller that feeds Queqiao's
+shared path model, so adaptive FEC does not receive an erasure estimate in
+these controls. That is acceptable for isolating fixed pacing, but it is why
+`brutal-no-comp` is not the finished low-loss design. A production version
+would cap wire pacing at the shared path boundary while retaining the erasure
+model and its adaptive coding.
+
+The opt-in prototype of that design is `--wire-cap-rate N
+--wire-interactive-reserve R` in `queqiaobench`, or
+`--wire-cap-bytes-per-sec N --wire-interactive-reserve-bytes-per-sec R` in
+`queqiaod`. It wraps the selected explicit QUIC controller instead of replacing
+it. Connections to the same provider path share one total scheduler; validated
+non-control data connections additionally share a bulk scheduler at `N-R`.
+Pooled/control connections use the total scheduler, so the reserve remains
+available for interactive work. The wrapper forwards the erasure controller's
+extended ACK/loss events unchanged, preserving its path model and adaptive FEC.
+`reno` is rejected because the QUIC fork does not expose its internal controller
+for wrapping. Zero remains the default and preserves existing behavior.
+
+This is a burst-bounded aggregate **QUIC packet-byte pacing cap**, not a strict
+NIC wire cap. It charges the packet size reported synchronously to congestion
+control, including QUIC overhead and repairs, but not UDP/IP headers. The
+handshake occurs before the wrapper is installed; path probes bypass the
+controller; ACK-only and PTO packets can bypass pacing eligibility and are
+charged afterward; and concurrent connection send loops can each pass one
+eligibility check before either charge is visible. The bounded debt is repaid
+by later packets and exported as telemetry. A strict all-packet cap needs a
+pre-registration pacing hook in the QUIC implementation rather than blocking
+`PacketConn.Write`: blocking there would register send/PTO state before the
+packet actually left and corrupt RTT, PTO, and erasure sampling.
+
+The JSON `wire_cap` object records each endpoint's configured total and bulk
+rates, charged QUIC bytes, overshoot packets, and sampled scheduler debt. The
+runtime exports the corresponding `queqiao_quic_wire_cap_*` metrics. Continue
+to use pathsim's `packets_erased` and `bottleneck_dropped` as the authoritative
+ambient-loss and sender-overshoot split.
+
+On the 100 Mbit/s development policer, a 95 Mbit/s cap removed all measured
+bottleneck drops at 8 and 16 ms refill intervals, but still dropped 6.996% at
+1 ms. That boundary is consistent with the ten-packet burst allowance and
+host timer granularity. It is evidence to keep the prototype opt-in, not a
+reason to relabel it as a hard cap. The full dated result and limitations are
+in [the low-latency, low-loss experiment report](LOW-LATENCY-LOW-LOSS-EXPERIMENT.md).
+
+The connection-reuse script borrows the useful latency property of AnyTLS's
+idle-session pool -- keep a path warm so a request does not pay another outer
+handshake. Queqiao already does this with `--quic-pool`; it should not import
+AnyTLS's one-TCP-session-per-flow shape or padding as latency mechanisms. TCP
+multiplexing adds head-of-line coupling, and padding adds bytes and writes.
+The script tests only the reusable mechanism: cold and warm request latency
+with the pool enabled and disabled.
+
+`--udp-packets N` adds a bounded SOCKS UDP echo workload to each stack and
+trial. Its JSON records application datagrams sent, received, and lost plus
+delivered-packet p50/p95/max latency. `--udp-on-stream` is the ordered-stream
+control: it can recover every packet, but a lost packet holds up the ones
+behind it. The UDP suite measures that delivery-versus-tail tradeoff directly
+under independent loss, burst loss, and a quantized policer. It does not call
+outer QUIC erasures "application loss".
+
+These are mechanism-inspired experiments, not protocol parity claims. A result
+is a candidate for a deployment default only if completion, useful goodput,
+bottleneck drops, cold/warm latency, and interactive p95 all remain acceptable,
+then survives a matched live campaign.
+
 ## Typical invocations
 
 ```sh
@@ -342,6 +476,26 @@ go run ./cmd/queqiaobench --rtt 200 --loss 3 --rate 100 --trials 5 \
 # rather than the controllers.
 go run ./cmd/queqiaobench --rtt 178 --loss 35 --loss-burst 10 --rate 50 \
     --bytes $((4*1024*1024)) --congestion brutal --brutal-rate 12 --trials 12
+
+# A queue-less 25 Mbit/s policer with an 8 ms refill quantum. The JSON report
+# separates ambient erasures from packets rejected by the policer.
+go run ./cmd/queqiaobench --stacks queqiao --rtt 226 --rate 25 --loss 20 \
+    --policer-refill 8ms --congestion brutal-no-comp --brutal-rate 23.75 \
+    --interactive --json /tmp/policer.json
+
+# Preserve erasure/FEC while sharing one 95 Mbit/s QUIC packet-byte cap across
+# every connection to the provider. Bulk connections share 85 Mbit/s and the
+# remaining 10 Mbit/s stays available to interactive/control traffic.
+go run ./cmd/queqiaobench --stacks queqiao --rtt 226 --rate 100 --loss 1 \
+    --policer-refill 8ms --congestion erasure --wire-cap-rate 95 \
+    --wire-interactive-reserve 10 --interactive --json /tmp/wire-cap.json
+
+# Residual application UDP loss and delivered-packet latency. The stream
+# control makes head-of-line delay visible instead of hiding it as 100%
+# delivery.
+go run ./cmd/queqiaobench --stacks queqiao --rtt 226 --rate 50 --loss 15 \
+    --udp-packets 80 --udp-interval 20ms --udp-settle 3s \
+    --json /tmp/udp.json
 
 # A reverse-path-heavy regime, which is where a transport that layers its own
 # acknowledgements over QUIC gets into trouble.

@@ -10,7 +10,9 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
@@ -25,6 +27,7 @@ type Report struct {
 	Trials        []TrialRecord      `json:"trials"`
 	Summary       []CellSummary      `json:"summary"`
 	Latency       []LatencyRecord    `json:"latency,omitempty"`
+	UDP           []UDPRecord        `json:"udp,omitempty"`
 	Contention    []ContentionRecord `json:"contention,omitempty"`
 }
 
@@ -51,31 +54,71 @@ type ModuleReport struct {
 }
 
 type PathReport struct {
-	RTTMillis           int     `json:"rtt_ms"`
-	LossPercent         float64 `json:"loss_percent"`
-	UpstreamLossPercent float64 `json:"upstream_loss_percent,omitempty"`
-	LossBurstPackets    float64 `json:"loss_burst_packets,omitempty"`
-	JitterMillis        float64 `json:"jitter_ms,omitempty"`
-	WanderMillis        float64 `json:"delay_wander_ms,omitempty"`
-	RateMbits           float64 `json:"rate_mbits"`
-	PerFlowMbits        float64 `json:"per_flow_mbits,omitempty"`
-	QueueBytes          int     `json:"queue_bytes"`
-	Seed                int64   `json:"seed"`
-	ObjectBytes         int64   `json:"object_bytes"`
-	Congestion          string  `json:"congestion"`
-	ChunkSize           int     `json:"chunk_size,omitempty"`
-	QUICPool            bool    `json:"quic_pool"`
+	RTTMillis               int     `json:"rtt_ms"`
+	LossPercent             float64 `json:"loss_percent"`
+	UpstreamLossPercent     float64 `json:"upstream_loss_percent,omitempty"`
+	LossBurstPackets        float64 `json:"loss_burst_packets,omitempty"`
+	JitterMillis            float64 `json:"jitter_ms,omitempty"`
+	WanderMillis            float64 `json:"delay_wander_ms,omitempty"`
+	RateMbits               float64 `json:"rate_mbits"`
+	PerFlowMbits            float64 `json:"per_flow_mbits,omitempty"`
+	QueueBytes              int     `json:"queue_bytes"`
+	PolicerRefillMillis     float64 `json:"policer_refill_ms,omitempty"`
+	PolicerBurstBytes       int     `json:"policer_burst_bytes,omitempty"`
+	Seed                    int64   `json:"seed"`
+	ObjectBytes             int64   `json:"object_bytes"`
+	Congestion              string  `json:"congestion"`
+	BrutalRateMbits         float64 `json:"brutal_rate_mbits,omitempty"`
+	AggregateRateMbits      float64 `json:"aggregate_rate_mbits,omitempty"`
+	InteractiveReserveMbits float64 `json:"interactive_reserve_mbits,omitempty"`
+	WireCapRateMbits        float64 `json:"wire_cap_rate_mbits,omitempty"`
+	WireReserveMbits        float64 `json:"wire_interactive_reserve_mbits,omitempty"`
+	ChunkSize               int     `json:"chunk_size,omitempty"`
+	QUICPool                bool    `json:"quic_pool"`
+	UDPOnStream             bool    `json:"udp_on_stream,omitempty"`
 }
 
 type TrialRecord struct {
-	Stack       string             `json:"stack"`
-	Flows       int                `json:"flows"`
-	Trial       int                `json:"trial"`
-	Seconds     float64            `json:"seconds"`
-	MbitsPerSec float64            `json:"mbits_per_sec"`
-	Complete    bool               `json:"complete"`
-	Note        string             `json:"note,omitempty"`
-	Interactive *InteractiveReport `json:"interactive,omitempty"`
+	Stack        string              `json:"stack"`
+	Flows        int                 `json:"flows"`
+	Trial        int                 `json:"trial"`
+	Seconds      float64             `json:"seconds"`
+	MbitsPerSec  float64             `json:"mbits_per_sec"`
+	Complete     bool                `json:"complete"`
+	Note         string              `json:"note,omitempty"`
+	Interactive  *InteractiveReport  `json:"interactive,omitempty"`
+	PathCounters *PathCountersReport `json:"path_counters,omitempty"`
+	WireCap      *WireCapReport      `json:"wire_cap,omitempty"`
+}
+
+type WireCapReport struct {
+	Client WireCapEndpointReport `json:"client"`
+	Server WireCapEndpointReport `json:"server"`
+}
+
+type WireCapEndpointReport struct {
+	RateMbits        float64 `json:"rate_mbits"`
+	BulkRateMbits    float64 `json:"bulk_rate_mbits"`
+	ChargedBytes     uint64  `json:"charged_bytes"`
+	OvershootPackets uint64  `json:"overshoot_packets"`
+	DebtMillis       float64 `json:"debt_ms"`
+}
+
+// PathCountersReport records what the deterministic emulator observed. Loss
+// and bottleneck drops are deliberately separate: random erasure belongs to
+// the configured path, while queue or policer drops are sender overshoot.
+type PathCountersReport struct {
+	Upstream   DirectionCountersReport `json:"upstream"`
+	Downstream DirectionCountersReport `json:"downstream"`
+}
+
+type DirectionCountersReport struct {
+	PacketsIn         uint64 `json:"packets_in"`
+	PacketsOut        uint64 `json:"packets_out"`
+	PacketsErased     uint64 `json:"packets_erased"`
+	BottleneckDropped uint64 `json:"bottleneck_dropped"`
+	BytesIn           uint64 `json:"bytes_in"`
+	BytesOut          uint64 `json:"bytes_out"`
 }
 
 type LatencyRecord struct {
@@ -85,6 +128,25 @@ type LatencyRecord struct {
 	WarmMillis float64 `json:"warm_ms"`
 	Complete   bool    `json:"complete"`
 	Note       string  `json:"note,omitempty"`
+}
+
+// UDPRecord measures SOCKS UDP at the application boundary. Path counters
+// cannot answer how many application datagrams survived FEC, retransmission,
+// or transport framing, so delivery and latency are recorded separately.
+type UDPRecord struct {
+	Stack           string              `json:"stack"`
+	Trial           int                 `json:"trial"`
+	UDPOnStream     bool                `json:"udp_on_stream,omitempty"`
+	Sent            int                 `json:"sent"`
+	Received        int                 `json:"received"`
+	Lost            int                 `json:"lost"`
+	DeliveryPercent float64             `json:"delivery_percent"`
+	P50Millis       float64             `json:"p50_ms"`
+	P95Millis       float64             `json:"p95_ms"`
+	MaxMillis       float64             `json:"max_ms"`
+	Note            string              `json:"note,omitempty"`
+	PathCounters    *PathCountersReport `json:"path_counters,omitempty"`
+	WireCap         *WireCapReport      `json:"wire_cap,omitempty"`
 }
 
 type ContentionRecord struct {
@@ -147,10 +209,49 @@ func describePath(opts options, cfg pathsim.Config) PathReport {
 		UpstreamLossPercent: opts.lossUp, LossBurstPackets: opts.lossBurst,
 		JitterMillis: opts.jitterMillis, WanderMillis: opts.wanderMillis,
 		RateMbits: opts.rateMbits, PerFlowMbits: opts.perFlowMbits,
-		QueueBytes: cfg.QueueBytes, Seed: opts.seed, ObjectBytes: opts.bytes,
-		Congestion: opts.congestion,
-		ChunkSize:  opts.chunkSize, QUICPool: opts.quicPool,
+		QueueBytes:          cfg.QueueBytes,
+		PolicerRefillMillis: round3(float64(cfg.PolicerRefillPeriod) / float64(time.Millisecond)),
+		PolicerBurstBytes:   cfg.PolicerBurstBytes,
+		Seed:                opts.seed, ObjectBytes: opts.bytes,
+		Congestion: opts.congestion, BrutalRateMbits: opts.brutalMbits,
+		AggregateRateMbits: opts.aggregateMbits, InteractiveReserveMbits: opts.interactiveReserveMbits,
+		WireCapRateMbits: opts.wireCapMbits, WireReserveMbits: opts.wireReserveMbits,
+		ChunkSize: opts.chunkSize, QUICPool: opts.quicPool, UDPOnStream: opts.udpOnStream,
 	}
+}
+
+func describePathCounters(up, down pathsim.Stats) PathCountersReport {
+	describe := func(stats pathsim.Stats) DirectionCountersReport {
+		return DirectionCountersReport{
+			PacketsIn: stats.PacketsIn, PacketsOut: stats.PacketsOut,
+			PacketsErased: stats.PacketsLost, BottleneckDropped: stats.PacketsDropped,
+			BytesIn: stats.BytesIn, BytesOut: stats.BytesOut,
+		}
+	}
+	return PathCountersReport{Upstream: describe(up), Downstream: describe(down)}
+}
+
+func describeWireCap(client, server metrics.Snapshot, configuredRate, configuredReserve float64) *WireCapReport {
+	describe := func(snapshot metrics.Snapshot) WireCapEndpointReport {
+		rate := round3(float64(snapshot.QUICWireCapRate) * 8 / 1e6)
+		bulkRate := round3(float64(snapshot.QUICWireCapBulkRate) * 8 / 1e6)
+		// Active-flow gauges disappear when a short benchmark flow closes,
+		// while the connection-scoped counters above remain banked. The exact
+		// configured rates are part of the harness, not a sampled gauge, so use
+		// them when there is no active observation left to report them.
+		if rate == 0 && configuredRate > 0 {
+			rate = configuredRate
+			bulkRate = configuredRate - configuredReserve
+		}
+		return WireCapEndpointReport{
+			RateMbits:        round3(rate),
+			BulkRateMbits:    round3(bulkRate),
+			ChargedBytes:     snapshot.QUICWireCapBytes,
+			OvershootPackets: snapshot.QUICWireCapOvershootPackets,
+			DebtMillis:       round3(float64(snapshot.QUICWireCapDebt) / float64(time.Millisecond)),
+		}
+	}
+	return &WireCapReport{Client: describe(client), Server: describe(server)}
 }
 
 func describeSource() SourceReport {

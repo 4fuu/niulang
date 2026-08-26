@@ -36,6 +36,17 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 			c.AggregateBytesPerSec = 2
 			c.InteractiveReserveBytesPerSec = 2
 		},
+		"wire reserve without cap": func(c *ClientConfig) {
+			c.WireInteractiveReserveBytesPerSec = 1
+		},
+		"wire reserve consumes cap": func(c *ClientConfig) {
+			c.WireCapBytesPerSec = 2
+			c.WireInteractiveReserveBytesPerSec = 2
+		},
+		"wire cap around Reno": func(c *ClientConfig) {
+			c.Congestion = CongestionReno
+			c.WireCapBytesPerSec = 2
+		},
 		"idle exceeds lifetime": func(c *ClientConfig) {
 			c.FlowIdleTimeout = 2 * time.Second
 			c.FlowMaxLifetime = time.Second
@@ -357,6 +368,21 @@ func TestTUICAlignedCongestionConfigurationIsAccepted(t *testing.T) {
 	}
 }
 
+func TestUncompensatedBrutalConfigurationRequiresAndAcceptsARate(t *testing.T) {
+	_, credentials := testCertificate(t)
+	base := ClientConfig{
+		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1",
+		Credentials: credentials, Congestion: CongestionBrutalNoComp,
+	}
+	if _, err := NewClient(base); err == nil || !strings.Contains(err.Error(), "positive per-lane byte rate") {
+		t.Fatalf("missing brutal-no-comp rate error = %v", err)
+	}
+	base.BrutalBytesPerSec = 1_000_000
+	if _, err := NewClient(base); err != nil {
+		t.Fatalf("brutal-no-comp configuration rejected: %v", err)
+	}
+}
+
 func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 	credentials, _ := testCertificate(t)
 	base := ServerConfig{ListenAddr: "127.0.0.1:0", Credentials: credentials}
@@ -377,6 +403,17 @@ func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 		"reserve consumes whole budget": func(c *ServerConfig) {
 			c.AggregateBytesPerSec = 2
 			c.InteractiveReserveBytesPerSec = 2
+		},
+		"wire reserve without cap": func(c *ServerConfig) {
+			c.WireInteractiveReserveBytesPerSec = 1
+		},
+		"wire reserve consumes cap": func(c *ServerConfig) {
+			c.WireCapBytesPerSec = 2
+			c.WireInteractiveReserveBytesPerSec = 2
+		},
+		"wire cap around Reno": func(c *ServerConfig) {
+			c.Congestion = CongestionReno
+			c.WireCapBytesPerSec = 2
 		},
 		"idle exceeds lifetime": func(c *ServerConfig) {
 			c.FlowIdleTimeout = 2 * time.Second

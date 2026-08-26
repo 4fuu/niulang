@@ -35,12 +35,16 @@ func NewBrutalSender(bytesPerSecond uint64, disableLossCompensation bool) *Bruta
 	if bytesPerSecond < brutalMinRate {
 		bytesPerSecond = brutalMinRate
 	}
+	kind := "brutal"
+	if disableLossCompensation {
+		kind = "brutal-no-comp"
+	}
 	b := &BrutalSender{
 		bps:                     quiccongestion.ByteCount(bytesPerSecond),
 		maxDatagramSize:         quiccongestion.InitialPacketSize,
 		ackRate:                 1,
 		disableLossCompensation: disableLossCompensation,
-		telemetry:               newTelemetryState("brutal"),
+		telemetry:               newTelemetryState(kind),
 	}
 	b.pacer = newPacer(b.bandwidth)
 	b.publishTelemetry()

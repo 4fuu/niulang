@@ -122,6 +122,8 @@ func connectionCounters(stats laneTransportStats) metrics.QUICConnectionCounters
 		ControllerAppSamples:    stats.controller.AppSamples,
 		ControllerStateMisses:   stats.controller.StateMisses,
 		ControllerZeroSamples:   stats.controller.ZeroSamples,
+		WireCapBytes:            stats.controller.WireCapBytes,
+		WireCapOvershootPackets: stats.controller.WireCapOvershootPackets,
 	}
 }
 

@@ -497,6 +497,7 @@ type runtimeOptions struct {
 	congestion                                                      string
 	brutalBytesPerSec, adaptiveMinBytesSec, adaptiveMaxBytesSec     uint64
 	aggregateBytesPerSec, interactiveReserveBytesPerSec             uint64
+	wireCapBytesPerSec, wireInteractiveReserveBytesPerSec           uint64
 	fallbackDelay, fallbackGrace, udpCooldown                       time.Duration
 	udpFailureThreshold                                             int
 	allowPrivate                                                    bool
@@ -530,11 +531,13 @@ func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
 	fs.IntVar(&opts.tcpFallbackLanes, "tcp-fallback-lanes", 0, "TCP lanes per bulk flow (0 uses role default)")
 	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry UDP packets on streams instead of QUIC datagrams")
 	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionErasure), "QUIC congestion controller")
-	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "Brutal fixed byte rate")
+	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "Brutal fixed per-lane byte rate")
 	fs.Uint64Var(&opts.adaptiveMinBytesSec, "adaptive-min-bytes-per-sec", 64*1024, "Adaptive minimum byte rate")
 	fs.Uint64Var(&opts.adaptiveMaxBytesSec, "adaptive-max-bytes-per-sec", 200*1024*1024, "Adaptive maximum byte rate")
 	fs.Uint64Var(&opts.aggregateBytesPerSec, "aggregate-bytes-per-sec", 0, "optional aggregate byte budget")
 	fs.Uint64Var(&opts.interactiveReserveBytesPerSec, "interactive-reserve-bytes-per-sec", 0, "interactive portion of aggregate budget")
+	fs.Uint64Var(&opts.wireCapBytesPerSec, "wire-cap-bytes-per-sec", 0, "experimental shared per-provider QUIC packet-byte pacing cap (0 disables)")
+	fs.Uint64Var(&opts.wireInteractiveReserveBytesPerSec, "wire-interactive-reserve-bytes-per-sec", 0, "portion of the wire cap reserved from bulk QUIC connections")
 	fs.StringVar(&opts.logLevel, "log-level", "info", "debug, info, warn, or error")
 	fs.StringVar(&opts.logFile, "log-file", "auto", "runtime log path; auto selects the platform location, none disables the file")
 	fs.StringVar(&opts.logFormat, "log-format", "json", "runtime log format: json or text")
@@ -596,10 +599,17 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 		opts.aggregateBytesPerSec != 0 && opts.interactiveReserveBytesPerSec >= opts.aggregateBytesPerSec {
 		return errors.New("invalid aggregate/interactive byte budget")
 	}
+	if opts.wireCapBytesPerSec == 0 && opts.wireInteractiveReserveBytesPerSec != 0 ||
+		opts.wireCapBytesPerSec != 0 && opts.wireInteractiveReserveBytesPerSec >= opts.wireCapBytesPerSec {
+		return errors.New("invalid wire cap/interactive reserve")
+	}
+	if opts.wireCapBytesPerSec != 0 && opts.congestion == string(pep.CongestionReno) {
+		return errors.New("--wire-cap-bytes-per-sec requires an explicit QUIC congestion controller")
+	}
 	if opts.adaptiveMinBytesSec == 0 || opts.adaptiveMaxBytesSec < opts.adaptiveMinBytesSec {
 		return errors.New("invalid adaptive byte-rate bounds")
 	}
-	if opts.congestion == string(pep.CongestionBrutal) && opts.brutalBytesPerSec == 0 {
+	if (opts.congestion == string(pep.CongestionBrutal) || opts.congestion == string(pep.CongestionBrutalNoComp)) && opts.brutalBytesPerSec == 0 {
 		return errors.New("--brutal-bytes-per-sec is required with brutal congestion")
 	}
 	if opts.logFormat != "json" && opts.logFormat != "text" {
@@ -748,6 +758,7 @@ func runServer(args []string) (returnErr error) {
 		Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 		AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 		AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
+		WireCapBytesPerSec: opts.wireCapBytesPerSec, WireInteractiveReserveBytesPerSec: opts.wireInteractiveReserveBytesPerSec,
 		Logger: logger, UDPOnStream: opts.udpOnStream,
 	})
 	if err != nil {
@@ -870,6 +881,8 @@ func logRuntimeConfiguration(logger *slog.Logger, opts runtimeOptions, client bo
 		slog.Duration("flow_max_lifetime", opts.flowMaxLifetime),
 		slog.Uint64("aggregate_bytes_per_second", opts.aggregateBytesPerSec),
 		slog.Uint64("interactive_reserve_bytes_per_second", opts.interactiveReserveBytesPerSec),
+		slog.Uint64("wire_cap_bytes_per_second", opts.wireCapBytesPerSec),
+		slog.Uint64("wire_interactive_reserve_bytes_per_second", opts.wireInteractiveReserveBytesPerSec),
 		slog.String("metrics_listen", opts.metricsListen),
 	}
 	if client {
@@ -1000,6 +1013,11 @@ func logPerformanceSnapshot(logger *slog.Logger, s metrics.Snapshot, interval ti
 		slog.Uint64("queqiao_quic_controller_bytes_lost", s.QUICControllerBytesLost),
 		slog.Uint64("queqiao_quic_controller_packets_lost", s.QUICControllerPacketsLost),
 		slog.Float64("queqiao_quic_controller_min_rtt_seconds", s.QUICControllerMinRTT.Seconds()),
+		slog.Uint64("queqiao_quic_wire_cap_rate_bytes_per_second", s.QUICWireCapRate),
+		slog.Uint64("queqiao_quic_wire_cap_bulk_rate_bytes_per_second", s.QUICWireCapBulkRate),
+		slog.Uint64("queqiao_quic_wire_cap_charged_bytes_total", s.QUICWireCapBytes),
+		slog.Uint64("queqiao_quic_wire_cap_overshoot_packets_total", s.QUICWireCapOvershootPackets),
+		slog.Float64("queqiao_quic_wire_cap_debt_seconds", s.QUICWireCapDebt.Seconds()),
 		slog.Float64("queqiao_erasure_ratio_send", s.QUICErasureSend),
 		slog.Float64("queqiao_delay_brake_ratio", s.QUICDelayBrake),
 		slog.Uint64("queqiao_quic_sample_mean_bytes_per_second", s.QUICSampleMean),

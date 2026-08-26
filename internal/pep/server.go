@@ -45,13 +45,15 @@ type ServerConfig struct {
 	TCPFallbackLanes int
 	// TCPCongestion selects the Linux kernel congestion controller inherited by
 	// accepted fallback sockets. "system" leaves the host default untouched.
-	TCPCongestion                 string
-	Congestion                    CongestionControlKind
-	BrutalBytesPerSec             uint64
-	AdaptiveMinBytesSec           uint64
-	AdaptiveMaxBytesSec           uint64
-	AggregateBytesPerSec          uint64
-	InteractiveReserveBytesPerSec uint64
+	TCPCongestion                     string
+	Congestion                        CongestionControlKind
+	BrutalBytesPerSec                 uint64
+	AdaptiveMinBytesSec               uint64
+	AdaptiveMaxBytesSec               uint64
+	AggregateBytesPerSec              uint64
+	InteractiveReserveBytesPerSec     uint64
+	WireCapBytesPerSec                uint64
+	WireInteractiveReserveBytesPerSec uint64
 	// StreamReceiveWindow and ConnectionReceiveWindow override the QUIC
 	// receive windows. Zero selects the defaults, which match TUIC.
 	StreamReceiveWindow     uint64
@@ -92,6 +94,7 @@ type Server struct {
 	enrollLog       recordLimiter
 	budget          *limiter.Budget
 	metrics         *metrics.Registry
+	wireCaps        *wireCapSet
 	// udpRelays holds the relay sockets of UDP associations whose lane died,
 	// so the replacement association keeps the source address the destination
 	// has been talking to.
@@ -226,10 +229,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Congestion == "" {
 		cfg.Congestion = defaultCongestion()
 	}
-	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
+	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal && cfg.Congestion != CongestionBrutalNoComp {
 		return nil, fmt.Errorf("unsupported QUIC congestion controller %q", cfg.Congestion)
 	}
-	if cfg.Congestion == CongestionBrutal && cfg.BrutalBytesPerSec == 0 {
+	if (cfg.Congestion == CongestionBrutal || cfg.Congestion == CongestionBrutalNoComp) && cfg.BrutalBytesPerSec == 0 {
 		return nil, errors.New("brutal congestion requires a positive per-lane byte rate")
 	}
 	if cfg.AdaptiveMinBytesSec == 0 {
@@ -251,6 +254,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.AggregateBytesPerSec != 0 && cfg.InteractiveReserveBytesPerSec >= cfg.AggregateBytesPerSec {
 		return nil, errors.New("interactive reserve must leave bulk capacity below the aggregate byte budget")
 	}
+	if err := validateWireCap(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec, cfg.Congestion); err != nil {
+		return nil, err
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -271,6 +277,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		accountUsage: make(map[string]*accountUsage),
 		budget:       budget,
 		metrics:      cfg.Metrics,
+		wireCaps:     newWireCapSet(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec),
 		udpRelays:    newUDPRelayStore(),
 	}
 	return server, nil
@@ -561,6 +568,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	controller := configureQUICController(conn, congestionConfig{
 		kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
 		adaptiveMinBytesPerSec: s.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: s.cfg.AdaptiveMaxBytesSec,
+		wireCaps: s.wireCaps,
 	})
 	state := conn.ConnectionState().TLS
 	if state.NegotiatedProtocol == identity.EnrollmentALPN {
@@ -572,7 +580,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 			return
 		}
 		defer s.releaseEnrollment()
-		stream, err := acceptQUICStream(ctx, conn, controller)
+		stream, err := acceptQUICStream(ctx, conn, controller, s.metrics)
 		if err == nil {
 			_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
 			result, serveErr := s.cfg.Enrollment.Serve(stream)
@@ -594,7 +602,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 		if err != nil {
 			return
 		}
-		stream, err := acceptQUICStream(ctx, conn, controller)
+		stream, err := acceptQUICStream(ctx, conn, controller, s.metrics)
 		if err == nil {
 			_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
 			result, renewErr := s.cfg.Enrollment.Renew(stream, principal)
@@ -636,7 +644,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 		// existing long download was actively transferring. Each accepted stream
 		// still gets the bounded authentication deadline in handleSession; the
 		// outer connection is bounded by QUIC's idle timeout and server shutdown.
-		stream, err := acceptQUICStream(ctx, conn, controller)
+		stream, err := acceptQUICStream(ctx, conn, controller, s.metrics)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.cfg.Logger.Debug("accept QUIC stream failed", "error", err)
@@ -691,6 +699,7 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 		_ = fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassNew}, Payload: session.ResetPayload(session.ResetProtocol, "invalid flow open")})
 		return
 	}
+	setWireBulk(conn, open.Header.Flags&protocol.FlagReserveControl == 0)
 	if refusal := s.admitAccountFlow(principal); refusal != nil {
 		s.refuseAccountFlow(fc, sessionID, open.Header.FlowID, principal, refusal)
 		return
@@ -937,6 +946,7 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 		s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinInvalidControlReplacement, session.ResetProtocol, "invalid control lane replacement")
 		return
 	}
+	setWireBulk(conn, !controlReplacement)
 	_ = conn.SetDeadline(time.Time{})
 	if serverSession.completed.Load() {
 		s.cfg.Logger.Debug("lane join reached a completed session", "lane", laneID)

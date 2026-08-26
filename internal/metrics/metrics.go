@@ -228,6 +228,8 @@ type quicCounterTotals struct {
 	controllerAppSamples    atomic.Uint64
 	controllerStateMisses   atomic.Uint64
 	controllerZeroSamples   atomic.Uint64
+	wireCapBytes            atomic.Uint64
+	wireCapOvershootPackets atomic.Uint64
 }
 
 func (t *quicCounterTotals) add(d QUICConnectionCounters) {
@@ -246,6 +248,8 @@ func (t *quicCounterTotals) add(d QUICConnectionCounters) {
 	t.controllerAppSamples.Add(d.ControllerAppSamples)
 	t.controllerStateMisses.Add(d.ControllerStateMisses)
 	t.controllerZeroSamples.Add(d.ControllerZeroSamples)
+	t.wireCapBytes.Add(d.WireCapBytes)
+	t.wireCapOvershootPackets.Add(d.WireCapOvershootPackets)
 }
 
 func (t *quicCounterTotals) load() QUICConnectionCounters {
@@ -265,6 +269,8 @@ func (t *quicCounterTotals) load() QUICConnectionCounters {
 		ControllerAppSamples:    t.controllerAppSamples.Load(),
 		ControllerStateMisses:   t.controllerStateMisses.Load(),
 		ControllerZeroSamples:   t.controllerZeroSamples.Load(),
+		WireCapBytes:            t.wireCapBytes.Load(),
+		WireCapOvershootPackets: t.wireCapOvershootPackets.Load(),
 	}
 }
 
@@ -300,6 +306,9 @@ type Snapshot struct {
 	QUICControllerCongestionWindow, QUICControllerBytesInFlight   uint64
 	QUICControllerBytesLost, QUICControllerPacketsLost            uint64
 	QUICControllerMinRTT                                          time.Duration
+	QUICWireCapRate, QUICWireCapBulkRate, QUICWireCapBytes        uint64
+	QUICWireCapOvershootPackets                                   uint64
+	QUICWireCapDebt                                               time.Duration
 	QUICSampleMean, QUICSampleMax, QUICSampleDelivered            uint64
 	QUICSampleInterval                                            time.Duration
 	QUICErasureSend                                               float64
@@ -346,6 +355,9 @@ type QUICObservation struct {
 	ControllerErasure          float64
 	ControllerDelayBrake       float64
 	ControllerInRecovery       bool
+	ControllerWireCapRate      uint64
+	ControllerWireCapBulkRate  uint64
+	ControllerWireCapDebt      time.Duration
 }
 
 // QUICConnectionCounters is the cumulative half of one QUIC connection's
@@ -401,6 +413,8 @@ type QUICConnectionCounters struct {
 	ControllerAppSamples    uint64
 	ControllerStateMisses   uint64
 	ControllerZeroSamples   uint64
+	WireCapBytes            uint64
+	WireCapOvershootPackets uint64
 }
 
 // Advance returns the forward movement of every counter between two readings
@@ -436,6 +450,8 @@ func (c QUICConnectionCounters) Advance(previous QUICConnectionCounters) QUICCon
 		ControllerAppSamples:    forward(c.ControllerAppSamples, previous.ControllerAppSamples),
 		ControllerStateMisses:   forward(c.ControllerStateMisses, previous.ControllerStateMisses),
 		ControllerZeroSamples:   forward(c.ControllerZeroSamples, previous.ControllerZeroSamples),
+		WireCapBytes:            forward(c.WireCapBytes, previous.WireCapBytes),
+		WireCapOvershootPackets: forward(c.WireCapOvershootPackets, previous.WireCapOvershootPackets),
 	}
 }
 
@@ -456,6 +472,8 @@ func (c *QUICConnectionCounters) Add(delta QUICConnectionCounters) {
 	c.ControllerAppSamples += delta.ControllerAppSamples
 	c.ControllerStateMisses += delta.ControllerStateMisses
 	c.ControllerZeroSamples += delta.ControllerZeroSamples
+	c.WireCapBytes += delta.WireCapBytes
+	c.WireCapOvershootPackets += delta.WireCapOvershootPackets
 }
 
 // IsZero reports whether nothing moved, which lets a caller skip the atomic
@@ -684,6 +702,8 @@ func (r *Registry) Snapshot() Snapshot {
 	var sampleMean, sampleMax, sampleDelivered uint64
 	var sampleInterval time.Duration
 	var controllerRecovery bool
+	var wireCapRate, wireCapBulkRate uint64
+	var wireCapDebt time.Duration
 	for key, entry := range r.quicFlows {
 		// An entry nobody refreshes is not a measurement of anything. Because
 		// the round-trip aggregate below is a maximum, keeping one would pin
@@ -759,6 +779,15 @@ func (r *Registry) Snapshot() Snapshot {
 				controllerDelayBrake = o.ControllerDelayBrake
 			}
 			controllerRecovery = controllerRecovery || o.ControllerInRecovery
+			if o.ControllerWireCapRate > wireCapRate {
+				wireCapRate = o.ControllerWireCapRate
+			}
+			if o.ControllerWireCapBulkRate > wireCapBulkRate {
+				wireCapBulkRate = o.ControllerWireCapBulkRate
+			}
+			if o.ControllerWireCapDebt > wireCapDebt {
+				wireCapDebt = o.ControllerWireCapDebt
+			}
 		}
 	}
 	r.telemetryMu.Unlock()
@@ -798,6 +827,11 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICControllerBytesLost = counters.ControllerBytesLost
 	s.QUICControllerPacketsLost = counters.ControllerPacketsLost
 	s.QUICControllerMinRTT = controllerMinRTT
+	s.QUICWireCapRate = wireCapRate
+	s.QUICWireCapBulkRate = wireCapBulkRate
+	s.QUICWireCapBytes = counters.WireCapBytes
+	s.QUICWireCapOvershootPackets = counters.WireCapOvershootPackets
+	s.QUICWireCapDebt = wireCapDebt
 	s.QUICSampleMean, s.QUICSampleMax = sampleMean, sampleMax
 	s.QUICSampleDelivered, s.QUICSampleInterval = sampleDelivered, sampleInterval
 	s.QUICErasureSend = controllerErasure
@@ -884,6 +918,11 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "queqiao_quic_controller_bytes_lost %d\n", s.QUICControllerBytesLost)
 	fmt.Fprintf(w, "queqiao_quic_controller_packets_lost %d\n", s.QUICControllerPacketsLost)
 	fmt.Fprintf(w, "queqiao_quic_controller_min_rtt_seconds %.9f\n", s.QUICControllerMinRTT.Seconds())
+	fmt.Fprintf(w, "queqiao_quic_wire_cap_rate_bytes_per_second %d\n", s.QUICWireCapRate)
+	fmt.Fprintf(w, "queqiao_quic_wire_cap_bulk_rate_bytes_per_second %d\n", s.QUICWireCapBulkRate)
+	fmt.Fprintf(w, "queqiao_quic_wire_cap_charged_bytes_total %d\n", s.QUICWireCapBytes)
+	fmt.Fprintf(w, "queqiao_quic_wire_cap_overshoot_packets_total %d\n", s.QUICWireCapOvershootPackets)
+	fmt.Fprintf(w, "queqiao_quic_wire_cap_debt_seconds %.9f\n", s.QUICWireCapDebt.Seconds())
 	// The erasure the path is measured to be applying, labelled by the
 	// direction it was measured on. A gateway's send direction is its
 	// downstream, which is the direction that was invisible when the only

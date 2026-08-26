@@ -92,8 +92,9 @@ The reference (`internal/baseline`) is a measurement control, not a product: it
 reproduces TUIC's data-path shape on the same QUIC stack and controllers queqiao
 uses, so a gap between the two rows is attributable to the transport design
 rather than to the language or QUIC library. The emulator (`internal/pathsim`)
-applies a fixed delay, seeded loss, a bottleneck with tail-drop queueing, and
-optionally a per-source-address policer; one seed reproduces one loss pattern.
+applies fixed or wandering delay, seeded independent or burst loss, a
+bottleneck with tail-drop queueing or a quantized token-bucket policer, and
+optional per-source shaping; one seed reproduces one loss pattern.
 
 Single cells can be run directly:
 
@@ -111,9 +112,56 @@ go run ./cmd/queqiaobench --stacks queqiao --rtt 200 --loss 1 --rate 400 \
     --per-flow-rate 25 --bytes $((100*1024*1024))
 ```
 
-The emulator models independent per-packet loss and one bottleneck queue per
-direction. It does not model bursty or correlated loss, reordering, variable
-delay, or middleboxes, and both endpoints run on one machine. Live campaigns
+The focused low-latency suites write a manifest, raw output, JSON per cell, and
+a compact TSV summary to a new output directory:
+
+```sh
+./scripts/bench_policer_controls.sh /tmp/queqiao-policer
+./scripts/bench_connection_reuse.sh /tmp/queqiao-reuse
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_loss_resilience.sh /tmp/queqiao-resilience
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_udp_delivery.sh /tmp/queqiao-udp
+```
+
+For a low-loss campaign that emphasizes latency and relatively high bandwidth,
+run the combined serial matrix. It concentrates on 0%, 1%, and 5% loss, uses
+ten trials for key cells and five elsewhere, and records per-cell CPU time and
+peak RSS in addition to the transport metrics. A single 15% UDP cell is kept
+only as a head-of-line boundary control:
+
+```sh
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_low_latency_bandwidth.sh /tmp/queqiao-low-loss
+```
+
+Set `QUEQIAO_PROFILE_SET=smoke` to validate the whole pipeline with one trial
+per family before a full run. The output bundle includes raw JSON and logs,
+four family-specific TSV files, `resources.tsv`, the machine/tool manifest,
+the source status and patch, and SHA-256 checksums.
+
+The combined matrix also includes the opt-in `erasure-wire-cap` prototype. It
+shares a QUIC packet-byte pacing scheduler across all connections on one
+provider path while leaving the erasure controller and adaptive FEC active.
+The campaign sets the total to 95% of the emulated rate and reserves 10% from
+bulk connections. JSON records configured total/bulk rates, charged bytes,
+overshoot packets, and debt. This is not enabled by default and is not a strict
+UDP/IP wire cap; see [the benchmarking guide](../docs/BENCHMARKING.md#low-latency-and-policer-experiments)
+for its measured boundary and implementation limitations.
+
+The first distinguishes seeded erasure from sender-induced policer drops and
+compares normal loss-compensating Brutal against `brutal-no-comp`, whose fixed
+rate is a per-lane wire target. The second measures whether the persistent QUIC
+pool actually removes a handshake from warm requests. The third checks
+completion and latency under independent loss, burst loss, and delay wander;
+it can add the real Hysteria2 implementation when sing-box is supplied. The
+fourth measures residual application UDP loss and delivered-packet p50/p95/max
+latency over QUIC datagrams versus ordered streams, optionally with Hysteria2
+on the same seeded path. This exposes stream head-of-line delay and does not
+mistake outer packet loss for application loss.
+
+The emulator still does not model middleboxes, path MTU changes, NAT rebinding,
+or a real NIC scheduler, and both endpoints run on one machine. Live campaigns
 remain necessary.
 
 ## Matched live comparison

@@ -78,6 +78,15 @@ type ControllerTelemetry struct {
 	// connection, so it keeps what a clean window established while this
 	// follows the path. On the live incident the two read 1.76% and 19.9%.
 	Erasure float64
+	// WireCap fields describe the optional shared path pacer wrapped around
+	// this controller. The controller kind and erasure estimate remain those
+	// of the inner sender so adaptive FEC can still identify and use them.
+	WireCapRate             uint64
+	WireCapBulkRate         uint64
+	WireCapBytes            uint64
+	WireCapOvershootPackets uint64
+	WireCapDebt             time.Duration
+	WireCapBulk             bool
 }
 
 const (

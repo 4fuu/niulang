@@ -78,6 +78,9 @@ func TestRuntimeBoundsRejectUnsafeValues(t *testing.T) {
 		{"--log-max-backups", "101"},
 		{"--telemetry-log-interval", "500ms"},
 		{"--log-file", "none", "--log-stderr=false"},
+		{"--wire-interactive-reserve-bytes-per-sec", "1"},
+		{"--wire-cap-bytes-per-sec", "1", "--wire-interactive-reserve-bytes-per-sec", "1"},
+		{"--wire-cap-bytes-per-sec", "1", "--congestion", "reno"},
 	} {
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -103,6 +106,18 @@ func TestFallbackWindowsRemainConfigurable(t *testing.T) {
 	opts := parseRuntimeForTest(t, true, "--fallback-delay", "25ms", "--fallback-grace", "3s")
 	if opts.fallbackDelay != 25*time.Millisecond || opts.fallbackGrace != 3*time.Second {
 		t.Fatalf("fallback windows = %v/%v", opts.fallbackDelay, opts.fallbackGrace)
+	}
+}
+
+func TestUncompensatedBrutalRuntimeRequiresAndAcceptsARate(t *testing.T) {
+	opts := parseRuntimeForTest(t, true)
+	opts.congestion = "brutal-no-comp"
+	if err := validateRuntime(opts, true); err == nil || !strings.Contains(err.Error(), "--brutal-bytes-per-sec") {
+		t.Fatalf("missing brutal-no-comp rate error = %v", err)
+	}
+	opts.brutalBytesPerSec = 1_000_000
+	if err := validateRuntime(opts, true); err != nil {
+		t.Fatalf("brutal-no-comp runtime rejected: %v", err)
 	}
 }
 

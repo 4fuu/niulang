@@ -56,7 +56,8 @@ const (
 	// controller can be held constant while the transport design varies:
 	// otherwise a queqiao-with-Brutal versus reference-with-BBR result measures
 	// the controller choice and says nothing about the transport.
-	CongestionBrutal CongestionKind = "brutal"
+	CongestionBrutal       CongestionKind = "brutal"
+	CongestionBrutalNoComp CongestionKind = "brutal-no-comp"
 )
 
 // Transport mirrors TUIC's quinn transport knobs.
@@ -124,6 +125,10 @@ func applyCongestion(conn *quic.Conn, kind CongestionKind, brutalBytesPerSecond 
 	case CongestionBrutal:
 		if brutalBytesPerSecond > 0 {
 			conn.SetCongestionControl(wancongestion.NewBrutalSender(brutalBytesPerSecond, false))
+		}
+	case CongestionBrutalNoComp:
+		if brutalBytesPerSecond > 0 {
+			conn.SetCongestionControl(wancongestion.NewBrutalSender(brutalBytesPerSecond, true))
 		}
 	}
 }

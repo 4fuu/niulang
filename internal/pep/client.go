@@ -144,6 +144,12 @@ type ClientConfig struct {
 	AdaptiveMaxBytesSec           uint64
 	AggregateBytesPerSec          uint64
 	InteractiveReserveBytesPerSec uint64
+	// WireCapBytesPerSec is an optional shared QUIC packet-byte pacing ceiling
+	// for every connection on this provider path. It wraps, rather than
+	// replaces, the selected controller. The reserve is withheld from bulk
+	// connections.
+	WireCapBytesPerSec                uint64
+	WireInteractiveReserveBytesPerSec uint64
 	// StreamReceiveWindow and ConnectionReceiveWindow override the QUIC
 	// receive windows. Zero selects the defaults, which match TUIC.
 	StreamReceiveWindow     uint64
@@ -181,6 +187,7 @@ type Client struct {
 	receiveMemory *memlimit.Budget
 	memoryLimits  flowMemoryLimits
 	metrics       *metrics.Registry
+	wireCaps      *wireCapSet
 
 	credentialsMu sync.RWMutex
 	credentials   identity.ClientCredentials
@@ -468,10 +475,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Congestion == "" {
 		cfg.Congestion = defaultCongestion()
 	}
-	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
+	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal && cfg.Congestion != CongestionBrutalNoComp {
 		return nil, fmt.Errorf("unsupported QUIC congestion controller %q", cfg.Congestion)
 	}
-	if cfg.Congestion == CongestionBrutal && cfg.BrutalBytesPerSec == 0 {
+	if (cfg.Congestion == CongestionBrutal || cfg.Congestion == CongestionBrutalNoComp) && cfg.BrutalBytesPerSec == 0 {
 		return nil, errors.New("brutal congestion requires a positive per-lane byte rate")
 	}
 	if cfg.AdaptiveMinBytesSec == 0 {
@@ -492,6 +499,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	// request outright. Require the reserve to leave something behind.
 	if cfg.AggregateBytesPerSec != 0 && cfg.InteractiveReserveBytesPerSec >= cfg.AggregateBytesPerSec {
 		return nil, errors.New("interactive reserve must leave bulk capacity below the aggregate byte budget")
+	}
+	if err := validateWireCap(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec, cfg.Congestion); err != nil {
+		return nil, err
 	}
 	// A caller may supply one budget shared by several clients, so that a
 	// multi-provider process paces to the configured total instead of offering
@@ -528,6 +538,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		credentials: cfg.Credentials, budget: budget,
 		metrics: cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
+		wireCaps: newWireCapSet(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec),
 	}, nil
 }
 
@@ -1332,12 +1343,13 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 		ccfg := congestionConfig{
 			kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
 			adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
+			wireCaps: c.wireCaps, wireBulk: !pooled,
 		}
 		if pooled {
 			outer, err = c.dialPooledQUICLane(ctx, ccfg)
 			reserveControl = true
 		} else {
-			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.currentCredentials(), c.cfg.DialTimeout, c.cfg.LocalAddress, c.cfg.SocketControl, c.observeTransientUDPSendFailure, ccfg, c.windows())
+			outer, err = dialQUIC(ctx, c.cfg.RemoteAddr, c.currentCredentials(), c.cfg.DialTimeout, c.cfg.LocalAddress, c.cfg.SocketControl, c.observeTransientUDPSendFailure, ccfg, c.windows(), c.metrics)
 		}
 	default:
 		return nil, fmt.Errorf("cannot dial transport %q", kind)
@@ -1384,7 +1396,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig) 
 	// only worth its cost when there is something to protect.
 	c.quicPoolActive.Add(1)
 	outer := &controlPoolStreamConn{
-		quicStreamConn: &quicStreamConn{stream: stream, conn: generation.conn, controller: generation.controller, closeConn: false, bulk: connBulkPath(generation.conn, c.memoryLimits.eventQueue)},
+		quicStreamConn: &quicStreamConn{stream: stream, conn: generation.conn, controller: generation.controller, metrics: c.metrics, closeConn: false, bulk: connBulkPath(generation.conn, c.memoryLimits.eventQueue)},
 		owner:          c, generation: generation,
 	}
 	return outer, nil
@@ -1628,7 +1640,7 @@ func (c *Client) openBulkPoolStream(ctx context.Context) (streamConn, error) {
 	}
 	c.cfg.Logger.Debug("bulk pool stream opened", "duration", time.Since(started), "connections", c.bulkConnCount())
 	return &bulkPoolStreamConn{
-		quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, controller: entry.controller, closeConn: false, bulk: connBulkPath(entry.conn, c.memoryLimits.eventQueue)},
+		quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, controller: entry.controller, metrics: c.metrics, closeConn: false, bulk: connBulkPath(entry.conn, c.memoryLimits.eventQueue)},
 		owner:          c, entry: entry,
 	}, nil
 }
@@ -1714,6 +1726,7 @@ func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
 	entry.controller = configureQUICController(conn, congestionConfig{
 		kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
 		adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
+		wireCaps: c.wireCaps, wireBulk: true,
 	})
 	c.cfg.Logger.Debug("bulk QUIC pool authenticated", "duration", time.Since(started))
 	return entry, nil
