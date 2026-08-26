@@ -317,10 +317,16 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 }
 
 func (f *multipathFlow) reliableReissueBurst() int {
-	if f.tcpStriping.Load() {
-		return 1
-	}
-	return 0
+	// A reliable stream will deliver its bytes or fail loudly. A speculative
+	// copy is only a hedge against a live-but-stalled lane, so copy the oldest
+	// missing chunk and wait for the next sweep before copying another.
+	//
+	// This applies to QUIC as well as TCP. When a bulk QUIC flow moved from the
+	// pooled control connection to its isolated data connection, the old
+	// unbounded behavior copied every chunk whose two-RTT timer had expired.
+	// The original stream remained live, so the handover sent several MiB
+	// twice, overflowed the bottleneck, and reduced useful throughput.
+	return 1
 }
 
 // superviseChunks re-offers chunks that a lane has gone quiet on. Self-pacing

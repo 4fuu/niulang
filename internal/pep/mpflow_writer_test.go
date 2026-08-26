@@ -14,6 +14,7 @@ import (
 	"github.com/4fuu/niulang/internal/limiter"
 	"github.com/4fuu/niulang/internal/metrics"
 	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/stripe"
 )
 
 // ackCaptureConn is a deterministic stream writer used to exercise the
@@ -686,6 +687,32 @@ func TestTCPStripingDoesNotUseTheUnknownRTTFloorForReinjection(t *testing.T) {
 	flow.tcpStriping.Store(true)
 	if got := flow.reissueDelay(); got != tcpStripingReissueDelay {
 		t.Fatalf("TCP striping reissue delay = %v, want %v", got, tcpStripingReissueDelay)
+	}
+}
+
+func TestReliableReinjectionIsBoundedDuringQUICIsolation(t *testing.T) {
+	for _, tcpStriping := range []bool{false, true} {
+		flow := &multipathFlow{}
+		flow.tcpStriping.Store(tcpStriping)
+		now := time.Now()
+		scheduler := stripe.New(bytes.NewReader(make([]byte, 4*defaultChunkSize)), stripe.Config{
+			ChunkSize: defaultChunkSize, LaneWindow: 4,
+			RetransmitAfter:      func() time.Duration { return time.Second },
+			ReliableReissueBurst: flow.reliableReissueBurst(),
+			Now:                  func() time.Time { return now },
+		})
+		for range 4 {
+			chunk, err := scheduler.Next(context.Background(), 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scheduler.Wrote(0, chunk)
+		}
+		now = now.Add(2 * time.Second)
+		if got := scheduler.ReissueExpired(); got != 1 {
+			t.Fatalf("tcp_striping=%v: reissued %d reliable chunks in one sweep, want 1", tcpStriping, got)
+		}
+		scheduler.Close()
 	}
 }
 
