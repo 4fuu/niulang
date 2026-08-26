@@ -106,6 +106,18 @@ func TestFallbackWindowsRemainConfigurable(t *testing.T) {
 	}
 }
 
+func TestUncompensatedBrutalRuntimeRequiresAndAcceptsARate(t *testing.T) {
+	opts := parseRuntimeForTest(t, true)
+	opts.congestion = "brutal-no-comp"
+	if err := validateRuntime(opts, true); err == nil || !strings.Contains(err.Error(), "--brutal-bytes-per-sec") {
+		t.Fatalf("missing brutal-no-comp rate error = %v", err)
+	}
+	opts.brutalBytesPerSec = 1_000_000
+	if err := validateRuntime(opts, true); err != nil {
+		t.Fatalf("brutal-no-comp runtime rejected: %v", err)
+	}
+}
+
 func TestLegacyModeInterfaceIsGone(t *testing.T) {
 	if err := run([]string{"--mode", "local"}); err == nil {
 		t.Fatal("legacy mode/secret interface was accepted")

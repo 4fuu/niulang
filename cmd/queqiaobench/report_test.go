@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
 func trial(stack string, flows int, mbits float64, complete bool) TrialRecord {
@@ -97,9 +100,21 @@ func TestReportRoundTripsAsJSON(t *testing.T) {
 	report := Report{
 		SchemaVersion: 1,
 		Arguments:     []string{"--rtt", "200", "--seed", "7"},
-		Path:          PathReport{RTTMillis: 200, LossPercent: 1, RateMbits: 100, Seed: 7},
-		Trials:        []TrialRecord{trial("queqiao", 1, 10, true)},
-		Latency:       []LatencyRecord{{Stack: "queqiao", Trial: 1, ColdMillis: 210, WarmMillis: 201, Complete: true}},
+		Path: PathReport{
+			RTTMillis: 200, LossPercent: 1, RateMbits: 100, Seed: 7,
+			PolicerRefillMillis: 8, PolicerBurstBytes: 4000,
+		},
+		Trials: []TrialRecord{{
+			Stack: "queqiao", Flows: 1, MbitsPerSec: 10, Complete: true,
+			PathCounters: &PathCountersReport{
+				Downstream: DirectionCountersReport{PacketsIn: 100, PacketsOut: 80, BottleneckDropped: 20},
+			},
+		}},
+		Latency: []LatencyRecord{{Stack: "queqiao", Trial: 1, ColdMillis: 210, WarmMillis: 201, Complete: true}},
+		UDP: []UDPRecord{{
+			Stack: "queqiao", Trial: 1, Sent: 100, Received: 97, Lost: 3,
+			DeliveryPercent: 97, P50Millis: 202, P95Millis: 240, MaxMillis: 281,
+		}},
 	}
 	report.Summary = summarize(report.Trials)
 	path := filepath.Join(t.TempDir(), "report.json")
@@ -117,8 +132,49 @@ func TestReportRoundTripsAsJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.SchemaVersion != 1 || decoded.Path.Seed != 7 || len(decoded.Latency) != 1 {
+	if decoded.SchemaVersion != 1 || decoded.Path.Seed != 7 || decoded.Path.PolicerRefillMillis != 8 ||
+		len(decoded.Latency) != 1 || len(decoded.UDP) != 1 || decoded.UDP[0].Lost != 3 ||
+		decoded.Trials[0].PathCounters.Downstream.BottleneckDropped != 20 {
 		t.Fatalf("report lost reproducibility fields: %+v", decoded)
+	}
+}
+
+func TestDescribePathRecordsPolicerAndApplicationBudgets(t *testing.T) {
+	opts := options{
+		rttMillis: 200, rateMbits: 25, policerRefill: 8 * time.Millisecond,
+		policerBurst: 4000, brutalMbits: 24, aggregateMbits: 20,
+		interactiveReserveMbits: 2, congestion: "brutal-no-comp", udpOnStream: true,
+	}
+	got := describePath(opts, pathsim.Config{
+		PolicerRefillPeriod: opts.policerRefill, PolicerBurstBytes: opts.policerBurst,
+	})
+	if got.PolicerRefillMillis != 8 || got.PolicerBurstBytes != 4000 ||
+		got.BrutalRateMbits != 24 || got.AggregateRateMbits != 20 || got.InteractiveReserveMbits != 2 || !got.UDPOnStream {
+		t.Fatalf("path report omitted experiment controls: %+v", got)
+	}
+}
+
+func TestDurationQuantilesIncludeTheDeliveredTail(t *testing.T) {
+	p50, p95, max := durationQuantiles([]time.Duration{
+		400 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond,
+	})
+	if p50 != 200 || p95 != 300 || max != 400 {
+		t.Fatalf("duration quantiles = %.0f/%.0f/%.0f, want 200/300/400", p50, p95, max)
+	}
+	p50, p95, max = durationQuantiles(nil)
+	if p50 != 0 || p95 != 0 || max != 0 {
+		t.Fatalf("empty duration quantiles = %.0f/%.0f/%.0f, want zeroes", p50, p95, max)
+	}
+}
+
+func TestDescribePathCountersSeparatesErasureFromBottleneckDrops(t *testing.T) {
+	got := describePathCounters(
+		pathsim.Stats{PacketsIn: 100, PacketsOut: 70, PacketsLost: 10, PacketsDropped: 20, BytesIn: 120_000, BytesOut: 84_000},
+		pathsim.Stats{PacketsIn: 50, PacketsOut: 48, PacketsLost: 2, BytesIn: 60_000, BytesOut: 57_600},
+	)
+	if got.Upstream.PacketsErased != 10 || got.Upstream.BottleneckDropped != 20 ||
+		got.Downstream.PacketsErased != 2 || got.Downstream.BottleneckDropped != 0 {
+		t.Fatalf("path counters conflated erasure and bottleneck drops: %+v", got)
 	}
 }
 

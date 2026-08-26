@@ -12,6 +12,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -20,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -41,40 +43,50 @@ import (
 	"github.com/bojieli/queqiao/internal/identity"
 	"github.com/bojieli/queqiao/internal/pathsim"
 	"github.com/bojieli/queqiao/internal/pep"
+	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 type options struct {
-	stacks       string
-	rttMillis    int
-	lossPercent  float64
-	lossBurst    float64
-	lossUp       float64
-	jitterMillis float64
-	wanderMillis float64
-	rateMbits    float64
-	perFlowMbits float64
-	queueBytes   int
-	seed         int64
-	bytes        int64
-	trials       int
-	flows        string
-	congestion   string
-	brutalMbits  float64
-	chunkSize    int
-	quicPool     bool
-	timeout      time.Duration
-	cpuProfile   string
-	verbose      bool
-	latency      bool
-	interactive  bool
-	singBox      string
-	kcptunClient string
-	kcptunServer string
-	kcp          extproxy.KCPParams
-	jsonOut      string
-	gate         bool
-	contend      string
-	tolerance    float64
+	stacks                  string
+	rttMillis               int
+	lossPercent             float64
+	lossBurst               float64
+	lossUp                  float64
+	jitterMillis            float64
+	wanderMillis            float64
+	rateMbits               float64
+	perFlowMbits            float64
+	queueBytes              int
+	policerRefill           time.Duration
+	policerBurst            int
+	seed                    int64
+	bytes                   int64
+	trials                  int
+	flows                   string
+	congestion              string
+	brutalMbits             float64
+	aggregateMbits          float64
+	interactiveReserveMbits float64
+	chunkSize               int
+	quicPool                bool
+	udpOnStream             bool
+	udpPackets              int
+	udpPayload              int
+	udpInterval             time.Duration
+	udpSettle               time.Duration
+	timeout                 time.Duration
+	cpuProfile              string
+	verbose                 bool
+	latency                 bool
+	interactive             bool
+	singBox                 string
+	kcptunClient            string
+	kcptunServer            string
+	kcp                     extproxy.KCPParams
+	jsonOut                 string
+	gate                    bool
+	contend                 string
+	tolerance               float64
 }
 
 func main() {
@@ -97,14 +109,23 @@ func run(args []string) error {
 	fs.Float64Var(&opts.rateMbits, "rate", 100, "bottleneck rate in Mbit/s in each direction (0 disables)")
 	fs.Float64Var(&opts.perFlowMbits, "per-flow-rate", 0, "per-source-address rate in Mbit/s, modelling per-flow policing (0 disables)")
 	fs.IntVar(&opts.queueBytes, "queue", 0, "bottleneck queue in bytes (0 selects one BDP)")
+	fs.DurationVar(&opts.policerRefill, "policer-refill", 0, "replace the queue with a token-bucket policer refilled at this interval (for example 8ms)")
+	fs.IntVar(&opts.policerBurst, "policer-burst", 0, "policer bucket depth in bytes (0 selects one refill quantum plus one packet)")
 	fs.Int64Var(&opts.seed, "seed", 1, "path emulator seed")
 	fs.Int64Var(&opts.bytes, "bytes", 10<<20, "object size per flow in bytes")
 	fs.IntVar(&opts.trials, "trials", 3, "trials per stack")
 	fs.StringVar(&opts.flows, "flows", "1", "comma-separated concurrent flow counts")
 	fs.StringVar(&opts.congestion, "congestion", "bbr-tuic", "congestion controller for both stacks")
-	fs.Float64Var(&opts.brutalMbits, "brutal-rate", 0, "queqiao fixed send rate in Mbit/s when --congestion=brutal")
+	fs.Float64Var(&opts.brutalMbits, "brutal-rate", 0, "fixed per-lane send rate in Mbit/s for brutal controllers")
+	fs.Float64Var(&opts.aggregateMbits, "aggregate-rate", 0, "queqiao aggregate application-data budget in Mbit/s (0 disables)")
+	fs.Float64Var(&opts.interactiveReserveMbits, "interactive-reserve", 0, "interactive share of --aggregate-rate in Mbit/s")
 	fs.IntVar(&opts.chunkSize, "chunk", 0, "queqiao data frame size in bytes (0 selects the default)")
 	fs.BoolVar(&opts.quicPool, "quic-pool", true, "enable the queqiao pooled QUIC connection")
+	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry queqiao SOCKS UDP packets on ordered streams instead of QUIC datagrams")
+	fs.IntVar(&opts.udpPackets, "udp-packets", 0, "also measure this many SOCKS UDP echo packets per stack and trial (0 disables)")
+	fs.IntVar(&opts.udpPayload, "udp-payload", 256, "UDP echo payload size in bytes")
+	fs.DurationVar(&opts.udpInterval, "udp-interval", 20*time.Millisecond, "interval between UDP packets")
+	fs.DurationVar(&opts.udpSettle, "udp-settle", 3*time.Second, "time to collect late UDP replies after the final packet")
 	fs.DurationVar(&opts.timeout, "timeout", 120*time.Second, "per-trial timeout")
 	fs.StringVar(&opts.cpuProfile, "cpuprofile", "", "write a CPU profile to this path")
 	fs.BoolVar(&opts.verbose, "verbose", false, "log transport diagnostics")
@@ -131,6 +152,31 @@ func run(args []string) error {
 	}
 	if opts.trials <= 0 || opts.bytes <= 0 {
 		return errors.New("trials and bytes must be positive")
+	}
+	if opts.udpPackets < 0 || opts.udpPayload < 4 || opts.udpPayload > 60*1024 || opts.udpInterval < 0 || opts.udpSettle <= 0 {
+		return errors.New("UDP packets and interval must not be negative, payload must be 4..61440 bytes, and settle must be positive")
+	}
+	if opts.contend != "" && opts.udpPackets > 0 {
+		return errors.New("--udp-packets cannot be combined with --contend")
+	}
+	if opts.rateMbits < 0 || opts.perFlowMbits < 0 || opts.brutalMbits < 0 ||
+		opts.aggregateMbits < 0 || opts.interactiveReserveMbits < 0 || opts.queueBytes < 0 || opts.policerBurst < 0 {
+		return errors.New("rates, queue, and policer burst must not be negative")
+	}
+	if opts.policerRefill < 0 {
+		return errors.New("policer refill must not be negative")
+	}
+	if opts.policerRefill > 0 && opts.rateMbits == 0 {
+		return errors.New("--policer-refill requires a positive --rate")
+	}
+	if opts.policerBurst > 0 && opts.policerRefill == 0 {
+		return errors.New("--policer-burst requires --policer-refill")
+	}
+	if opts.interactiveReserveMbits > 0 && (opts.aggregateMbits == 0 || opts.interactiveReserveMbits >= opts.aggregateMbits) {
+		return errors.New("--interactive-reserve requires a larger positive --aggregate-rate")
+	}
+	if (opts.congestion == string(pep.CongestionBrutal) || opts.congestion == string(pep.CongestionBrutalNoComp)) && opts.brutalMbits == 0 {
+		return errors.New("--brutal-rate is required with brutal congestion")
 	}
 
 	if opts.cpuProfile != "" {
@@ -159,6 +205,8 @@ func run(args []string) error {
 		RateBytesPerSec:        uint64(opts.rateMbits * 1e6 / 8),
 		PerFlowRateBytesPerSec: uint64(opts.perFlowMbits * 1e6 / 8),
 		QueueBytes:             opts.queueBytes,
+		PolicerRefillPeriod:    opts.policerRefill,
+		PolicerBurstBytes:      opts.policerBurst,
 		Seed:                   opts.seed,
 	}
 
@@ -168,8 +216,8 @@ func run(args []string) error {
 	}
 	defer origin.Close()
 
-	fmt.Printf("# path rtt=%dms loss=%.2f%% burst=%.1f rate=%.1fMbit/s per_flow=%.1fMbit/s queue=%s seed=%d object=%s congestion=%s\n",
-		opts.rttMillis, opts.lossPercent, opts.lossBurst, opts.rateMbits, opts.perFlowMbits, humanQueue(pathCfg), opts.seed,
+	fmt.Printf("# path rtt=%dms loss=%.2f%% burst=%.1f rate=%.1fMbit/s per_flow=%.1fMbit/s bottleneck=%s seed=%d object=%s congestion=%s\n",
+		opts.rttMillis, opts.lossPercent, opts.lossBurst, opts.rateMbits, opts.perFlowMbits, humanBottleneck(pathCfg), opts.seed,
 		humanBytes(opts.bytes), opts.congestion)
 	fmt.Printf("stack\tflows\ttrial\tseconds\tmbits_per_sec\tcomplete\tnote\n")
 
@@ -206,6 +254,7 @@ func run(args []string) error {
 					Stack: stack, Flows: flows, Trial: trial,
 					Seconds: round3(result.seconds), MbitsPerSec: round3(result.mbitsPerSec),
 					Complete: result.complete, Note: result.note, Interactive: result.interactive,
+					PathCounters: result.pathCounters,
 				})
 			}
 		}
@@ -219,6 +268,9 @@ func run(args []string) error {
 			return err
 		}
 	}
+	if opts.udpPackets > 0 {
+		report.UDP = measureUDP(opts, pathCfg, origin)
+	}
 	if opts.jsonOut != "" {
 		if err := writeReport(opts.jsonOut, report); err != nil {
 			return err
@@ -231,11 +283,12 @@ func run(args []string) error {
 }
 
 type trialResult struct {
-	seconds     float64
-	mbitsPerSec float64
-	complete    bool
-	note        string
-	interactive *InteractiveReport
+	seconds      float64
+	mbitsPerSec  float64
+	complete     bool
+	note         string
+	interactive  *InteractiveReport
+	pathCounters *PathCountersReport
 }
 
 func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin, flows, trial int) trialResult {
@@ -259,7 +312,9 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 	// and not TUIC would be the wrong comparison; handshake cost is reported
 	// separately by the latency mode.
 	if err := warmUp(ctx, harness.socks, origin); err != nil {
-		return trialResult{note: "warmup: " + err.Error()}
+		up, down := harness.relay.Stats()
+		pathCounters := describePathCounters(up, down)
+		return trialResult{note: "warmup: " + err.Error(), pathCounters: &pathCounters}
 	}
 
 	var wg sync.WaitGroup
@@ -308,12 +363,13 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 		}
 	}
 	up, down := harness.relay.Stats()
+	pathCounters := describePathCounters(up, down)
 	if note == "" {
-		// Loss and tail drop are separated because they mean opposite things
-		// about the sender: ambient loss is the path's, a tail drop is the
-		// sender's own overshoot of a queue. Reporting only the delivered
-		// fraction hides which one a change moved.
-		note = fmt.Sprintf("up=%d/%d,lost=%d,tail=%d down=%d/%d,lost=%d,tail=%d",
+		// Random erasure and bottleneck drops are separated because they mean
+		// opposite things about the sender: ambient loss is the path's, while a
+		// queue or policer drop is the sender's own overshoot. Reporting only
+		// the delivered fraction hides which one a change moved.
+		note = fmt.Sprintf("up=%d/%d,lost=%d,bottleneck_drop=%d down=%d/%d,lost=%d,bottleneck_drop=%d",
 			up.PacketsOut, up.PacketsIn, up.PacketsLost, up.PacketsDropped,
 			down.PacketsOut, down.PacketsIn, down.PacketsLost, down.PacketsDropped)
 		// How many source addresses the path saw, which is how many buckets a
@@ -330,11 +386,12 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 		note = summarizeProbes(probes) + " " + note
 	}
 	return trialResult{
-		seconds:     elapsed.Seconds(),
-		mbitsPerSec: float64(total) * 8 / elapsed.Seconds() / 1e6,
-		complete:    complete,
-		note:        note,
-		interactive: interactive,
+		seconds:      elapsed.Seconds(),
+		mbitsPerSec:  float64(total) * 8 / elapsed.Seconds() / 1e6,
+		complete:     complete,
+		note:         note,
+		interactive:  interactive,
+		pathCounters: &pathCounters,
 	}
 }
 
@@ -565,7 +622,10 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			ListenAddr: serverPacket.LocalAddr().String(), Credentials: serverIdentity,
 			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: opts.chunkSize,
 			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
-			Logger: logger,
+			AggregateBytesPerSec:          uint64(opts.aggregateMbits * 1e6 / 8),
+			InteractiveReserveBytesPerSec: uint64(opts.interactiveReserveMbits * 1e6 / 8),
+			UDPOnStream:                   opts.udpOnStream,
+			Logger:                        logger,
 		})
 		if err != nil {
 			h.Close()
@@ -574,10 +634,13 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		client, err := pep.NewClient(pep.ClientConfig{
 			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), Credentials: clientIdentity,
 			Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
-			EnableQUICPool:    opts.quicPool,
-			Congestion:        pep.CongestionControlKind(opts.congestion),
-			BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
-			Logger:            logger,
+			EnableQUICPool:                opts.quicPool,
+			Congestion:                    pep.CongestionControlKind(opts.congestion),
+			BrutalBytesPerSec:             uint64(opts.brutalMbits * 1e6 / 8),
+			AggregateBytesPerSec:          uint64(opts.aggregateMbits * 1e6 / 8),
+			InteractiveReserveBytesPerSec: uint64(opts.interactiveReserveMbits * 1e6 / 8),
+			UDPOnStream:                   opts.udpOnStream,
+			Logger:                        logger,
 		})
 		if err != nil {
 			h.Close()
@@ -711,8 +774,10 @@ func externalCongestion(name string) string {
 type origin struct {
 	listener      net.Listener
 	smallListener net.Listener
+	udp           net.PacketConn
 	addr          string
 	smallAddr     string
+	udpAddr       string
 	smallSize     int64
 	size          int64
 }
@@ -727,13 +792,20 @@ func newOrigin(size int64) (*origin, error) {
 		_ = listener.Close()
 		return nil, err
 	}
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		_ = listener.Close()
+		_ = smallListener.Close()
+		return nil, err
+	}
 	o := &origin{
-		listener: listener, smallListener: smallListener,
+		listener: listener, smallListener: smallListener, udp: udp,
 		addr: listener.Addr().String(), smallAddr: smallListener.Addr().String(),
-		size: size, smallSize: 1024,
+		udpAddr: udp.LocalAddr().String(), size: size, smallSize: 1024,
 	}
 	go o.serve(listener, size)
 	go o.serve(smallListener, o.smallSize)
+	go o.serveUDP()
 	return o, nil
 }
 
@@ -771,9 +843,21 @@ func (o *origin) serve(listener net.Listener, size int64) {
 	}
 }
 
+func (o *origin) serveUDP() {
+	packet := make([]byte, 64*1024)
+	for {
+		n, addr, err := o.udp.ReadFrom(packet)
+		if err != nil {
+			return
+		}
+		_, _ = o.udp.WriteTo(packet[:n], addr)
+	}
+}
+
 func (o *origin) Close() {
 	_ = o.listener.Close()
 	_ = o.smallListener.Close()
+	_ = o.udp.Close()
 }
 
 // ------------------------------------------------------------------ SOCKS ---
@@ -886,6 +970,234 @@ func socksConnect(conn net.Conn, destination string) error {
 	return nil
 }
 
+// -------------------------------------------------------------------- UDP ---
+
+type udpReply struct {
+	sequence uint32
+	at       time.Time
+}
+
+// measureUDP measures residual application datagram loss, rather than
+// inferring it from outer QUIC packet counters. Packets are sent independently
+// and replies are collected concurrently so a lost datagram never blocks the
+// one behind it.
+func measureUDP(opts options, pathCfg pathsim.Config, o *origin) []UDPRecord {
+	fmt.Printf("\nstack\ttrial\tsent\treceived\tdelivery_percent\tp50_ms\tp95_ms\tmax_ms\tnote\n")
+	var records []UDPRecord
+	for _, stack := range strings.Split(opts.stacks, ",") {
+		stack = strings.TrimSpace(stack)
+		if stack == "" {
+			continue
+		}
+		for trial := 1; trial <= opts.trials; trial++ {
+			record := measureUDPTrial(stack, trial, opts, pathCfg, o)
+			fmt.Printf("%s\t%d\t%d\t%d\t%.2f\t%.1f\t%.1f\t%.1f\t%s\n",
+				stack, trial, record.Sent, record.Received, record.DeliveryPercent,
+				record.P50Millis, record.P95Millis, record.MaxMillis, record.Note)
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+func measureUDPTrial(stack string, trial int, opts options, pathCfg pathsim.Config, o *origin) (record UDPRecord) {
+	record = UDPRecord{Stack: stack, Trial: trial, UDPOnStream: opts.udpOnStream}
+	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	defer cancel()
+	cfg := pathCfg
+	cfg.Seed = pathCfg.Seed + int64(trial)*1000
+	harness, err := startStack(ctx, stack, opts, cfg)
+	if err != nil {
+		record.Note = "setup: " + err.Error()
+		return record
+	}
+	defer harness.Close()
+	defer func() {
+		up, down := harness.relay.Stats()
+		counters := describePathCounters(up, down)
+		record.PathCounters = &counters
+	}()
+	if err := warmUp(ctx, harness.socks, o); err != nil {
+		record.Note = "warmup: " + err.Error()
+		return record
+	}
+	control, relay, err := openUDPAssociation(ctx, harness.socks)
+	if err != nil {
+		record.Note = "associate: " + err.Error()
+		return record
+	}
+	defer control.Close()
+	defer relay.Close()
+
+	replies := make(chan udpReply, opts.udpPackets)
+	collectUntil := time.Now().Add(time.Duration(opts.udpPackets-1)*opts.udpInterval + opts.udpSettle)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(collectUntil) {
+		collectUntil = deadline
+	}
+	_ = relay.SetReadDeadline(collectUntil)
+	go collectUDPReplies(relay, replies)
+
+	started := make([]time.Time, opts.udpPackets)
+	payload := make([]byte, opts.udpPayload)
+	for i := range opts.udpPackets {
+		for j := 4; j < len(payload); j++ {
+			payload[j] = byte(i + j)
+		}
+		binary.BigEndian.PutUint32(payload[:4], uint32(i))
+		var packet bytes.Buffer
+		if err := socks5.WriteUDPDatagram(&packet, o.udpAddr, payload); err != nil {
+			record.Note = "encode: " + err.Error()
+			return record
+		}
+		started[i] = time.Now()
+		if _, err := relay.Write(packet.Bytes()); err != nil {
+			record.Note = "send: " + err.Error()
+			return record
+		}
+		record.Sent++
+		if i+1 < opts.udpPackets && opts.udpInterval > 0 {
+			select {
+			case <-ctx.Done():
+				record.Note = ctx.Err().Error()
+				return record
+			case <-time.After(opts.udpInterval):
+			}
+		}
+	}
+
+	seen := make([]bool, opts.udpPackets)
+	var latencies []time.Duration
+	for reply := range replies {
+		if int(reply.sequence) >= len(started) || seen[reply.sequence] || started[reply.sequence].IsZero() {
+			continue
+		}
+		seen[reply.sequence] = true
+		latencies = append(latencies, reply.at.Sub(started[reply.sequence]))
+	}
+	record.Received = len(latencies)
+	record.Lost = record.Sent - record.Received
+	record.DeliveryPercent = round3(100 * float64(record.Received) / float64(record.Sent))
+	record.P50Millis, record.P95Millis, record.MaxMillis = durationQuantiles(latencies)
+	return record
+}
+
+func collectUDPReplies(conn *net.UDPConn, replies chan<- udpReply) {
+	defer close(replies)
+	packet := make([]byte, 64*1024)
+	for {
+		n, err := conn.Read(packet)
+		at := time.Now()
+		if err != nil {
+			return
+		}
+		datagram, err := socks5.ReadUDPDatagram(packet[:n])
+		if err != nil || len(datagram.Payload) < 4 {
+			continue
+		}
+		replies <- udpReply{sequence: binary.BigEndian.Uint32(datagram.Payload[:4]), at: at}
+	}
+}
+
+func durationQuantiles(samples []time.Duration) (p50, p95, max float64) {
+	if len(samples) == 0 {
+		return 0, 0, 0
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	pick := func(q float64) float64 {
+		return round3(float64(samples[int(q*float64(len(samples)-1))].Microseconds()) / 1000)
+	}
+	return pick(0.5), pick(0.95), pick(1)
+}
+
+func openUDPAssociation(ctx context.Context, socksAddr string) (net.Conn, *net.UDPConn, error) {
+	control, err := (&net.Dialer{}).DialContext(ctx, "tcp", socksAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	fail := func(err error) (net.Conn, *net.UDPConn, error) {
+		_ = control.Close()
+		return nil, nil, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = control.SetDeadline(deadline)
+	}
+	if _, err := control.Write([]byte{5, 1, 0}); err != nil {
+		return fail(err)
+	}
+	var method [2]byte
+	if _, err := io.ReadFull(control, method[:]); err != nil {
+		return fail(err)
+	}
+	if method != [2]byte{5, 0} {
+		return fail(fmt.Errorf("SOCKS5 method negotiation returned %v", method))
+	}
+	if _, err := control.Write([]byte{5, socks5.CommandUDPAssociate, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+		return fail(err)
+	}
+	var header [4]byte
+	if _, err := io.ReadFull(control, header[:]); err != nil {
+		return fail(err)
+	}
+	if header[0] != 5 || header[1] != socks5.ReplySucceeded || header[2] != 0 {
+		return fail(fmt.Errorf("SOCKS5 UDP associate returned %v", header))
+	}
+	host, port, err := readSocksAddress(control, header[3])
+	if err != nil {
+		return fail(err)
+	}
+	if host == "0.0.0.0" || host == "::" {
+		host, _, err = net.SplitHostPort(socksAddr)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	bound, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, fmt.Sprint(port)))
+	if err != nil {
+		return fail(err)
+	}
+	udp, err := net.DialUDP("udp", nil, bound)
+	if err != nil {
+		return fail(err)
+	}
+	_ = control.SetDeadline(time.Time{})
+	return control, udp, nil
+}
+
+func readSocksAddress(r io.Reader, addressType byte) (string, int, error) {
+	var host string
+	switch addressType {
+	case 1:
+		var address [4]byte
+		if _, err := io.ReadFull(r, address[:]); err != nil {
+			return "", 0, err
+		}
+		host = net.IP(address[:]).String()
+	case 4:
+		var address [16]byte
+		if _, err := io.ReadFull(r, address[:]); err != nil {
+			return "", 0, err
+		}
+		host = net.IP(address[:]).String()
+	case 3:
+		var length [1]byte
+		if _, err := io.ReadFull(r, length[:]); err != nil {
+			return "", 0, err
+		}
+		address := make([]byte, int(length[0]))
+		if _, err := io.ReadFull(r, address); err != nil {
+			return "", 0, err
+		}
+		host = string(address)
+	default:
+		return "", 0, fmt.Errorf("unsupported SOCKS5 address type %d", addressType)
+	}
+	var port [2]byte
+	if _, err := io.ReadFull(r, port[:]); err != nil {
+		return "", 0, err
+	}
+	return host, int(binary.BigEndian.Uint16(port[:])), nil
+}
+
 // ------------------------------------------------------------------ utils ---
 
 func parsePort(port string) (int, error) {
@@ -944,11 +1256,18 @@ func humanBytes(n int64) string {
 	}
 }
 
-func humanQueue(cfg pathsim.Config) string {
-	if cfg.QueueBytes > 0 {
-		return humanBytes(int64(cfg.QueueBytes))
+func humanBottleneck(cfg pathsim.Config) string {
+	if cfg.PolicerRefillPeriod > 0 {
+		burst := "default"
+		if cfg.PolicerBurstBytes > 0 {
+			burst = humanBytes(int64(cfg.PolicerBurstBytes))
+		}
+		return fmt.Sprintf("policer(refill=%s,burst=%s)", cfg.PolicerRefillPeriod, burst)
 	}
-	return "1BDP"
+	if cfg.QueueBytes > 0 {
+		return "queue(" + humanBytes(int64(cfg.QueueBytes)) + ")"
+	}
+	return "queue(1BDP)"
 }
 
 func selfSignedCertificate() (tls.Certificate, *x509.CertPool, error) {

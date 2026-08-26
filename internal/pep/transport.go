@@ -48,15 +48,19 @@ const (
 // the original queqiao controller. BBRTUIC is a faithful Go port of TUIC's
 // quinn-congestions BBR model. Adaptive is a conservative rate-estimating
 // controller for unknown paths. Brutal is a fixed-rate mode for controlled
-// experiments where the operator knows the per-lane budget.
+// experiments where the operator knows the per-lane budget. BrutalNoComp uses
+// the same fixed rate as a wire-rate target instead of raising it to
+// compensate for observed loss; it is the safer experimental control on a
+// policed path, where compensation only creates more policer drops.
 type CongestionControlKind string
 
 const (
-	CongestionReno     CongestionControlKind = "reno"
-	CongestionBBR      CongestionControlKind = "bbr"
-	CongestionBBRTUIC  CongestionControlKind = "bbr-tuic"
-	CongestionAdaptive CongestionControlKind = "adaptive"
-	CongestionBrutal   CongestionControlKind = "brutal"
+	CongestionReno         CongestionControlKind = "reno"
+	CongestionBBR          CongestionControlKind = "bbr"
+	CongestionBBRTUIC      CongestionControlKind = "bbr-tuic"
+	CongestionAdaptive     CongestionControlKind = "adaptive"
+	CongestionBrutal       CongestionControlKind = "brutal"
+	CongestionBrutalNoComp CongestionControlKind = "brutal-no-comp"
 	// CongestionErasure is BBR corrected for a path that erases packets for
 	// reasons unrelated to congestion. It is the right choice on a long-haul
 	// path with a loss floor; on a clean path it reduces to BBR, because the
@@ -781,9 +785,10 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestio
 			conn.InitialPacketSize(), pathmodel.Shared(peerKey(conn)))
 		conn.SetCongestionControl(controller)
 		return controller
-	case CongestionBrutal:
+	case CongestionBrutal, CongestionBrutalNoComp:
 		if cfg.brutalBytesPerSecond > 0 {
-			controller := wancongestion.NewBrutalSender(cfg.brutalBytesPerSecond, false)
+			controller := wancongestion.NewBrutalSender(
+				cfg.brutalBytesPerSecond, cfg.kind == CongestionBrutalNoComp)
 			conn.SetCongestionControl(controller)
 			return controller
 		}

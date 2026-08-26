@@ -92,8 +92,9 @@ The reference (`internal/baseline`) is a measurement control, not a product: it
 reproduces TUIC's data-path shape on the same QUIC stack and controllers queqiao
 uses, so a gap between the two rows is attributable to the transport design
 rather than to the language or QUIC library. The emulator (`internal/pathsim`)
-applies a fixed delay, seeded loss, a bottleneck with tail-drop queueing, and
-optionally a per-source-address policer; one seed reproduces one loss pattern.
+applies fixed or wandering delay, seeded independent or burst loss, a
+bottleneck with tail-drop queueing or a quantized token-bucket policer, and
+optional per-source shaping; one seed reproduces one loss pattern.
 
 Single cells can be run directly:
 
@@ -111,9 +112,31 @@ go run ./cmd/queqiaobench --stacks queqiao --rtt 200 --loss 1 --rate 400 \
     --per-flow-rate 25 --bytes $((100*1024*1024))
 ```
 
-The emulator models independent per-packet loss and one bottleneck queue per
-direction. It does not model bursty or correlated loss, reordering, variable
-delay, or middleboxes, and both endpoints run on one machine. Live campaigns
+The focused low-latency suites write a manifest, raw output, JSON per cell, and
+a compact TSV summary to a new output directory:
+
+```sh
+./scripts/bench_policer_controls.sh /tmp/queqiao-policer
+./scripts/bench_connection_reuse.sh /tmp/queqiao-reuse
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_loss_resilience.sh /tmp/queqiao-resilience
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_udp_delivery.sh /tmp/queqiao-udp
+```
+
+The first distinguishes seeded erasure from sender-induced policer drops and
+compares normal loss-compensating Brutal against `brutal-no-comp`, whose fixed
+rate is a per-lane wire target. The second measures whether the persistent QUIC
+pool actually removes a handshake from warm requests. The third checks
+completion and latency under independent loss, burst loss, and delay wander;
+it can add the real Hysteria2 implementation when sing-box is supplied. The
+fourth measures residual application UDP loss and delivered-packet p50/p95/max
+latency over QUIC datagrams versus ordered streams, optionally with Hysteria2
+on the same seeded path. This exposes stream head-of-line delay and does not
+mistake outer packet loss for application loss.
+
+The emulator still does not model middleboxes, path MTU changes, NAT rebinding,
+or a real NIC scheduler, and both endpoints run on one machine. Live campaigns
 remain necessary.
 
 ## Matched live comparison

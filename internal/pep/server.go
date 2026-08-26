@@ -226,10 +226,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Congestion == "" {
 		cfg.Congestion = defaultCongestion()
 	}
-	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal {
+	if cfg.Congestion != CongestionReno && cfg.Congestion != CongestionBBR && cfg.Congestion != CongestionBBRTUIC && cfg.Congestion != CongestionErasure && cfg.Congestion != CongestionAdaptive && cfg.Congestion != CongestionBrutal && cfg.Congestion != CongestionBrutalNoComp {
 		return nil, fmt.Errorf("unsupported QUIC congestion controller %q", cfg.Congestion)
 	}
-	if cfg.Congestion == CongestionBrutal && cfg.BrutalBytesPerSec == 0 {
+	if (cfg.Congestion == CongestionBrutal || cfg.Congestion == CongestionBrutalNoComp) && cfg.BrutalBytesPerSec == 0 {
 		return nil, errors.New("brutal congestion requires a positive per-lane byte rate")
 	}
 	if cfg.AdaptiveMinBytesSec == 0 {

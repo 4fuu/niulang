@@ -79,6 +79,27 @@ func TestBrutalSenderCompensatesForModerateLoss(t *testing.T) {
 	}
 }
 
+func TestBrutalSenderCanKeepConfiguredWireRateWithoutLossCompensation(t *testing.T) {
+	const configured = 1_000_000
+	sender := NewBrutalSender(configured, true)
+	sender.SetRTTStatsProvider(&fakeRTT{smoothed: 200 * time.Millisecond})
+	start := monotime.Now()
+	acked := make([]quiccongestion.AckedPacketInfo, 60)
+	lost := make([]quiccongestion.LostPacketInfo, 40)
+	for second := 0; second < 3; second++ {
+		sender.OnCongestionEventEx(0, start.Add(time.Duration(second)*time.Second), acked, lost)
+	}
+	if got := sender.bandwidth(); got != configured {
+		t.Fatalf("wire rate = %d, want configured %d after persistent loss", got, configured)
+	}
+	if sender.ackRate != 1 {
+		t.Fatalf("disabled compensation changed ACK multiplier to %v", sender.ackRate)
+	}
+	if got := sender.Telemetry().Kind; got != "brutal-no-comp" {
+		t.Fatalf("telemetry kind = %q, want brutal-no-comp", got)
+	}
+}
+
 func TestBBRSenderBuildsDeliveryModelAndRecovers(t *testing.T) {
 	sender := NewBBRSender(1200)
 	rtt := &fakeRTT{smoothed: 200 * time.Millisecond}
