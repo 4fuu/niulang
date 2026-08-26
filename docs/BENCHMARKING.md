@@ -325,7 +325,21 @@ SING_BOX=/path/to/sing-box \
 # optionally include Hysteria2 in the same seeded path matrix.
 SING_BOX=/path/to/sing-box \
     ./scripts/bench_udp_delivery.sh /tmp/queqiao-udp
+
+# A serial low-loss campaign for latency and relatively high bandwidth. Key
+# cells use ten trials, other cells use five, and CPU/peak RSS are retained.
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_low_latency_bandwidth.sh /tmp/queqiao-low-loss
 ```
+
+The combined campaign makes 0%, 1%, and 5% independent loss its primary
+regime. It covers 50--400 ms RTT, 50--100 Mbit/s bottlenecks, 256- and
+1200-byte UDP payloads, three policer refill quanta, connection reuse, and a
+small burst-loss boundary. One 15% UDP cell is retained only to quantify
+ordered-stream head-of-line delay; it is not part of the low-loss verdict.
+Each cell runs serially so another benchmark process cannot distort its tail or
+resource data. `resources.tsv` reports wall, user and system CPU time plus peak
+RSS for the whole cell, including external transports reaped by the harness.
 
 The fixed-rate control is `--congestion brutal-no-comp --brutal-rate N`.
 It borrows one narrow idea from Hysteria2's Brutal controller: capacity is an

@@ -124,6 +124,22 @@ SING_BOX=/path/to/sing-box \
     ./scripts/bench_udp_delivery.sh /tmp/queqiao-udp
 ```
 
+For a low-loss campaign that emphasizes latency and relatively high bandwidth,
+run the combined serial matrix. It concentrates on 0%, 1%, and 5% loss, uses
+ten trials for key cells and five elsewhere, and records per-cell CPU time and
+peak RSS in addition to the transport metrics. A single 15% UDP cell is kept
+only as a head-of-line boundary control:
+
+```sh
+SING_BOX=/path/to/sing-box \
+    ./scripts/bench_low_latency_bandwidth.sh /tmp/queqiao-low-loss
+```
+
+Set `QUEQIAO_PROFILE_SET=smoke` to validate the whole pipeline with one trial
+per family before a full run. The output bundle includes raw JSON and logs,
+four family-specific TSV files, `resources.tsv`, the machine/tool manifest,
+the source status and patch, and SHA-256 checksums.
+
 The first distinguishes seeded erasure from sender-induced policer drops and
 compares normal loss-compensating Brutal against `brutal-no-comp`, whose fixed
 rate is a per-lane wire target. The second measures whether the persistent QUIC
