@@ -3,10 +3,9 @@
 //
 // It exists because the path this project targets is an erasure channel rather
 // than a congested one. About 38% of packets are dropped in the download
-// direction independently of the sending rate
-// (docs/archive/2026-08-development/DESIGN-ERASURE.md), and
-// independent loss at that rate is cheap to repair and expensive in round
-// trips to retransmit. On a memoryless channel with erasure probability p the
+// direction independently of the sending rate. Independent loss at that rate
+// is cheap to repair and expensive in round trips to retransmit. On a
+// memoryless channel with erasure probability p the
 // capacity is (1-p) times the line rate whatever the scheme, so a code buys no
 // bandwidth that retransmission does not -- what it buys is the round trip,
 // and that is why it is worth having for a small exchange and not for a bulk

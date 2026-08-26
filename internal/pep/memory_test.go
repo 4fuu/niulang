@@ -50,7 +50,7 @@ func TestMemoryLimitsRejectDeadlockingOrMultiplicativeSettings(t *testing.T) {
 	}
 }
 
-func TestQUICWindowsCanBeHardCappedForMobile(t *testing.T) {
+func TestQUICWindowsCanBeHardCappedForConstrainedClients(t *testing.T) {
 	windows := flowWindows{
 		stream: 512 * 1024, connection: 2 * 1024 * 1024,
 		maxStream: 512 * 1024, maxConnection: 2 * 1024 * 1024, maxStreams: 32,

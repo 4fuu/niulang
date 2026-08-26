@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded HTTP POST sink for controlled QUEQIAO upload measurements.
+"""Bounded HTTP POST sink for controlled NIULANG upload measurements.
 
 This is intentionally a test utility, not a production public service. It
 accepts a fixed number of bounded request bodies, reports the byte count, and
@@ -13,7 +13,7 @@ import threading
 
 
 class SinkHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "queqiao-upload-sink/1"
+    server_version = "niulang-upload-sink/1"
 
     def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
         try:

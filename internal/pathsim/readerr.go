@@ -1,7 +1,7 @@
 package pathsim
 
 import (
-	"github.com/bojieli/queqiao/internal/udperr"
+	"github.com/4fuu/niulang/internal/udperr"
 )
 
 // fatalReadError reports whether a relay read error means the socket is

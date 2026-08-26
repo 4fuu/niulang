@@ -6,10 +6,10 @@ import (
 
 	"github.com/apernet/quic-go"
 
-	"github.com/bojieli/queqiao/internal/coded"
-	"github.com/bojieli/queqiao/internal/fec"
-	"github.com/bojieli/queqiao/internal/pathmodel"
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/coded"
+	"github.com/4fuu/niulang/internal/fec"
+	"github.com/4fuu/niulang/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 // A lane's bulk payload can travel over the connection's unreliable datagrams,

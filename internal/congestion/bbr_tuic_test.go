@@ -668,8 +668,7 @@ func TestTUICAppLimitedCountsAnyUnusedWindowOutsideDrain(t *testing.T) {
 // Live, a 4 ms round trip seeded onto a 200 ms path sized BBR's target window
 // fifty times too small and held the connection near 1 Mbit/s for the rest of
 // the process's life -- every connection made afterwards inherited it through
-// the shared path model. See
-// docs/archive/2026-08-development/MEASUREMENTS-20260816.md.
+// the shared path model.
 func TestSeedBandwidthNeverAdoptsAForeignRoundTrip(t *testing.T) {
 	b := NewTUICBBRSender(1200)
 	measured := 200 * time.Millisecond

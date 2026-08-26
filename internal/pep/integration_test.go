@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/socks5"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/socks5"
 )
 
 func testCertificate(t *testing.T) (identity.ServerCredentials, identity.ClientCredentials) {
@@ -164,7 +164,7 @@ func TestTLSOneLaneSOCKSEndToEnd(t *testing.T) {
 		t.Fatalf("SOCKS connect failed: %v", reply)
 	}
 
-	payload := bytes.Repeat([]byte("queqiao-one-lane-"), 8192)
+	payload := bytes.Repeat([]byte("niulang-one-lane-"), 8192)
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -484,9 +484,9 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	// The per-stream authentication timeout must not be used as a timer for
 	// accepting the next QUIC stream. Keep this established flow idle beyond
 	// that bound, then prove that the same stream still transfers data. The old
-	// behavior closed the whole connection with "queqiao session complete".
+	// behavior closed the whole connection with "niulang session complete".
 	time.Sleep(750 * time.Millisecond)
-	payload := bytes.Repeat([]byte("queqiao-quic-"), 8192)
+	payload := bytes.Repeat([]byte("niulang-quic-"), 8192)
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	// disturbing the first flow's session or destination stream.
 	conn2 := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
 	defer conn2.Close()
-	payload2 := bytes.Repeat([]byte("queqiao-pooled-flow-"), 1024)
+	payload2 := bytes.Repeat([]byte("niulang-pooled-flow-"), 1024)
 	if _, err := conn2.Write(payload2); err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +591,7 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	payload := bytes.Repeat([]byte("queqiao-lane-recovery-"), 128*1024)
+	payload := bytes.Repeat([]byte("niulang-lane-recovery-"), 128*1024)
 	writeErr := make(chan error, 1)
 	go func() {
 		_, err := conn.Write(payload)
@@ -750,7 +750,7 @@ func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
 	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	payload := bytes.Repeat([]byte("queqiao-auto-rescue-"), 32*1024)
+	payload := bytes.Repeat([]byte("niulang-auto-rescue-"), 32*1024)
 	writeErr := make(chan error, 1)
 	go func() {
 		_, writeErrValue := conn.Write(payload)

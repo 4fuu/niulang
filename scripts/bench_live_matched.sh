@@ -8,15 +8,15 @@
 # pairs, keeps the comparison inside one path window.
 set -Eeuo pipefail
 
-a_proxy=${QUEQIAO_A_PROXY:-127.0.0.1:12140}
-b_proxy=${QUEQIAO_B_PROXY:-127.0.0.1:12141}
-a_label=${QUEQIAO_A_LABEL:-queqiao}
-b_label=${QUEQIAO_B_LABEL:-reference}
-url=${QUEQIAO_URL:-}
-expected_bytes=${QUEQIAO_EXPECTED_BYTES:-10485760}
-rounds=${QUEQIAO_ROUNDS:-5}
-timeout_seconds=${QUEQIAO_TIMEOUT_SECONDS:-120}
-output=${QUEQIAO_OUTPUT:--}
+a_proxy=${NIULANG_A_PROXY:-127.0.0.1:12140}
+b_proxy=${NIULANG_B_PROXY:-127.0.0.1:12141}
+a_label=${NIULANG_A_LABEL:-niulang}
+b_label=${NIULANG_B_LABEL:-reference}
+url=${NIULANG_URL:-}
+expected_bytes=${NIULANG_EXPECTED_BYTES:-10485760}
+rounds=${NIULANG_ROUNDS:-5}
+timeout_seconds=${NIULANG_TIMEOUT_SECONDS:-120}
+output=${NIULANG_OUTPUT:--}
 
 usage() {
     cat >&2 <<'EOF'

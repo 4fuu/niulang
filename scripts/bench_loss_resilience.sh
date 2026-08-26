@@ -7,7 +7,7 @@ set -Euo pipefail
 usage() {
     echo "Usage: $0 OUTPUT_DIR" >&2
     echo "Optional: SING_BOX=/path/to/sing-box adds the real Hysteria2 implementation" >&2
-    echo "Environment: QUEQIAO_TRIALS=5 QUEQIAO_BYTES=2097152" >&2
+    echo "Environment: NIULANG_TRIALS=5 NIULANG_BYTES=2097152" >&2
 }
 
 [[ $# -eq 1 ]] || { usage; exit 2; }
@@ -21,9 +21,9 @@ source "$repo/scripts/benchmark_source.sh"
 command -v go >/dev/null || { echo "go is required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
-trials=${QUEQIAO_TRIALS:-5}
-bytes=${QUEQIAO_BYTES:-2097152}
-timeout=${QUEQIAO_TIMEOUT:-90s}
+trials=${NIULANG_TRIALS:-5}
+bytes=${NIULANG_BYTES:-2097152}
+timeout=${NIULANG_TIMEOUT:-90s}
 sing_box=${SING_BOX:-}
 if [[ -n "$sing_box" && ! -x "$sing_box" ]]; then
     echo "SING_BOX is not executable: $sing_box" >&2
@@ -32,7 +32,7 @@ fi
 
 mkdir -p "$output"
 {
-    echo 'format=queqiao-loss-resilience-v1'
+    echo 'format=niulang-loss-resilience-v1'
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "commit=$(git rev-parse HEAD)"
     echo "go_version=$(go version)"
@@ -55,7 +55,7 @@ run_cell() {
     if [[ "$stack" == hysteria2 ]]; then stack_args+=(--sing-box "$sing_box"); fi
     if [[ "$controller" == brutal-no-comp ]]; then extra+=(--brutal-rate 42.5); fi
 
-    go run ./cmd/queqiaobench "${stack_args[@]}" \
+    go run ./cmd/niulangbench "${stack_args[@]}" \
         --rtt 226 --rate 50 --bytes "$bytes" --flows 1 --trials "$trials" \
         --timeout "$timeout" --latency --congestion "$controller" \
         --json "$json" "${extra[@]}" | tee "$log"
@@ -81,9 +81,9 @@ for path_name in independent burst wander; do
         burst)       path_args=(--loss 20 --loss-burst 8) ;;
         wander)      path_args=(--loss 10 --delay-wander 107) ;;
     esac
-    run_cell "$path_name" erasure queqiao erasure "${path_args[@]}"
-    run_cell "$path_name" bbr-tuic queqiao bbr-tuic "${path_args[@]}"
-    run_cell "$path_name" brutal-wire-cap queqiao brutal-no-comp "${path_args[@]}"
+    run_cell "$path_name" erasure niulang erasure "${path_args[@]}"
+    run_cell "$path_name" bbr-tuic niulang bbr-tuic "${path_args[@]}"
+    run_cell "$path_name" brutal-wire-cap niulang brutal-no-comp "${path_args[@]}"
     if [[ -n "$sing_box" ]]; then
         run_cell "$path_name" hysteria2 hysteria2 bbr-tuic "${path_args[@]}"
     fi

@@ -7,9 +7,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/netbind"
-	"github.com/bojieli/queqiao/internal/pathmodel"
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/netbind"
+	"github.com/4fuu/niulang/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 // The path a client is on is not a property of the server. Moving from Wi-Fi

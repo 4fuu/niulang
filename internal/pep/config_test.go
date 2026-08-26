@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/limiter"
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/limiter"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
@@ -488,7 +488,7 @@ func TestQUICConnectionsHaveAnAdmissionBound(t *testing.T) {
 	}
 }
 
-func TestServerQUICStreamCapacitySupportsMobileSessions(t *testing.T) {
+func TestServerQUICStreamCapacitySupportsManySessions(t *testing.T) {
 	config := quicServerConfig(flowWindows{})
 	if config.MaxIncomingStreams < 1024 {
 		t.Fatalf("server QUIC stream capacity = %d, want at least 1024", config.MaxIncomingStreams)

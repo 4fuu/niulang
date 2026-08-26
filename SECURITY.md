@@ -1,8 +1,8 @@
-# Queqiao security model
+# Niulang security model
 
 ## Supported security design
 
-Queqiao protocol version 1 has one data-plane security mode: TLS 1.3 with
+Niulang protocol version 1 has one data-plane security mode: TLS 1.3 with
 provider-pinned gateway authentication and provider-issued per-device mutual
 authentication. Plaintext transport and application-level shared secrets do
 not exist.
@@ -21,9 +21,7 @@ WebPKI certificate, and user-managed root CA file are unnecessary.
 - Invitations contain provider metadata, a root fingerprint, expiry, and a
   random 256-bit bearer token. They contain no device private key. Treat an
   unused invitation like a temporary password and send it over a private
-  channel. Mobile users should paste or explicitly share the invitation into
-  Queqiao; the apps do not claim the unauthenticated `queqiao` custom URL scheme,
-  which another installed application could impersonate.
+  channel.
 - The client generates an Ed25519 device key locally during enrollment. The
   mode-0600 profile contains that key, its certificate, endpoint, and pinned
   provider identity. Back it up or re-enroll; never publish it.
@@ -94,7 +92,7 @@ the last known-good in-memory state active.
 
 ## Limitations
 
-- Queqiao is an encrypted proxy, not an anonymity system. The provider can see
+- Niulang is an encrypted proxy, not an anonymity system. The provider can see
   destination metadata and traffic timing.
 - A compromised endpoint can use its own authorized account until revoked.
 - The compact invitation solves trust bootstrap, not secure delivery; the
@@ -105,18 +103,9 @@ the last known-good in-memory state active.
 
 ## Reporting a vulnerability
 
-Report privately, by either channel:
-
-- **Email the maintainer: <bojieli@gmail.com>.** This works regardless of how
-  the repository is configured, so use it if anything else is unavailable.
-- **GitHub private vulnerability reporting:**
-  <https://github.com/bojieli/queqiao/security/advisories/new>. The draft
-  advisory stays between you and the maintainer until a fix is published, which
-  makes it a convenient place to hold the exploit detail and the eventual
-  disclosure together.
-
-Do not wait for an acknowledgement before the report is complete: send what you
-have to the address above rather than holding a finding until a form works.
+Report privately through [GitHub private vulnerability
+reporting](https://github.com/4fuu/niulang/security/advisories/new). The draft
+advisory stays between you and the maintainer until a fix is published.
 
 Include the affected revision, the reproduction, the impact, and any proposed
 mitigation. Remove client profiles, invitations, provider state, packet

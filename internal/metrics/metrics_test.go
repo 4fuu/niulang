@@ -55,7 +55,7 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "queqiao_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_path_unavailable_total 1") || !strings.Contains(rec.Body.String(), "queqiao_endpoint_transport_races_failed_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_transient_send_errors_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "queqiao_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "queqiao_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "queqiao_quic_packets_sent 80") || !strings.Contains(rec.Body.String(), "queqiao_quic_packets_received 75") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_latest_sample_bytes_per_second 900000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_latest_ack_rate_bytes_per_second 1100000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_non_app_limited_samples_total 10") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_state_misses_total 1") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_round 7") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "queqiao_quic_wire_cap_rate_bytes_per_second 1000000") || !strings.Contains(rec.Body.String(), "queqiao_quic_wire_cap_charged_bytes_total 90") || !strings.Contains(rec.Body.String(), "queqiao_quic_wire_cap_overshoot_packets_total 2") || !strings.Contains(rec.Body.String(), "queqiao_quic_wire_cap_debt_seconds 0.002000000") || !strings.Contains(rec.Body.String(), "queqiao_quic_controller_in_recovery 1") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "niulang_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_path_unavailable_total 1") || !strings.Contains(rec.Body.String(), "niulang_endpoint_transport_races_failed_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_transient_send_errors_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "niulang_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_sent 80") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_received 75") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_sample_bytes_per_second 900000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_ack_rate_bytes_per_second 1100000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_non_app_limited_samples_total 10") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_state_misses_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_round 7") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_rate_bytes_per_second 1000000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_charged_bytes_total 90") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_overshoot_packets_total 2") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_debt_seconds 0.002000000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_in_recovery 1") {
 		t.Fatalf("unexpected exposition: %s", rec.Body.String())
 	}
 }
@@ -122,8 +122,8 @@ func TestReplayAndIsolationCountersAreExported(t *testing.T) {
 	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	for _, want := range []string{
-		"queqiao_replay_bytes_in_use 512",
-		"queqiao_bulk_isolations_total 1",
+		"niulang_replay_bytes_in_use 512",
+		"niulang_bulk_isolations_total 1",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics output is missing %q", want)
@@ -187,7 +187,7 @@ func TestSnapshotExpiresQUICObservationsNobodyRefreshes(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if body := recorder.Body.String(); !strings.Contains(body, "queqiao_quic_observations_expired_total 1") {
+	if body := recorder.Body.String(); !strings.Contains(body, "niulang_quic_observations_expired_total 1") {
 		t.Fatalf("metrics output is missing the expiry counter: %s", body)
 	}
 }
@@ -231,9 +231,9 @@ func TestAccountAdmissionRefusalsAreCountedByReason(t *testing.T) {
 	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	for _, want := range []string{
-		"queqiao_account_admission_refused_total{reason=\"flow_limit\"} 2",
-		"queqiao_account_admission_refused_total{reason=\"client_limit\"} 1",
-		"queqiao_account_admission_refused_total{reason=\"unauthorized\"} 0",
+		"niulang_account_admission_refused_total{reason=\"flow_limit\"} 2",
+		"niulang_account_admission_refused_total{reason=\"client_limit\"} 1",
+		"niulang_account_admission_refused_total{reason=\"unauthorized\"} 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics output is missing %q:\n%s", want, body)
@@ -264,10 +264,10 @@ func TestLaneJoinRefusalsAreCountedByReason(t *testing.T) {
 	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	for _, want := range []string{
-		"queqiao_lane_join_refused_total{reason=\"unknown_session\"} 2",
-		"queqiao_lane_join_refused_total{reason=\"principal_mismatch\"} 1",
-		"queqiao_lane_join_refused_total{reason=\"flow_mismatch\"} 0",
-		"queqiao_lane_join_refused_total{reason=\"lane_unavailable\"} 0",
+		"niulang_lane_join_refused_total{reason=\"unknown_session\"} 2",
+		"niulang_lane_join_refused_total{reason=\"principal_mismatch\"} 1",
+		"niulang_lane_join_refused_total{reason=\"flow_mismatch\"} 0",
+		"niulang_lane_join_refused_total{reason=\"lane_unavailable\"} 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics output is missing %q:\n%s", want, body)
@@ -387,7 +387,7 @@ func TestRepublishingTheSameConnectionReadingCountsOnce(t *testing.T) {
 
 // quic-go increments its own loss counters only inside its cubic sender, and
 // this transport installs its own controller through SetCongestionControl, so
-// queqiao_quic_packets_lost and queqiao_quic_bytes_lost could never leave zero.
+// niulang_quic_packets_lost and niulang_quic_bytes_lost could never leave zero.
 // They were published anyway, and the dashboard divided by them. A counter
 // that cannot be produced is worse than a missing one once it is monotonic,
 // because it then reads as a measurement rather than as an absence.
@@ -400,7 +400,7 @@ func TestTheExpositionPublishesNoCounterItCannotProduce(t *testing.T) {
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	body := rec.Body.String()
 
-	for _, dead := range []string{"queqiao_quic_packets_lost", "queqiao_quic_bytes_lost"} {
+	for _, dead := range []string{"niulang_quic_packets_lost", "niulang_quic_bytes_lost"} {
 		for _, line := range strings.Split(body, "\n") {
 			if name, _, ok := strings.Cut(line, " "); ok && name == dead {
 				t.Errorf("%s is still published, and nothing can move it off zero", dead)
@@ -408,8 +408,8 @@ func TestTheExpositionPublishesNoCounterItCannotProduce(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"queqiao_quic_loss_observed_packets_total 200",
-		"queqiao_quic_controller_packets_lost 40",
+		"niulang_quic_loss_observed_packets_total 200",
+		"niulang_quic_controller_packets_lost 40",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("exposition is missing %q", want)
@@ -477,7 +477,7 @@ func TestTheMeasuredErasureIsPublishedBesideTheFloorAndLabelledByDirection(t *te
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	body := rec.Body.String()
 	for _, want := range []string{
-		`queqiao_erasure_ratio{direction="send"} 0.199000000`,
+		`niulang_erasure_ratio{direction="send"} 0.199000000`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("exposition is missing %q", want)
@@ -522,11 +522,11 @@ func TestTheReceiveDirectionIsPublishedFromItsOwnCounters(t *testing.T) {
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	body := rec.Body.String()
 	for _, want := range []string{
-		`queqiao_coded_symbols_total{outcome="arrived"} 800`,
-		`queqiao_coded_symbols_total{outcome="recovered"} 150`,
-		`queqiao_coded_symbols_total{outcome="lost"} 50`,
-		`queqiao_erasure_ratio{direction="receive"} 0.200000000`,
-		`queqiao_erasure_residual_ratio{direction="receive"} 0.050000000`,
+		`niulang_coded_symbols_total{outcome="arrived"} 800`,
+		`niulang_coded_symbols_total{outcome="recovered"} 150`,
+		`niulang_coded_symbols_total{outcome="lost"} 50`,
+		`niulang_erasure_ratio{direction="receive"} 0.200000000`,
+		`niulang_erasure_residual_ratio{direction="receive"} 0.050000000`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("exposition is missing %q", want)

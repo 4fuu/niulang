@@ -11,14 +11,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/classifier"
-	"github.com/bojieli/queqiao/internal/coded"
-	"github.com/bojieli/queqiao/internal/limiter"
-	"github.com/bojieli/queqiao/internal/memlimit"
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/multipath"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/stripe"
+	"github.com/4fuu/niulang/internal/classifier"
+	"github.com/4fuu/niulang/internal/coded"
+	"github.com/4fuu/niulang/internal/limiter"
+	"github.com/4fuu/niulang/internal/memlimit"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/multipath"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/stripe"
 )
 
 var nextTelemetryID atomic.Uint64

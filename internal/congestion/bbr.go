@@ -129,10 +129,10 @@ func NewBBRSender(initialPacketSize quiccongestion.ByteCount) *BBRSender {
 	if initialPacketSize < quiccongestion.MinInitialPacketSize {
 		initialPacketSize = quiccongestion.InitialPacketSize
 	}
-	// TUIC's BBR uses the standard 32-packet initial window. The old queqiao
-	// controller used ten packets, which unnecessarily serialized startup over
-	// a 200-ms path and made a single flow look much worse than TUIC before its
-	// estimator had any useful sample.
+	// TUIC's BBR uses the standard 32-packet initial window. The inherited
+	// Queqiao controller used ten packets. That unnecessarily serialized startup
+	// over a 200-ms path and made one flow look much worse than TUIC before the
+	// estimator had a useful sample.
 	initial := maxByteCount(32*initialPacketSize, 14720)
 	maxCwnd := quiccongestion.MaxCongestionWindowPackets * initialPacketSize
 	if initial > maxCwnd {

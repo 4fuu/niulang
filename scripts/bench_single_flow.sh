@@ -5,13 +5,13 @@
 # several independent downloads disguised as one result.
 set -Eeuo pipefail
 
-proxy=${QUEQIAO_SOCKS5:-127.0.0.1:12080}
-url=${QUEQIAO_URL:-https://cachefly.cachefly.net/10mb.test}
-expected_bytes=${QUEQIAO_EXPECTED_BYTES:-10485760}
-trials=${QUEQIAO_TRIALS:-5}
-timeout_seconds=${QUEQIAO_TIMEOUT_SECONDS:-90}
-output=${QUEQIAO_OUTPUT:--}
-label=${QUEQIAO_LABEL:-single-flow}
+proxy=${NIULANG_SOCKS5:-127.0.0.1:12080}
+url=${NIULANG_URL:-https://cachefly.cachefly.net/10mb.test}
+expected_bytes=${NIULANG_EXPECTED_BYTES:-10485760}
+trials=${NIULANG_TRIALS:-5}
+timeout_seconds=${NIULANG_TIMEOUT_SECONDS:-90}
+output=${NIULANG_OUTPUT:--}
+label=${NIULANG_LABEL:-single-flow}
 
 usage() {
     cat >&2 <<'EOF'
@@ -54,7 +54,7 @@ fi
 printf 'trial\tlabel\thttp_code\tbytes\ttotal_seconds\tspeed_bytes_per_sec\tcurl_exit\tcomplete\n' >"$out_fd"
 
 for ((trial = 1; trial <= trials; trial++)); do
-    result=$(mktemp "${TMPDIR:-/tmp}/queqiao-single.XXXXXX")
+    result=$(mktemp "${TMPDIR:-/tmp}/niulang-single.XXXXXX")
     errfile="$result.err"
     trap 'rm -f "$result" "$errfile"' EXIT INT TERM
     set +e

@@ -9,7 +9,7 @@ import (
 )
 
 // laneTrace prints one line per lane per congestion sample when
-// QUEQIAO_LANE_TRACE is set. It exists because every question this transport has
+// NIULANG_LANE_TRACE is set. It exists because every question this transport has
 // had to answer -- why a window grew, why a bottleneck dropped, why one trial
 // was twice another -- is a question about per-lane state over time, and a
 // throughput number at the end of a transfer cannot answer any of them.
@@ -19,7 +19,7 @@ import (
 // state, but it shares the bounded file and schema envelope with other logs.
 var laneTrace atomic.Bool
 
-func init() { laneTrace.Store(os.Getenv("QUEQIAO_LANE_TRACE") == "1") }
+func init() { laneTrace.Store(os.Getenv("NIULANG_LANE_TRACE") == "1") }
 
 var traceStart = time.Now()
 

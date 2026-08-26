@@ -1,11 +1,10 @@
 // Package lossmodel decides what a lost packet means.
 //
-// On a long-haul path loss is not one process. Measured on the China-US path
-// this project targets (docs/PATH-CHARACTER-20260813.md), about 42% of packets
-// are dropped at 1 Mbit/s as readily as at 12, and ICMP loses 37% at five
-// packets per second: a property of the channel that no amount of backing off
-// will reduce. Above the bottleneck a second process appears whose losses
-// cluster into runs, and that one is congestion.
+// On a long-haul path loss is not one process. On the motivating China-US path,
+// about 42% of packets were dropped at 1 Mbit/s as readily as at 12, and ICMP
+// lost 37% at five packets per second: a property of the channel that no amount
+// of backing off will reduce. Above the bottleneck a second process appears
+// whose losses cluster into runs, and that one is congestion.
 //
 // A transport that cannot tell them apart fails twice over. Reading the
 // channel as congestion, it collapses to the Mathis limit -- about 30 kbit/s

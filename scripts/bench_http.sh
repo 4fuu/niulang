@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Measure independent application flows through a local queqiao SOCKS5 node.
+# Measure independent application flows through a local niulang SOCKS5 node.
 # Callers must start and health-check the local client separately.
 set -Eeuo pipefail
 
-proxy=${QUEQIAO_SOCKS5:-127.0.0.1:12080}
-url=${QUEQIAO_URL:-https://cachefly.cachefly.net/10mb.test}
-expected_bytes=${QUEQIAO_EXPECTED_BYTES:-10485760}
-trials=${QUEQIAO_TRIALS:-5}
-timeout_seconds=${QUEQIAO_TIMEOUT_SECONDS:-90}
-flow_list=${QUEQIAO_FLOWS:-"1 2 4 8"}
-output=${QUEQIAO_OUTPUT:--}
+proxy=${NIULANG_SOCKS5:-127.0.0.1:12080}
+url=${NIULANG_URL:-https://cachefly.cachefly.net/10mb.test}
+expected_bytes=${NIULANG_EXPECTED_BYTES:-10485760}
+trials=${NIULANG_TRIALS:-5}
+timeout_seconds=${NIULANG_TIMEOUT_SECONDS:-90}
+flow_list=${NIULANG_FLOWS:-"1 2 4 8"}
+output=${NIULANG_OUTPUT:--}
 
 usage() {
     cat >&2 <<'EOF'
@@ -17,7 +17,7 @@ Usage: bench_http.sh [--proxy host:port] [--url https://...] [--expected-bytes N
                        [--trials N] [--timeout seconds] [--flows "1 2 4 8"]
                        [--output FILE]
 
-Environment variables with QUEQIAO_ prefixes provide the same defaults.
+Environment variables with NIULANG_ prefixes provide the same defaults.
 Each row is one HTTP flow. Success requires curl exit 0, HTTP 200, and the
 exact expected body length. Partial bodies and timeout failures stay in output.
 EOF
@@ -44,7 +44,7 @@ done
 [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || { echo "timeout must be positive" >&2; exit 2; }
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 127; }
 
-tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/queqiao-bench.XXXXXX")
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/niulang-bench.XXXXXX")
 pids=()
 cleanup() {
     local pid

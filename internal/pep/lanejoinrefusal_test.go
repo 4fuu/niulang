@@ -8,9 +8,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 // A gateway refusing session resumes looked healthy at the default log level,

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/socks5"
+	"github.com/4fuu/niulang/internal/socks5"
 )
 
 // SOCKSTarget is the SOCKS5 endpoint a tunnel stack forwards to.

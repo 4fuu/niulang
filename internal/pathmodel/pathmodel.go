@@ -96,9 +96,9 @@ type report struct {
 // A congestion controller must under-estimate erasure: believing loss is
 // congestion makes it slow down, which is safe. A code must not: believing
 // loss is congestion makes it send no parity into a channel that is erasing,
-// which is what docs/CONTROL-REDESIGN.md was written about. One number cannot
-// serve both, so the model pools both and each consumer reads the one whose
-// error it can survive.
+// which caused an earlier under-coding failure. One number cannot serve both,
+// so the model pools both and each consumer reads the one whose error it can
+// survive.
 type Observation struct {
 	// Erasure is the loss rate this contributor measured, unclassified, and
 	// BurstFactor is how much of it arrived in runs. Both are what a code has

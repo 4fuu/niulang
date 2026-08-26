@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/metrics"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/metrics"
 )
 
 func TestClientProbeAuthenticatesProviderWithoutOpeningFlow(t *testing.T) {

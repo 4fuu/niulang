@@ -10,18 +10,14 @@ Clash/mihomo integration. It also covers multi-provider clients, service
 operation, upgrades, and rollback. Protocol 1 is the only supported wire
 protocol, so client and server must be upgraded together.
 
-**Download the binary first:** [latest release](https://github.com/bojieli/queqiao/releases/latest), or the
-per-platform links in the
-[README](../README.md#platform-availability). Every release publishes
-reproducible archives for Linux, macOS, and Windows on amd64 and arm64, so a
-normal deployment has no build step; check what you downloaded against the
-release's `SHA256SUMS` before running it. [Build from
-source](../README.md#build-from-source) only to develop or to run somewhere no
-archive covers.
+**Download the binary first:** use the [latest
+release](https://github.com/4fuu/niulang/releases/latest). Releases provide
+archives for Linux, macOS, and Windows on amd64 and arm64. Check the archive
+against the release's `SHA256SUMS` before running it. Build from source only for
+development or for an uncovered platform.
 
-For a quick overview, start with the [repository README](../README.md). Use
-[known limitations](KNOWN-LIMITATIONS.md) to check whether the paired-gateway
-assumption fits your network before exposing a service.
+Niulang assumes a paired client and gateway under the same operator's control.
+Confirm that this model fits your network before exposing a service.
 
 ## Install with the scripts
 
@@ -48,7 +44,7 @@ that URI over an authenticated private channel; it is a bearer credential.
 On the client, as the account that will use the tunnel -- not with `sudo`:
 
 ```sh
-./deploy/install-client.sh --invite 'queqiao://enroll/...'
+./deploy/install-client.sh --invite 'niulang://enroll/...'
 ```
 
 That enrolls the invitation, writes the provider manifest, installs a per-user
@@ -60,8 +56,8 @@ If you already enrolled by hand, or you would rather see each step, the binary
 installs its own service and needs no script:
 
 ```sh
-queqiaod enroll 'queqiao://enroll/...'
-queqiaod service install --profile "$PROFILE"
+niulangd enroll 'niulang://enroll/...'
+niulangd service install --profile "$PROFILE"
 ```
 
 Both scripts take `--dry-run`, use `--binary PATH` when you have a reviewed
@@ -78,16 +74,16 @@ replace only the binary, unit, and environment file.
 The provider chooses three durable values:
 
 - a private provider-state directory, conventionally
-  `/var/lib/queqiao/provider`;
+  `/var/lib/niulang/provider`;
 - a display name users will recognize; and
 - one public `host:port` endpoint placed in every invitation and profile.
 
-The endpoint may be an IP address or DNS name. Queqiao authenticates the
+The endpoint may be an IP address or DNS name. Niulang authenticates the
 provider root pinned by the invitation, not a WebPKI name, so no public CA or
 Let's Encrypt certificate is required. The endpoint must remain reachable on
 both TCP and UDP unless the provider intentionally offers only one transport.
 
-Each user receives one temporary `queqiao://` invitation. Importing it creates
+Each user receives one temporary `niulang://` invitation. Importing it creates
 one private profile containing the endpoint, provider pin, device certificate,
 and locally generated device key. Users never copy provider keys, CA files,
 shared secrets, or individual JSON fields.
@@ -102,24 +98,24 @@ Install the exact reviewed binary and confirm its protocol before creating
 state:
 
 ```sh
-sudo install -m 0755 ./queqiaod /usr/local/bin/queqiaod
-/usr/local/bin/queqiaod --version
+sudo install -m 0755 ./niulangd /usr/local/bin/niulangd
+/usr/local/bin/niulangd --version
 ```
 
 The output must contain `wire=1`. Create a dedicated account once:
 
 ```sh
 sudo useradd --system --user-group \
-  --home-dir /var/lib/queqiao --shell /usr/sbin/nologin queqiao
-sudo install -d -m 0700 -o queqiao -g queqiao /var/lib/queqiao
-sudo install -d -m 0750 -o queqiao -g queqiao /var/log/queqiao
+  --home-dir /var/lib/niulang --shell /usr/sbin/nologin niulang
+sudo install -d -m 0700 -o niulang -g niulang /var/lib/niulang
+sudo install -d -m 0750 -o niulang -g niulang /var/log/niulang
 ```
 
 Initialize a new trust domain. The final state path must not already exist:
 
 ```sh
-sudo -u queqiao /usr/local/bin/queqiaod provider init \
-  --state /var/lib/queqiao/provider \
+sudo -u niulang /usr/local/bin/niulangd provider init \
+  --state /var/lib/niulang/provider \
   --name "Example Network" \
   --endpoint gateway.example.net:443
 ```
@@ -143,11 +139,11 @@ as, and keeping the two aligned is what makes a misconfiguration obvious.
 
 ### systemd
 
-Install [`deploy/queqiaod.service`](../deploy/queqiaod.service), then create
-`/etc/queqiao/queqiaod.env` owned by `root:queqiao` with mode `0640`:
+Install [`deploy/niulangd.service`](../deploy/niulangd.service), then create
+`/etc/niulang/niulangd.env` owned by `root:niulang` with mode `0640`:
 
 ```text
-QUEQIAOD_ARGS=--state /var/lib/queqiao/provider --listen :443 --transport auto --max-sessions 4096 --metrics-listen 127.0.0.1:19090 --log-level info --log-format json --log-file /var/log/queqiao/server.log --telemetry-log-interval 5s
+NIULANGD_ARGS=--state /var/lib/niulang/provider --listen :443 --transport auto --max-sessions 4096 --metrics-listen 127.0.0.1:19090 --log-level info --log-format json --log-file /var/log/niulang/server.log --telemetry-log-interval 5s
 ```
 
 The environment file is a whitespace-separated argument list; do not put a
@@ -160,12 +156,12 @@ all. Start and verify the service:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now queqiaod
-systemctl is-active queqiaod
+sudo systemctl enable --now niulangd
+systemctl is-active niulangd
 sudo ss -lntup | grep ':443'
 curl -fsS http://127.0.0.1:19090/metrics | head
-sudo test -s /var/log/queqiao/server.log
-sudo tail -n 5 /var/log/queqiao/server.log
+sudo test -s /var/log/niulang/server.log
+sudo tail -n 5 /var/log/niulang/server.log
 ```
 
 With `--transport auto`, two listener rows are expected: TCP and UDP on the
@@ -179,7 +175,7 @@ at 32 MiB with five backups. See [`LOGGING.md`](LOGGING.md).
 
 Linux's default socket limits are often too small for a QUIC gateway. A burst
 of new flows can then overflow both the UDP receive queue and TCP listen queue
-even when the host has idle CPU and memory. Queqiao's QUIC dependency requests
+even when the host has idle CPU and memory. Niulang's QUIC dependency requests
 an 8 MiB UDP buffer; the provider should leave additional kernel headroom and
 use larger network and SYN backlogs.
 
@@ -189,9 +185,9 @@ Run the repository's idempotent tuning script on every Linux provider:
 sudo ./deploy/tune-server.sh
 ```
 
-The script installs `/etc/sysctl.d/90-queqiao-performance.conf`, immediately
+The script installs `/etc/sysctl.d/90-niulang-performance.conf`, immediately
 applies 16 MiB UDP socket maxima and larger network/TCP backlogs, verifies the
-effective values, and restarts `queqiaod.service` if it is active so the QUIC
+effective values, and restarts `niulangd.service` if it is active so the QUIC
 listener obtains its larger buffer. Use `--no-restart` when coordinating a
 separate maintenance window, or `--service NAME` for a differently named
 systemd unit. `--dry-run` prints the settings without changing the host.
@@ -200,8 +196,8 @@ Afterward, confirm that the listener has room and that its drop counters do not
 keep increasing under normal traffic:
 
 ```sh
-sudo ss -lntpm | grep queqiao
-sudo ss -unapm | grep queqiao
+sudo ss -lntpm | grep niulang
+sudo ss -unapm | grep niulang
 nstat -az | grep -E 'UdpRcvbufErrors|ListenOverflows|ListenDrops'
 ```
 
@@ -214,8 +210,8 @@ service is intentionally an access proxy into a private network.
 Create a separate account for every customer or administrative boundary:
 
 ```sh
-sudo -u queqiao /usr/local/bin/queqiaod provider add-user \
-  --state /var/lib/queqiao/provider \
+sudo -u niulang /usr/local/bin/niulangd provider add-user \
+  --state /var/lib/niulang/provider \
   --name alice \
   --max-clients 8
 ```
@@ -247,8 +243,8 @@ Both limits can be corrected in place, without deleting the account and every
 device enrolled against it:
 
 ```sh
-sudo -u queqiao /usr/local/bin/queqiaod provider set-user-limits \
-  --state /var/lib/queqiao/provider \
+sudo -u niulang /usr/local/bin/niulangd provider set-user-limits \
+  --state /var/lib/niulang/provider \
   --user alice \
   --max-flows 0
 ```
@@ -257,7 +253,7 @@ A limit you do not name keeps its current value. The gateway re-reads
 authorization state every second, so a corrected limit admits new flows within
 a second, without a restart and without disturbing open connections.
 
-Refusals are counted at `queqiao_account_admission_refused_total` by reason —
+Refusals are counted at `niulang_account_admission_refused_total` by reason —
 `flow_limit`, `client_limit`, `unauthorized` — and logged as `msg="account flow
 open refused"` naming the account and device. Check those first when a user
 reports that some sites work and others do not.
@@ -266,8 +262,8 @@ Create a one-time invitation and deliver the single printed URI through an
 authenticated private channel:
 
 ```sh
-sudo -u queqiao /usr/local/bin/queqiaod provider invite \
-  --state /var/lib/queqiao/provider \
+sudo -u niulang /usr/local/bin/niulangd provider invite \
+  --state /var/lib/niulang/provider \
   --user alice \
   --expires-in 1h
 ```
@@ -279,16 +275,16 @@ stdout value or render it as a QR code without translating any fields.
 Audit or revoke unused invitations without printing their tokens:
 
 ```sh
-sudo -u queqiao /usr/local/bin/queqiaod provider list-invites \
-  --state /var/lib/queqiao/provider --user alice
-sudo -u queqiao /usr/local/bin/queqiaod provider revoke-invite \
-  --state /var/lib/queqiao/provider --invite INVITE_ID
+sudo -u niulang /usr/local/bin/niulangd provider list-invites \
+  --state /var/lib/niulang/provider --user alice
+sudo -u niulang /usr/local/bin/niulangd provider revoke-invite \
+  --state /var/lib/niulang/provider --invite INVITE_ID
 ```
 
 ## Set up a desktop client
 
 There are two ways in, and they end in the same place. Either one leaves a
-supervised client that starts on its own; do not run `queqiaod client` in a
+supervised client that starts on its own; do not run `niulangd client` in a
 terminal as a deployment, because the process exits when any provider's
 listener stops and nothing brings it back.
 
@@ -296,15 +292,15 @@ listener stops and nothing brings it back.
 installs the service, and verifies that traffic reaches the gateway:
 
 ```sh
-./deploy/install-client.sh --invite 'queqiao://enroll/…'
+./deploy/install-client.sh --invite 'niulang://enroll/…'
 ```
 
 **Two commands.** If you already enrolled by hand, or you want to see each step,
-`queqiaod` installs its own service:
+`niulangd` installs its own service:
 
 ```sh
-queqiaod enroll 'queqiao://enroll/…'
-queqiaod service install --profile "$PROFILE"
+niulangd enroll 'niulang://enroll/…'
+niulangd service install --profile "$PROFILE"
 ```
 
 `enroll` prints the exact `service install` line to run next, with the profile
@@ -314,12 +310,12 @@ path filled in. Both routes are the same on macOS and Linux.
 
 | What | macOS | Linux |
 | --- | --- | --- |
-| Profile | `~/Library/Application Support/queqiao/` | `~/.config/queqiao/` |
-| Service | `~/Library/LaunchAgents/me.01.queqiao.client.plist` | `~/.config/systemd/user/queqiao-client.service` |
-| Log | `~/Library/Logs/Queqiao/client.log` | `~/.local/state/queqiao/client.log` |
+| Profile | `~/Library/Application Support/niulang/` | `~/.config/niulang/` |
+| Service | `~/Library/LaunchAgents/me.01.niulang.client.plist` | `~/.config/systemd/user/niulang-client.service` |
+| Log | `~/Library/Logs/Niulang/client.log` | `~/.local/state/niulang/client.log` |
 
 The profile directory is the platform configuration directory, which is what
-`queqiaod enroll` uses when `--profile` is not given. Run `queqiaod logs client`
+`niulangd enroll` uses when `--profile` is not given. Run `niulangd logs client`
 to print the log path and a follow command rather than assuming it.
 
 Changing the layout later is a re-run, not a manual move. Passing a different
@@ -333,15 +329,15 @@ a profile left behind is a device lost.
 ### Enrolling
 
 ```sh
-queqiaod enroll 'queqiao://enroll/…'
+niulangd enroll 'niulang://enroll/…'
 ```
 
 The default profile path is printed on success. To choose the path and a
 recognizable device label explicitly:
 
 ```sh
-queqiaod enroll 'queqiao://enroll/…' \
-  --profile ~/queqiao/example-network.json \
+niulangd enroll 'niulang://enroll/…' \
+  --profile ~/niulang/example-network.json \
   --device-name alice-laptop \
   --local-address if:en0
 ```
@@ -349,7 +345,7 @@ queqiaod enroll 'queqiao://enroll/…' \
 `--local-address` defaults to `auto` for enrollment, normal client traffic,
 and certificate renewal. Automatic selection excludes loopback and
 point-to-point TUN interfaces. If two physical IPv4 interfaces are active,
-Queqiao reports both instead of guessing; use `if:NAME` or a literal local IP.
+Niulang reports both instead of guessing; use `if:NAME` or a literal local IP.
 This is especially important when Clash TUN owns the default route: bootstrap
 and renewal must not depend on the tunnel they are configuring.
 
@@ -359,21 +355,21 @@ profile path, and device name to reuse that key safely. Do not delete the draft
 merely because the first response was lost; requesting a different key after
 token consumption is correctly rejected as replay.
 
-The profile must remain readable only by its owner. Queqiao rejects a
+The profile must remain readable only by its owner. Niulang rejects a
 group/world-readable profile rather than silently using an exposed key.
 
 ### The service
 
 ```sh
-queqiaod service install --profile "$PROFILE"   # or --providers MANIFEST
-queqiaod service status
-queqiaod service print --profile "$PROFILE"     # render it without installing
-queqiaod service uninstall                      # leaves profiles alone
+niulangd service install --profile "$PROFILE"   # or --providers MANIFEST
+niulangd service status
+niulangd service print --profile "$PROFILE"     # render it without installing
+niulangd service uninstall                      # leaves profiles alone
 ```
 
 `install` writes the definition, loads it, and leaves it starting on its own
 from then on. The SOCKS5 listener defaults to `127.0.0.1:12080`, the port
-[`deploy/clash-queqiao.yaml`](../deploy/clash-queqiao.yaml) already points at.
+[`deploy/clash-niulang.yaml`](../deploy/clash-niulang.yaml) already points at.
 Use `--listen` to change it, `--label` or `--service-name` to run more than one
 client, and `--binary` when the definition should name a path other than the
 running executable.
@@ -391,21 +387,21 @@ the tunnel is not up before someone logs in. On Linux the unit is a systemd
 start-at-boot. Check either with:
 
 ```sh
-queqiaod service status
+niulangd service status
 ```
 
 After editing a loaded plist by hand, use `launchctl bootout` then
 `launchctl bootstrap`; `kickstart` restarts the definition launchd already
-cached and does not re-read arguments from disk. `queqiaod service install`
+cached and does not re-read arguments from disk. `niulangd service install`
 does the bootout/bootstrap pair for you.
 
 ## Connect Clash or mihomo
 
-Queqiao is a separate local SOCKS5 service, not a protocol parsed by Clash.
+Niulang is a separate local SOCKS5 service, not a protocol parsed by Clash.
 Add a loopback SOCKS5 node with UDP enabled and select it in the group used by
-your rules. [`deploy/clash-queqiao.yaml`](../deploy/clash-queqiao.yaml) is a
+your rules. [`deploy/clash-niulang.yaml`](../deploy/clash-niulang.yaml) is a
 complete starter profile; for an existing Clash profile, copy only its
-`queqiao` proxy entry and add that name to the existing selector.
+`niulang` proxy entry and add that name to the existing selector.
 
 Verify the SOCKS service before selecting it:
 
@@ -428,19 +424,19 @@ from every provider and enroll each one into a clearly named profile:
 
 ```sh
 # Use the Hong Kong provider's invitation in the first command.
-queqiaod enroll 'queqiao://enroll/…' \
-  --profile ~/queqiao/hk.json \
+niulangd enroll 'niulang://enroll/…' \
+  --profile ~/niulang/hk.json \
   --device-name alice-laptop
 
 # Use the US West provider's invitation in the second command.
-queqiaod enroll 'queqiao://enroll/…' \
-  --profile ~/queqiao/us.json \
+niulangd enroll 'niulang://enroll/…' \
+  --profile ~/niulang/us.json \
   --device-name alice-laptop
 ```
 
 `deploy/install-client.sh` writes this manifest for you. To write it by hand,
 save it beside the profiles — the profile directory is
-`~/Library/Application Support/queqiao` on macOS and `~/.config/queqiao` on
+`~/Library/Application Support/niulang` on macOS and `~/.config/niulang` on
 Linux:
 
 ```json
@@ -456,8 +452,8 @@ Linux:
 Start all configured providers together:
 
 ```sh
-queqiaod client \
-  --providers ~/queqiao/providers.json \
+niulangd client \
+  --providers ~/niulang/providers.json \
   --metrics-listen 127.0.0.1:12090
 ```
 
@@ -494,8 +490,8 @@ down. Certificate renewal then runs for every provider concurrently.
 
 The process exits if any provider's listener stops, so a partially working
 client never looks healthy to a service manager. Run it under a supervisor that
-restarts it — a bare foreground `queqiaod client --providers` will not come
-back on its own. `queqiaod service install --providers MANIFEST` sets that up.
+restarts it — a bare foreground `niulangd client --providers` will not come
+back on its own. `niulangd service install --providers MANIFEST` sets that up.
 
 To let Clash/mihomo choose between these endpoints, define one SOCKS5 proxy for
 each listener and put them in a health-checked group. This `fallback` example
@@ -504,28 +500,28 @@ when its health check fails:
 
 ```yaml
 proxies:
-  - name: queqiao-hong-kong
+  - name: niulang-hong-kong
     type: socks5
     server: 127.0.0.1
     port: 1081
     udp: true
-  - name: queqiao-us-west
+  - name: niulang-us-west
     type: socks5
     server: 127.0.0.1
     port: 1082
     udp: true
 
 proxy-groups:
-  - name: Queqiao
+  - name: Niulang
     type: fallback
     url: https://www.gstatic.com/generate_204
     interval: 300
     proxies:
-      - queqiao-hong-kong
-      - queqiao-us-west
+      - niulang-hong-kong
+      - niulang-us-west
 ```
 
-Point the relevant Clash/mihomo rules at the `Queqiao` group. Queqiao itself
+Point the relevant Clash/mihomo rules at the `Niulang` group. Niulang itself
 does not select providers. Clash/mihomo can switch only new connections;
 existing connections are not migrated and fail if their provider becomes
 unavailable. Use a `url-test` group instead when lowest measured latency is
@@ -546,7 +542,7 @@ Use this order:
    files into timestamped rollback directories. Do not overwrite them.
 3. Install the protocol-1 binary under its final path without restarting the
    old service.
-4. Create `/var/lib/queqiao/provider`, add the user, and generate an invitation
+4. Create `/var/lib/niulang/provider`, add the user, and generate an invitation
    while the old process still owns the public port.
 5. Install the new server unit and restart the gateway. Verify protocol 1,
    TCP and UDP listeners, and loopback metrics before touching the client.
@@ -567,14 +563,14 @@ they are known to be compromised.
 ## User and device lifecycle
 
 ```sh
-sudo -u queqiao queqiaod provider list-users \
-  --state /var/lib/queqiao/provider
-sudo -u queqiao queqiaod provider list-devices \
-  --state /var/lib/queqiao/provider --user alice
-sudo -u queqiao queqiaod provider revoke-device \
-  --state /var/lib/queqiao/provider --device DEVICE_ID
-sudo -u queqiao queqiaod provider disable-user \
-  --state /var/lib/queqiao/provider --user alice
+sudo -u niulang niulangd provider list-users \
+  --state /var/lib/niulang/provider
+sudo -u niulang niulangd provider list-devices \
+  --state /var/lib/niulang/provider --user alice
+sudo -u niulang niulangd provider revoke-device \
+  --state /var/lib/niulang/provider --device DEVICE_ID
+sudo -u niulang niulangd provider disable-user \
+  --state /var/lib/niulang/provider --user alice
 ```
 
 The gateway reloads atomic authorization updates. Revocation or user disable
@@ -597,9 +593,9 @@ invitation would be inconvenient.
 Useful health checks are:
 
 ```sh
-systemctl is-active queqiaod
+systemctl is-active niulangd
 curl -fsS http://127.0.0.1:19090/metrics
-launchctl print "gui/$(id -u)/me.01.queqiao.client"
+launchctl print "gui/$(id -u)/me.01.niulang.client"
 curl -fsS http://127.0.0.1:12090/metrics
 ```
 
@@ -610,8 +606,8 @@ error metric stays healthy, while every new enrollment fails. Alert on it
 directly:
 
 ```
-queqiao_authorization_consecutive_refresh_failures > 30
-time() - queqiao_authorization_last_good_timestamp_seconds > 300
+niulang_authorization_consecutive_refresh_failures > 30
+time() - niulang_authorization_last_good_timestamp_seconds > 300
 ```
 
 The first fires while the store is unreadable; the second catches a snapshot
@@ -627,7 +623,7 @@ without redaction.
 
 | Symptom | Action |
 |---|---|
-| `does not support Queqiao enrollment` or `rejected Queqiao protocol 1` | Confirm the invitation endpoint, client/server `wire=1`, and that no old TLS service still owns the port. |
+| `does not support Niulang enrollment` or `rejected Niulang protocol 1` | Confirm the invitation endpoint, client/server `wire=1`, and that no old TLS service still owns the port. |
 | `more than one physical IPv4 address is active` | Choose the intended uplink with `--local-address if:NAME`; use the same value for enroll and client. |
 | `interface … has no active IPv4 address` | Correct the interface name or connect it before retrying. The saved enrollment draft remains reusable. |
 | Enrollment reports a pinned-identity error | The URI belongs to another provider, the provider state was replaced, or traffic is intercepted. Never bypass pin verification. |

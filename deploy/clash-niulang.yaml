@@ -1,0 +1,52 @@
+# niulang — starter Clash Verge / mihomo profile
+#
+# Use this complete profile only when Clash Verge has no existing usable
+# profile. If a profile already exists, do not add a second one: use the
+# recommended existing-profile procedure in docs/DEPLOYING.md, add the node to
+# top-level proxies, and add its name to the selector your rules already use.
+#
+# Import a new local profile through the Clash Verge UI. Do not copy this file
+# directly into the application's profiles directory; files placed there are
+# not automatically registered and do not appear on the Profiles page.
+#
+# niulang is not a protocol Clash speaks. The client (`niulangd client`)
+# runs as a separate process beside Clash and exposes a plain SOCKS5 ingress on
+# loopback; Clash forwards to it like any other SOCKS5 node.
+#
+# Before selecting this profile, confirm the client is up:
+#   nc -z 127.0.0.1 12080
+#   env -u NO_PROXY -u no_proxy curl --noproxy '' -sS \
+#       --socks5-hostname 127.0.0.1:12080 https://api.ipify.org
+# The second command must print the egress host's address.
+#
+# Enrollment and the client default to --local-address auto, which excludes
+# point-to-point TUN interfaces. On a host with more than one physical uplink,
+# use --local-address if:en0 (or a literal IP) for both commands. Clash's TUN
+# mode installs a default route through 198.18.0.1; explicit physical binding
+# prevents Niulang's own outer connection from being carried through the
+# tunnel it was meant to replace, or through a loop.
+#
+# See docs/DEPLOYING.md.
+
+proxies:
+  - name: niulang
+    type: socks5
+    server: 127.0.0.1
+    port: 12080
+    # niulang implements SOCKS5 UDP ASSOCIATE and carries the datagrams on the
+    # connection's QUIC datagrams where QUIC negotiated them, so an application
+    # that chose UDP keeps datagram semantics rather than having its packets
+    # serialised into a stream where one loss stalls everything behind it.
+    udp: true
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - niulang
+      - DIRECT
+
+rules:
+  - DOMAIN-SUFFIX,cn,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy

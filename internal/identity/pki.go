@@ -1,4 +1,4 @@
-// Package identity implements Queqiao's provider trust domain, device
+// Package identity implements Niulang's provider trust domain, device
 // identities, enrollment profiles, and TLS authentication.
 //
 // Users never handle X.509 objects directly. A provider root is the stable
@@ -421,7 +421,7 @@ func newRoot(name string, now time.Time) (*x509.Certificate, ed25519.PrivateKey,
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: name + " Queqiao provider root"},
+		Subject:      pkix.Name{CommonName: name + " Niulang provider root"},
 		NotBefore:    now.Add(-certificateClockSkew), NotAfter: now.AddDate(10, 0, 0),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true, IsCA: true, MaxPathLen: 1,
@@ -684,7 +684,7 @@ func verifyIssuer(certificate, root *x509.Certificate, expectedProvider, role st
 
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".queqiao-*")
+	tmp, err := os.CreateTemp(dir, ".niulang-*")
 	if err != nil {
 		return fmt.Errorf("create temporary state file: %w", err)
 	}

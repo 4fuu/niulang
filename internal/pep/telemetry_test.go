@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	wancongestion "github.com/bojieli/queqiao/internal/congestion"
-	"github.com/bojieli/queqiao/internal/metrics"
+	wancongestion "github.com/4fuu/niulang/internal/congestion"
+	"github.com/4fuu/niulang/internal/metrics"
 )
 
 // statsConn is a lane transport that reports fixed QUIC connection statistics.

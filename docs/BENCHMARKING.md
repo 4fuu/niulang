@@ -10,15 +10,14 @@ running one transport's trials and then another's compares two path windows
 rather than two transports. Every performance claim in this repository should
 be reproducible with the commands here.
 
-Read the [project status](STATUS.md) before interpreting a result. The harness
-can establish correctness, behavior under controlled impairment, and a fair
-same-window comparison; it cannot turn one path into a universal performance
-claim.
+The harness can establish correctness, behavior under controlled impairment,
+and a fair same-window comparison; it cannot turn one path into a universal
+performance claim.
 
 ## One protocol, three workload views
 
 Short-lived, interactive, and bulk are evaluation families for the same
-Queqiao architecture. The benchmark changes the offered workload; it does not
+Niulang architecture. The benchmark changes the offered workload; it does not
 select three transports.
 
 | Family | Primary outputs | Minimum comparison |
@@ -71,10 +70,10 @@ this is the measured limit of the filter.
 One seed reproduces one loss pattern exactly. That property has its own test,
 because everything else depends on it.
 
-**`internal/baseline`** (runnable as `cmd/queqiaoref`) — a TUIC-shaped reference
+**`internal/baseline`** (runnable as `cmd/niulangref`) — a TUIC-shaped reference
 proxy: one authenticated QUIC connection, one bidirectional stream per relayed
 TCP connection, a short destination header, then unframed copying. It runs on
-the same quic-go fork and the same congestion controllers queqiao uses, with
+the same quic-go fork and the same congestion controllers niulang uses, with
 TUIC's published transport windows.
 
 It is a control, not a claim to be native TUIC. Comparing against a separately
@@ -93,7 +92,7 @@ comparison is not limited to an in-tree control:
 | `kcptun` | kcptun, KCP with fixed-rate FEC | UDP relay | `--kcptun-client`, `--kcptun-server` |
 
 Each runs as a server the emulator forwards to and a client exposing SOCKS5,
-over exactly the same seeded path as queqiao. Where the transport has TLS the
+over exactly the same seeded path as niulang. Where the transport has TLS the
 client trusts exactly the server's certificate, so nothing disables
 verification. They are registry entries rather than special cases; see the
 contract below for adding another.
@@ -113,7 +112,7 @@ extra hops are loopback. kcptun's upstream repository was withdrawn and
 `github.com/xtaci/kcptun` no longer resolves, which is why the stack takes two
 binary paths rather than naming a source: build from whatever copy you trust,
 and record which one and at what commit alongside the run, as for any other
-measured dependency. It is the comparison queqiao's own coding most needs,
+measured dependency. It is the comparison niulang's own coding most needs,
 because both transports spend parity to avoid a round trip and choose how much
 in opposite ways — see the fixed-parity section below before quoting a number.
 kcptun ships one program per side, which is why it takes two paths; its
@@ -121,7 +120,7 @@ compression is disabled, because the benchmark's payload is a repeating byte
 ramp that snappy would reduce to almost nothing, and the stack would then
 report the compressor's rate rather than the path's.
 
-**`cmd/queqiaobench`** — runs the selected stacks over one emulated path in a
+**`cmd/niulangbench`** — runs the selected stacks over one emulated path in a
 single process and reports per-trial rows, a summary, optional JSON, and an
 optional regression gate.
 
@@ -139,7 +138,7 @@ producing a lossless result, and it applies backpressure where the packet relay
 would tail-drop.
 
 So `vless-ws` against `vless-tcp` is a fair comparison — it isolates
-WebSocket's framing cost — and `tuic` against `queqiao` is a fair comparison.
+WebSocket's framing cost — and `tuic` against `niulang` is a fair comparison.
 `vless-tcp` against `tuic` is not. Emulating loss for a stream transport needs
 an IP-layer facility such as dummynet, which needs privilege this harness does
 not take.
@@ -195,7 +194,7 @@ What the running pair must satisfy:
    be measured with `--loss 0`, for the reason in the section above.
 
 The harness has to be told where the binary comes from, which is the one step
-that is not in `internal/extproxy`. Add a flag for it in `cmd/queqiaobench` and
+that is not in `internal/extproxy`. Add a flag for it in `cmd/niulangbench` and
 a case to `externalBinaries` keyed on the implementation the registry entry
 names; a stack that skips this registers fine and then refuses every run with
 `stack "x" needs a y binary, and this benchmark has no flag for one`. An
@@ -212,7 +211,7 @@ with the commit, dirty bit, Go toolchain, target, module graph, exact
 arguments, and seeded path parameters, which is what makes a cell reproducible
 by somebody who was not there.
 
-The harness records Queqiao's bounded wire-cap telemetry because it runs that
+The harness records Niulang's bounded wire-cap telemetry because it runs that
 stack in-process. It does not read arbitrary controller internals, and an
 external stack is a pair of processes whose logs are captured only to explain
 a failure. So a claim that depends on what the transport did internally --
@@ -236,7 +235,7 @@ an error that says nothing about why.
 ### Comparing a fixed-parity transport
 
 A transport with FEC in the matrix is worth having, and it needs one thing said
-about the comparison before the numbers are taken. Queqiao chooses its parity
+about the comparison before the numbers are taken. Niulang chooses its parity
 from the erasure it measures, and it revises that choice while a flow runs; a
 kcptun-style code rate is a constant chosen in advance. A single configuration
 is therefore a comparison against one guess, and whichever way it lands the
@@ -250,15 +249,15 @@ So a comparison should carry:
   the code does. Measured live on that path, the same build went from 5.09 to
   25.36 Mbit/s -- five times faster -- when `--kcptun-sndwnd` and
   `--kcptun-rcvwnd` were raised to a delay-bandwidth product's worth of
-  packets, and the gap to queqiao fell from 9.6x to 2.1x. A comparison run at
+  packets, and the gap to niulang fell from 9.6x to 2.1x. A comparison run at
   the default windows is measuring the window.
 - **A parity sweep, not a point.** `--kcptun-parityshard` against a fixed
   `--kcptun-datashard`, spanning ratios above and below the erasure rate, with
-  the best one shown against queqiao rather than an arbitrary one. The
+  the best one shown against niulang rather than an arbitrary one. The
   defaults are kcptun's own (10 data, 3 parity, `fast`, 128/512 windows), which
   is a starting point rather than an answer.
 - **The cost alongside the rate.** Parity is bandwidth spent on the same
-  bottleneck, so report the parity share of bytes sent on both sides. Queqiao's
+  bottleneck, so report the parity share of bytes sent on both sides. Niulang's
   is `fec_repairs_total` over `fec_sent_total` in its runtime log, and kcptun's
   is the ratio the sweep fixed; a transport buying more of the wire can finish
   sooner while delivering fewer useful bytes per byte sent, and a goodput
@@ -273,9 +272,9 @@ So a comparison should carry:
   check against the calibration bound below.
 
 ```sh
-# One cell of a parity sweep, against queqiao on the same seeded path.
+# One cell of a parity sweep, against niulang on the same seeded path.
 for parity in 1 3 6 10; do
-  go run ./cmd/queqiaobench --stacks queqiao,kcptun \
+  go run ./cmd/niulangbench --stacks niulang,kcptun \
       --kcptun-client ./kcptun/client --kcptun-server ./kcptun/server \
       --kcptun-mode fast3 --kcptun-datashard 10 --kcptun-parityshard "$parity" \
       --rtt 200 --loss 20 --rate 50 --bytes $((16*1024*1024)) --trials 5 \
@@ -290,7 +289,7 @@ partial rate**, alongside the completion rate.
 
 This matters. A median over completed trials alone rewards a transport for
 giving up: in a 35%-burst-loss block the reference completed 7 of 12 trials and
-queqiao 10 of 12, and scoring only the successes made the transport that
+niulang 10 of 12, and scoring only the successes made the transport that
 finished the hard trials look slower than the one that abandoned them.
 `median_mbits_completed_only` is retained for continuity with older campaign
 notes and must never be compared across stacks with different completion rates.
@@ -312,25 +311,25 @@ Four focused scripts cover the cases a throughput-only matrix misses:
 ```sh
 # Current erasure control, aggregate application budget, compensating Brutal,
 # and a fixed wire-rate control on an 8 ms token-bucket policer.
-./scripts/bench_policer_controls.sh /tmp/queqiao-policer
+./scripts/bench_policer_controls.sh /tmp/niulang-policer
 
 # Fresh versus reused QUIC connections across clean and lossy RTTs.
-./scripts/bench_connection_reuse.sh /tmp/queqiao-reuse
+./scripts/bench_connection_reuse.sh /tmp/niulang-reuse
 
 # Independent loss, burst loss, and delay wander. Optionally add the real
 # Hysteria2 implementation from sing-box.
 SING_BOX=/path/to/sing-box \
-    ./scripts/bench_loss_resilience.sh /tmp/queqiao-resilience
+    ./scripts/bench_loss_resilience.sh /tmp/niulang-resilience
 
 # Application UDP delivery and latency over datagrams versus ordered streams;
 # optionally include Hysteria2 in the same seeded path matrix.
 SING_BOX=/path/to/sing-box \
-    ./scripts/bench_udp_delivery.sh /tmp/queqiao-udp
+    ./scripts/bench_udp_delivery.sh /tmp/niulang-udp
 
 # A serial low-loss campaign for latency and relatively high bandwidth. Key
 # cells use ten trials, other cells use five, and CPU/peak RSS are retained.
 SING_BOX=/path/to/sing-box \
-    ./scripts/bench_low_latency_bandwidth.sh /tmp/queqiao-low-loss
+    ./scripts/bench_low_latency_bandwidth.sh /tmp/niulang-low-loss
 ```
 
 The combined campaign makes 0%, 1%, and 5% independent loss its primary
@@ -343,7 +342,7 @@ resource data. `resources.tsv` reports wall, user and system CPU time plus peak
 RSS for the whole cell, including external transports reaped by the harness.
 
 Each in-process trial resets the shared path model before it starts. The
-Queqiao client binds `127.0.0.2` while the server remains on `127.0.0.1`, so
+Niulang client binds `127.0.0.2` while the server remains on `127.0.0.1`, so
 the client and server directions cannot collapse into the same production
 `local->peer` model key merely because both endpoints are loopback. Omitting
 either isolation contaminates later erasure/FEC trials with observations from
@@ -366,7 +365,7 @@ headers or FEC repairs and therefore is not a strict wire cap. The policer
 script measures both controls rather than presenting either approximation as a
 finished automatic brake.
 
-Both Brutal modes also replace the erasure controller that feeds Queqiao's
+Both Brutal modes also replace the erasure controller that feeds Niulang's
 shared path model, so adaptive FEC does not receive an erasure estimate in
 these controls. That is acceptable for isolating fixed pacing, but it is why
 `brutal-no-comp` is not the finished low-loss design. A production version
@@ -374,9 +373,9 @@ would cap wire pacing at the shared path boundary while retaining the erasure
 model and its adaptive coding.
 
 The opt-in prototype of that design is `--wire-cap-rate N
---wire-interactive-reserve R` in `queqiaobench`, or
+--wire-interactive-reserve R` in `niulangbench`, or
 `--wire-cap-bytes-per-sec N --wire-interactive-reserve-bytes-per-sec R` in
-`queqiaod`. It wraps the selected explicit QUIC controller instead of replacing
+`niulangd`. It wraps the selected explicit QUIC controller instead of replacing
 it. Connections to the same provider path share one total scheduler; validated
 non-control data connections additionally share a bulk scheduler at `N-R`.
 Pooled/control connections use the total scheduler, so the reserve remains
@@ -399,7 +398,7 @@ packet actually left and corrupt RTT, PTO, and erasure sampling.
 
 The JSON `wire_cap` object records each endpoint's configured total and bulk
 rates, charged QUIC bytes, overshoot packets, and sampled scheduler debt. The
-runtime exports the corresponding `queqiao_quic_wire_cap_*` metrics. Continue
+runtime exports the corresponding `niulang_quic_wire_cap_*` metrics. Continue
 to use pathsim's `packets_erased` and `bottleneck_dropped` as the authoritative
 ambient-loss and sender-overshoot split.
 
@@ -407,12 +406,11 @@ On the 100 Mbit/s development policer, a 95 Mbit/s cap removed all measured
 bottleneck drops at 8 and 16 ms refill intervals, but still dropped 6.996% at
 1 ms. That boundary is consistent with the ten-packet burst allowance and
 host timer granularity. It is evidence to keep the prototype opt-in, not a
-reason to relabel it as a hard cap. The full dated result and limitations are
-in [the low-latency, low-loss experiment report](LOW-LATENCY-LOW-LOSS-EXPERIMENT.md).
+reason to relabel it as a hard cap.
 
 The connection-reuse script borrows the useful latency property of AnyTLS's
 idle-session pool -- keep a path warm so a request does not pay another outer
-handshake. Queqiao already does this with `--quic-pool`; it should not import
+handshake. Niulang already does this with `--quic-pool`; it should not import
 AnyTLS's one-TCP-session-per-flow shape or padding as latency mechanisms. TCP
 multiplexing adds head-of-line coupling, and padding adds bytes and writes.
 The script tests only the reusable mechanism: cold and warm request latency
@@ -435,30 +433,30 @@ then survives a matched live campaign.
 
 ```sh
 # Short-lived requests: cold/warm setup, first byte, and completion.
-go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
+go run ./cmd/niulangbench --rtt 200 --loss 1 --rate 100 \
     --bytes $((64*1024)) --latency --trials 8
 
 # Interactive requests while the same protocol carries a bulk transfer.
-go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
+go run ./cmd/niulangbench --rtt 200 --loss 1 --rate 100 \
     --bytes $((50*1024*1024)) --interactive --trials 5
 
 # Bulk completion and useful goodput.
-go run ./cmd/queqiaobench --rtt 200 --loss 1 --rate 100 \
+go run ./cmd/niulangbench --rtt 200 --loss 1 --rate 100 \
     --bytes $((100*1024*1024)) --trials 5
 
 # Against real implementations rather than only the in-tree control.
-go run ./cmd/queqiaobench --stacks baseline,queqiao,tuic,hysteria2 \
+go run ./cmd/niulangbench --stacks baseline,niulang,tuic,hysteria2 \
     --sing-box /path/to/sing-box --rtt 200 --loss 1 --rate 100 --trials 5
 
-# Against a fixed-rate erasure code, which is the comparison queqiao's own
+# Against a fixed-rate erasure code, which is the comparison niulang's own
 # coding most needs. Sweep the parity; see the fixed-parity section.
-go run ./cmd/queqiaobench --stacks queqiao,kcptun \
+go run ./cmd/niulangbench --stacks niulang,kcptun \
     --kcptun-client /path/to/kcptun/client --kcptun-server /path/to/kcptun/server \
     --kcptun-mode fast3 --kcptun-parityshard 3 \
     --rtt 200 --loss 20 --rate 50 --bytes $((16*1024*1024)) --trials 5
 
 # The TCP family, which cannot be measured under loss.
-go run ./cmd/queqiaobench --stacks vless-tcp,vless-ws \
+go run ./cmd/niulangbench --stacks vless-tcp,vless-ws \
     --sing-box /path/to/sing-box --rtt 200 --loss 0 --rate 100 --trials 4
 
 # The standard matrix, five trials per cell.
@@ -466,40 +464,40 @@ go run ./cmd/queqiaobench --stacks vless-tcp,vless-ws \
 
 # An archival bundle: TSV, per-cell JSON, source/toolchain manifest, any dirty
 # source patch, and checksums. The directory must not already exist.
-./scripts/bench_matrix.sh --trials 5 --json-dir /tmp/queqiao-report
+./scripts/bench_matrix.sh --trials 5 --json-dir /tmp/niulang-report
 
 # One cell, both stacks, with a machine-readable record and a CI gate.
-go run ./cmd/queqiaobench --rtt 200 --loss 3 --rate 100 --trials 5 \
+go run ./cmd/niulangbench --rtt 200 --loss 3 --rate 100 --trials 5 \
     --json /tmp/result.json --gate --tolerance 0.10
 
 # Correlated loss, controller held constant so the transports are compared
 # rather than the controllers.
-go run ./cmd/queqiaobench --rtt 178 --loss 35 --loss-burst 10 --rate 50 \
+go run ./cmd/niulangbench --rtt 178 --loss 35 --loss-burst 10 --rate 50 \
     --bytes $((4*1024*1024)) --congestion brutal --brutal-rate 12 --trials 12
 
 # A queue-less 25 Mbit/s policer with an 8 ms refill quantum. The JSON report
 # separates ambient erasures from packets rejected by the policer.
-go run ./cmd/queqiaobench --stacks queqiao --rtt 226 --rate 25 --loss 20 \
+go run ./cmd/niulangbench --stacks niulang --rtt 226 --rate 25 --loss 20 \
     --policer-refill 8ms --congestion brutal-no-comp --brutal-rate 23.75 \
     --interactive --json /tmp/policer.json
 
 # Preserve erasure/FEC while sharing one 95 Mbit/s QUIC packet-byte cap across
 # every connection to the provider. Bulk connections share 85 Mbit/s and the
 # remaining 10 Mbit/s stays available to interactive/control traffic.
-go run ./cmd/queqiaobench --stacks queqiao --rtt 226 --rate 100 --loss 1 \
+go run ./cmd/niulangbench --stacks niulang --rtt 226 --rate 100 --loss 1 \
     --policer-refill 8ms --congestion erasure --wire-cap-rate 95 \
     --wire-interactive-reserve 10 --interactive --json /tmp/wire-cap.json
 
 # Residual application UDP loss and delivered-packet latency. The stream
 # control makes head-of-line delay visible instead of hiding it as 100%
 # delivery.
-go run ./cmd/queqiaobench --stacks queqiao --rtt 226 --rate 50 --loss 15 \
+go run ./cmd/niulangbench --stacks niulang --rtt 226 --rate 50 --loss 15 \
     --udp-packets 80 --udp-interval 20ms --udp-settle 3s \
     --json /tmp/udp.json
 
 # A reverse-path-heavy regime, which is where a transport that layers its own
 # acknowledgements over QUIC gets into trouble.
-go run ./cmd/queqiaobench --rtt 200 --loss 0.5 --loss-up 25 --rate 100 \
+go run ./cmd/niulangbench --rtt 200 --loss 0.5 --loss-up 25 --rate 100 \
     --bytes $((32*1024*1024)) --trials 4
 ```
 
@@ -514,7 +512,7 @@ serialization clock, one queue, one loss process -- starts both transfers
 together, and reports each one's share:
 
 ```sh
-go run ./cmd/queqiaobench --contend queqiao,baseline --rtt 200 --rate 100 \
+go run ./cmd/niulangbench --contend niulang,baseline --rtt 200 --rate 100 \
     --bytes $((20*1024*1024)) --trials 6
 ```
 
@@ -580,7 +578,7 @@ campaigns. All five are cheap to avoid and expensive to miss:
   reports it as a success. Use `env -u NO_PROXY -u no_proxy curl --noproxy ''`.
 - **Make the remote oracle concurrent.** A single-threaded `http.server` lets a
   lingering connection from one trial delay the next; before this was fixed,
-  queqiao measured 1.19 Mbit/s against the reference's 4.52, and with a threaded
+  niulang measured 1.19 Mbit/s against the reference's 4.52, and with a threaded
   oracle and nothing else changed the two measured 0.478 and 0.522.
 
 **Measure a fixed duration, not a fixed object, when the stacks are far apart.**
@@ -598,5 +596,5 @@ policer. It does not model middlebox behavior, path MTU changes, or NAT
 rebinding. Both endpoints run on one machine, so it cannot expose a defect that
 only appears with a real NIC or a real scheduler.
 
-It says nothing about correctness under lane failure, UDP blocking, or restart.
-Those gates are in [`PRODUCTION-DESIGN.md`](PRODUCTION-DESIGN.md).
+It says nothing about correctness under lane failure, UDP blocking, or restart;
+those require separate correctness and failure-mode tests.

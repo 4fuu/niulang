@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# One-command Queqiao desktop client install for macOS and Linux. It enrolls
+# One-command Niulang desktop client install for macOS and Linux. It enrolls
 # one or more invitations, writes the multi-provider manifest, installs a
 # per-user service that starts at login (launchd on macOS, a systemd --user
 # unit with lingering on Linux), and verifies each SOCKS5 listener.
@@ -16,8 +16,8 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 
 home=${HOME:?HOME must be set}
-prefix=$home/.queqiao
-# Left empty here and resolved once the platform is known: `queqiaod enroll`
+prefix=$home/.niulang
+# Left empty here and resolved once the platform is known: `niulangd enroll`
 # uses the platform configuration directory, and an installer that chose a
 # different one would leave hand-enrolled and script-enrolled profiles in two
 # places with no hint that either existed.
@@ -27,8 +27,8 @@ metrics_listen=127.0.0.1:12090
 local_address=auto
 device_name=
 log_level=info
-label=me.01.queqiao.client
-service_name=queqiao-client
+label=me.01.niulang.client
+service_name=niulang-client
 binary_source=
 verify=true
 egress_check=true
@@ -42,9 +42,9 @@ binary_origin=
 
 usage() {
 	cat <<'EOF'
-Usage: deploy/install-client.sh --invite 'queqiao://enroll/...' [--invite ...] [options]
+Usage: deploy/install-client.sh --invite 'niulang://enroll/...' [--invite ...] [options]
 
-Enroll one or more provider invitations, install queqiaod as a per-user
+Enroll one or more provider invitations, install niulangd as a per-user
 service that starts at login, and verify the resulting SOCKS5 listeners.
 
 Invitations:
@@ -54,7 +54,7 @@ Invitations:
 
 Options:
   --base-port PORT         first loopback SOCKS5 port (default 12080, matching
-                           deploy/clash-queqiao.yaml); later providers take the
+                           deploy/clash-niulang.yaml); later providers take the
                            next free ports
   --local-address VALUE    outer source for enrollment and traffic: auto, an IP,
                            or if:NAME (default auto). Use if:en0 when Clash TUN
@@ -63,12 +63,12 @@ Options:
   --metrics-listen ADDR    loopback metrics address (default 127.0.0.1:12090)
   --log-level LEVEL        debug, info, warn, or error (default info)
   --config-dir DIR         profiles and manifest (default: the same directory
-                           `queqiaod enroll` uses -- ~/Library/Application
-                           Support/queqiao on macOS, ~/.config/queqiao on Linux)
-  --prefix DIR             binary install prefix (default ~/.queqiao)
-  --label NAME             macOS LaunchAgent label (default me.01.queqiao.client)
-  --service-name NAME      Linux systemd --user unit name (default queqiao-client)
-  --binary PATH            install this queqiaod instead of building one
+                           `niulangd enroll` uses -- ~/Library/Application
+                           Support/niulang on macOS, ~/.config/niulang on Linux)
+  --prefix DIR             binary install prefix (default ~/.niulang)
+  --label NAME             macOS LaunchAgent label (default me.01.niulang.client)
+  --service-name NAME      Linux systemd --user unit name (default niulang-client)
+  --binary PATH            install this niulangd instead of building one
   --no-start               write the service definition without loading it
   --no-egress-check        skip the outbound request through the tunnel
   --no-verify              skip listener and egress verification entirely
@@ -81,8 +81,8 @@ every enrolled profile moves with it, and the superseded definition and binary
 are removed. Profiles are moved rather than re-enrolled because an invitation
 is single-use and the device key cannot be reissued.
 
-The binary is taken from --binary, then ./queqiaod in the repository root,
-then a local `go build ./cmd/queqiaod`.
+The binary is taken from --binary, then ./niulangd in the repository root,
+then a local `go build ./cmd/niulangd`.
 EOF
 }
 
@@ -122,10 +122,10 @@ entries=$work_dir/entries
 # the name. An unnamed provider leaves the trailing field empty instead.
 record_invite() {
 	case $1 in
-	queqiao://*)
+	niulang://*)
 		printf '%s\t\n' "$1" >>"$pending"
 		;;
-	[A-Za-z0-9]*=queqiao://*)
+	[A-Za-z0-9]*=niulang://*)
 		invite_name=${1%%=*}
 		case $invite_name in
 		*[!A-Za-z0-9._-]*)
@@ -231,9 +231,9 @@ esac
 
 if [ -z "$config_dir" ]; then
 	if [ "$platform" = macos ]; then
-		config_dir="$home/Library/Application Support/queqiao"
+		config_dir="$home/Library/Application Support/niulang"
 	else
-		config_dir="${XDG_CONFIG_HOME:-$home/.config}/queqiao"
+		config_dir="${XDG_CONFIG_HOME:-$home/.config}/niulang"
 	fi
 fi
 
@@ -260,7 +260,7 @@ for path_value in "$prefix" "$config_dir"; do
 	esac
 done
 
-binary_path=$prefix/bin/queqiaod
+binary_path=$prefix/bin/niulangd
 manifest=$config_dir/providers.json
 if [ "$platform" = macos ]; then
 	service_dir=$home/Library/LaunchAgents
@@ -307,13 +307,13 @@ find_previous_install() {
 	for candidate in "$@"; do
 		[ -f "$candidate" ] || continue
 		grep -q -- '--providers' "$candidate" || continue
-		grep -q 'queqiaod' "$candidate" || continue
+		grep -q 'niulangd' "$candidate" || continue
 		printf '%s\n' "$candidate" >>"$matches"
 	done
 	found=$(wc -l <"$matches" | tr -d ' ')
 	[ "$found" -gt 0 ] || return 0
 	if [ "$found" -gt 1 ]; then
-		die "$service_dir holds more than one queqiao client service:
+		die "$service_dir holds more than one niulang client service:
 $(cat "$matches")
 Remove the ones you do not want before relocating; this script will not guess
 which install is current."
@@ -468,19 +468,19 @@ if [ -n "$binary_source" ]; then
 	[ -x "$binary_source" ] || die "--binary $binary_source is not an executable file"
 	staged_binary=$binary_source
 	binary_origin="supplied binary"
-elif [ -x "$repo_root/queqiaod" ]; then
-	staged_binary=$repo_root/queqiaod
-	binary_origin="prebuilt $repo_root/queqiaod"
+elif [ -x "$repo_root/niulangd" ]; then
+	staged_binary=$repo_root/niulangd
+	binary_origin="prebuilt $repo_root/niulangd"
 elif command -v go >/dev/null 2>&1; then
-	echo "Building queqiaod from $repo_root ..."
-	(cd "$repo_root" && go build -o "$work_dir/queqiaod" ./cmd/queqiaod) ||
+	echo "Building niulangd from $repo_root ..."
+	(cd "$repo_root" && go build -o "$work_dir/niulangd" ./cmd/niulangd) ||
 		die "go build failed; build it separately and pass --binary PATH"
-	staged_binary=$work_dir/queqiaod
+	staged_binary=$work_dir/niulangd
 	binary_origin="source build"
 else
-	die "no queqiaod binary found.
-Pass --binary PATH, place a built binary at $repo_root/queqiaod, or install Go
-and re-run: go build -o ./queqiaod ./cmd/queqiaod"
+	die "no niulangd binary found.
+Pass --binary PATH, place a built binary at $repo_root/niulangd, or install Go
+and re-run: go build -o ./niulangd ./cmd/niulangd"
 fi
 
 version_line=$("$staged_binary" version) ||
@@ -595,7 +595,7 @@ manifest_tmp=$work_dir/providers.json
 install -m 0600 "$manifest_tmp" "$manifest"
 
 # The service definition has one renderer, and it lives in the binary. This
-# script owns enrollment, the manifest, and verification; `queqiaod service`
+# script owns enrollment, the manifest, and verification; `niulangd service`
 # owns what a LaunchAgent and a systemd user unit look like. Two copies of that
 # knowledge is exactly how the old hand-edited plist drifted from the guide.
 # Positional parameters rather than one string: the default configuration
@@ -662,7 +662,7 @@ fi
 
 cat <<EOF
 
-Queqiao client installed.
+Niulang client installed.
   binary    $binary_path
   manifest  $manifest
   service   $service_path
@@ -676,7 +676,7 @@ done <"$entries"
 
 cat <<EOF
 
-Point Clash or mihomo at the listeners above; deploy/clash-queqiao.yaml is a
+Point Clash or mihomo at the listeners above; deploy/clash-niulang.yaml is a
 starter profile. Add another provider later with:
-  deploy/install-client.sh --invite 'queqiao://enroll/...'
+  deploy/install-client.sh --invite 'niulang://enroll/...'
 EOF

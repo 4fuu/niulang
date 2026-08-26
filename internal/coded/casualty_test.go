@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/fec"
-	"github.com/bojieli/queqiao/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/fec"
+	"github.com/4fuu/niulang/internal/pathmodel"
 )
 
 // refusingPipe is a carrier that refuses some datagrams outright, which is what

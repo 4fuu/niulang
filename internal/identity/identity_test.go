@@ -128,12 +128,15 @@ func TestInvitationIsCompactStrictExpiringAndOneTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(uri) > 2048 || strings.Contains(uri, "PRIVATE") || strings.Contains(uri, "CERTIFICATE") {
+	if !strings.HasPrefix(uri, "niulang://enroll/") || len(uri) > 2048 || strings.Contains(uri, "PRIVATE") || strings.Contains(uri, "CERTIFICATE") {
 		t.Fatalf("invitation is not a compact bearer URI: length=%d", len(uri))
 	}
 	parsed, err := ParseInvitation(uri, now)
 	if err != nil || parsed != invitation {
 		t.Fatalf("parse invitation: %v", err)
+	}
+	if _, err := ParseInvitation("queqiao"+strings.TrimPrefix(uri, "niulang"), now); err == nil {
+		t.Fatal("legacy Queqiao invitation scheme was accepted")
 	}
 	if _, err := ParseInvitation(uri, now.Add(2*time.Hour)); err == nil {
 		t.Fatal("expired invitation was accepted")
@@ -460,7 +463,7 @@ func TestEnrollmentExplainsProtocolALPNMismatch(t *testing.T) {
 		Certificates: []tls.Certificate{provider.GatewayCert},
 		MinVersion:   tls.VersionTLS13,
 		MaxVersion:   tls.VersionTLS13,
-		NextProtos:   []string{"not-queqiao"},
+		NextProtos:   []string{"not-niulang"},
 	}
 	go func() {
 		raw, acceptErr := listener.Accept()
@@ -471,7 +474,7 @@ func TestEnrollmentExplainsProtocolALPNMismatch(t *testing.T) {
 		_ = tls.Server(raw, serverConfig).Handshake()
 	}()
 	_, err = EnrollWithOptions(context.Background(), invitation, "laptop", DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
-	if err == nil || !strings.Contains(err.Error(), "does not support Queqiao enrollment") || !strings.Contains(err.Error(), "protocol 1") {
+	if err == nil || !strings.Contains(err.Error(), "does not support Niulang enrollment") || !strings.Contains(err.Error(), "protocol 1") {
 		t.Fatalf("ALPN mismatch produced unhelpful error: %v", err)
 	}
 }

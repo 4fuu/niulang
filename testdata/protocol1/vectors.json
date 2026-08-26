@@ -1,6 +1,6 @@
 {
   "protocol": 1,
-  "note": "Frozen conformance vectors for queqiao wire protocol 1. Every credential-shaped value here is synthetic. Regenerating this file is a wire change: protocol.Version and the data ALPN must move with it.",
+  "note": "Frozen conformance vectors for Niulang protocol 1. Every credential-shaped value here is synthetic. Regenerating this file is a compatibility change; data-plane changes require protocol.Version and the data ALPN to move with them.",
   "frame_headers": {
     "accept": [
       {
@@ -1117,7 +1117,7 @@
     }
   ],
   "invitation": {
-    "uri": "queqiao://enroll/eyJ2IjoxLCJuYW1lIjoiRXhhbXBsZSBQcm92aWRlciIsInByb3ZpZGVyIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJlbmRwb2ludCI6ImdhdGV3YXkuZXhhbXBsZS5pbnZhbGlkOjg0NDMiLCJnYXRld2F5IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDIiLCJyb290IjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsInRva2VuIjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsImV4cGlyZXMiOiIyMDI2LTAxLTA1VDAwOjAwOjAwWiJ9",
+    "uri": "niulang://enroll/eyJ2IjoxLCJuYW1lIjoiRXhhbXBsZSBQcm92aWRlciIsInByb3ZpZGVyIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJlbmRwb2ludCI6ImdhdGV3YXkuZXhhbXBsZS5pbnZhbGlkOjg0NDMiLCJnYXRld2F5IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDIiLCJyb290IjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsInRva2VuIjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsImV4cGlyZXMiOiIyMDI2LTAxLTA1VDAwOjAwOjAwWiJ9",
     "version": 1,
     "provider_name": "Example Provider",
     "provider_id": "00000000000000000000000000000001",

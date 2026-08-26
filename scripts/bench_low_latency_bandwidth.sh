@@ -10,11 +10,11 @@ Usage: bench_low_latency_bandwidth.sh OUTPUT_DIR
 
 Environment:
   SING_BOX=/path/to/sing-box       add real Hysteria2 cells
-  QUEQIAO_TRIALS=5                 ordinary cell trials
-  QUEQIAO_IMPORTANT_TRIALS=10      key cell trials
-  QUEQIAO_FAMILIES='throughput policer udp reuse'
-  QUEQIAO_PROFILE_SET=full|smoke   full is the default
-  QUEQIAO_TIMEOUT=90s              per-trial timeout
+  NIULANG_TRIALS=5                 ordinary cell trials
+  NIULANG_IMPORTANT_TRIALS=10      key cell trials
+  NIULANG_FAMILIES='throughput policer udp reuse'
+  NIULANG_PROFILE_SET=full|smoke   full is the default
+  NIULANG_TIMEOUT=90s              per-trial timeout
 
 The full profile concentrates on 0%, 1%, and 5% independent loss. One 15%
 cell is retained only to make UDP-on-stream head-of-line delay measurable.
@@ -34,16 +34,16 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 time_bin=$(command -v /usr/bin/time || true)
 [[ -n "$time_bin" ]] || { echo "GNU /usr/bin/time is required" >&2; exit 1; }
 
-trials=${QUEQIAO_TRIALS:-5}
-important_trials=${QUEQIAO_IMPORTANT_TRIALS:-10}
-families=${QUEQIAO_FAMILIES:-"throughput policer udp reuse"}
-profile_set=${QUEQIAO_PROFILE_SET:-full}
-timeout=${QUEQIAO_TIMEOUT:-90s}
+trials=${NIULANG_TRIALS:-5}
+important_trials=${NIULANG_IMPORTANT_TRIALS:-10}
+families=${NIULANG_FAMILIES:-"throughput policer udp reuse"}
+profile_set=${NIULANG_PROFILE_SET:-full}
+timeout=${NIULANG_TIMEOUT:-90s}
 sing_box=${SING_BOX:-}
 
-[[ "$trials" =~ ^[1-9][0-9]*$ ]] || { echo "QUEQIAO_TRIALS must be positive" >&2; exit 2; }
-[[ "$important_trials" =~ ^[1-9][0-9]*$ ]] || { echo "QUEQIAO_IMPORTANT_TRIALS must be positive" >&2; exit 2; }
-case "$profile_set" in full|smoke) ;; *) echo "QUEQIAO_PROFILE_SET must be full or smoke" >&2; exit 2 ;; esac
+[[ "$trials" =~ ^[1-9][0-9]*$ ]] || { echo "NIULANG_TRIALS must be positive" >&2; exit 2; }
+[[ "$important_trials" =~ ^[1-9][0-9]*$ ]] || { echo "NIULANG_IMPORTANT_TRIALS must be positive" >&2; exit 2; }
+case "$profile_set" in full|smoke) ;; *) echo "NIULANG_PROFILE_SET must be full or smoke" >&2; exit 2 ;; esac
 if [[ -n "$sing_box" && ! -x "$sing_box" ]]; then
     echo "SING_BOX is not executable: $sing_box" >&2
     exit 1
@@ -57,7 +57,7 @@ source_status=$(git status --porcelain=v1 --untracked-files=normal)
 tree_state=clean
 [[ -z "$source_status" ]] || tree_state=modified
 {
-    echo 'format=queqiao-low-latency-bandwidth-v1'
+    echo 'format=niulang-low-latency-bandwidth-v1'
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "commit=$(git rev-parse HEAD)"
     echo "tree_state=$tree_state"
@@ -87,8 +87,8 @@ write_source_patch "$output/source.patch"
 
 build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
-bench="$build_dir/queqiaobench"
-go build -trimpath -o "$bench" ./cmd/queqiaobench
+bench="$build_dir/niulangbench"
+go build -trimpath -o "$bench" ./cmd/niulangbench
 
 printf 'family\tprofile\tmode\ttrials\twall_seconds\tuser_seconds\tsystem_seconds\tcpu_percent\tmax_rss_kib\texit_code\n' >"$output/resources.tsv"
 printf 'profile\tmode\trtt_ms\trate_mbits\tloss_percent\tloss_burst\ttrials\tcompleted\tsetup_failures\tmedian_mbits\tworst_mbits\tinteractive_p95_ms\tpackets_in\terased\tbottleneck_drops\tbottleneck_drop_percent\n' >"$output/throughput.tsv"
@@ -109,7 +109,7 @@ run_throughput_cell() {
     local profile=$1 rtt=$2 rate=$3 loss=$4 burst=$5 bytes=$6 cell_trials=$7 mode=$8
     local json="$output/json/throughput-${profile}-${mode}.json"
     local log="$output/logs/throughput-${profile}-${mode}.txt"
-    local stack=queqiao controller=$mode
+    local stack=niulang controller=$mode
     local extra=()
     case "$mode" in
         erasure|bbr-tuic) ;;
@@ -189,7 +189,7 @@ run_policer_cell() {
             ;;
     esac
     run_timed policer "$profile" "$mode" "$cell_trials" "$log" \
-        --stacks queqiao --rtt "$rtt" --rate "$rate" --loss "$loss" \
+        --stacks niulang --rtt "$rtt" --rate "$rate" --loss "$loss" \
         --policer-refill "$refill" --bytes "$bytes" --flows 1 \
         --trials "$cell_trials" --timeout "$timeout" --interactive \
         --congestion "$controller" --json "$json" "${extra[@]}"
@@ -223,7 +223,7 @@ run_udp_cell() {
     local profile=$1 rtt=$2 rate=$3 loss=$4 burst=$5 payload=$6 cell_trials=$7 mode=$8
     local json="$output/json/udp-${profile}-${mode}.json"
     local log="$output/logs/udp-${profile}-${mode}.txt"
-    local stack=queqiao controller=erasure
+    local stack=niulang controller=erasure
     local extra=()
     case "$mode" in
         erasure-datagram) ;;
@@ -294,7 +294,7 @@ run_reuse_cell() {
     local json="$output/json/reuse-${profile}-${mode}.json"
     local log="$output/logs/reuse-${profile}-${mode}.txt"
     run_timed reuse "$profile" "$mode" "$cell_trials" "$log" \
-        --stacks queqiao --rtt "$rtt" --rate 100 --loss "$loss" \
+        --stacks niulang --rtt "$rtt" --rate 100 --loss "$loss" \
         --bytes 1024 --flows 1 --trials "$cell_trials" --timeout "$timeout" \
         --congestion erasure --quic-pool="$pool" --latency --json "$json"
     jq -r --arg profile "$profile" --arg mode "$mode" '

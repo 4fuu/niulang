@@ -3,7 +3,7 @@ package pep
 import (
 	"testing"
 
-	wancongestion "github.com/bojieli/queqiao/internal/congestion"
+	wancongestion "github.com/4fuu/niulang/internal/congestion"
 )
 
 func TestWireCapSetSharesOnlyOneEndpointPath(t *testing.T) {

@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/coded"
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/coded"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 // frameConn is a lane's framing. It always has a control substrate, and may

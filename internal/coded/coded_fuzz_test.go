@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/fec"
-	"github.com/bojieli/queqiao/internal/lossmodel"
+	"github.com/4fuu/niulang/internal/fec"
+	"github.com/4fuu/niulang/internal/lossmodel"
 )
 
 // receiveOnly builds the half of a Path that arriving datagrams touch, without

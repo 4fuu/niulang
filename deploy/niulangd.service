@@ -1,0 +1,41 @@
+[Unit]
+Description=niulang performance-enhancing proxy
+Documentation=https://github.com/4fuu/niulang
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=niulang
+Group=niulang
+# Put whitespace-separated server flags in /etc/niulang/niulangd.env as:
+# NIULANGD_ARGS=--state /var/lib/niulang/provider --listen :12540 ...
+EnvironmentFile=/etc/niulang/niulangd.env
+# The shared runtime logger resolves this to /var/log/niulang/server.log,
+# rotates it at 32 MiB, and retains five backups. stderr remains available in
+# journald as an independent emergency/debugging surface.
+Environment=NIULANG_LOG_DIR=/var/log/niulang
+ExecStart=/usr/local/bin/niulangd server $NIULANGD_ARGS
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+# A gateway listening on 443 is bound by an unprivileged account, which needs
+# this capability granted at exec: NoNewPrivileges blocks acquiring it any
+# other way. Bounding the set to the single capability the service can use
+# also removes every other capability from its reach.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/niulang /var/log/niulang
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

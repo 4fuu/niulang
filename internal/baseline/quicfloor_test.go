@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/4fuu/niulang/internal/pathsim"
 	"github.com/apernet/quic-go"
-	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
 // TestRawQUICSaturatesThePath is the floor under every transport number this
@@ -76,7 +76,7 @@ func TestRawQUICSaturatesThePath(t *testing.T) {
 			}()
 
 			conn, err := quic.DialAddr(ctx, relay.LocalAddr(), &tls.Config{
-				RootCAs: pool, ServerName: "queqiao.test", NextProtos: []string{"raw-floor"},
+				RootCAs: pool, ServerName: "niulang.test", NextProtos: []string{"raw-floor"},
 			}, qcfg)
 			if err != nil {
 				t.Fatal(err)

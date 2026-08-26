@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/session"
-	"github.com/bojieli/queqiao/internal/socks5"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/session"
+	"github.com/4fuu/niulang/internal/socks5"
 )
 
 var udpTestPrincipal = identity.Principal{ProviderID: "provider", AccountID: "account", DeviceID: "device"}

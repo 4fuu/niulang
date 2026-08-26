@@ -10,7 +10,7 @@ import (
 // updateSampleShape stores four figures in atomics and snapshot builds the
 // struct the rest of the process reads. A field written on one side and not
 // read on the other produces a metric that is always zero, which is worse than
-// a missing one: queqiao_quic_sample_max_bytes_per_second reads as "the widest
+// a missing one: niulang_quic_sample_max_bytes_per_second reads as "the widest
 // sample was nothing" rather than as "nobody published this".
 //
 // This is asserted against the telemetry state directly rather than through a

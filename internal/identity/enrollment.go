@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/netbind"
+	"github.com/4fuu/niulang/internal/netbind"
 )
 
 const maxEnrollmentMessage = 64 * 1024
@@ -346,7 +346,7 @@ func RenewProfileWithOptions(ctx context.Context, profile ClientProfile, options
 		return ClientProfile{}, explainIdentityHandshakeError(profile.Endpoint, "renewal", err)
 	}
 	if conn.ConnectionState().NegotiatedProtocol != RenewalALPN {
-		return ClientProfile{}, errors.New("server did not negotiate Queqiao renewal")
+		return ClientProfile{}, errors.New("server did not negotiate Niulang renewal")
 	}
 	if err := writeEnrollmentJSON(conn, renewalRequest{Version: ProfileVersion}); err != nil {
 		return ClientProfile{}, err
@@ -441,7 +441,7 @@ func (d EnrollmentDraft) EnrollWithOptions(ctx context.Context, options DialOpti
 		return ClientProfile{}, explainIdentityHandshakeError(invitation.Endpoint, "enrollment", err)
 	}
 	if tlsConn.ConnectionState().NegotiatedProtocol != EnrollmentALPN {
-		return ClientProfile{}, errors.New("server did not negotiate Queqiao enrollment")
+		return ClientProfile{}, errors.New("server did not negotiate Niulang enrollment")
 	}
 	request := enrollmentRequest{
 		Version: InvitationVersion, Token: invitation.Token, DeviceName: deviceName,
@@ -519,7 +519,7 @@ func dialIdentityEndpoint(ctx context.Context, endpoint, purpose string, options
 
 func explainIdentityHandshakeError(endpoint, purpose string, err error) error {
 	if strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q does not support Queqiao %s; confirm that this endpoint runs protocol 1 with %s enabled: %w", endpoint, purpose, purpose, err)
+		return fmt.Errorf("gateway %q does not support Niulang %s; confirm that this endpoint runs protocol 1 with %s enabled: %w", endpoint, purpose, purpose, err)
 	}
 	return fmt.Errorf("verify the pinned provider identity at gateway %q for %s: %w", endpoint, purpose, err)
 }

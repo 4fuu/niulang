@@ -39,7 +39,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/memlimit"
+	"github.com/4fuu/niulang/internal/memlimit"
 )
 
 // ErrClosed reports that the scheduler has been closed.

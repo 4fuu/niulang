@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a complete queqiao release directory without extracting archives."""
+"""Validate a complete niulang release directory without extracting archives."""
 
 from __future__ import annotations
 
@@ -17,56 +17,22 @@ import zipfile
 
 REQUIRED_ARCHIVE_FILES = {
     "BUILDINFO",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md",
     "LICENSE",
-    "PRIVACY.md",
     "README.md",
     "SBOM.cdx.json",
     "SECURITY.md",
     "THIRD_PARTY_LICENSES.txt",
     "THIRD_PARTY_NOTICES.md",
-    "assets/queqiao-icon.png",
-    "deploy/clash-queqiao.yaml",
+    "deploy/clash-niulang.yaml",
     "deploy/install-client.sh",
     "deploy/install-server.sh",
-    "deploy/queqiaod.service",
+    "deploy/niulangd-dev.service",
+    "deploy/niulangd.service",
     "deploy/tune-server.sh",
-    "docs/ARCHITECTURE.md",
     "docs/BENCHMARKING.md",
-    "docs/CONTRIBUTING-NETWORK-EVIDENCE.md",
     "docs/DEPLOYING.md",
-    "docs/DESIGN.md",
-    "docs/FIELD-VALIDATION.md",
-    "docs/KNOWN-LIMITATIONS.md",
     "docs/LOGGING.md",
-    "docs/MOBILE.md",
-    "docs/PATH-CHARACTER-20260813.md",
-    "docs/PRODUCTION-DESIGN.md",
     "docs/PROTOCOL.md",
-    "docs/README.md",
-    "docs/RELEASE-CHECKLIST.md",
-    "docs/RELEASING.md",
-    "docs/ROADMAP.md",
-    "docs/STATUS.md",
-    "docs/VISION.md",
-    "docs/archive/README.md",
-    "docs/archive/2026-08-development/DESIGN-ERASURE.md",
-    "docs/archive/2026-08-development/DESIGN-MULTIPATH.md",
-    "docs/archive/2026-08-development/MEASUREMENTS-20260809.md",
-    "docs/archive/2026-08-development/MEASUREMENTS-20260810.md",
-    "docs/archive/2026-08-development/MEASUREMENTS-20260816.md",
-    "docs/archive/2026-08-development/PERFORMANCE-20260812.md",
-    "docs/archive/2026-08-development/PROFILE-20260811.md",
-    "docs/archive/2026-08-development/PUBLIC-HISTORY-AUDIT-20260817.md",
-    "docs/archive/2026-08-development/README.md",
-    "docs/archive/2026-08-development/RELEASE-CANDIDATE-20260817.md",
-    "docs/archive/2026-08-development/RELEASE-HARDENING-20260817.md",
-    "docs/archive/2026-08-development/STALL-20260817.md",
-    "docs/archive/2026-08-development/STATIC-SECURITY-AUDIT-20260817.md",
-    "docs/archive/2026-08-development/TCP-FALLBACK-20260817.md",
-    "docs/archive/2026-08-development/field-results/20260817-primary-high-port.md",
-    "docs/field-results/README.md",
     "internal/congestion/NOTICE",
 }
 
@@ -256,19 +222,19 @@ def validate_sbom(
     if bom.get("bomFormat") != "CycloneDX" or bom.get("specVersion") != "1.5":
         raise ValueError(f"{archive_name}: unsupported SBOM identity")
     component = bom.get("metadata", {}).get("component", {})
-    if component.get("type") != "application" or component.get("name") != "queqiaod":
+    if component.get("type") != "application" or component.get("name") != "niulangd":
         raise ValueError(f"{archive_name}: invalid root SBOM component")
     if component.get("licenses") != [{"license": {"id": "MIT"}}]:
         raise ValueError(f"{archive_name}: invalid root SBOM license")
     component_properties = properties(component)
-    if component_properties.get("queqiao:wire-protocol") != "1":
+    if component_properties.get("niulang:wire-protocol") != "1":
         raise ValueError(f"{archive_name}: SBOM does not declare wire protocol 1")
     buildinfo = parse_buildinfo(archive["BUILDINFO"][0])
     for sbom_key, build_key in (
-        ("queqiao:commit", "commit"),
-        ("queqiao:target", "target"),
-        ("queqiao:wire-protocol", "wire_protocol"),
-        ("queqiao:go-version", "go"),
+        ("niulang:commit", "commit"),
+        ("niulang:target", "target"),
+        ("niulang:wire-protocol", "wire_protocol"),
+        ("niulang:go-version", "go"),
     ):
         if component_properties.get(sbom_key) != buildinfo.get(build_key):
             raise ValueError(f"{archive_name}: SBOM {sbom_key} disagrees with BUILDINFO")
@@ -277,7 +243,7 @@ def validate_sbom(
     if bom.get("metadata", {}).get("timestamp") != buildinfo["build_date"]:
         raise ValueError(f"{archive_name}: SBOM timestamp disagrees with BUILDINFO")
 
-    binary_name = "queqiaod.exe" if buildinfo["target"].startswith("windows/") else "queqiaod"
+    binary_name = "niulangd.exe" if buildinfo["target"].startswith("windows/") else "niulangd"
     binary, mode = archive[binary_name]
     if mode & 0o111 == 0:
         raise ValueError(f"{archive_name}: binary is not executable")
@@ -365,7 +331,7 @@ def validate_release(
         if not archive_path.is_file():
             raise ValueError(f"archive for {sbom_path.name} is missing")
         contents = archive_files(archive_path, stem)
-        binary_name = "queqiaod.exe" if archive_path.suffix == ".zip" else "queqiaod"
+        binary_name = "niulangd.exe" if archive_path.suffix == ".zip" else "niulangd"
         required = REQUIRED_ARCHIVE_FILES | {binary_name}
         if set(contents) != required:
             raise ValueError(
@@ -389,7 +355,7 @@ def validate_release(
         )
         buildinfo = parse_buildinfo(contents["BUILDINFO"][0])
         buildinfos.append(buildinfo)
-        expected_stem = "queqiaod_{}_{}".format(
+        expected_stem = "niulangd_{}_{}".format(
             buildinfo["version"], buildinfo["target"].replace("/", "_")
         )
         if stem != expected_stem:

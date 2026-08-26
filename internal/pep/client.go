@@ -13,16 +13,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/4fuu/niulang/internal/classifier"
+	wancongestion "github.com/4fuu/niulang/internal/congestion"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/limiter"
+	"github.com/4fuu/niulang/internal/memlimit"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/session"
+	"github.com/4fuu/niulang/internal/socks5"
 	"github.com/apernet/quic-go"
-	"github.com/bojieli/queqiao/internal/classifier"
-	wancongestion "github.com/bojieli/queqiao/internal/congestion"
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/limiter"
-	"github.com/bojieli/queqiao/internal/memlimit"
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
-	"github.com/bojieli/queqiao/internal/socks5"
 )
 
 // A peer that accepts a replacement stream and immediately closes it must not
@@ -65,14 +65,14 @@ type ClientConfig struct {
 	RemoteAddr   string
 	LocalAddress string
 	// SocketControl is invoked after an outer socket is created and before it
-	// is bound or connected. Mobile VPN clients use it to exempt Queqiao's own
-	// TCP and UDP sockets from the virtual interface. A failure aborts the dial;
-	// silently continuing would route the tunnel through itself.
+	// is bound or connected. Route-integrating clients use it to exempt
+	// Niulang's own TCP and UDP sockets from a virtual interface. A failure
+	// aborts the dial; silently continuing would route the tunnel through itself.
 	SocketControl func(network, address string, conn syscall.RawConn) error
 	// SOCKSAuth optionally requires RFC 1929 username/password on the local
 	// SOCKS5 listener. It is nil for the loopback-private listener used by the
-	// desktop agent and the mobile packet tunnel, and set when the listener is
-	// reachable by other applications on the same host, as in Android export
+	// desktop agent, and set when the listener is
+	// reachable by other applications on the same host, as with an exported
 	// mode where loopback is shared across every installed app.
 	SOCKSAuth        *socks5.Credentials
 	Credentials      identity.ClientCredentials
@@ -708,8 +708,8 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 		} else {
 			// The client may still be waiting for the two-byte SOCKS greeting
 			// response. A request-level reply starts with 0x05, 0x01 and is then
-			// misread as "unsupported authentication method 0x01" by the mobile
-			// packet engine. Send the protocol-level method rejection instead.
+			// misread as "unsupported authentication method 0x01" by some SOCKS
+			// clients. Send the protocol-level method rejection instead.
 			_ = socks5.WriteMethodUnavailable(conn)
 			_ = conn.Close()
 			c.cfg.Logger.Debug("local session limit reached")
@@ -720,8 +720,8 @@ func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error
 // closeQUICPool is called when the local agent stops. It is safe to call more
 // than once and closes the packet socket owned by a locally-bound QUIC dial.
 func (c *Client) closeQUICPool() {
-	c.closeControlQUICPool("queqiao client pool reset")
-	c.closeBulkQUICPool("queqiao bulk pool stopped")
+	c.closeControlQUICPool("niulang client pool reset")
+	c.closeBulkQUICPool("niulang bulk pool stopped")
 }
 
 func (c *Client) closeControlQUICPool(reason string) {
@@ -1388,7 +1388,7 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig) 
 	stream, err := generation.conn.OpenStreamSync(dialCtx)
 	if err != nil {
 		if generation.conn.Context().Err() != nil {
-			c.retireControlQUICGeneration(generation, "queqiao pooled connection failed")
+			c.retireControlQUICGeneration(generation, "niulang pooled connection failed")
 		}
 		return nil, err
 	}
@@ -1428,7 +1428,7 @@ func (c *Client) acquireControlQUICGeneration(ctx context.Context, ccfg congesti
 		}
 		c.quicMu.Unlock()
 		if stale != nil {
-			stale.close("queqiao stale pooled connection")
+			stale.close("niulang stale pooled connection")
 		}
 
 		select {
@@ -1473,7 +1473,7 @@ func (c *Client) runControlQUICDial(ctx context.Context, attempt *controlQUICDia
 	}
 	c.quicMu.Unlock()
 	if !current && generation != nil {
-		generation.close("queqiao superseded pooled connection")
+		generation.close("niulang superseded pooled connection")
 	}
 	if !current {
 		attempt.superseded = true
@@ -1652,7 +1652,7 @@ func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
 	live := c.bulkConns[:0]
 	for _, entry := range c.bulkConns {
 		if entry.conn.Context().Err() != nil && !entry.busy {
-			entry.close("queqiao stale bulk pool")
+			entry.close("niulang stale bulk pool")
 			continue
 		}
 		live = append(live, entry)
@@ -1684,7 +1684,7 @@ func (c *Client) reserveBulkConn(ctx context.Context) (*bulkConn, error) {
 	c.bulkMu.Lock()
 	if len(c.bulkConns) >= c.maxBulkConns() {
 		c.bulkMu.Unlock()
-		entry.close("queqiao bulk pool limit reached")
+		entry.close("niulang bulk pool limit reached")
 		return nil, errBulkConnectionLimit
 	}
 	entry.busy = true
@@ -1752,7 +1752,7 @@ func (s *controlPoolStreamConn) transportFailed(err error) {
 	// pool. A real I/O timeout is sufficient evidence to retire the generation;
 	// ordinary per-stream EOFs and application closes must not evict it.
 	if s.generation.conn.Context().Err() != nil || pooledTransportTimedOut(err) {
-		s.owner.retireControlQUICGeneration(s.generation, "queqiao pooled connection failed")
+		s.owner.retireControlQUICGeneration(s.generation, "niulang pooled connection failed")
 	}
 }
 
@@ -1802,7 +1802,7 @@ func (c *Client) releaseBulkConn(entry *bulkConn, dead bool) {
 		}
 		c.bulkConns = remaining
 		c.bulkMu.Unlock()
-		entry.close("queqiao bulk pool failed")
+		entry.close("niulang bulk pool failed")
 		return
 	}
 	if entry.idleTimer != nil {
@@ -1830,7 +1830,7 @@ func (c *Client) expireBulkConn(entry *bulkConn) {
 	c.bulkConns = remaining
 	c.bulkMu.Unlock()
 	if found {
-		entry.close("queqiao bulk pool idle")
+		entry.close("niulang bulk pool idle")
 	}
 }
 

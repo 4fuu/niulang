@@ -128,14 +128,14 @@ func TestSOCKSTargetDialsWhatItIsAskedFor(t *testing.T) {
 	if err := socksConnect(conn, origin); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Write([]byte("queqiao")); err != nil {
+	if _, err := conn.Write([]byte("niulang")); err != nil {
 		t.Fatal(err)
 	}
-	echoed := make([]byte, len("queqiao"))
+	echoed := make([]byte, len("niulang"))
 	if _, err := io.ReadFull(conn, echoed); err != nil {
 		t.Fatal(err)
 	}
-	if string(echoed) != "queqiao" {
+	if string(echoed) != "niulang" {
 		t.Fatalf("echo = %q", echoed)
 	}
 }
@@ -238,8 +238,8 @@ func init() {
 }
 
 const (
-	stubTunnelListen  = "QUEQIAO_STUB_TUNNEL_LISTEN"
-	stubTunnelForward = "QUEQIAO_STUB_TUNNEL_FORWARD"
+	stubTunnelListen  = "NIULANG_STUB_TUNNEL_LISTEN"
+	stubTunnelForward = "NIULANG_STUB_TUNNEL_FORWARD"
 )
 
 // TestStubTunnelHelper is one end of the stub tunnel when the environment says

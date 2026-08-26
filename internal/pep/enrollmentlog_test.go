@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/bojieli/queqiao/internal/identity"
+	"github.com/4fuu/niulang/internal/identity"
 )
 
 func enrollmentRecorder(t *testing.T) (*Server, *bytes.Buffer) {

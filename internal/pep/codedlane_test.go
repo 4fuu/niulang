@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/pathmodel"
-	"github.com/bojieli/queqiao/internal/pathsim"
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/pathsim"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 // codedPair brings up a server and a client, optionally with a lossy emulated

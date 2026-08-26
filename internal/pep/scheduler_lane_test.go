@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 // laneRate installs a synthetic rate/RTT sample so lane selection can be

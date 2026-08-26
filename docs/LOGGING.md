@@ -1,15 +1,15 @@
 # Runtime logging
 
-Both `queqiaod client` and `queqiaod server` create a structured runtime log
+Both `niulangd client` and `niulangd server` create a structured runtime log
 by default. The log is the durable operational record; stderr is a second copy
 for an interactive terminal or service journal.
 
 ## Find the active log
 
 ```sh
-queqiaod logs
-queqiaod logs client
-queqiaod logs server
+niulangd logs
+niulangd logs client
+niulangd logs server
 ```
 
 The command prints the absolute default path, whether it exists, its current
@@ -17,12 +17,12 @@ size, and a command that follows it. The default files are separate:
 
 | Platform | Client | Server when run interactively |
 | --- | --- | --- |
-| macOS | `~/Library/Logs/Queqiao/client.log` | `~/Library/Logs/Queqiao/server.log` |
-| Linux | `${XDG_STATE_HOME:-~/.local/state}/queqiao/client.log` | `${XDG_STATE_HOME:-~/.local/state}/queqiao/server.log` |
-| Windows | `%LOCALAPPDATA%\Queqiao\Logs\client.log` | `%LOCALAPPDATA%\Queqiao\Logs\server.log` |
+| macOS | `~/Library/Logs/Niulang/client.log` | `~/Library/Logs/Niulang/server.log` |
+| Linux | `${XDG_STATE_HOME:-~/.local/state}/niulang/client.log` | `${XDG_STATE_HOME:-~/.local/state}/niulang/server.log` |
+| Windows | `%LOCALAPPDATA%\Niulang\Logs\client.log` | `%LOCALAPPDATA%\Niulang\Logs\server.log` |
 
-The production systemd unit sets `QUEQIAO_LOG_DIR=/var/log/queqiao`, so its
-server log is `/var/log/queqiao/server.log`. The macOS LaunchAgent template
+The production systemd unit sets `NIULANG_LOG_DIR=/var/log/niulang`, so its
+server log is `/var/log/niulang/server.log`. The macOS LaunchAgent template
 sets the client file explicitly to the macOS path above.
 
 An explicit `--log-file` always wins. Relative paths are converted to absolute
@@ -33,26 +33,22 @@ needed.
 Read the current and rotated files with ordinary tools:
 
 ```sh
-tail -n 200 -f ~/Library/Logs/Queqiao/client.log
-tail -n 200 /var/log/queqiao/server.log
-ls -lh /var/log/queqiao/server.log*
+tail -n 200 -f ~/Library/Logs/Niulang/client.log
+tail -n 200 /var/log/niulang/server.log
+ls -lh /var/log/niulang/server.log*
 ```
 
-The visualizer's **Select log files…** action accepts the active file and any
-rotated `.1`, `.2`, and later files together.
-
-The system service owns its `0600` server log, so a desktop browser normally
-cannot open it directly. Copy only the evidence you need into your current
-user's private directory; do not make the service log world-readable:
+The system service owns its `0600` server log. Copy only the evidence you need
+into your current user's private directory; do not make the service log
+world-readable:
 
 ```sh
-mkdir -m 0700 ./queqiao-log-review
+mkdir -m 0700 ./niulang-log-review
 sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" \
-  /var/log/queqiao/server.log ./queqiao-log-review/server.log
+  /var/log/niulang/server.log ./niulang-log-review/server.log
 ```
 
-Then choose `queqiao-log-review/server.log` in the visualizer and remove the
-review copy when the investigation is finished.
+Remove the review copy when the investigation is finished.
 
 ## Defaults and controls
 
@@ -98,17 +94,17 @@ congestion, framing, timeout, pooling, and admission settings. Shutdown
 failures are written to the file before it is closed.
 
 Performance records use `msg="performance snapshot"`, `type="metrics"`, and
-`telemetry_schema=1`. Their flat `queqiao_*` fields intentionally match the
+`telemetry_schema=1`. Their flat `niulang_*` fields intentionally match the
 Prometheus `/metrics` names. They cover:
 
 - active/started/completed/failed flows and transferred bytes;
 - latest, smoothed, and controller-minimum RTT;
 - QUIC sent and received bytes and packets, and two loss counters that are now
-  the same number derived two ways: `queqiao_quic_loss_observed_packets_total`
-  is every loss the sender detected, and `queqiao_quic_controller_packets_lost`
+  the same number derived two ways: `niulang_quic_loss_observed_packets_total`
+  is every loss the sender detected, and `niulang_quic_controller_packets_lost`
   is what the congestion controller was charged. Nothing is withheld from the
   controller any more, so they agree; they are both kept so that a divergence
-  is visible rather than silent. Divide either by `queqiao_quic_packets_sent`
+  is visible rather than silent. Divide either by `niulang_quic_packets_sent`
   for a loss rate;
 - delivery, ACK, send, pacing, and maximum-bandwidth estimates;
 - congestion window, bytes in flight, controller round/mode/recovery;
@@ -118,12 +114,12 @@ Prometheus `/metrics` names. They cover:
   a round-trip aggregate frozen at a stale constant announces itself;
 - lane joins refused and account flow opens refused, each split by reason; and
 - the erasure the path is measured to be applying to the direction this
-  endpoint sends into, published as `queqiao_erasure_ratio{direction="send"}`
-  and as `queqiao_erasure_ratio_send` in the log. A gateway's send direction is
+  endpoint sends into, published as `niulang_erasure_ratio{direction="send"}`
+  and as `niulang_erasure_ratio_send` in the log. A gateway's send direction is
   its downstream. This is what a code is sized from;
 - the shape of the delivery-rate samples the bandwidth estimate is built from:
-  `queqiao_quic_sample_mean_bytes_per_second`,
-  `queqiao_quic_sample_max_bytes_per_second`, and the
+  `niulang_quic_sample_mean_bytes_per_second`,
+  `niulang_quic_sample_max_bytes_per_second`, and the
   `..._max_delivered_bytes` and `..._max_interval_seconds` behind that widest
   sample. The estimate is a maximum over these samples, and a maximum alone
   cannot be read: a rate is high either because the path is fast or because the
@@ -131,14 +127,14 @@ Prometheus `/metrics` names. They cover:
   rather than the path, and a tail measured over a short interval is a
   measurement artefact rather than either;
 - how much of the sending rate the delay bound is removing, as
-  `queqiao_delay_brake_ratio`. It is non-zero only while the path is carrying
+  `niulang_delay_brake_ratio`. It is non-zero only while the path is carrying
   more than one bandwidth-delay product of queue, and it separates a rate held
   back by the path's own queue from one that simply measured less;
 - the receive direction, measured by this endpoint's decoders rather than
-  inferred from acknowledgements: `queqiao_coded_symbols_total` split by
+  inferred from acknowledgements: `niulang_coded_symbols_total` split by
   outcome (`arrived`, `recovered`, `lost`), with
-  `queqiao_erasure_ratio{direction="receive"}` and
-  `queqiao_erasure_residual_ratio{direction="receive"}` derived from them. Every
+  `niulang_erasure_ratio{direction="receive"}` and
+  `niulang_erasure_residual_ratio{direction="receive"}` derived from them. Every
   source symbol the peer sent ends in exactly one outcome, so the three are a
   denominator and the ratios are counters over counters rather than a mean of
   per-flow ratios. The residual is what the code could not repair and the
@@ -174,8 +170,8 @@ whole outage or ended early, and `lanes_joined` tells you whether anything ever
 arrived to end one.
 
 The dashboard calculates interval packet loss from changes in
-`queqiao_quic_packets_sent` and `queqiao_quic_loss_observed_packets_total`.
-`queqiao_quic_packets_lost` and `queqiao_quic_bytes_lost` were removed: they
+`niulang_quic_packets_sent` and `niulang_quic_loss_observed_packets_total`.
+`niulang_quic_packets_lost` and `niulang_quic_bytes_lost` were removed: they
 were quic-go's own counters, incremented only inside its cubic sender, and this
 transport installs its own controller, so nothing ever moved them off zero
 while the dashboard divided by them. A counter that cannot be produced is worse
@@ -206,14 +202,14 @@ peer naming a live session that is not the one it holds. A storm is rate
 limited per reason rather than per session -- the identifiers in a refused join
 are the peer's to choose, so a map keyed by them is memory a peer sizes -- and
 each record carries how many refusals of that reason it stands for in
-`suppressed`. The matching counters are `queqiao_lane_join_refused_total` by
+`suppressed`. The matching counters are `niulang_lane_join_refused_total` by
 reason.
 
 A gateway that refuses a flow open because of the opening account's own limits
 writes `msg="account flow open refused"` at `warn`, naming the `reason` --
 `flow_limit`, `client_limit`, or `unauthorized` -- with the account and device.
 It is rate limited and counted the same way, with `suppressed` and `total` in
-each record and `queqiao_account_admission_refused_total` by reason. This is
+each record and `niulang_account_admission_refused_total` by reason. This is
 the record to look for when a user reports that most sites load and a few do
 not: an account whose flow limit is too low for a browser fails exactly that
 way, and the flow limit counts connections rather than devices.
@@ -242,14 +238,14 @@ reads as a fault:
 | --- | --- | --- |
 | `fec_receive_erasure` | what this endpoint receives | source symbols the decoder accounted for |
 | `fec_observed_loss` | what this endpoint receives | gaps in the peer's transmission sequence |
-| `queqiao_quic_controller_erasure_floor_ratio` | what this endpoint sends into | the controller's own acknowledgements |
+| `niulang_quic_controller_erasure_floor_ratio` | what this endpoint sends into | the controller's own acknowledgements |
 
 On a path whose downstream erases and whose upstream does not, the first two
 are large while the third is near zero, and all three are correct. The
 controller's floor is the one that sizes this endpoint's parity, because the
 direction a sender codes for is the direction it sends into. Failed flows are warning-level records with the
 same performance and FEC fields plus the error, so they remain visible at the
-default `info` level. `QUEQIAO_LANE_TRACE=1` remains an opt-in raw
+default `info` level. `NIULANG_LANE_TRACE=1` remains an opt-in raw
 per-lane diagnostic. It is not needed for the standard aggregate dashboard.
 
 No application payload is logged. Operational logs can contain configured
@@ -263,8 +259,8 @@ The production systemd service writes the file and mirrors JSON records to
 journald. Either surface can diagnose startup when the other is unavailable:
 
 ```sh
-sudo tail -f /var/log/queqiao/server.log
-sudo journalctl -u queqiaod -f
+sudo tail -f /var/log/niulang/server.log
+sudo journalctl -u niulangd -f
 ```
 
 Rotation is internal and does not require `logrotate`, a SIGHUP, or reopening

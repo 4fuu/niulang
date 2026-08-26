@@ -4,8 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/4fuu/niulang/internal/metrics"
 	"github.com/apernet/quic-go"
-	"github.com/bojieli/queqiao/internal/metrics"
 )
 
 // A QUIC connection's cumulative counters belong to the connection, not to

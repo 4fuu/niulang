@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/bojieli/queqiao/internal/memlimit"
+	"github.com/4fuu/niulang/internal/memlimit"
 )
 
 func TestReassemblerSharesHardMemoryBudget(t *testing.T) {

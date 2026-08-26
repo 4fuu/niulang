@@ -1,29 +1,28 @@
 #!/usr/bin/env bash
-# Run the emulated-path comparison matrix between queqiao and the TUIC-shaped
-# reference proxy. Every row is produced by cmd/queqiaobench in one process
+# Run the emulated-path comparison matrix between niulang and the TUIC-shaped
+# reference proxy. Every row is produced by cmd/niulangbench in one process
 # against a seeded path emulator, so a difference between the two stacks in the
 # same block is attributable to the transports rather than to a path window.
 #
-# This is the fast inner loop. It does not replace a live China-US campaign;
-# see docs/archive/2026-08-development/MEASUREMENTS-*.md for those.
+# This is the fast inner loop. It does not replace a live China-US campaign.
 set -Euo pipefail
 
 invocation=("$0" "$@")
 
-output=${QUEQIAO_OUTPUT:-}
-trials=${QUEQIAO_TRIALS:-5}
-congestion=${QUEQIAO_CONGESTION:-bbr-tuic}
-timeout_seconds=${QUEQIAO_TIMEOUT:-180s}
-gate=${QUEQIAO_GATE:-0}
-tolerance=${QUEQIAO_TOLERANCE:-0.10}
-json_dir=${QUEQIAO_JSON_DIR:-}
+output=${NIULANG_OUTPUT:-}
+trials=${NIULANG_TRIALS:-5}
+congestion=${NIULANG_CONGESTION:-bbr-tuic}
+timeout_seconds=${NIULANG_TIMEOUT:-180s}
+gate=${NIULANG_GATE:-0}
+tolerance=${NIULANG_TOLERANCE:-0.10}
+json_dir=${NIULANG_JSON_DIR:-}
 
 usage() {
     cat >&2 <<'EOF'
 Usage: bench_matrix.sh [--output FILE] [--trials N] [--congestion NAME]
                        [--gate] [--tolerance FRACTION] [--json-dir DIR]
 
---gate makes each block fail when queqiao falls behind the reference by more
+--gate makes each block fail when niulang falls behind the reference by more
 than --tolerance, or completes fewer transfers, so a transport regression is
 rejected rather than merely printed. --json-dir writes one machine-readable
 record per block, which is what makes results comparable across commits.
@@ -61,7 +60,7 @@ if [[ -n "$json_dir" ]]; then
     mkdir -p "$json_dir"
     if [[ -z "$output" ]]; then output=$json_dir/results.tsv; fi
     {
-        echo 'format=queqiao-benchmark-bundle-v1'
+        echo 'format=niulang-benchmark-bundle-v1'
         echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "commit=$(git rev-parse HEAD)"
         echo "tree_state=$tree_state"
@@ -100,7 +99,7 @@ bench() {
     if ((gate)); then
         extra+=(--gate --tolerance "$tolerance")
     fi
-    if ! go run ./cmd/queqiaobench --trials "$trials" --congestion "$congestion" \
+    if ! go run ./cmd/niulangbench --trials "$trials" --congestion "$congestion" \
         --timeout "$timeout_seconds" "${extra[@]}" "$@"; then
         failures=$((failures + 1))
     fi

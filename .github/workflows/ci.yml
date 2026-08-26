@@ -1,439 +1,46 @@
-# What every push has to satisfy. Kept cheap on purpose: this repository is
-# intentionally small; the expensive campaigns live in deep.yml where they run
-# on a schedule instead of on every commit.
 name: ci
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  # The build matrix exists because it has already caught something: the
-  # external-proxy harness used Setpgid, Getpgid and Kill directly and did not
-  # compile for Windows at all, on a tree whose tests were entirely green.
-  # Nothing but a cross-build finds that.
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - {os: linux, arch: amd64}
-          - {os: linux, arch: arm64}
-          - {os: darwin, arch: amd64}
-          - {os: darwin, arch: arm64}
-          - {os: windows, arch: amd64}
-          - {os: windows, arch: arm64}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - run: go build ./...
-        env:
-          GOOS: ${{ matrix.target.os }}
-          GOARCH: ${{ matrix.target.arch }}
-
-  vet:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - run: go vet ./...
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "not gofmt'd:"; echo "$unformatted"; exit 1
-          fi
-
-  # Changelog entries are one file per change in changelog.d/, assembled into
-  # CHANGELOG.md only at release time. Nothing else writes that file, which is
-  # what stops two branches conflicting over the same list every time both of
-  # them describe a user-visible change.
-  changelog:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-      - name: pending entries are well formed
-        run: ./scripts/changelog.py check
-      - name: CHANGELOG.md is assembled, not edited
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          NUMBER: ${{ github.event.number }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # "I cannot compare" is not "you edited it". Saying so cost an hour
-          # once already: a pull request whose base branch had been deleted
-          # failed this step reporting a changelog edit it had not made.
-          base="origin/${BASE_REF}"
-          if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
-            echo "Cannot resolve ${base}, so this check cannot tell whether"
-            echo "CHANGELOG.md was edited. That is a checkout or base-branch"
-            echo "problem rather than a changelog one: the base branch may have"
-            echo "been deleted or renamed while this pull request was open."
-            exit 1
-          fi
-          changed=0
-          git diff --quiet "${base}...HEAD" -- CHANGELOG.md || changed=$?
-          if [ "$changed" -eq 0 ]; then
-            exit 0
-          fi
-          if [ "$changed" -ne 1 ]; then
-            echo "git diff against ${base} failed with status ${changed}, so"
-            echo "whether CHANGELOG.md was edited is unknown."
-            exit 1
-          fi
-          # Read the label from the API rather than from the event payload,
-          # which is a snapshot taken when the pull request was opened. Adding
-          # the label to an open pull request and re-running this job has to be
-          # enough; with the payload it never is.
-          if gh api "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/labels" \
-              --jq '.[].name' | grep -qx changelog; then
-            echo "The 'changelog' label permits this pull request to edit it."
-            exit 0
-          fi
-          echo "CHANGELOG.md is assembled from changelog.d/ at release time."
-          echo "Describe this change in its own file instead:"
-          echo "  ./scripts/changelog.py new <category> <slug>"
-          echo "A pull request that means to edit it carries the 'changelog'"
-          echo "label; add it and re-run this job."
-          exit 1
-
-  analysis:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - name: Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -checks=all,-U1000 ./...
-      - name: Gosec reviewed baseline
-        run: |
-          set +e
-          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 \
-            -fmt json -out gosec.json ./...
-          scanner_status=$?
-          set -e
-          test "$scanner_status" -eq 0 || test "$scanner_status" -eq 1
-          ./scripts/check_gosec.py gosec.json .
-
-  # Run the portable suite on every advertised native OS and architecture.
-  # -short skips the tests that bring QUIC up across an emulated 300 ms
-  # erasure path, and the emulator calibrations that need an uncontended host
-  # to measure anything. Those run natively in deep.yml and
-  # release-candidate.yml.
   test:
-    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {runner: ubuntu-24.04, os: linux, arch: amd64}
-          - {runner: ubuntu-24.04-arm, os: linux, arch: arm64}
-          - {runner: macos-15-intel, os: darwin, arch: amd64}
-          - {runner: macos-15, os: darwin, arch: arm64}
-          - {runner: windows-2025, os: windows, arch: amd64}
-          - {runner: windows-11-arm, os: windows, arch: arm64}
-    runs-on: ${{ matrix.runner }}
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test -short -timeout 20m ./...
-      - name: live probe helper tests
-        if: matrix.os == 'linux' && matrix.arch == 'amd64'
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - run: go test ./... -count=1
 
-  mobile-core:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: mobile/core/go.mod
-          cache-dependency-path: |
-            go.sum
-            mobile/core/go.sum
-      - run: mobile/scripts/audit-dependencies.sh
-      - run: go test ./mobile/tools/notices
-      - run: go test -race ./...
-        working-directory: mobile/core
-      - run: go vet ./...
-        working-directory: mobile/core
-      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 -checks=all,-U1000 ./...
-        working-directory: mobile/core
-      - run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
-        working-directory: mobile/core
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
-        working-directory: mobile/core
-      - name: notices are reproducible
-        run: |
-          go run ./mobile/tools/notices \
-            -core mobile/core \
-            -lock mobile/runtime-dependencies.lock \
-            -output mobile/legal/THIRD_PARTY_NOTICES.txt
-          git diff --exit-code -- mobile/legal/THIRD_PARTY_NOTICES.txt
-
-  android:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: mobile/core/go.mod
-          cache-dependency-path: |
-            go.sum
-            mobile/core/go.sum
-      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
-        with:
-          cmdline-tools-version: "14742923"
-          packages: ""
-      - name: install pinned Android SDK components
-        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;28.0.12433566"
-      - run: mobile/scripts/build-android-core.sh
-      - name: lint, shrink, and package
-        working-directory: mobile/android
-        run: >-
-          ./gradlew --no-daemon --dependency-verification strict
-          lintDebug lintRelease
-          assembleDebug assembleDebugAndroidTest
-          assembleRelease bundleRelease
-      - name: assert the released manifest stays export-only
-        run: |
-          set -euo pipefail
-          aapt2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
-          apk=$(ls mobile/android/app/build/outputs/apk/release/*.apk)
-          manifest=$("$aapt2" dump xmltree --file AndroidManifest.xml "$apk")
-          # Export mode is the whole point of the release build: routing policy
-          # belongs to whichever client the user already runs, and this app has
-          # no reason to hold BIND_VPN_SERVICE. The tunnel is debug-only, and
-          # nothing but this check keeps a stray manifest merge from shipping it.
-          if grep -qiE 'BIND_VPN_SERVICE|android\.net\.VpnService' <<<"$manifest"; then
-            echo "the release manifest declares a VPN service:" >&2
-            grep -inE 'BIND_VPN_SERVICE|android\.net\.VpnService' <<<"$manifest" >&2
-            exit 1
-          fi
-          grep -q 'QueqiaoProxyService' <<<"$manifest"
-          # The denylist above catches the one permission we can name today.
-          # This catches the ones we cannot: an app that routes nothing and
-          # talks to one gateway has a small, enumerable set of things to ask
-          # for, and anything outside it arrived by accident or by a merged
-          # library manifest. Update the list deliberately, with a reason.
-          expected=$(printf '%s\n' \
-            android.permission.ACCESS_NETWORK_STATE \
-            android.permission.FOREGROUND_SERVICE \
-            android.permission.FOREGROUND_SERVICE_SPECIAL_USE \
-            android.permission.INTERNET \
-            android.permission.POST_NOTIFICATIONS | sort)
-          declared=$("$aapt2" dump permissions "$apk" |
-            sed -n "s/^uses-permission: name='\\(.*\\)'$/\\1/p" | sort -u)
-          if [ "$declared" != "$expected" ]; then
-            echo "the release permission set changed:" >&2
-            diff <(echo "$expected") <(echo "$declared") >&2 || true
-            exit 1
-          fi
-      # The Android build previously proved the APKs compile and then discarded
-      # them, so nothing downstream could inspect what CI had actually built.
-      # These are CI artifacts for review, not release assets: the release APK
-      # is unsigned, its name says so, and publication remains a separate
-      # reviewed decision.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: queqiao-android-${{ github.sha }}
-          path: |
-            mobile/android/app/build/outputs/apk/release/*.apk
-            mobile/android/app/build/outputs/apk/debug/*.apk
-            mobile/android/app/build/outputs/bundle/release/*.aab
-          if-no-files-found: error
-          retention-days: 14
-
-  android-instrumentation:
-    name: Android Keystore API ${{ matrix.api }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        api: [30, 33, 35]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: mobile/core/go.mod
-          cache-dependency-path: |
-            go.sum
-            mobile/core/go.sum
-      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
-        with:
-          cmdline-tools-version: "14742923"
-          packages: ""
-      - name: remove preinstalled NDKs before pinned install
-        run: |
-          test "$ANDROID_HOME" = /usr/local/lib/android/sdk
-          sudo rm -rf -- /usr/local/lib/android/sdk/ndk
-      - name: install official Android emulator image
-        run: >-
-          sdkmanager
-          "platforms;android-37.0" "build-tools;36.0.0" "ndk;28.0.12433566"
-          "emulator" "platform-tools"
-          "system-images;android-${{ matrix.api }};google_apis;x86_64"
-      - run: mobile/scripts/build-android-core.sh
-      - name: assemble app and instrumentation APKs
-        working-directory: mobile/android
-        run: >-
-          ./gradlew --no-daemon --dependency-verification strict
-          assembleDebug assembleDebugAndroidTest
-      - name: remove build-only NDK before emulator
-        run: |
-          test "$ANDROID_HOME" = /usr/local/lib/android/sdk
-          sudo rm -rf -- /usr/local/lib/android/sdk/ndk
-          # The AAR and both APKs are complete. Hosted runners are tight enough
-          # that emulator 37 may otherwise miss creation of its userdata image
-          # by only a few hundred MB, so release the Go caches before the AVD.
-          go clean -cache -modcache -testcache -fuzzcache
-      - name: start isolated emulator
-        run: |
-          if [ -e /dev/kvm ]; then
-            sudo chmod 666 /dev/kvm
-          fi
-          export ANDROID_AVD_HOME="$RUNNER_TEMP/avd"
-          mkdir -p "$ANDROID_AVD_HOME"
-          printf 'no\n' | avdmanager create avd --force \
-            --name queqiao_ci \
-            --package "system-images;android-${{ matrix.api }};google_apis;x86_64" \
-            --device pixel_6
-          config="$ANDROID_AVD_HOME/queqiao_ci.avd/config.ini"
-          grep -q '^disk\.dataPartition\.size' "$config"
-          sed -i -E \
-            's/^disk\.dataPartition\.size[[:space:]]*=.*/disk.dataPartition.size = 2147483648/' \
-            "$config"
-          test -x "$ANDROID_HOME/emulator/emulator"
-          nohup "$ANDROID_HOME/emulator/emulator" @queqiao_ci \
-            -no-window -no-audio -no-boot-anim \
-            -no-snapshot -wipe-data -gpu swiftshader_indirect \
-            >"$RUNNER_TEMP/queqiao-emulator.log" 2>&1 &
-          if ! timeout 60s adb wait-for-device; then
-            cat "$RUNNER_TEMP/queqiao-emulator.log"
-            exit 1
-          fi
-          for _ in {1..90}; do
-            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; then
-              exit 0
-            fi
-            sleep 2
-          done
-          cat "$RUNNER_TEMP/queqiao-emulator.log"
-          exit 1
-      - name: run mobile storage and routing checks
-        working-directory: mobile/android
-        run: >-
-          ./gradlew --no-daemon --dependency-verification strict
-          connectedDebugAndroidTest
-
-  ios:
-    runs-on: macos-26
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: mobile/core/go.mod
-          cache-dependency-path: |
-            go.sum
-            mobile/core/go.sum
-      - run: mobile/scripts/build-ios-core.sh
-      - run: ../scripts/run-swiftlint.sh lint --strict --config .swiftlint.yml .
-        working-directory: mobile/ios
-      - name: prepare hosted iOS simulator
-        id: ios-simulator
-        run: |
-          set -euo pipefail
-          # Hosted arm64 images intermittently start with an empty device set
-          # even though the runtimes are installed. Listing first refreshes
-          # CoreSimulator's inventory; creating the device covers the cases
-          # where the refresh finds the runtime but no precreated phones.
-          xcrun simctl list
-          device_id=$(
-            xcrun simctl list devices available --json |
-              jq -r '[.devices[][] | select(.name == "iPhone 17")] | last.udid // empty'
-          )
-          if [[ -z "$device_id" ]]; then
-            runtime_id=$(
-              xcrun simctl list runtimes available --json |
-                jq -r '[.runtimes[] | select(.identifier | contains(".SimRuntime.iOS-"))] | last.identifier // empty'
-            )
-            test -n "$runtime_id"
-            device_id=$(
-              xcrun simctl create "Queqiao CI iPhone 17" \
-                com.apple.CoreSimulator.SimDeviceType.iPhone-17 "$runtime_id"
-            )
-          fi
-          echo "id=$device_id" >> "$GITHUB_OUTPUT"
-      - name: simulator build and boundary tests
-        working-directory: mobile/ios
-        run: >-
-          xcodebuild
-          -project Queqiao.xcodeproj
-          -scheme Queqiao
-          -destination 'platform=iOS Simulator,id=${{ steps.ios-simulator.outputs.id }}'
-          -derivedDataPath DerivedData
-          CODE_SIGNING_ALLOWED=NO
-          test
-
-  # Exercise the actual release path, including embedded version metadata and
-  # deterministic archive creation. One target is enough here; release.yml
-  # packages the complete six-target matrix.
-  package:
+  cross-build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: package smoke test
+      - name: Build retained commands
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
         run: |
-          build_date=$(git show -s --format=%cI HEAD)
-          go run ./cmd/queqiaopack \
-            --version v0.0.0-ci --commit "${GITHUB_SHA}" \
-            --build-date "$build_date" --targets linux/amd64 \
-            --output dist
-          cd dist
-          sha256sum -c SHA256SUMS
-          cd ..
-          ./scripts/validate_release.py --expected-targets linux/amd64 dist
-          cd dist
-          tar -xzf queqiaod_v0.0.0-ci_linux_amd64.tar.gz
-          ./queqiaod_v0.0.0-ci_linux_amd64/queqiaod --version |
-            grep -F "queqiaod v0.0.0-ci commit=${GITHUB_SHA}"
+          for command in niulangd niulangbench niulangpack niulangref pathprobe; do
+            go build -o /tmp/${command}-${GOOS}-${GOARCH} ./cmd/${command}
+          done

@@ -17,7 +17,7 @@ import (
 // process. The gateway runs as a dedicated service account while provider
 // maintenance runs from an administrator's shell, and Refresh is documented to
 // adopt changes written by those separate CLI processes. Without this step a
-// single privileged `queqiaod provider add-user` hands authorization.json to
+// single privileged `niulangd provider add-user` hands authorization.json to
 // root, and the gateway - which re-reads it once a second and on every
 // enrollment - can no longer open its own state. Callers restore the mode
 // themselves; only ownership needs carrying across the replace.

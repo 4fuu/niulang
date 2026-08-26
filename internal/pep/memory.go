@@ -3,12 +3,12 @@ package pep
 import (
 	"fmt"
 
-	"github.com/bojieli/queqiao/internal/memlimit"
+	"github.com/4fuu/niulang/internal/memlimit"
 )
 
 // MemoryLimits turns the transport's multiplicative per-flow buffering into
 // fixed endpoint budgets. A nil *MemoryLimits keeps the throughput-oriented
-// server defaults. Mobile clients provide an explicit profile.
+// server defaults. Constrained clients provide an explicit profile.
 type MemoryLimits struct {
 	// SendBudgetBytes and ReceiveBudgetBytes are shared by all flows. Send
 	// reservations block source reads; receive reservations fail only the flow

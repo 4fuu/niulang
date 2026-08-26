@@ -13,14 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/4fuu/niulang/internal/classifier"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/multipath"
+	"github.com/4fuu/niulang/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/pathsim"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/stripe"
 	"github.com/apernet/quic-go"
-	"github.com/bojieli/queqiao/internal/classifier"
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/multipath"
-	"github.com/bojieli/queqiao/internal/pathmodel"
-	"github.com/bojieli/queqiao/internal/pathsim"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/stripe"
 )
 
 // requestResponse serves a destination that answers each small request with a

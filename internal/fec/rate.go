@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/lossmodel"
+	"github.com/4fuu/niulang/internal/lossmodel"
 )
 
 // Class is what a flow needs from the code. It decides the block length, which
@@ -277,8 +277,7 @@ func deliveredPerSymbolTime(k, n int, residual, reissue float64) float64 {
 // This picks the round trip because removing a round trip from a gap is what
 // this transport exists to do, and because under-coding is what the incident
 // this design answers was made of. It is the least defensible number in the
-// objective and the pathsim cases in docs/CONTROL-REDESIGN.md are what should
-// settle it.
+// objective, and controlled pathsim cases should settle it.
 func (p Params) reissueCost(k int) float64 {
 	if p.RoundTrip <= 0 || p.RateBytesPerSec <= 0 || p.ShardBytes <= 0 {
 		return float64(k)

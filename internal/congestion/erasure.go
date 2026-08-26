@@ -8,8 +8,8 @@ import (
 	quiccongestion "github.com/apernet/quic-go/congestion"
 	"github.com/apernet/quic-go/monotime"
 
-	"github.com/bojieli/queqiao/internal/lossmodel"
-	"github.com/bojieli/queqiao/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/lossmodel"
+	"github.com/4fuu/niulang/internal/pathmodel"
 )
 
 var nextErasureMemberID atomic.Uint64
@@ -19,9 +19,8 @@ var nextErasureMemberID atomic.Uint64
 //
 // Measured on the China-US path this project targets, about 42% of packets are
 // dropped independently of the sending rate: at 1 Mbit/s as readily as at 12,
-// and ICMP loses 37% at five packets a second
-// (docs/PATH-CHARACTER-20260813.md). Every loss-responsive controller gives
-// the path away. Across the emulated channel, carrying QUIC datagrams:
+// and ICMP loses 37% at five packets a second. Every loss-responsive controller
+// gives the path away. Across the emulated channel, carrying QUIC datagrams:
 //
 //	default (Reno/Cubic)          0.13 Mbit/s
 //	BBR                           0.39
@@ -84,6 +83,10 @@ type ErasureSender struct {
 	// it is published because a floor is not a substitute for it: on the live
 	// path the floor read a seventh of what the channel was doing.
 	erasure atomic.Uint64
+	// observed is the number of packet fates behind the local erasure estimate.
+	// It distinguishes a measured clean path from a new sender whose zero-valued
+	// erasure field means only "unknown".
+	observed atomic.Uint64
 
 	// rttStats is the connection's round-trip measurements, kept here as well
 	// as on the inner controller because the delay bound is this sender's.
@@ -174,6 +177,9 @@ func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmo
 		// seed only. Sharing one number for the two used to mean that the
 		// only lane on a path capped itself at whatever the last one managed.
 		state := path.Current()
+		if state.ObservedSamples > 0 {
+			e.observed.Store(uint64(state.ObservedSamples))
+		}
 		// The measured erasure is path knowledge, so a replacement lane paces
 		// from it rather than rediscovering it. On a channel that erases 42% of
 		// packets that rediscovery is expensive -- it is the same ramp that
@@ -409,6 +415,9 @@ func (e *ErasureSender) unmeteredBurst() quiccongestion.ByteCount {
 	// reading of an ambiguous channel is to keep metering. Where loss is
 	// absent, a burst that starts causing it shows up as loss within a round
 	// trip and closes this gate.
+	if e.observed.Load() < burstEvidencePackets {
+		return 0
+	}
 	if float64(e.erasure.Load())/partsPerMillion > burstLossCeiling {
 		return 0
 	}
@@ -429,6 +438,12 @@ func (e *ErasureSender) unmeteredBurst() quiccongestion.ByteCount {
 // Anything in between is a channel this sender cannot characterize from its
 // own traffic, and it meters rather than guess.
 const burstLossCeiling = 0.01
+
+// burstEvidencePackets distinguishes a measured clean direction from a new
+// sender whose zero-valued loss fields mean only "unknown". It is deliberately
+// small: the purpose is to keep the first unmeasured flight bounded, not to
+// claim a precise low-loss estimate.
+const burstEvidencePackets = 32
 
 func (e *ErasureSender) TimeUntilSend(quiccongestion.ByteCount) monotime.Time {
 	return e.pacer.timeUntilSend()
@@ -509,6 +524,7 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 		e.estimator.ObserveOutcome(outcome.arrived)
 	}
 	snapshot := e.estimator.Snapshot()
+	e.observed.Store(snapshot.Decided)
 	if snapshot.Congestive > 0 {
 		e.congestive.Store(uint64(snapshot.Congestive * partsPerMillion))
 	} else {
@@ -526,9 +542,9 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 			RoundTrip:       e.inner.minRoundTrip(),
 		})
 		erasure = state.Erasure
-		e.erasure.Store(uint64(state.Erasure * partsPerMillion))
 		e.share.Store(uint64(state.Share))
 	}
+	e.erasure.Store(uint64(erasure * partsPerMillion))
 	// The compensation rides on the measurement rather than on a floor biased
 	// low for pacing. Under-compensating is not the safe direction it looks
 	// like: pacing a delivered-rate estimate makes the sending rate its own

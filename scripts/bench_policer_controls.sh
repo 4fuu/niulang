@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compare Queqiao's current controller with fixed-rate and aggregate-budget
+# Compare Niulang's current controller with fixed-rate and aggregate-budget
 # controls on a token-bucket policer. The important outputs are useful goodput,
 # interactive p95, and bottleneck_drop_percent: optimizing only one of them can
 # make the other two worse.
@@ -7,7 +7,7 @@ set -Euo pipefail
 
 usage() {
     echo "Usage: $0 OUTPUT_DIR" >&2
-    echo "Environment: QUEQIAO_TRIALS=3 QUEQIAO_RATE_MBITS=10 QUEQIAO_LOSS='0 20' QUEQIAO_BYTES=4194304" >&2
+    echo "Environment: NIULANG_TRIALS=3 NIULANG_RATE_MBITS=10 NIULANG_LOSS='0 20' NIULANG_BYTES=4194304" >&2
 }
 
 [[ $# -eq 1 ]] || { usage; exit 2; }
@@ -21,16 +21,16 @@ source "$repo/scripts/benchmark_source.sh"
 command -v go >/dev/null || { echo "go is required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
-trials=${QUEQIAO_TRIALS:-3}
-rate=${QUEQIAO_RATE_MBITS:-10}
-losses=${QUEQIAO_LOSS:-"0 20"}
-bytes=${QUEQIAO_BYTES:-4194304}
-timeout=${QUEQIAO_TIMEOUT:-90s}
-refill=${QUEQIAO_POLICER_REFILL:-8ms}
+trials=${NIULANG_TRIALS:-3}
+rate=${NIULANG_RATE_MBITS:-10}
+losses=${NIULANG_LOSS:-"0 20"}
+bytes=${NIULANG_BYTES:-4194304}
+timeout=${NIULANG_TIMEOUT:-90s}
+refill=${NIULANG_POLICER_REFILL:-8ms}
 
 mkdir -p "$output"
 {
-    echo 'format=queqiao-policer-controls-v1'
+    echo 'format=niulang-policer-controls-v1'
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "commit=$(git rev-parse HEAD)"
     echo "go_version=$(go version)"
@@ -54,8 +54,8 @@ run_cell() {
     if [[ "$aggregate" != 0 ]]; then extra+=(--aggregate-rate "$aggregate"); fi
     if [[ "$reserve" != 0 ]]; then extra+=(--interactive-reserve "$reserve"); fi
 
-    go run ./cmd/queqiaobench \
-        --stacks queqiao --rtt 200 --rate "$rate" --loss "$loss" \
+    go run ./cmd/niulangbench \
+        --stacks niulang --rtt 200 --rate "$rate" --loss "$loss" \
         --policer-refill "$refill" --bytes "$bytes" --flows 1 \
         --trials "$trials" --timeout "$timeout" --interactive \
         --congestion "$controller" --json "$json" "${extra[@]}" | tee "$log"

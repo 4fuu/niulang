@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/session"
 )
 
 // An account whose limit was set too low produced a client reporting resets

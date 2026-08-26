@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record timestamped Queqiao /metrics snapshots as dashboard-ready JSON Lines."""
+"""Record timestamped Niulang /metrics snapshots as dashboard-ready JSON Lines."""
 
 import argparse
 import datetime
@@ -22,7 +22,7 @@ def parse_metrics(text: str) -> dict[str, float]:
     result: dict[str, float] = {}
     for line in text.splitlines():
         line = line.strip()
-        if not line or line.startswith("#") or not line.startswith("queqiao_"):
+        if not line or line.startswith("#") or not line.startswith("niulang_"):
             continue
         fields = line.split()
         if len(fields) not in (2, 3):
@@ -48,7 +48,7 @@ def fetch_metrics(url: str, timeout: float) -> dict[str, float]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", required=True, help="Queqiao metrics URL, normally http://127.0.0.1:PORT/metrics")
+    parser.add_argument("--url", required=True, help="Niulang metrics URL, normally http://127.0.0.1:PORT/metrics")
     parser.add_argument("--output", required=True, type=pathlib.Path, help="new JSONL output path")
     parser.add_argument("--interval", type=float, default=1, help="seconds between scrape starts (default: 1)")
     parser.add_argument("--duration", type=float, default=0, help="capture duration in seconds; 0 runs until interrupted")

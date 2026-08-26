@@ -46,7 +46,7 @@ func TestInitiallyUnavailableUplinkWarmsWhenItAppears(t *testing.T) {
 }
 
 func TestOnlyConfiguredDynamicBindingMakesAnEmptyProbeDefinitive(t *testing.T) {
-	dynamic := &Client{cfg: ClientConfig{LocalAddress: "if:queqiao-interface-that-does-not-exist"}}
+	dynamic := &Client{cfg: ClientConfig{LocalAddress: "if:niulang-interface-that-does-not-exist"}}
 	if address, unavailable := dynamic.currentUplinkState(); address != "" || !unavailable {
 		t.Fatalf("missing configured interface = address %q unavailable %v", address, unavailable)
 	}

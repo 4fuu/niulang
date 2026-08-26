@@ -13,15 +13,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/4fuu/niulang/internal/coded"
+	wancongestion "github.com/4fuu/niulang/internal/congestion"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/netbind"
+	"github.com/4fuu/niulang/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/protocol"
 	"github.com/apernet/quic-go"
 	quiccongestion "github.com/apernet/quic-go/congestion"
-	"github.com/bojieli/queqiao/internal/coded"
-	wancongestion "github.com/bojieli/queqiao/internal/congestion"
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/netbind"
-	"github.com/bojieli/queqiao/internal/pathmodel"
-	"github.com/bojieli/queqiao/internal/protocol"
 )
 
 type TransportKind string
@@ -47,7 +47,7 @@ const (
 //
 // Erasure is the default and the only one that should normally be chosen. Reno
 // leaves the apNet quic-go default untouched and is the safe control. BBR is
-// the original queqiao controller. BBRTUIC is a faithful Go port of TUIC's
+// the inherited Queqiao controller. BBRTUIC is a faithful Go port of TUIC's
 // quinn-congestions BBR model. Adaptive is a conservative rate-estimating
 // controller for unknown paths. Brutal is a fixed-rate mode for controlled
 // experiments where the operator knows the per-lane budget. BrutalNoComp uses
@@ -437,7 +437,7 @@ func (c *quicStreamConn) Close() error {
 		if c.closeConn {
 			// Dedicated lanes own their QUIC connection and socket. Pooled
 			// streams deliberately leave both alive for other flows.
-			if closeErr := c.conn.CloseWithError(0, "queqiao lane closed"); closeErr != nil {
+			if closeErr := c.conn.CloseWithError(0, "niulang lane closed"); closeErr != nil {
 				err = closeErr
 			}
 			if c.packet != nil {
@@ -475,7 +475,7 @@ func dialTCP(ctx context.Context, remote string, credentials identity.ClientCred
 	tlsConn := conn.(*tls.Conn)
 	if tlsConn.ConnectionState().NegotiatedProtocol != defaultALPN {
 		_ = tlsConn.Close()
-		return nil, fmt.Errorf("gateway %q did not negotiate Queqiao protocol 1 over TCP; check that the endpoint and server version match", remote)
+		return nil, fmt.Errorf("gateway %q did not negotiate Niulang protocol 1 over TCP; check that the endpoint and server version match", remote)
 	}
 	return tlsConn, nil
 }
@@ -489,7 +489,7 @@ func dialTCP(ctx context.Context, remote string, credentials identity.ClientCred
 // window within a small multiple of the RTT. On a 200 ms path with a few
 // percent packet loss, loss recovery delays consumption enough that the
 // window stops growing, and the *receive window* rather than congestion
-// control becomes the binding constraint. Measured with cmd/queqiaobench at
+// control becomes the binding constraint. Measured with cmd/niulangbench at
 // 200 ms RTT and 1--5% loss, a 512 KiB initial stream window cost 30--40%
 // goodput against an otherwise identical TUIC-shaped reference.
 //
@@ -531,8 +531,8 @@ const (
 	maxConnectionReceiveWindow = 128 * 1024 * 1024
 	// A bounded stream fan-out lets one QUIC connection carry multiple
 	// independent PEP flows, like TUIC, without an unbounded stream commitment.
-	// 1,024 is the mobile upper bound; stream state and retained payload remain
-	// bounded separately by the endpoint's memory budgets.
+	// Stream state and retained payload remain bounded separately by the
+	// endpoint's memory budgets.
 	maxIncomingStreams = 1024
 )
 
@@ -549,8 +549,8 @@ type flowWindows struct {
 	maxConnection uint64
 	maxStreams    int64
 	// codedQueue is the connection-level coded path's send and receive
-	// mailbox depth. Zero keeps the desktop default; mobile supplies the same
-	// tiny depth as its other frame queues.
+	// mailbox depth. Zero keeps the default; constrained profiles can supply a
+	// smaller depth.
 	codedQueue int
 }
 
@@ -644,7 +644,7 @@ func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCre
 	controller := configureQUICController(conn, ccfg)
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		_ = conn.CloseWithError(0, "unable to open queqiao stream")
+		_ = conn.CloseWithError(0, "unable to open niulang stream")
 		if packetConn != nil {
 			_ = packetConn.Close()
 		}
@@ -799,7 +799,7 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 
 func explainDataHandshakeError(remote, transport string, err error) error {
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q rejected Queqiao protocol 1 over %s; the endpoint may still run an incompatible development server or another TLS service: %w", remote, transport, err)
+		return fmt.Errorf("gateway %q rejected Niulang protocol 1 over %s; the endpoint may still run an incompatible development server or another TLS service: %w", remote, transport, err)
 	}
 	return err
 }

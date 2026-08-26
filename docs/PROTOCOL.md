@@ -1,4 +1,4 @@
-# Queqiao protocol version 1
+# Niulang protocol version 1
 
 > [!IMPORTANT]
 > **Status:** First public wire contract
@@ -10,7 +10,7 @@
 > **Compatibility:** Version 1 only; mismatches fail closed
 > **Last reviewed:** 2026-08-19
 
-This document specifies the protocol implemented by the current Queqiao source
+This document specifies the protocol implemented by the current Niulang source
 tree. Earlier private development builds used higher internal wire numbers.
 Those builds were never a public compatibility contract; the first public
 protocol is deliberately numbered 1 and has no legacy handshake or downgrade
@@ -22,9 +22,9 @@ network byte order (big-endian).
 
 ## 1. Protocol layers
 
-Queqiao version 1 has four related layers:
+Niulang version 1 has four related layers:
 
-1. **Identity bootstrap:** a `queqiao://` invitation and a bounded enrollment
+1. **Identity bootstrap:** a `niulang://` invitation and a bounded enrollment
    exchange create a per-device identity.
 2. **Authenticated carrier:** TLS 1.3 over QUIC/UDP or TCP establishes the
    provider, gateway, account, and device principal.
@@ -34,7 +34,7 @@ Queqiao version 1 has four related layers:
    frames through a sliding-window erasure code. The reliable QUIC stream
    always remains the control substrate.
 
-Application TLS is not terminated. Queqiao sees the requested destination,
+Application TLS is not terminated. Niulang sees the requested destination,
 frame sizes, and timing, then relays application bytes or datagrams.
 
 ## 2. Carrier and TLS contract
@@ -86,23 +86,23 @@ client offers exactly `queqiao-renew/1`. Offering either control ALPN alongside
 another protocol MUST NOT select the weaker enrollment configuration.
 
 A data connection that does not negotiate `queqiao/1` is incompatible and MUST
-be rejected. Neither endpoint falls back to a previous Queqiao protocol.
+be rejected. Neither endpoint falls back to a previous Niulang protocol.
 
 ### 2.3 QUIC and TCP carriage
 
 Each QUIC bidirectional stream or TLS/TCP connection carries a sequence of
-Queqiao frames on its reliable byte stream. QUIC connections negotiate DATAGRAM
+Niulang frames on its reliable byte stream. QUIC connections negotiate DATAGRAM
 support; when both endpoints support it, the same connection can additionally
 carry coded DATA frames and UDP PACKET frames as datagrams.
 
 One QUIC connection may pool many logical flows on separate streams. QUIC
 datagrams are connection-scoped and are demultiplexed by the `flow_id` inside
-the recovered Queqiao frame.
+the recovered Niulang frame.
 
 TCP uses the identical reliable frame stream. A flow that has handed off to
 TCP MUST NOT simultaneously schedule data over QUIC. A configured TCP-only
 bundle may attach additional authenticated TCP lanes with JOIN; each socket
-retains its kernel congestion controller, while Queqiao preserves one logical
+retains its kernel congestion controller, while Niulang preserves one logical
 byte-offset space above them.
 
 ## 3. Identifiers and scope
@@ -354,7 +354,7 @@ Each `[start,end)` range MUST be non-empty, at or above the cumulative
 sequence, sorted by start, and non-overlapping. Adjacent ranges are allowed.
 The payload length MUST be a multiple of 16 and no greater than 256 bytes.
 
-Protocol ACKs bound Queqiao's retained replay window and report delivery across
+Protocol ACKs bound Niulang's retained replay window and report delivery across
 unreliable or replacement substrates. They do not replace QUIC or TCP transport
 acknowledgements and are not a second per-packet congestion-control loop.
 
@@ -421,7 +421,7 @@ because its QUIC datagram was lost.
 ## 12. Coded datagram format
 
 The coded substrate is directional and scoped to one QUIC connection. It
-carries complete encoded Queqiao frames inside source symbols and GF(256)
+carries complete encoded Niulang frames inside source symbols and GF(256)
 repair symbols. Its delivery remains unreliable; FEC reduces erasure but does
 not create a second reliable stream.
 
@@ -464,7 +464,7 @@ Every source vector begins:
 | 4 | 2 | fragment count |
 | 6 | variable | payload, zero-extended by repair arithmetic as needed |
 
-For `fragment_count = 1`, the payload packs one or more complete Queqiao frames,
+For `fragment_count = 1`, the payload packs one or more complete Niulang frames,
 each prefixed by a 32-bit frame length. A frame larger than one symbol uses
 consecutive ESIs with a common fragment count and indexes `0..count-1`; its
 payload is the direct frame bytes without the per-frame 32-bit prefix. The
@@ -659,7 +659,7 @@ for the first public release.
 The URI is:
 
 ```text
-queqiao://enroll/BASE64URL_WITHOUT_PADDING(JSON)
+niulang://enroll/BASE64URL_WITHOUT_PADDING(JSON)
 ```
 
 The decoded strict JSON object contains:
@@ -789,5 +789,4 @@ refuse every vector marked `reject`. Two implementations that agree on this
 document but not on this file do not interoperate.
 
 The broader threat model, credential lifecycle, and residual risks are in
-[`SECURITY.md`](../SECURITY.md). Implementation components are mapped in
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+[`SECURITY.md`](../SECURITY.md).

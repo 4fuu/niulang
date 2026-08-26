@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# One-command Queqiao provider install for a Linux systemd host. It performs
+# One-command Niulang provider install for a Linux systemd host. It performs
 # every step of the gateway section of docs/DEPLOYING.md: binary, service
 # account, directories, provider trust root, first user, environment file,
 # hardened unit, and post-start verification. The final invitation is issued
@@ -15,12 +15,12 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 
 prefix=/usr/local
-config_dir=/etc/queqiao
-log_dir=/var/log/queqiao
-state=/var/lib/queqiao/provider
-run_user=queqiao
-service_name=queqiaod
-backup_root=/var/lib/queqiao-rollback
+config_dir=/etc/niulang
+log_dir=/var/log/niulang
+state=/var/lib/niulang/provider
+run_user=niulang
+service_name=niulangd
+backup_root=/var/lib/niulang-rollback
 
 binary_source=
 provider_name=
@@ -47,7 +47,7 @@ usage() {
 	cat <<'EOF'
 Usage: deploy/install-server.sh --name NAME --endpoint HOST:PORT --user USER [options]
 
-Install queqiaod as a systemd gateway service, initialize a provider, create
+Install niulangd as a systemd gateway service, initialize a provider, create
 the first user, and print one single-use invitation URI.
 
 Required for a first install:
@@ -56,7 +56,7 @@ Required for a first install:
   --user USER              first user account to create
 
 Provider options:
-  --state DIR              provider state directory (default /var/lib/queqiao/provider)
+  --state DIR              provider state directory (default /var/lib/niulang/provider)
   --user-max-clients N     per-user concurrent device limit (default 8, 0 for every device)
   --user-max-flows N       per-user concurrent flow limit (default 1024, 0 for the
                            gateway-wide limit). One flow is one TCP connection or
@@ -70,22 +70,22 @@ Service options:
   --transport auto|quic|tcp  (default auto)
   --max-sessions N         gateway-wide concurrent flow limit (default 4096)
   --metrics-listen ADDR    loopback metrics address (default 127.0.0.1:19090, "" disables)
-  --extra-args "ARGS"      additional queqiaod server flags
-  --service-name NAME      systemd unit name without .service (default queqiaod)
-  --run-user NAME          service account (default queqiao)
+  --extra-args "ARGS"      additional niulangd server flags
+  --service-name NAME      systemd unit name without .service (default niulangd)
+  --run-user NAME          service account (default niulang)
   --prefix DIR             install prefix (default /usr/local)
-  --config-dir DIR         environment file directory (default /etc/queqiao)
-  --log-dir DIR            runtime log directory (default /var/log/queqiao)
+  --config-dir DIR         environment file directory (default /etc/niulang)
+  --log-dir DIR            runtime log directory (default /var/log/niulang)
 
 Other options:
-  --binary PATH            install this queqiaod instead of building one
+  --binary PATH            install this niulangd instead of building one
   --tune                   also run deploy/tune-server.sh for socket limits
   --no-verify              skip the post-start listener and metrics checks
   --dry-run                print the plan and exit without changing the host
   -h, --help               show this help
 
-The binary is taken from --binary, then ./queqiaod in the repository root,
-then a local `go build ./cmd/queqiaod`.
+The binary is taken from --binary, then ./niulangd in the repository root,
+then a local `go build ./cmd/niulangd`.
 EOF
 }
 
@@ -281,10 +281,10 @@ if [ "$listen_port" -lt 1 ] || [ "$listen_port" -gt 65535 ]; then
 fi
 
 state_parent=$(dirname -- "$state")
-unit_template=$script_dir/queqiaod.service
+unit_template=$script_dir/niulangd.service
 unit_path=/etc/systemd/system/$service_name.service
-env_path=$config_dir/queqiaod.env
-binary_path=$prefix/bin/queqiaod
+env_path=$config_dir/niulangd.env
+binary_path=$prefix/bin/niulangd
 
 server_args="--state $state --listen $listen --transport $transport --max-sessions $max_sessions"
 if [ -n "$metrics_listen" ]; then
@@ -304,7 +304,7 @@ Would install:
   state           $state (mode 0700)
   logs            $log_dir (mode 0750)
 
-Would write QUEQIAOD_ARGS=$server_args
+Would write NIULANGD_ARGS=$server_args
 EOF
 	if [ "$bootstrap" = true ]; then
 		cat <<EOF
@@ -359,20 +359,20 @@ if [ -n "$binary_source" ]; then
 	[ -x "$binary_source" ] || die "--binary $binary_source is not an executable file"
 	staged_binary=$binary_source
 	binary_origin="supplied binary"
-elif [ -x "$repo_root/queqiaod" ]; then
-	staged_binary=$repo_root/queqiaod
-	binary_origin="prebuilt $repo_root/queqiaod"
+elif [ -x "$repo_root/niulangd" ]; then
+	staged_binary=$repo_root/niulangd
+	binary_origin="prebuilt $repo_root/niulangd"
 elif command -v go >/dev/null 2>&1; then
-	echo "Building queqiaod from $repo_root ..."
+	echo "Building niulangd from $repo_root ..."
 	build_dir=$(mktemp -d)
-	(cd "$repo_root" && go build -o "$build_dir/queqiaod" ./cmd/queqiaod) ||
+	(cd "$repo_root" && go build -o "$build_dir/niulangd" ./cmd/niulangd) ||
 		die "go build failed; build it separately and pass --binary PATH"
-	staged_binary=$build_dir/queqiaod
+	staged_binary=$build_dir/niulangd
 	binary_origin="source build"
 else
-	die "no queqiaod binary found.
-Pass --binary PATH, place a built binary at $repo_root/queqiaod, or install Go
-and re-run: go build -o ./queqiaod ./cmd/queqiaod"
+	die "no niulangd binary found.
+Pass --binary PATH, place a built binary at $repo_root/niulangd, or install Go
+and re-run: go build -o ./niulangd ./cmd/niulangd"
 fi
 
 version_line=$("$staged_binary" version) ||
@@ -446,7 +446,7 @@ fi
 
 umask 077
 env_tmp=$(mktemp "$env_path.tmp.XXXXXX")
-printf 'QUEQIAOD_ARGS=%s\n' "$server_args" >"$env_tmp"
+printf 'NIULANGD_ARGS=%s\n' "$server_args" >"$env_tmp"
 install -o root -g "$run_user" -m 0640 "$env_tmp" "$env_path"
 rm -f "$env_tmp"
 
@@ -455,8 +455,8 @@ sed \
 	-e "s|^User=.*|User=$run_user|" \
 	-e "s|^Group=.*|Group=$run_user|" \
 	-e "s|^EnvironmentFile=.*|EnvironmentFile=$env_path|" \
-	-e "s|^Environment=QUEQIAO_LOG_DIR=.*|Environment=QUEQIAO_LOG_DIR=$log_dir|" \
-	-e "s|^ExecStart=.*|ExecStart=$binary_path server \$QUEQIAOD_ARGS|" \
+	-e "s|^Environment=NIULANG_LOG_DIR=.*|Environment=NIULANG_LOG_DIR=$log_dir|" \
+	-e "s|^ExecStart=.*|ExecStart=$binary_path server \$NIULANGD_ARGS|" \
 	-e "s|^ReadWritePaths=.*|ReadWritePaths=$state_parent $log_dir|" \
 	"$unit_template" >"$unit_tmp"
 install -o root -g root -m 0644 "$unit_tmp" "$unit_path"
@@ -517,7 +517,7 @@ if [ "$verify" = true ]; then
 	fi
 
 	wait_for test -s "$log_dir/server.log" ||
-		echo "NOTE: $log_dir/server.log is still empty; run queqiaod logs server to check." >&2
+		echo "NOTE: $log_dir/server.log is still empty; run niulangd logs server to check." >&2
 fi
 
 invitation=
@@ -530,7 +530,7 @@ service_state=$(systemctl is-active "$service_name" || true)
 
 cat <<EOF
 
-Queqiao gateway installed.
+Niulang gateway installed.
   service      $service_name ($service_state)
   binary       $binary_path
   environment  $env_path
@@ -551,7 +551,7 @@ if [ -n "$invitation" ]; then
 
 Send this single-use invitation to $user_name over an authenticated private
 channel. It is a bearer credential valid for $invite_expires_in; do not paste it
-into a shared log or ticket, and revoke it with 'queqiaod provider
+into a shared log or ticket, and revoke it with 'niulangd provider
 revoke-invite' if it is not used.
 
 $invitation

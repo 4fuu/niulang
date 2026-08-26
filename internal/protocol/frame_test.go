@@ -121,7 +121,7 @@ func TestPayloadLimitBoundaryIsFixedByTheProtocol(t *testing.T) {
 // is a PACKET carrying a maximum UDP datagram to a maximum-length destination.
 // A limit below that bound is not a smaller buffer, it is an inability to
 // deliver legal traffic, and that is exactly the failure a configurable limit
-// produced on the mobile profiles.
+// produced on constrained profiles.
 func TestPayloadLimitCoversTheLargestLegalFrame(t *testing.T) {
 	// The PACKET payload is a two-byte destination length, the destination,
 	// then the datagram. internal/session owns the encoding; these numbers are

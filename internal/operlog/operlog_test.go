@@ -36,7 +36,7 @@ func TestOpenWritesStructuredFileAndConsole(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(payload), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record["service"] != "queqiaod" || record["role"] != "client" || record["msg"] != "runtime logging initialized" || record["answer"] != float64(42) {
+	if record["service"] != "niulangd" || record["role"] != "client" || record["msg"] != "runtime logging initialized" || record["answer"] != float64(42) {
 		t.Fatalf("unexpected structured record: %#v", record)
 	}
 	if runtime.GOOS != "windows" {
@@ -81,7 +81,7 @@ func TestRotationBoundsFilesAndPreservesNewestRecords(t *testing.T) {
 
 func TestDefaultPathCanBeMadeDeterministic(t *testing.T) {
 	directory := t.TempDir()
-	t.Setenv("QUEQIAO_LOG_DIR", directory)
+	t.Setenv("NIULANG_LOG_DIR", directory)
 	for _, role := range []string{"client", "server"} {
 		path, err := DefaultPath(role)
 		if err != nil {

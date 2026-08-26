@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/memlimit"
+	"github.com/4fuu/niulang/internal/memlimit"
 )
 
 func TestConcurrentSchedulersShareOneFixedMemoryBudget(t *testing.T) {

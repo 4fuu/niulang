@@ -44,7 +44,7 @@ func buildConfigs(cfg Config) (server, client any, err error) {
 
 	serverTLS := map[string]any{
 		"enabled":          true,
-		"server_name":      "queqiao.test",
+		"server_name":      "niulang.test",
 		"certificate_path": cfg.CertificatePath,
 		"key_path":         cfg.KeyPath,
 	}
@@ -52,7 +52,7 @@ func buildConfigs(cfg Config) (server, client any, err error) {
 	// never needs a verification bypass.
 	clientTLS := map[string]any{
 		"enabled":          true,
-		"server_name":      "queqiao.test",
+		"server_name":      "niulang.test",
 		"certificate_path": cfg.CertificatePath,
 	}
 
@@ -100,7 +100,7 @@ func buildConfigs(cfg Config) (server, client any, err error) {
 			"tls":  clientTLS,
 		}
 		if cfg.Kind == VLESSWebSocket {
-			transport := map[string]any{"type": "ws", "path": "/queqiao"}
+			transport := map[string]any{"type": "ws", "path": "/niulang"}
 			inbound["transport"] = transport
 			outbound["transport"] = transport
 		}

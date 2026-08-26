@@ -1,4 +1,4 @@
-// Package operlog provides queqiaod's bounded, durable operational log.
+// Package operlog provides niulangd's bounded, durable operational log.
 package operlog
 
 import (
@@ -73,7 +73,7 @@ func ResolvePath(value, role string) (string, error) {
 // an explicit /var/log path because their service account and write policy are
 // deployment decisions, while an interactive process must work unprivileged.
 func DefaultPath(role string) (string, error) {
-	if override := os.Getenv("QUEQIAO_LOG_DIR"); override != "" {
+	if override := os.Getenv("NIULANG_LOG_DIR"); override != "" {
 		return defaultPathAt(override, role)
 	}
 	home, err := os.UserHomeDir()
@@ -83,19 +83,19 @@ func DefaultPath(role string) (string, error) {
 	var directory string
 	switch runtime.GOOS {
 	case "darwin":
-		directory = filepath.Join(home, "Library", "Logs", "Queqiao")
+		directory = filepath.Join(home, "Library", "Logs", "Niulang")
 	case "windows":
 		directory = os.Getenv("LOCALAPPDATA")
 		if directory == "" {
 			directory = filepath.Join(home, "AppData", "Local")
 		}
-		directory = filepath.Join(directory, "Queqiao", "Logs")
+		directory = filepath.Join(directory, "Niulang", "Logs")
 	default:
 		directory = os.Getenv("XDG_STATE_HOME")
 		if directory == "" {
 			directory = filepath.Join(home, ".local", "state")
 		}
-		directory = filepath.Join(directory, "queqiao")
+		directory = filepath.Join(directory, "niulang")
 	}
 	return defaultPathAt(directory, role)
 }
@@ -160,7 +160,7 @@ func Open(config Config) (*slog.Logger, *Sink, error) {
 	} else {
 		handler = slog.NewTextHandler(output, options)
 	}
-	logger := slog.New(handler).With("service", "queqiaod", "role", config.Role, "pid", os.Getpid())
+	logger := slog.New(handler).With("service", "niulangd", "role", config.Role, "pid", os.Getpid())
 	return logger, &Sink{path: path, writer: fileWriter}, nil
 }
 

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/pathmodel"
 )
 
 // lossyPipe is a pair of carriers connected through an erasure channel, so a
@@ -445,13 +445,13 @@ func TestAPathDoesNotInferItsOutboundFloorFromReverseLoss(t *testing.T) {
 	}
 }
 
-// The incident in docs/CONTROL-REDESIGN.md happened here, between a path model
-// that knew what the channel was doing and a code that was sized from
-// something else. The controller's floor is biased low on purpose, and
-// channel() used to build the code's whole view of the channel out of that one
-// scalar -- Loss, Floor and Recent all set to it, and BurstFactor asserted to
-// be 1. On the live path that meant parity sized for 1.76% while the far
-// decoder measured 19.9%, and 11% of the payload handed back to the session.
+// An earlier under-coding incident happened here, between a path model that
+// knew what the channel was doing and a code that was sized from something
+// else. The controller's floor is biased low on purpose, and channel() used to
+// build the code's whole view of the channel out of that one scalar -- Loss,
+// Floor and Recent all set to it, and BurstFactor asserted to be 1. On the live
+// path that meant parity sized for 1.76% while the far decoder measured 19.9%,
+// and 11% of the payload handed back to the session.
 //
 // This holds the wiring rather than the arithmetic: given a model whose floor
 // and measurement disagree the way the live one did, the code must be sized

@@ -9,7 +9,7 @@ import (
 
 	quiccongestion "github.com/apernet/quic-go/congestion"
 
-	"github.com/bojieli/queqiao/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/pathmodel"
 )
 
 func losses(n int) []quiccongestion.LostPacketInfo {
@@ -418,6 +418,7 @@ func TestTheSenderPublishesTheMeasurementItsCodeIsSizedFrom(t *testing.T) {
 // that the burst follows that evidence rather than a constant.
 func TestNoCongestionEvidenceMeansNoMetering(t *testing.T) {
 	e := senderAtRTT(t, 200*time.Millisecond, 202*time.Millisecond)
+	e.observed.Store(burstEvidencePackets)
 	got := e.unmeteredBurst()
 	if got <= 0 {
 		t.Fatal("a path holding almost no queue, with no loss attributed to rate, is " +
@@ -434,6 +435,7 @@ func TestNoCongestionEvidenceMeansNoMetering(t *testing.T) {
 // the thing pacing exists to prevent, so metering has to come back.
 func TestAQueueAtTheBoundRestoresMetering(t *testing.T) {
 	e := senderAtRTT(t, 200*time.Millisecond, 400*time.Millisecond)
+	e.observed.Store(burstEvidencePackets)
 	if got := e.unmeteredBurst(); got != 0 {
 		t.Fatalf("a path holding a full round trip of queue reported an unmetered burst "+
 			"of %d; that is the bound this controller says must not be exceeded", got)
@@ -445,6 +447,7 @@ func TestAQueueAtTheBoundRestoresMetering(t *testing.T) {
 // Erasure alone must not restore metering; congestive loss must.
 func TestOnlyCongestiveLossRestoresMetering(t *testing.T) {
 	e := senderAtRTT(t, 200*time.Millisecond, 201*time.Millisecond)
+	e.observed.Store(burstEvidencePackets)
 	if e.unmeteredBurst() <= 0 {
 		t.Fatal("precondition: a quiet path should not be metered")
 	}
@@ -463,6 +466,7 @@ func TestOnlyCongestiveLossRestoresMetering(t *testing.T) {
 // evidence of absence either and the constant has to stand.
 func TestNoRoundTripMeasurementKeepsTheConstant(t *testing.T) {
 	e := NewErasureSender(1200)
+	e.observed.Store(burstEvidencePackets)
 	if got := e.unmeteredBurst(); got != 0 {
 		t.Fatalf("a sender with no round-trip measurement reported %d; it cannot know "+
 			"whether a queue is forming, so it must not stop metering", got)
@@ -477,6 +481,7 @@ func TestNoRoundTripMeasurementKeepsTheConstant(t *testing.T) {
 // holding the rate down. See internal/pep/case4_test.go.
 func TestALossyDirectionIsStillMetered(t *testing.T) {
 	e := senderAtRTT(t, 200*time.Millisecond, 201*time.Millisecond)
+	e.observed.Store(burstEvidencePackets)
 	if e.unmeteredBurst() <= 0 {
 		t.Fatal("precondition: a clean quiet path should not be metered")
 	}
@@ -493,9 +498,37 @@ func TestALossyDirectionIsStillMetered(t *testing.T) {
 // would never fire on a real link.
 func TestAnAlmostCleanDirectionStillBursts(t *testing.T) {
 	e := senderAtRTT(t, 200*time.Millisecond, 201*time.Millisecond)
+	e.observed.Store(burstEvidencePackets)
 	e.erasure.Store(uint64(0.001 * partsPerMillion))
 	if e.unmeteredBurst() <= 0 {
 		t.Fatal("a direction losing one packet in a thousand is being metered; the " +
 			"measured datacenter upload lost 0 of 41,663 and this rule has to fire there")
+	}
+}
+
+func TestAnUnmeasuredDirectionStaysPaced(t *testing.T) {
+	e := senderAtRTT(t, 200*time.Millisecond, 201*time.Millisecond)
+	if got := e.unmeteredBurst(); got != 0 {
+		t.Fatalf("an unmeasured direction reported an unmetered burst of %d", got)
+	}
+}
+
+func TestStandaloneSenderStoresLossThatClosesTheBurstGate(t *testing.T) {
+	e := senderAtRTT(t, 200*time.Millisecond, 201*time.Millisecond)
+	acked := make([]quiccongestion.AckedPacketInfo, burstEvidencePackets-1)
+	for i := range acked {
+		acked[i] = quiccongestion.AckedPacketInfo{PacketNumber: quiccongestion.PacketNumber(i), BytesAcked: 1200}
+	}
+	e.OnCongestionEventEx(32*1200, monotime.Now(), acked, []quiccongestion.LostPacketInfo{{
+		PacketNumber: burstEvidencePackets - 1, BytesLost: 1200,
+	}})
+	if got := e.observed.Load(); got != burstEvidencePackets {
+		t.Fatalf("observed packet fates = %d, want %d", got, burstEvidencePackets)
+	}
+	if got := float64(e.erasure.Load()) / partsPerMillion; got < 0.03 || got > 0.04 {
+		t.Fatalf("stored erasure = %.4f, want 1/%d", got, burstEvidencePackets)
+	}
+	if got := e.unmeteredBurst(); got != 0 {
+		t.Fatalf("a measured lossy direction reported an unmetered burst of %d", got)
 	}
 }

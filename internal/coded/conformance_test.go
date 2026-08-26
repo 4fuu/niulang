@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bojieli/queqiao/internal/conformance"
-	"github.com/bojieli/queqiao/internal/fec"
+	"github.com/4fuu/niulang/internal/conformance"
+	"github.com/4fuu/niulang/internal/fec"
 )
 
 // TestCodedDatagramVectors replays the committed protocol-1 datagram vectors

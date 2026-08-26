@@ -33,7 +33,7 @@ import (
 // returns what is stored. A lane that carried a burst and then went silent
 // therefore keeps its figure until it sends again. That is harmless for the
 // lane, whose estimate only governs what it puts on the wire, but it is not
-// harmless for a trace: queqiao_quic_controller_max_bandwidth_bytes_per_second
+// harmless for a trace: niulang_quic_controller_max_bandwidth_bytes_per_second
 // folds the maximum across lanes, so one idle lane can report a peak the path
 // has not sustained for minutes. Reading the metric as the path's bandwidth is
 // the same mistake this filter was fixed for, one level up.

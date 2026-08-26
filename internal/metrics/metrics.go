@@ -1,5 +1,5 @@
 // Package metrics provides the small, dependency-free operational surface
-// needed by queqiaod. It intentionally exports aggregate counters only: no
+// needed by niulangd. It intentionally exports aggregate counters only: no
 // destinations, session IDs, secrets, or application payload are retained.
 package metrics
 
@@ -850,84 +850,84 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	s := r.Snapshot()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprintf(w, "queqiao_active_flows %d\n", s.ActiveFlows)
-	fmt.Fprintf(w, "queqiao_flows_started_total %d\n", s.FlowsStarted)
-	fmt.Fprintf(w, "queqiao_flows_completed_total %d\n", s.FlowsCompleted)
-	fmt.Fprintf(w, "queqiao_flows_failed_total %d\n", s.FlowsFailed)
-	fmt.Fprintf(w, "queqiao_bytes_up_total %d\n", s.BytesUp)
-	fmt.Fprintf(w, "queqiao_bytes_down_total %d\n", s.BytesDown)
-	fmt.Fprintf(w, "queqiao_lane_failures_total %d\n", s.LaneFailures)
-	fmt.Fprintf(w, "queqiao_lane_replacements_total %d\n", s.LaneReplacements)
-	fmt.Fprintf(w, "queqiao_fallbacks_total %d\n", s.Fallbacks)
-	fmt.Fprintf(w, "queqiao_udp_path_unavailable_total %d\n", s.UDPPathUnavailable)
-	fmt.Fprintf(w, "queqiao_endpoint_transport_races_failed_total %d\n", s.EndpointTransportRaceFailures)
-	fmt.Fprintf(w, "queqiao_udp_transient_send_errors_total %d\n", s.TransientUDPSendErrors)
-	fmt.Fprintf(w, "queqiao_udp_association_reconnects_total %d\n", s.UDPAssociationReconnects)
-	fmt.Fprintf(w, "queqiao_udp_association_rescue_failures_total %d\n", s.UDPAssociationRescueFailures)
-	fmt.Fprintf(w, "queqiao_completion_timeouts_total %d\n", s.CompletionTimeouts)
-	fmt.Fprintf(w, "queqiao_flow_timeouts_total %d\n", s.FlowTimeouts)
+	fmt.Fprintf(w, "niulang_active_flows %d\n", s.ActiveFlows)
+	fmt.Fprintf(w, "niulang_flows_started_total %d\n", s.FlowsStarted)
+	fmt.Fprintf(w, "niulang_flows_completed_total %d\n", s.FlowsCompleted)
+	fmt.Fprintf(w, "niulang_flows_failed_total %d\n", s.FlowsFailed)
+	fmt.Fprintf(w, "niulang_bytes_up_total %d\n", s.BytesUp)
+	fmt.Fprintf(w, "niulang_bytes_down_total %d\n", s.BytesDown)
+	fmt.Fprintf(w, "niulang_lane_failures_total %d\n", s.LaneFailures)
+	fmt.Fprintf(w, "niulang_lane_replacements_total %d\n", s.LaneReplacements)
+	fmt.Fprintf(w, "niulang_fallbacks_total %d\n", s.Fallbacks)
+	fmt.Fprintf(w, "niulang_udp_path_unavailable_total %d\n", s.UDPPathUnavailable)
+	fmt.Fprintf(w, "niulang_endpoint_transport_races_failed_total %d\n", s.EndpointTransportRaceFailures)
+	fmt.Fprintf(w, "niulang_udp_transient_send_errors_total %d\n", s.TransientUDPSendErrors)
+	fmt.Fprintf(w, "niulang_udp_association_reconnects_total %d\n", s.UDPAssociationReconnects)
+	fmt.Fprintf(w, "niulang_udp_association_rescue_failures_total %d\n", s.UDPAssociationRescueFailures)
+	fmt.Fprintf(w, "niulang_completion_timeouts_total %d\n", s.CompletionTimeouts)
+	fmt.Fprintf(w, "niulang_flow_timeouts_total %d\n", s.FlowTimeouts)
 	// A non-zero consecutive count means the gateway is enforcing a snapshot
 	// it can no longer re-read: established devices keep working while every
 	// enrollment fails. Alert on the consecutive count, and use
-	// time() - queqiao_authorization_last_good_timestamp_seconds for the age
+	// time() - niulang_authorization_last_good_timestamp_seconds for the age
 	// of the rules actually in force.
-	fmt.Fprintf(w, "queqiao_authorization_refresh_failures_total %d\n", s.AuthorizationRefreshFailures)
-	fmt.Fprintf(w, "queqiao_authorization_reloads_total %d\n", s.AuthorizationReloads)
-	fmt.Fprintf(w, "queqiao_authorization_consecutive_refresh_failures %d\n", s.AuthorizationConsecutiveRefreshFailures)
-	fmt.Fprintf(w, "queqiao_authorization_last_good_timestamp_seconds %d\n", s.AuthorizationLastGoodUnix)
+	fmt.Fprintf(w, "niulang_authorization_refresh_failures_total %d\n", s.AuthorizationRefreshFailures)
+	fmt.Fprintf(w, "niulang_authorization_reloads_total %d\n", s.AuthorizationReloads)
+	fmt.Fprintf(w, "niulang_authorization_consecutive_refresh_failures %d\n", s.AuthorizationConsecutiveRefreshFailures)
+	fmt.Fprintf(w, "niulang_authorization_last_good_timestamp_seconds %d\n", s.AuthorizationLastGoodUnix)
 	// A rising unreplayable count means lane rescue is no longer available for
 	// the affected flows: their rescue window was dropped to keep the
 	// application moving, so a lane failure now fails the flow.
-	fmt.Fprintf(w, "queqiao_replay_bytes_in_use %d\n", s.ReplayBytesInUse)
-	fmt.Fprintf(w, "queqiao_bulk_isolations_total %d\n", s.BulkIsolations)
-	fmt.Fprintf(w, "queqiao_lane_reinjections_total %d\n", s.Reinjections)
-	fmt.Fprintf(w, "queqiao_peer_protocol_violations_total %d\n", s.PeerProtocolViolations)
-	fmt.Fprintf(w, "queqiao_quic_lanes %d\n", s.QUICLanes)
-	fmt.Fprintf(w, "queqiao_quic_latest_rtt_seconds %.9f\n", s.QUICLatestRTT.Seconds())
-	fmt.Fprintf(w, "queqiao_quic_smoothed_rtt_seconds %.9f\n", s.QUICSmoothedRTT.Seconds())
-	fmt.Fprintf(w, "queqiao_quic_bytes_sent %d\n", s.QUICBytesSent)
-	fmt.Fprintf(w, "queqiao_quic_bytes_received %d\n", s.QUICBytesReceived)
-	fmt.Fprintf(w, "queqiao_quic_packets_sent %d\n", s.QUICPacketsSent)
-	fmt.Fprintf(w, "queqiao_quic_packets_received %d\n", s.QUICPacketsReceived)
+	fmt.Fprintf(w, "niulang_replay_bytes_in_use %d\n", s.ReplayBytesInUse)
+	fmt.Fprintf(w, "niulang_bulk_isolations_total %d\n", s.BulkIsolations)
+	fmt.Fprintf(w, "niulang_lane_reinjections_total %d\n", s.Reinjections)
+	fmt.Fprintf(w, "niulang_peer_protocol_violations_total %d\n", s.PeerProtocolViolations)
+	fmt.Fprintf(w, "niulang_quic_lanes %d\n", s.QUICLanes)
+	fmt.Fprintf(w, "niulang_quic_latest_rtt_seconds %.9f\n", s.QUICLatestRTT.Seconds())
+	fmt.Fprintf(w, "niulang_quic_smoothed_rtt_seconds %.9f\n", s.QUICSmoothedRTT.Seconds())
+	fmt.Fprintf(w, "niulang_quic_bytes_sent %d\n", s.QUICBytesSent)
+	fmt.Fprintf(w, "niulang_quic_bytes_received %d\n", s.QUICBytesReceived)
+	fmt.Fprintf(w, "niulang_quic_packets_sent %d\n", s.QUICPacketsSent)
+	fmt.Fprintf(w, "niulang_quic_packets_received %d\n", s.QUICPacketsReceived)
 	// What the path did, and what the controller was told about it. Observed
 	// is the one to divide by packets_sent for a loss rate; the controller
 	// figure below is congestion only, and on an erasure path the two differ
 	// by most of the loss.
-	fmt.Fprintf(w, "queqiao_quic_loss_observed_packets_total %d\n", s.QUICLossObservedPackets)
+	fmt.Fprintf(w, "niulang_quic_loss_observed_packets_total %d\n", s.QUICLossObservedPackets)
 	// A rising expiry count means some flow's telemetry stopped being
 	// refreshed without being removed. The RTT values above are maxima, so
 	// that is the failure mode which freezes them at a stale constant.
-	fmt.Fprintf(w, "queqiao_quic_observations_expired_total %d\n", s.QUICObservationsExpired)
+	fmt.Fprintf(w, "niulang_quic_observations_expired_total %d\n", s.QUICObservationsExpired)
 	if s.QUICControllerKind != "" {
-		fmt.Fprintf(w, "queqiao_quic_controller_kind{kind=\"%s\"} 1\n", s.QUICControllerKind)
+		fmt.Fprintf(w, "niulang_quic_controller_kind{kind=\"%s\"} 1\n", s.QUICControllerKind)
 	}
-	fmt.Fprintf(w, "queqiao_quic_controller_mode %d\n", s.QUICControllerMode)
-	fmt.Fprintf(w, "queqiao_quic_controller_max_bandwidth_bytes_per_second %d\n", s.QUICControllerMaxBandwidth)
-	fmt.Fprintf(w, "queqiao_quic_controller_latest_sample_bytes_per_second %d\n", s.QUICControllerLatestSample)
-	fmt.Fprintf(w, "queqiao_quic_controller_latest_ack_rate_bytes_per_second %d\n", s.QUICControllerLatestAckRate)
-	fmt.Fprintf(w, "queqiao_quic_controller_latest_send_rate_bytes_per_second %d\n", s.QUICControllerLatestSendRate)
-	fmt.Fprintf(w, "queqiao_quic_controller_samples_total %d\n", s.QUICControllerSamples)
-	fmt.Fprintf(w, "queqiao_quic_controller_non_app_limited_samples_total %d\n", s.QUICControllerNonAppSamples)
-	fmt.Fprintf(w, "queqiao_quic_controller_app_limited_samples_total %d\n", s.QUICControllerAppSamples)
-	fmt.Fprintf(w, "queqiao_quic_controller_state_misses_total %d\n", s.QUICControllerStateMisses)
-	fmt.Fprintf(w, "queqiao_quic_controller_zero_samples_total %d\n", s.QUICControllerZeroSamples)
-	fmt.Fprintf(w, "queqiao_quic_controller_round %d\n", s.QUICControllerRound)
-	fmt.Fprintf(w, "queqiao_quic_controller_pacing_rate_bytes_per_second %d\n", s.QUICControllerPacingRate)
-	fmt.Fprintf(w, "queqiao_quic_controller_congestion_window_bytes %d\n", s.QUICControllerCongestionWindow)
-	fmt.Fprintf(w, "queqiao_quic_controller_bytes_in_flight %d\n", s.QUICControllerBytesInFlight)
-	fmt.Fprintf(w, "queqiao_quic_controller_bytes_lost %d\n", s.QUICControllerBytesLost)
-	fmt.Fprintf(w, "queqiao_quic_controller_packets_lost %d\n", s.QUICControllerPacketsLost)
-	fmt.Fprintf(w, "queqiao_quic_controller_min_rtt_seconds %.9f\n", s.QUICControllerMinRTT.Seconds())
-	fmt.Fprintf(w, "queqiao_quic_wire_cap_rate_bytes_per_second %d\n", s.QUICWireCapRate)
-	fmt.Fprintf(w, "queqiao_quic_wire_cap_bulk_rate_bytes_per_second %d\n", s.QUICWireCapBulkRate)
-	fmt.Fprintf(w, "queqiao_quic_wire_cap_charged_bytes_total %d\n", s.QUICWireCapBytes)
-	fmt.Fprintf(w, "queqiao_quic_wire_cap_overshoot_packets_total %d\n", s.QUICWireCapOvershootPackets)
-	fmt.Fprintf(w, "queqiao_quic_wire_cap_debt_seconds %.9f\n", s.QUICWireCapDebt.Seconds())
+	fmt.Fprintf(w, "niulang_quic_controller_mode %d\n", s.QUICControllerMode)
+	fmt.Fprintf(w, "niulang_quic_controller_max_bandwidth_bytes_per_second %d\n", s.QUICControllerMaxBandwidth)
+	fmt.Fprintf(w, "niulang_quic_controller_latest_sample_bytes_per_second %d\n", s.QUICControllerLatestSample)
+	fmt.Fprintf(w, "niulang_quic_controller_latest_ack_rate_bytes_per_second %d\n", s.QUICControllerLatestAckRate)
+	fmt.Fprintf(w, "niulang_quic_controller_latest_send_rate_bytes_per_second %d\n", s.QUICControllerLatestSendRate)
+	fmt.Fprintf(w, "niulang_quic_controller_samples_total %d\n", s.QUICControllerSamples)
+	fmt.Fprintf(w, "niulang_quic_controller_non_app_limited_samples_total %d\n", s.QUICControllerNonAppSamples)
+	fmt.Fprintf(w, "niulang_quic_controller_app_limited_samples_total %d\n", s.QUICControllerAppSamples)
+	fmt.Fprintf(w, "niulang_quic_controller_state_misses_total %d\n", s.QUICControllerStateMisses)
+	fmt.Fprintf(w, "niulang_quic_controller_zero_samples_total %d\n", s.QUICControllerZeroSamples)
+	fmt.Fprintf(w, "niulang_quic_controller_round %d\n", s.QUICControllerRound)
+	fmt.Fprintf(w, "niulang_quic_controller_pacing_rate_bytes_per_second %d\n", s.QUICControllerPacingRate)
+	fmt.Fprintf(w, "niulang_quic_controller_congestion_window_bytes %d\n", s.QUICControllerCongestionWindow)
+	fmt.Fprintf(w, "niulang_quic_controller_bytes_in_flight %d\n", s.QUICControllerBytesInFlight)
+	fmt.Fprintf(w, "niulang_quic_controller_bytes_lost %d\n", s.QUICControllerBytesLost)
+	fmt.Fprintf(w, "niulang_quic_controller_packets_lost %d\n", s.QUICControllerPacketsLost)
+	fmt.Fprintf(w, "niulang_quic_controller_min_rtt_seconds %.9f\n", s.QUICControllerMinRTT.Seconds())
+	fmt.Fprintf(w, "niulang_quic_wire_cap_rate_bytes_per_second %d\n", s.QUICWireCapRate)
+	fmt.Fprintf(w, "niulang_quic_wire_cap_bulk_rate_bytes_per_second %d\n", s.QUICWireCapBulkRate)
+	fmt.Fprintf(w, "niulang_quic_wire_cap_charged_bytes_total %d\n", s.QUICWireCapBytes)
+	fmt.Fprintf(w, "niulang_quic_wire_cap_overshoot_packets_total %d\n", s.QUICWireCapOvershootPackets)
+	fmt.Fprintf(w, "niulang_quic_wire_cap_debt_seconds %.9f\n", s.QUICWireCapDebt.Seconds())
 	// The erasure the path is measured to be applying, labelled by the
 	// direction it was measured on. A gateway's send direction is its
 	// downstream, which is the direction that was invisible when the only
 	// erasure figure published was the floor below.
-	fmt.Fprintf(w, "queqiao_erasure_ratio{direction=\"send\"} %.9f\n", s.QUICErasureSend)
+	fmt.Fprintf(w, "niulang_erasure_ratio{direction=\"send\"} %.9f\n", s.QUICErasureSend)
 	// The receive direction, measured by this endpoint's decoders rather than
 	// inferred from acknowledgements. Every source symbol the peer sent ends in
 	// exactly one of the three outcomes below, so they are a denominator and
@@ -936,41 +936,41 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// The residual is what the code could not repair and the session has to
 	// re-issue a round trip later. It is the number the motivating incident was
 	// actually made of -- 11% of the payload -- and it had no metric at all.
-	fmt.Fprintf(w, "queqiao_coded_symbols_total{outcome=\"arrived\"} %d\n", s.QUICCodedSources)
-	fmt.Fprintf(w, "queqiao_coded_symbols_total{outcome=\"recovered\"} %d\n", s.QUICCodedRecovered)
-	fmt.Fprintf(w, "queqiao_coded_symbols_total{outcome=\"lost\"} %d\n", s.QUICCodedLost)
-	fmt.Fprintf(w, "queqiao_erasure_ratio{direction=\"receive\"} %.9f\n", s.ReceiveErasure())
-	fmt.Fprintf(w, "queqiao_erasure_residual_ratio{direction=\"receive\"} %.9f\n", s.ReceiveResidual())
+	fmt.Fprintf(w, "niulang_coded_symbols_total{outcome=\"arrived\"} %d\n", s.QUICCodedSources)
+	fmt.Fprintf(w, "niulang_coded_symbols_total{outcome=\"recovered\"} %d\n", s.QUICCodedRecovered)
+	fmt.Fprintf(w, "niulang_coded_symbols_total{outcome=\"lost\"} %d\n", s.QUICCodedLost)
+	fmt.Fprintf(w, "niulang_erasure_ratio{direction=\"receive\"} %.9f\n", s.ReceiveErasure())
+	fmt.Fprintf(w, "niulang_erasure_residual_ratio{direction=\"receive\"} %.9f\n", s.ReceiveResidual())
 	// How much of the sending rate the delay bound is removing. Non-zero means
 	// the path is carrying more than one bandwidth-delay product of queue and
 	// is being held back by it, which is a different condition from a path that
 	// simply measured less.
-	fmt.Fprintf(w, "queqiao_delay_brake_ratio %.9f\n", s.QUICDelayBrake)
+	fmt.Fprintf(w, "niulang_delay_brake_ratio %.9f\n", s.QUICDelayBrake)
 	// The shape of the delivery-rate samples the bandwidth estimate is built
 	// from. The estimate is a maximum over these, and a maximum far above the
 	// mean is a tail rather than the path -- while a tail measured over a short
 	// interval is a measurement artefact rather than either.
-	fmt.Fprintf(w, "queqiao_quic_sample_mean_bytes_per_second %d\n", s.QUICSampleMean)
-	fmt.Fprintf(w, "queqiao_quic_sample_max_bytes_per_second %d\n", s.QUICSampleMax)
-	fmt.Fprintf(w, "queqiao_quic_sample_max_delivered_bytes %d\n", s.QUICSampleDelivered)
-	fmt.Fprintf(w, "queqiao_quic_sample_max_interval_seconds %.9f\n", s.QUICSampleInterval.Seconds())
+	fmt.Fprintf(w, "niulang_quic_sample_mean_bytes_per_second %d\n", s.QUICSampleMean)
+	fmt.Fprintf(w, "niulang_quic_sample_max_bytes_per_second %d\n", s.QUICSampleMax)
+	fmt.Fprintf(w, "niulang_quic_sample_max_delivered_bytes %d\n", s.QUICSampleDelivered)
+	fmt.Fprintf(w, "niulang_quic_sample_max_interval_seconds %.9f\n", s.QUICSampleInterval.Seconds())
 	if s.QUICControllerInRecovery {
-		fmt.Fprintln(w, "queqiao_quic_controller_in_recovery 1")
+		fmt.Fprintln(w, "niulang_quic_controller_in_recovery 1")
 	} else {
-		fmt.Fprintln(w, "queqiao_quic_controller_in_recovery 0")
+		fmt.Fprintln(w, "niulang_quic_controller_in_recovery 0")
 	}
 	for i, value := range s.ClassTransitions {
-		fmt.Fprintf(w, "queqiao_class_transitions_total{class=\"%d\"} %d\n", i, value)
+		fmt.Fprintf(w, "niulang_class_transitions_total{class=\"%d\"} %d\n", i, value)
 	}
 	// The reasons stay separate because they mean different things to whoever
 	// is on call: a forgotten session is a peer whose flows are failing, a
 	// principal mismatch is a peer reaching for a session that is not its own,
 	// and an unavailable lane is this endpoint's own ceiling.
 	for i, value := range s.LaneJoinRefusals {
-		fmt.Fprintf(w, "queqiao_lane_join_refused_total{reason=\"%s\"} %d\n", LaneJoinRefusal(i), value)
+		fmt.Fprintf(w, "niulang_lane_join_refused_total{reason=\"%s\"} %d\n", LaneJoinRefusal(i), value)
 	}
 	for i, value := range s.AccountAdmissionRefusals {
-		fmt.Fprintf(w, "queqiao_account_admission_refused_total{reason=\"%s\"} %d\n", AccountRefusal(i), value)
+		fmt.Fprintf(w, "niulang_account_admission_refused_total{reason=\"%s\"} %d\n", AccountRefusal(i), value)
 	}
 }
 

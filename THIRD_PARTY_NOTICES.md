@@ -1,6 +1,6 @@
 # Third-party notices
 
-Queqiao is licensed under the MIT License. The `queqiaod` binary also links the
+Niulang is licensed under the MIT License. The `niulangd` binary also links the
 following Go modules:
 
 | Module | Version | License |
@@ -21,5 +21,5 @@ components and their versions.
 
 The congestion-controller design acknowledgements are retained in
 `internal/congestion/NOTICE` and included in release archives. Test-only and
-benchmark-only dependencies are not linked into `queqiaod` and therefore do
+benchmark-only dependencies are not linked into `niulangd` and therefore do
 not appear in the binary notice or SBOM.

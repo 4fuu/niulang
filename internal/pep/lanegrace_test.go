@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 // The replacement grace covers the time a replacement lane needs to arrive.

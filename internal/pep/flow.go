@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/limiter"
+	"github.com/4fuu/niulang/internal/limiter"
 )
 
 const defaultChunkSize = 32 * 1024

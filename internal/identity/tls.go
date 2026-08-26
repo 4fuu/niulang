@@ -234,7 +234,7 @@ func EnrollmentTLSConfig(rootPin, providerID, gatewayID string) *tls.Config {
 }
 
 // pinnedClientTLSConfig deliberately performs custom verification because a
-// Queqiao gateway is identified by a provider URI rather than a DNS name. The
+// Niulang gateway is identified by a provider URI rather than a DNS name. The
 // scary standard-library field is never user-configurable: VerifyConnection
 // always pins the exact provider root, validates the chain and serverAuth EKU,
 // and checks the expected gateway URI.
@@ -299,7 +299,7 @@ func PrincipalFromTLS(state tls.ConnectionState) (Principal, error) {
 
 func PrincipalFromCertificate(cert *x509.Certificate) (Principal, error) {
 	if cert == nil || len(cert.URIs) != 1 {
-		return Principal{}, errors.New("device certificate has no unique Queqiao identity")
+		return Principal{}, errors.New("device certificate has no unique Niulang identity")
 	}
 	u := cert.URIs[0]
 	if u.Scheme != "queqiao" || u.Host == "" {

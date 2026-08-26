@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bojieli/queqiao/internal/fec"
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
+	"github.com/4fuu/niulang/internal/fec"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/session"
 )
 
 var update = flag.Bool("update", false, "rewrite the committed protocol-1 vectors from this build")
@@ -42,9 +42,8 @@ func loadVectors(t *testing.T) File {
 //
 // The asymmetry is the point. Regenerating on every run would make the file a
 // mirror of whatever the code does, which agrees with any change including a
-// wire break. Failing here means either this build changed the wire, in which
-// case the protocol version has to move with it, or the file was edited by
-// hand, in which case one of the two is wrong.
+// compatibility break. Failing here means either the data wire or identity
+// bootstrap changed deliberately, or the file and implementation disagree.
 func TestVectorsAreCurrent(t *testing.T) {
 	encoded, err := json.MarshalIndent(generate(t), "", "  ")
 	if err != nil {
@@ -64,9 +63,10 @@ func TestVectorsAreCurrent(t *testing.T) {
 	}
 	if string(committed) != string(encoded) {
 		t.Fatalf("this build no longer produces the committed protocol-1 vectors.\n"+
-			"If the wire genuinely changed, protocol.Version must change with it and the\n"+
-			"data ALPN with that. If it did not, this is a regression. Only once one of\n"+
-			"those two is true, run:\n    go test ./internal/conformance -update\n"+
+			"A data-wire change requires a matching protocol.Version and data ALPN; an\n"+
+			"identity-bootstrap change requires an explicit compatibility decision. If\n"+
+			"neither changed deliberately, this is a regression. After review, run:\n"+
+			"    go test ./internal/conformance -update\n"+
 			"committed %d bytes, this build %d bytes", len(committed), len(encoded))
 	}
 }
@@ -75,9 +75,9 @@ func generate(t *testing.T) File {
 	t.Helper()
 	return File{
 		Protocol: int(protocol.Version),
-		Note: "Frozen conformance vectors for queqiao wire protocol 1. Every credential-shaped " +
-			"value here is synthetic. Regenerating this file is a wire change: protocol.Version " +
-			"and the data ALPN must move with it.",
+		Note: "Frozen conformance vectors for Niulang protocol 1. Every credential-shaped " +
+			"value here is synthetic. Regenerating this file is a compatibility change; data-plane " +
+			"changes require protocol.Version and the data ALPN to move with them.",
 		FrameHeaders:    frameHeaderVectors(t),
 		AckRanges:       ackRangeVectors(t),
 		Destinations:    destinationVectors(t),
@@ -513,7 +513,7 @@ func invitationVector(t *testing.T) InvitationVector {
 		t.Fatal(err)
 	}
 	return InvitationVector{
-		URI:          "queqiao://enroll/" + base64.RawURLEncoding.EncodeToString(body),
+		URI:          "niulang://enroll/" + base64.RawURLEncoding.EncodeToString(body),
 		Version:      invitation.Version,
 		ProviderName: invitation.ProviderName, ProviderID: invitation.ProviderID,
 		Endpoint: invitation.Endpoint, GatewayID: invitation.GatewayID,

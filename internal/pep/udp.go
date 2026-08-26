@@ -1,7 +1,7 @@
 package pep
 
 // This file implements the SOCKS5 UDP-associate data plane. UDP packets are
-// carried as individual authenticated queqiao TypePacket frames, so packet
+// carried as individual authenticated niulang TypePacket frames, so packet
 // boundaries survive whichever substrate carries them.
 //
 // Where the lane's QUIC connection negotiated DATAGRAM in both directions,
@@ -29,11 +29,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
-	"github.com/bojieli/queqiao/internal/socks5"
-	"github.com/bojieli/queqiao/internal/udperr"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/session"
+	"github.com/4fuu/niulang/internal/socks5"
+	"github.com/4fuu/niulang/internal/udperr"
 )
 
 const (

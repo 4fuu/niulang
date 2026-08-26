@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/4fuu/niulang/internal/identity"
 	"github.com/apernet/quic-go"
-	"github.com/bojieli/queqiao/internal/identity"
 )
 
 type routeErrorPacketConn struct{ err error }

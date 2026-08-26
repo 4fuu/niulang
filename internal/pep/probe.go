@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/session"
 )
 
 // ProbeResult describes one authenticated provider connection attempt.
 // Latency includes name resolution, transport establishment, mutual TLS,
-// certificate authorization, and Queqiao ALPN negotiation.
+// certificate authorization, and Niulang ALPN negotiation.
 type ProbeResult struct {
 	Transport TransportKind
 	Latency   time.Duration

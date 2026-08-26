@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/pathsim"
+	"github.com/4fuu/niulang/internal/pathsim"
 )
 
-// Falsification case 4 from docs/CONTROL-REDESIGN.md, and it fails.
+// A known falsification case for the controller, and it fails.
 //
 // A policer drops what it cannot pass and holds nothing, so overload produces
 // loss and no delay. Loss is no longer a congestion signal and there is no
@@ -19,7 +19,7 @@ import (
 // This is a characterization test. It asserts the defect rather than the fix,
 // so that the behaviour cannot change silently in either direction. If it
 // starts failing because the sender no longer overdrives, that is the case
-// being resolved: update it and the design document together.
+// being resolved: update this characterization and its rationale together.
 //
 // It matters more than a hypothetical, because internal/pathsim records that
 // the live path this project targets is a policer -- "at twice the bottleneck

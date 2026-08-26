@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/fec"
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
+	"github.com/4fuu/niulang/internal/fec"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/session"
 )
 
 func decodeHex(t *testing.T, name, s string) []byte {

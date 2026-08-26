@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
-	"github.com/bojieli/queqiao/internal/socks5"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/session"
+	"github.com/4fuu/niulang/internal/socks5"
 )
 
 type observedUDPAssociationConn struct {

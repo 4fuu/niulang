@@ -7,7 +7,7 @@ set -Euo pipefail
 usage() {
     echo "Usage: $0 OUTPUT_DIR" >&2
     echo "Optional: SING_BOX=/path/to/sing-box adds the real Hysteria2 implementation" >&2
-    echo "Environment: QUEQIAO_TRIALS=3 QUEQIAO_UDP_PACKETS=80 QUEQIAO_UDP_INTERVAL=20ms" >&2
+    echo "Environment: NIULANG_TRIALS=3 NIULANG_UDP_PACKETS=80 NIULANG_UDP_INTERVAL=20ms" >&2
 }
 
 [[ $# -eq 1 ]] || { usage; exit 2; }
@@ -21,12 +21,12 @@ source "$repo/scripts/benchmark_source.sh"
 command -v go >/dev/null || { echo "go is required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
-trials=${QUEQIAO_TRIALS:-3}
-packets=${QUEQIAO_UDP_PACKETS:-80}
-payload=${QUEQIAO_UDP_PAYLOAD:-256}
-interval=${QUEQIAO_UDP_INTERVAL:-20ms}
-settle=${QUEQIAO_UDP_SETTLE:-3s}
-timeout=${QUEQIAO_TIMEOUT:-45s}
+trials=${NIULANG_TRIALS:-3}
+packets=${NIULANG_UDP_PACKETS:-80}
+payload=${NIULANG_UDP_PAYLOAD:-256}
+interval=${NIULANG_UDP_INTERVAL:-20ms}
+settle=${NIULANG_UDP_SETTLE:-3s}
+timeout=${NIULANG_TIMEOUT:-45s}
 sing_box=${SING_BOX:-}
 if [[ -n "$sing_box" && ! -x "$sing_box" ]]; then
     echo "SING_BOX is not executable: $sing_box" >&2
@@ -35,7 +35,7 @@ fi
 
 mkdir -p "$output"
 {
-    echo 'format=queqiao-udp-delivery-v1'
+    echo 'format=niulang-udp-delivery-v1'
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "commit=$(git rev-parse HEAD)"
     echo "go_version=$(go version)"
@@ -62,7 +62,7 @@ run_cell() {
     if [[ "$brutal" != 0 ]]; then extra+=(--brutal-rate "$brutal"); fi
     if [[ "$stream" == 1 ]]; then extra+=(--udp-on-stream); fi
 
-    go run ./cmd/queqiaobench "${stack_args[@]}" \
+    go run ./cmd/niulangbench "${stack_args[@]}" \
         --bytes 1024 --flows 1 --trials "$trials" --timeout "$timeout" \
         --udp-packets "$packets" --udp-payload "$payload" \
         --udp-interval "$interval" --udp-settle "$settle" \
@@ -94,9 +94,9 @@ for path_name in independent burst policer; do
         burst)       path_args=(--rtt 226 --rate 50 --loss 15 --loss-burst 8) ;;
         policer)     path_args=(--rtt 200 --rate 10 --loss 10 --policer-refill 8ms); fixed=9.5 ;;
     esac
-    run_cell "$path_name" erasure-datagram queqiao erasure 0 0 "${path_args[@]}"
-    run_cell "$path_name" erasure-stream queqiao erasure 0 1 "${path_args[@]}"
-    run_cell "$path_name" fixed-wire-datagram queqiao brutal-no-comp "$fixed" 0 "${path_args[@]}"
+    run_cell "$path_name" erasure-datagram niulang erasure 0 0 "${path_args[@]}"
+    run_cell "$path_name" erasure-stream niulang erasure 0 1 "${path_args[@]}"
+    run_cell "$path_name" fixed-wire-datagram niulang brutal-no-comp "$fixed" 0 "${path_args[@]}"
     if [[ -n "$sing_box" ]]; then
         run_cell "$path_name" hysteria2 hysteria2 bbr-tuic 0 0 "${path_args[@]}"
     fi

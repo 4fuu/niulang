@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/pathmodel"
-	"github.com/bojieli/queqiao/internal/pathsim"
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/pathsim"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 func TestCurrentUplinkAppliesSocketControl(t *testing.T) {

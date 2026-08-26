@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measure the cold and warm request cost of Queqiao's persistent QUIC pool.
+# Measure the cold and warm request cost of Niulang's persistent QUIC pool.
 # This tests the useful low-latency idea behind AnyTLS's idle-session pool
 # without importing TCP multiplexing or padding, neither of which is a latency
 # mechanism.
@@ -7,7 +7,7 @@ set -Euo pipefail
 
 usage() {
     echo "Usage: $0 OUTPUT_DIR" >&2
-    echo "Environment: QUEQIAO_TRIALS=5 QUEQIAO_RTTS='50 200' QUEQIAO_LOSSES='0 5'" >&2
+    echo "Environment: NIULANG_TRIALS=5 NIULANG_RTTS='50 200' NIULANG_LOSSES='0 5'" >&2
 }
 
 [[ $# -eq 1 ]] || { usage; exit 2; }
@@ -21,14 +21,14 @@ source "$repo/scripts/benchmark_source.sh"
 command -v go >/dev/null || { echo "go is required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
-trials=${QUEQIAO_TRIALS:-5}
-rtts=${QUEQIAO_RTTS:-"50 200"}
-losses=${QUEQIAO_LOSSES:-"0 5"}
-timeout=${QUEQIAO_TIMEOUT:-60s}
+trials=${NIULANG_TRIALS:-5}
+rtts=${NIULANG_RTTS:-"50 200"}
+losses=${NIULANG_LOSSES:-"0 5"}
+timeout=${NIULANG_TIMEOUT:-60s}
 
 mkdir -p "$output"
 {
-    echo 'format=queqiao-connection-reuse-v1'
+    echo 'format=niulang-connection-reuse-v1'
     echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "commit=$(git rev-parse HEAD)"
     echo "go_version=$(go version)"
@@ -48,8 +48,8 @@ for rtt in $rtts; do
             [[ "$pool" == true ]] || mode=unpooled
             json="$output/${mode}-rtt-${rtt}-loss-${loss}.json"
             log="$output/${mode}-rtt-${rtt}-loss-${loss}.txt"
-            go run ./cmd/queqiaobench \
-                --stacks queqiao --rtt "$rtt" --rate 100 --loss "$loss" \
+            go run ./cmd/niulangbench \
+                --stacks niulang --rtt "$rtt" --rate 100 --loss "$loss" \
                 --bytes 1024 --flows 1 --trials "$trials" --timeout "$timeout" \
                 --congestion erasure --quic-pool="$pool" --latency --json "$json" | tee "$log"
             jq -r --arg mode "$mode" --argjson rtt "$rtt" --argjson loss "$loss" '.latency[] |

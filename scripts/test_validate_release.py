@@ -15,9 +15,9 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ValidateReleaseTests(unittest.TestCase):
-    def test_readme_icon_is_required_in_every_archive(self):
+    def test_essential_documents_are_required_in_every_archive(self):
         self.assertIn("README.md", MODULE.REQUIRED_ARCHIVE_FILES)
-        self.assertIn("assets/queqiao-icon.png", MODULE.REQUIRED_ARCHIVE_FILES)
+        self.assertIn("SECURITY.md", MODULE.REQUIRED_ARCHIVE_FILES)
 
     def test_checksums_reject_paths_and_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -105,8 +105,8 @@ class ValidateReleaseTests(unittest.TestCase):
     def test_sbom_properties_reject_duplicates(self):
         component = {
             "properties": [
-                {"name": "queqiao:commit", "value": "one"},
-                {"name": "queqiao:commit", "value": "two"},
+                {"name": "niulang:commit", "value": "one"},
+                {"name": "niulang:commit", "value": "two"},
             ]
         }
         with self.assertRaises(ValueError):

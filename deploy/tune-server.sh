@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-config_path=${QUEQIAO_SYSCTL_CONFIG:-/etc/sysctl.d/90-queqiao-performance.conf}
-service_name=${QUEQIAO_SERVICE:-queqiaod.service}
+config_path=${NIULANG_SYSCTL_CONFIG:-/etc/sysctl.d/90-niulang-performance.conf}
+service_name=${NIULANG_SERVICE:-niulangd.service}
 restart_service=true
 dry_run=false
 
@@ -11,12 +11,12 @@ usage() {
 Usage: deploy/tune-server.sh [--dry-run] [--no-restart] [--service NAME]
 
 Persist and apply the Linux socket and backlog limits recommended for a
-Queqiao provider. If the selected systemd service is active, it is restarted
+Niulang provider. If the selected systemd service is active, it is restarted
 so its QUIC socket can request the larger buffer.
 
 Environment:
-  QUEQIAO_SYSCTL_CONFIG  sysctl file to install
-  QUEQIAO_SERVICE        systemd service name
+  NIULANG_SYSCTL_CONFIG  sysctl file to install
+  NIULANG_SERVICE        systemd service name
 EOF
 }
 
@@ -51,7 +51,7 @@ done
 
 settings() {
 	cat <<'EOF'
-# Queqiao provider socket queues.
+# Niulang provider socket queues.
 #
 # quic-go requests an 8 MiB UDP buffer. Linux caps SO_RCVBUF and SO_SNDBUF at
 # rmem_max and wmem_max, so leave headroom above that request. The backlog
@@ -125,4 +125,4 @@ if [ "$restart_service" = true ] && command -v systemctl >/dev/null 2>&1; then
 	fi
 fi
 
-echo "Queqiao server networking limits are installed and active."
+echo "Niulang server networking limits are installed and active."

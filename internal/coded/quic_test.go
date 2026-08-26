@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	wancongestion "github.com/4fuu/niulang/internal/congestion"
+	"github.com/4fuu/niulang/internal/pathsim"
 	"github.com/apernet/quic-go"
-	wancongestion "github.com/bojieli/queqiao/internal/congestion"
-	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
 func testTLS(t *testing.T) (*tls.Config, *tls.Config) {
@@ -53,8 +53,7 @@ func testTLS(t *testing.T) (*tls.Config, *tls.Config) {
 
 // liveChannel is the China-US path as measured on 2026-08-13: a token bucket
 // at 25 Mbit/s refilled every 8 ms, with an independent 42% erasure segment
-// behind it. See docs/PATH-CHARACTER-20260813.md and
-// pathsim.TestTheEmulatorReproducesTheMeasuredPath.
+// behind it. See pathsim.TestTheEmulatorReproducesTheMeasuredPath.
 func liveChannel() pathsim.Config {
 	return pathsim.Config{
 		OneWayDelay:         150 * time.Millisecond,

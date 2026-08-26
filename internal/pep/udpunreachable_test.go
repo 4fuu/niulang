@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/pathmodel"
-	"github.com/bojieli/queqiao/internal/socks5"
+	"github.com/4fuu/niulang/internal/pathmodel"
+	"github.com/4fuu/niulang/internal/socks5"
 )
 
 // A UDP association must outlive a destination that stops listening.

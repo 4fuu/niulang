@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	wancongestion "github.com/4fuu/niulang/internal/congestion"
+	"github.com/4fuu/niulang/internal/pathsim"
 	"github.com/apernet/quic-go"
-	wancongestion "github.com/bojieli/queqiao/internal/congestion"
-	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
 // datagramRate measures what a controller can actually push across the path,

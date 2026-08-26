@@ -37,10 +37,10 @@ func TestAuthorizationCountersAreExported(t *testing.T) {
 	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
 	for _, want := range []string{
-		"queqiao_authorization_refresh_failures_total 3",
-		"queqiao_authorization_reloads_total 1",
-		"queqiao_authorization_consecutive_refresh_failures 3",
-		"queqiao_authorization_last_good_timestamp_seconds 1700000000",
+		"niulang_authorization_refresh_failures_total 3",
+		"niulang_authorization_reloads_total 1",
+		"niulang_authorization_consecutive_refresh_failures 3",
+		"niulang_authorization_last_good_timestamp_seconds 1700000000",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("exposition is missing %q", want)

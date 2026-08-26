@@ -235,9 +235,8 @@ func TestIndependenceIsNotClaimedBeforeItIsKnown(t *testing.T) {
 	}
 }
 
-// Analyze is what measurement tools report, so it has to reproduce the
-// published figures for the path. These are the live 1 Mbit/s numbers from
-// docs/PATH-CHARACTER-20260813.md, regenerated from the same channel model.
+// Analyze is what measurement tools report, so it has to reproduce the live
+// 1 Mbit/s path figures captured by this channel model.
 func TestAnalyzeReproducesTheMeasuredChannel(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
 	p := Analyze(bernoulli(rng, 200000, 0.45))

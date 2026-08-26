@@ -12,13 +12,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/4fuu/niulang/internal/classifier"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/limiter"
+	"github.com/4fuu/niulang/internal/metrics"
+	"github.com/4fuu/niulang/internal/protocol"
+	"github.com/4fuu/niulang/internal/session"
 	"github.com/apernet/quic-go"
-	"github.com/bojieli/queqiao/internal/classifier"
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/limiter"
-	"github.com/bojieli/queqiao/internal/metrics"
-	"github.com/bojieli/queqiao/internal/protocol"
-	"github.com/bojieli/queqiao/internal/session"
 )
 
 // Must exceed the client's bounded lane-replacement wait so a final-ACK loss
@@ -564,7 +564,7 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	// ordering is important during shutdown: a handler blocked in Read must be
 	// released before Wait can complete.
 	defer wg.Wait()
-	defer conn.CloseWithError(0, "queqiao session complete")
+	defer conn.CloseWithError(0, "niulang session complete")
 	controller := configureQUICController(conn, congestionConfig{
 		kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
 		adaptiveMinBytesPerSec: s.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: s.cfg.AdaptiveMaxBytesSec,

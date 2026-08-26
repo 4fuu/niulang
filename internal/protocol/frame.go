@@ -1,4 +1,4 @@
-// Package protocol defines the versioned, bounded queqiao frame envelope.
+// Package protocol defines the versioned, bounded niulang frame envelope.
 package protocol
 
 import (

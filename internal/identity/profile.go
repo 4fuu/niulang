@@ -132,7 +132,7 @@ func (i Invitation) URI() (string, error) {
 	if len(data) > maxInvitationSize {
 		return "", errors.New("invitation is too large")
 	}
-	return "queqiao://enroll/" + base64.RawURLEncoding.EncodeToString(data), nil
+	return "niulang://enroll/" + base64.RawURLEncoding.EncodeToString(data), nil
 }
 
 func ParseInvitation(text string, now time.Time) (Invitation, error) {
@@ -140,13 +140,13 @@ func ParseInvitation(text string, now time.Time) (Invitation, error) {
 		return Invitation{}, errors.New("invitation URI is too large")
 	}
 	u, err := url.Parse(strings.TrimSpace(text))
-	if err != nil || u.Scheme != "queqiao" || u.Host != "enroll" || u.RawQuery != "" || u.Fragment != "" {
-		return Invitation{}, errors.New("invalid Queqiao invitation URI")
+	if err != nil || u.Scheme != "niulang" || u.Host != "enroll" || u.RawQuery != "" || u.Fragment != "" {
+		return Invitation{}, errors.New("invalid Niulang invitation URI")
 	}
 	raw := strings.TrimPrefix(u.EscapedPath(), "/")
 	data, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil || len(data) == 0 || len(data) > maxInvitationSize {
-		return Invitation{}, errors.New("invalid Queqiao invitation payload")
+		return Invitation{}, errors.New("invalid Niulang invitation payload")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

@@ -1,4 +1,4 @@
-module github.com/bojieli/queqiao
+module github.com/4fuu/niulang
 
 go 1.25.13
 

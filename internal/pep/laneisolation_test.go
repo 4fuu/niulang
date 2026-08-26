@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/identity"
-	"github.com/bojieli/queqiao/internal/protocol"
+	"github.com/4fuu/niulang/internal/identity"
+	"github.com/4fuu/niulang/internal/protocol"
 )
 
 // isolationLane builds a lane with a usable frame connection, which addLane

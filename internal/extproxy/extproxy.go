@@ -1,8 +1,8 @@
-// Package extproxy launches third-party proxy implementations so queqiao can be
+// Package extproxy launches third-party proxy implementations so niulang can be
 // measured against them under the same emulated path.
 //
 // The in-tree reference in internal/baseline deliberately reproduces TUIC's
-// data-path shape on queqiao's own QUIC stack, which isolates the transport
+// data-path shape on niulang's own QUIC stack, which isolates the transport
 // design from the language and library. That is a useful control and a weak
 // claim: it is not TUIC, and it says nothing about the other transports people
 // actually deploy. This package closes that gap by driving real
@@ -11,7 +11,7 @@
 //
 // Each transport is a pair of processes: a server bound to a local address that
 // the path emulator forwards to, and a client exposing SOCKS5 that dials the
-// emulator. Nothing here is used by queqiaod; this is measurement scaffolding.
+// emulator. Nothing here is used by niulangd; this is measurement scaffolding.
 package extproxy
 
 import (
@@ -29,7 +29,7 @@ import (
 type Kind string
 
 const (
-	// TUIC is the protocol queqiao's in-tree reference imitates. Measuring
+	// TUIC is the protocol niulang's in-tree reference imitates. Measuring
 	// against the real implementation is the only way to claim parity with it.
 	TUIC Kind = "tuic"
 	// Hysteria2 is the other widely deployed QUIC-based transport for this
@@ -42,7 +42,7 @@ const (
 	VLESSWebSocket Kind = "vless-ws"
 	VLESSTCP       Kind = "vless-tcp"
 	// KCPTun is a fixed-rate erasure-coded transport, which is the comparison
-	// queqiao's own coding most needs: both spend parity to avoid a round
+	// niulang's own coding most needs: both spend parity to avoid a round
 	// trip, and they choose how much of it in opposite ways. It is also the
 	// first stack here that is a tunnel rather than a proxy; see SOCKSTarget.
 	KCPTun Kind = "kcptun"
@@ -180,7 +180,7 @@ type KCPParams struct {
 	// fast3.
 	Mode string
 	// DataShards and ParityShards are the FEC ratio, fixed for the whole run.
-	// Queqiao sizes its parity from the erasure it measures and revises it
+	// Niulang sizes its parity from the erasure it measures and revises it
 	// while a flow runs, so one ratio here is a comparison against one guess:
 	// sweep it. See docs/BENCHMARKING.md.
 	DataShards, ParityShards int
@@ -220,7 +220,7 @@ func (p KCPParams) withDefaults() KCPParams {
 		p.Crypt = "aes"
 	}
 	if p.Key == "" {
-		p.Key = "queqiao-benchmark-credential"
+		p.Key = "niulang-benchmark-credential"
 	}
 	return p
 }
@@ -230,7 +230,7 @@ func (c Config) withDefaults() Config {
 		c.Congestion = "bbr"
 	}
 	if c.Credential == "" {
-		c.Credential = "queqiao-benchmark-credential"
+		c.Credential = "niulang-benchmark-credential"
 	}
 	if c.UUID == "" {
 		c.UUID = "8c9dbf4a-3e2b-4a1c-9f6d-5b7e0a1c2d3e"

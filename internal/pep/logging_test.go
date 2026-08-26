@@ -3,9 +3,9 @@ package pep
 import (
 	"testing"
 
-	"github.com/bojieli/queqiao/internal/coded"
-	"github.com/bojieli/queqiao/internal/fec"
-	"github.com/bojieli/queqiao/internal/lossmodel"
+	"github.com/4fuu/niulang/internal/coded"
+	"github.com/4fuu/niulang/internal/fec"
+	"github.com/4fuu/niulang/internal/lossmodel"
 )
 
 func TestCodedSubstrateLogFieldsExposePlanAndEstimator(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/bojieli/queqiao/internal/identity"
+	"github.com/4fuu/niulang/internal/identity"
 )
 
 // enrollmentOutcome is the label an enrollment record is rate limited under:
