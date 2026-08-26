@@ -1486,6 +1486,11 @@ type laneJoinResult struct {
 	lane *mpLane
 	id   uint64
 	err  error
+	// replacement distinguishes a join opened because the flow has no lane
+	// left from one opened to widen a healthy bundle. Only the first is a
+	// replacement attempt, and the result arrives too late to tell by looking
+	// at the flow: by then it may have recovered or died.
+	replacement bool
 }
 
 // errLaneJoinRejected reports that the peer answered a lane join and refused
@@ -1948,7 +1953,9 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 				}
 				recoveryAttempts++
 				lastRecoveryAttempt = now
+				flow.noteReplacementAttempt()
 				if err := c.openRecoveryLane(manageCtx, flow, sessionID, flowID); err != nil {
+					flow.noteReplacementFailure()
 					if errors.Is(err, errLaneJoinRejected) {
 						// The peer answered, and its answer was that it does
 						// not hold this session. That does not change: a
@@ -1957,11 +1964,16 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 						// grace learning the same thing, so record the refusal
 						// and let the flow fail now.
 						flow.resumeRefused.Store(true)
-						c.cfg.Logger.Debug("peer cannot resume this association", "error", err)
+						c.cfg.Logger.Debug("peer cannot resume this association", "flow_id", flowID, "error", err)
 						return
 					}
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-						c.cfg.Logger.Warn("lane recovery unavailable", "error", err)
+						// The flow this belongs to is the whole point of the
+						// line: a gateway record saying a flow failed with no
+						// replacement cannot be told from one where none was
+						// tried unless the attempts can be found by flow.
+						c.cfg.Logger.Warn("lane recovery unavailable", "flow_id", flowID,
+							"attempt", recoveryAttempts, "error", err)
 					}
 					if recoveryBackoff == 0 {
 						recoveryBackoff = time.Second
@@ -2094,16 +2106,19 @@ func (c *Client) manageTCPBundle(ctx context.Context, flow *multipathFlow, sessi
 	var lastFailure time.Time
 	observedLaneFailures := flow.laneFailureCount()
 
-	launch := func() bool {
+	launch := func(replacement bool) bool {
 		laneID, err := flow.allocateJoinID()
 		if err != nil {
 			return false
+		}
+		if replacement {
+			flow.noteReplacementAttempt()
 		}
 		pending++
 		go func() {
 			lane, joinErr := c.openJoinLane(manageCtx, TransportTCP, sessionID, flowID, laneID)
 			select {
-			case joins <- laneJoinResult{lane: lane, id: laneID, err: joinErr}:
+			case joins <- laneJoinResult{lane: lane, id: laneID, err: joinErr, replacement: replacement}:
 			case <-manageCtx.Done():
 				if lane != nil {
 					_ = lane.fc.Close()
@@ -2124,6 +2139,9 @@ func (c *Client) manageTCPBundle(ctx context.Context, flow *multipathFlow, sessi
 				pending--
 			}
 			if result.err != nil {
+				if result.replacement {
+					flow.noteReplacementFailure()
+				}
 				if manageCtx.Err() != nil || flow.doneChanClosed() {
 					return
 				}
@@ -2206,7 +2224,7 @@ func (c *Client) manageTCPBundle(ctx context.Context, flow *multipathFlow, sessi
 			}
 			recoveryAttempts++
 			lastRecoveryAttempt = now
-			launch()
+			launch(true)
 			continue
 		}
 		// An accept-then-close peer must not reset the replacement budget on
@@ -2235,7 +2253,10 @@ func (c *Client) manageTCPBundle(ctx context.Context, flow *multipathFlow, sessi
 		}
 		missing := c.cfg.TCPFallbackLanes - healthy - pending
 		for range missing {
-			if !launch() {
+			// Widening a bundle that already has a healthy lane is not a
+			// replacement, and counting it as one would bury the flows that
+			// have nothing left in the ordinary run of bulk transfers.
+			if !launch(false) {
 				break
 			}
 		}
