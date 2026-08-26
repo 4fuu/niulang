@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/pathsim"
 )
 
@@ -70,6 +71,8 @@ type PathReport struct {
 	BrutalRateMbits         float64 `json:"brutal_rate_mbits,omitempty"`
 	AggregateRateMbits      float64 `json:"aggregate_rate_mbits,omitempty"`
 	InteractiveReserveMbits float64 `json:"interactive_reserve_mbits,omitempty"`
+	WireCapRateMbits        float64 `json:"wire_cap_rate_mbits,omitempty"`
+	WireReserveMbits        float64 `json:"wire_interactive_reserve_mbits,omitempty"`
 	ChunkSize               int     `json:"chunk_size,omitempty"`
 	QUICPool                bool    `json:"quic_pool"`
 	UDPOnStream             bool    `json:"udp_on_stream,omitempty"`
@@ -85,6 +88,20 @@ type TrialRecord struct {
 	Note         string              `json:"note,omitempty"`
 	Interactive  *InteractiveReport  `json:"interactive,omitempty"`
 	PathCounters *PathCountersReport `json:"path_counters,omitempty"`
+	WireCap      *WireCapReport      `json:"wire_cap,omitempty"`
+}
+
+type WireCapReport struct {
+	Client WireCapEndpointReport `json:"client"`
+	Server WireCapEndpointReport `json:"server"`
+}
+
+type WireCapEndpointReport struct {
+	RateMbits        float64 `json:"rate_mbits"`
+	BulkRateMbits    float64 `json:"bulk_rate_mbits"`
+	ChargedBytes     uint64  `json:"charged_bytes"`
+	OvershootPackets uint64  `json:"overshoot_packets"`
+	DebtMillis       float64 `json:"debt_ms"`
 }
 
 // PathCountersReport records what the deterministic emulator observed. Loss
@@ -129,6 +146,7 @@ type UDPRecord struct {
 	MaxMillis       float64             `json:"max_ms"`
 	Note            string              `json:"note,omitempty"`
 	PathCounters    *PathCountersReport `json:"path_counters,omitempty"`
+	WireCap         *WireCapReport      `json:"wire_cap,omitempty"`
 }
 
 type ContentionRecord struct {
@@ -197,6 +215,7 @@ func describePath(opts options, cfg pathsim.Config) PathReport {
 		Seed:                opts.seed, ObjectBytes: opts.bytes,
 		Congestion: opts.congestion, BrutalRateMbits: opts.brutalMbits,
 		AggregateRateMbits: opts.aggregateMbits, InteractiveReserveMbits: opts.interactiveReserveMbits,
+		WireCapRateMbits: opts.wireCapMbits, WireReserveMbits: opts.wireReserveMbits,
 		ChunkSize: opts.chunkSize, QUICPool: opts.quicPool, UDPOnStream: opts.udpOnStream,
 	}
 }
@@ -210,6 +229,29 @@ func describePathCounters(up, down pathsim.Stats) PathCountersReport {
 		}
 	}
 	return PathCountersReport{Upstream: describe(up), Downstream: describe(down)}
+}
+
+func describeWireCap(client, server metrics.Snapshot, configuredRate, configuredReserve float64) *WireCapReport {
+	describe := func(snapshot metrics.Snapshot) WireCapEndpointReport {
+		rate := round3(float64(snapshot.QUICWireCapRate) * 8 / 1e6)
+		bulkRate := round3(float64(snapshot.QUICWireCapBulkRate) * 8 / 1e6)
+		// Active-flow gauges disappear when a short benchmark flow closes,
+		// while the connection-scoped counters above remain banked. The exact
+		// configured rates are part of the harness, not a sampled gauge, so use
+		// them when there is no active observation left to report them.
+		if rate == 0 && configuredRate > 0 {
+			rate = configuredRate
+			bulkRate = configuredRate - configuredReserve
+		}
+		return WireCapEndpointReport{
+			RateMbits:        round3(rate),
+			BulkRateMbits:    round3(bulkRate),
+			ChargedBytes:     snapshot.QUICWireCapBytes,
+			OvershootPackets: snapshot.QUICWireCapOvershootPackets,
+			DebtMillis:       round3(float64(snapshot.QUICWireCapDebt) / float64(time.Millisecond)),
+		}
+	}
+	return &WireCapReport{Client: describe(client), Server: describe(server)}
 }
 
 func describeSource() SourceReport {

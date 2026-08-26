@@ -17,6 +17,7 @@ case "$output" in /*) ;; *) output=$PWD/$output ;; esac
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+source "$repo/scripts/benchmark_source.sh"
 command -v go >/dev/null || { echo "go is required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
@@ -40,7 +41,7 @@ mkdir -p "$output"
     echo "policer_refill=$refill"
 } >"$output/manifest.txt"
 git status --porcelain=v1 --untracked-files=normal >"$output/source-status.txt"
-git diff --binary HEAD >"$output/source.patch"
+write_source_patch "$output/source.patch"
 
 printf 'mode\tloss_percent\tcomplete\tmedian_mbits\tinteractive_p95_ms\tdownstream_packets\tbottleneck_drops\tbottleneck_drop_percent\terased_packets\n' >"$output/summary.tsv"
 

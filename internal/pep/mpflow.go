@@ -737,6 +737,15 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 				observation.ControllerDelayBrake = controller.DelayBrake
 			}
 			observation.ControllerInRecovery = observation.ControllerInRecovery || controller.InRecovery
+			if controller.WireCapRate > observation.ControllerWireCapRate {
+				observation.ControllerWireCapRate = controller.WireCapRate
+			}
+			if controller.WireCapBulkRate > observation.ControllerWireCapBulkRate {
+				observation.ControllerWireCapBulkRate = controller.WireCapBulkRate
+			}
+			if controller.WireCapDebt > observation.ControllerWireCapDebt {
+				observation.ControllerWireCapDebt = controller.WireCapDebt
+			}
 		}
 	}
 	if observation.SmoothedRTT > 0 {
@@ -2597,6 +2606,12 @@ func (f *multipathFlow) dataSubstrates() (coded, stream uint64) {
 
 func (f *multipathFlow) closeAll() {
 	f.closeOnce.Do(func() {
+		// Bank the last sub-second of connection movement before the lanes are
+		// closed and before finished prevents gauge publication. The periodic
+		// observer runs only once a second; without this final reading, every
+		// short flow and the tail of every long one vanished from cumulative
+		// QUIC and wire-cap counters.
+		f.observeTransport(f.healthyLanes())
 		// Mark completion before closing physical lanes. Their reader goroutines
 		// can observe the resulting EOF concurrently; those expected shutdown
 		// errors must not be exported as transport failures.

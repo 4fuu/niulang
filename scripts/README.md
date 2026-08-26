@@ -140,6 +140,15 @@ per family before a full run. The output bundle includes raw JSON and logs,
 four family-specific TSV files, `resources.tsv`, the machine/tool manifest,
 the source status and patch, and SHA-256 checksums.
 
+The combined matrix also includes the opt-in `erasure-wire-cap` prototype. It
+shares a QUIC packet-byte pacing scheduler across all connections on one
+provider path while leaving the erasure controller and adaptive FEC active.
+The campaign sets the total to 95% of the emulated rate and reserves 10% from
+bulk connections. JSON records configured total/bulk rates, charged bytes,
+overshoot packets, and debt. This is not enabled by default and is not a strict
+UDP/IP wire cap; see [the benchmarking guide](../docs/BENCHMARKING.md#low-latency-and-policer-experiments)
+for its measured boundary and implementation limitations.
+
 The first distinguishes seeded erasure from sender-induced policer drops and
 compares normal loss-compensating Brutal against `brutal-no-comp`, whose fixed
 rate is a per-lane wire target. The second measures whether the persistent QUIC

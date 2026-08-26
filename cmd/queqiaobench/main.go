@@ -41,6 +41,8 @@ import (
 	"github.com/bojieli/queqiao/internal/baseline"
 	"github.com/bojieli/queqiao/internal/extproxy"
 	"github.com/bojieli/queqiao/internal/identity"
+	qmetrics "github.com/bojieli/queqiao/internal/metrics"
+	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/pathsim"
 	"github.com/bojieli/queqiao/internal/pep"
 	"github.com/bojieli/queqiao/internal/socks5"
@@ -67,6 +69,8 @@ type options struct {
 	brutalMbits             float64
 	aggregateMbits          float64
 	interactiveReserveMbits float64
+	wireCapMbits            float64
+	wireReserveMbits        float64
 	chunkSize               int
 	quicPool                bool
 	udpOnStream             bool
@@ -119,6 +123,8 @@ func run(args []string) error {
 	fs.Float64Var(&opts.brutalMbits, "brutal-rate", 0, "fixed per-lane send rate in Mbit/s for brutal controllers")
 	fs.Float64Var(&opts.aggregateMbits, "aggregate-rate", 0, "queqiao aggregate application-data budget in Mbit/s (0 disables)")
 	fs.Float64Var(&opts.interactiveReserveMbits, "interactive-reserve", 0, "interactive share of --aggregate-rate in Mbit/s")
+	fs.Float64Var(&opts.wireCapMbits, "wire-cap-rate", 0, "experimental shared per-path QUIC packet-byte pacing cap in Mbit/s (0 disables)")
+	fs.Float64Var(&opts.wireReserveMbits, "wire-interactive-reserve", 0, "portion of --wire-cap-rate reserved from bulk QUIC connections in Mbit/s")
 	fs.IntVar(&opts.chunkSize, "chunk", 0, "queqiao data frame size in bytes (0 selects the default)")
 	fs.BoolVar(&opts.quicPool, "quic-pool", true, "enable the queqiao pooled QUIC connection")
 	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry queqiao SOCKS UDP packets on ordered streams instead of QUIC datagrams")
@@ -160,7 +166,7 @@ func run(args []string) error {
 		return errors.New("--udp-packets cannot be combined with --contend")
 	}
 	if opts.rateMbits < 0 || opts.perFlowMbits < 0 || opts.brutalMbits < 0 ||
-		opts.aggregateMbits < 0 || opts.interactiveReserveMbits < 0 || opts.queueBytes < 0 || opts.policerBurst < 0 {
+		opts.aggregateMbits < 0 || opts.interactiveReserveMbits < 0 || opts.wireCapMbits < 0 || opts.wireReserveMbits < 0 || opts.queueBytes < 0 || opts.policerBurst < 0 {
 		return errors.New("rates, queue, and policer burst must not be negative")
 	}
 	if opts.policerRefill < 0 {
@@ -174,6 +180,12 @@ func run(args []string) error {
 	}
 	if opts.interactiveReserveMbits > 0 && (opts.aggregateMbits == 0 || opts.interactiveReserveMbits >= opts.aggregateMbits) {
 		return errors.New("--interactive-reserve requires a larger positive --aggregate-rate")
+	}
+	if opts.wireReserveMbits > 0 && (opts.wireCapMbits == 0 || opts.wireReserveMbits >= opts.wireCapMbits) {
+		return errors.New("--wire-interactive-reserve requires a larger positive --wire-cap-rate")
+	}
+	if opts.wireCapMbits > 0 && opts.congestion == string(pep.CongestionReno) {
+		return errors.New("--wire-cap-rate requires an explicit QUIC congestion controller")
 	}
 	if (opts.congestion == string(pep.CongestionBrutal) || opts.congestion == string(pep.CongestionBrutalNoComp)) && opts.brutalMbits == 0 {
 		return errors.New("--brutal-rate is required with brutal congestion")
@@ -255,6 +267,7 @@ func run(args []string) error {
 					Seconds: round3(result.seconds), MbitsPerSec: round3(result.mbitsPerSec),
 					Complete: result.complete, Note: result.note, Interactive: result.interactive,
 					PathCounters: result.pathCounters,
+					WireCap:      result.wireCap,
 				})
 			}
 		}
@@ -289,9 +302,14 @@ type trialResult struct {
 	note         string
 	interactive  *InteractiveReport
 	pathCounters *PathCountersReport
+	wireCap      *WireCapReport
 }
 
 func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin, flows, trial int) trialResult {
+	// Every trial promises fresh controller and path state. All in-process
+	// emulator endpoints are loopback, so their production path keys repeat
+	// even though the emulated path and seed are new.
+	pathmodel.Reset()
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
@@ -344,6 +362,18 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 		close(probeStop)
 		probes = <-probeDone
 	}
+	// The receiver has the full body before the sender necessarily receives
+	// the protocol close acknowledgement. Give teardown one RTT to bank final
+	// connection counters and let the emulator drain, without including that
+	// wait in the measured completion time above.
+	settle := time.NewTimer(time.Duration(opts.rttMillis)*time.Millisecond + 20*time.Millisecond)
+	select {
+	case <-settle.C:
+	case <-ctx.Done():
+		if !settle.Stop() {
+			<-settle.C
+		}
+	}
 
 	var total int64
 	complete := true
@@ -392,6 +422,7 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 		note:         note,
 		interactive:  interactive,
 		pathCounters: &pathCounters,
+		wireCap:      harness.wireCapReport(),
 	}
 }
 
@@ -471,6 +502,7 @@ func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) ([]Lat
 			continue
 		}
 		for trial := 1; trial <= opts.trials; trial++ {
+			pathmodel.Reset()
 			ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 			cfg := pathCfg
 			cfg.Seed = pathCfg.Seed + int64(trial)*1000
@@ -520,15 +552,26 @@ type pathRelay interface {
 }
 
 type harness struct {
-	socks  string
-	relay  pathRelay
-	closes []func()
+	socks         string
+	relay         pathRelay
+	clientMetrics *qmetrics.Registry
+	serverMetrics *qmetrics.Registry
+	wireCapMbits  float64
+	wireReserve   float64
+	closes        []func()
 }
 
 func (h *harness) Close() {
 	for i := len(h.closes) - 1; i >= 0; i-- {
 		h.closes[i]()
 	}
+}
+
+func (h *harness) wireCapReport() *WireCapReport {
+	if h.clientMetrics == nil || h.serverMetrics == nil {
+		return nil
+	}
+	return describeWireCap(h.clientMetrics.Snapshot(), h.serverMetrics.Snapshot(), h.wireCapMbits, h.wireReserve)
 }
 
 func startStack(ctx context.Context, stack string, opts options, pathCfg pathsim.Config) (*harness, error) {
@@ -618,14 +661,19 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			h.Close()
 			return nil, err
 		}
+		h.clientMetrics, h.serverMetrics = qmetrics.New(), qmetrics.New()
+		h.wireCapMbits, h.wireReserve = opts.wireCapMbits, opts.wireReserveMbits
 		server, err := pep.NewServer(pep.ServerConfig{
 			ListenAddr: serverPacket.LocalAddr().String(), Credentials: serverIdentity,
 			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: opts.chunkSize,
 			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
-			AggregateBytesPerSec:          uint64(opts.aggregateMbits * 1e6 / 8),
-			InteractiveReserveBytesPerSec: uint64(opts.interactiveReserveMbits * 1e6 / 8),
-			UDPOnStream:                   opts.udpOnStream,
-			Logger:                        logger,
+			AggregateBytesPerSec:              uint64(opts.aggregateMbits * 1e6 / 8),
+			InteractiveReserveBytesPerSec:     uint64(opts.interactiveReserveMbits * 1e6 / 8),
+			WireCapBytesPerSec:                uint64(opts.wireCapMbits * 1e6 / 8),
+			WireInteractiveReserveBytesPerSec: uint64(opts.wireReserveMbits * 1e6 / 8),
+			UDPOnStream:                       opts.udpOnStream,
+			Metrics:                           h.serverMetrics,
+			Logger:                            logger,
 		})
 		if err != nil {
 			h.Close()
@@ -633,14 +681,19 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		}
 		client, err := pep.NewClient(pep.ClientConfig{
 			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), Credentials: clientIdentity,
-			Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
-			EnableQUICPool:                opts.quicPool,
-			Congestion:                    pep.CongestionControlKind(opts.congestion),
-			BrutalBytesPerSec:             uint64(opts.brutalMbits * 1e6 / 8),
-			AggregateBytesPerSec:          uint64(opts.aggregateMbits * 1e6 / 8),
-			InteractiveReserveBytesPerSec: uint64(opts.interactiveReserveMbits * 1e6 / 8),
-			UDPOnStream:                   opts.udpOnStream,
-			Logger:                        logger,
+			// Use a distinct loopback source so this in-process client's path
+			// model cannot merge with the server's reverse-direction model.
+			LocalAddress: "127.0.0.2", Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
+			EnableQUICPool:                    opts.quicPool,
+			Congestion:                        pep.CongestionControlKind(opts.congestion),
+			BrutalBytesPerSec:                 uint64(opts.brutalMbits * 1e6 / 8),
+			AggregateBytesPerSec:              uint64(opts.aggregateMbits * 1e6 / 8),
+			InteractiveReserveBytesPerSec:     uint64(opts.interactiveReserveMbits * 1e6 / 8),
+			WireCapBytesPerSec:                uint64(opts.wireCapMbits * 1e6 / 8),
+			WireInteractiveReserveBytesPerSec: uint64(opts.wireReserveMbits * 1e6 / 8),
+			UDPOnStream:                       opts.udpOnStream,
+			Metrics:                           h.clientMetrics,
+			Logger:                            logger,
 		})
 		if err != nil {
 			h.Close()
@@ -1002,6 +1055,7 @@ func measureUDP(opts options, pathCfg pathsim.Config, o *origin) []UDPRecord {
 
 func measureUDPTrial(stack string, trial int, opts options, pathCfg pathsim.Config, o *origin) (record UDPRecord) {
 	record = UDPRecord{Stack: stack, Trial: trial, UDPOnStream: opts.udpOnStream}
+	pathmodel.Reset()
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 	cfg := pathCfg
@@ -1016,6 +1070,7 @@ func measureUDPTrial(stack string, trial int, opts options, pathCfg pathsim.Conf
 		up, down := harness.relay.Stats()
 		counters := describePathCounters(up, down)
 		record.PathCounters = &counters
+		record.WireCap = harness.wireCapReport()
 	}()
 	if err := warmUp(ctx, harness.socks, o); err != nil {
 		record.Note = "warmup: " + err.Error()
@@ -1449,6 +1504,7 @@ func measureContention(opts options, pathCfg pathsim.Config, origin *origin) ([]
 	var shares []float64
 	var records []ContentionRecord
 	for trial := 1; trial <= opts.trials; trial++ {
+		pathmodel.Reset()
 		cfg := pathCfg
 		cfg.Seed = pathCfg.Seed + int64(trial)*1000
 		shared := pathsim.NewBottleneck(cfg)

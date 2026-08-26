@@ -28,6 +28,7 @@ case "$output" in /*) ;; *) output=$PWD/$output ;; esac
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+source "$repo/scripts/benchmark_source.sh"
 command -v go >/dev/null || { echo "go is required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 time_bin=$(command -v /usr/bin/time || true)
@@ -82,7 +83,7 @@ tree_state=clean
 if [[ -n "$source_status" ]]; then printf '%s\n' "$source_status" >"$output/source-status.txt"
 else : >"$output/source-status.txt"
 fi
-git diff --binary HEAD >"$output/source.patch"
+write_source_patch "$output/source.patch"
 
 build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
@@ -112,6 +113,11 @@ run_throughput_cell() {
     local extra=()
     case "$mode" in
         erasure|bbr-tuic) ;;
+        erasure-wire-cap)
+            controller=erasure
+            extra+=(--wire-cap-rate "$(awk -v rate="$rate" 'BEGIN { printf "%.3f", rate * 0.95 }')"
+                --wire-interactive-reserve "$(awk -v rate="$rate" 'BEGIN { printf "%.3f", rate * 0.10 }')")
+            ;;
         brutal-no-comp)
             extra+=(--brutal-rate "$(awk -v rate="$rate" 'BEGIN { printf "%.3f", rate * 0.95 }')")
             ;;
@@ -128,14 +134,15 @@ run_throughput_cell() {
         --bytes "$bytes" --flows 1 --trials "$cell_trials" --timeout "$timeout" \
         --congestion "$controller" --interactive --json "$json" "${extra[@]}"
     jq -r --arg profile "$profile" --arg mode "$mode" '
+        def r3: (. * 1000 | round) / 1000;
         .summary[0] as $s |
         ([.trials[].path_counters.downstream.packets_in] | add // 0) as $packets |
         ([.trials[].path_counters.downstream.packets_erased] | add // 0) as $erased |
         ([.trials[].path_counters.downstream.bottleneck_dropped] | add // 0) as $drops |
         [$profile, $mode, .path.rtt_ms, .path.rate_mbits, .path.loss_percent,
          (.path.loss_burst_packets // 0), $s.trials, $s.completed, ($s.setup_failures // 0),
-         $s.median_mbits_all_trials, $s.worst_mbits_all_trials,
-         ($s.interactive_median.p95_ms // 0), $packets, $erased, $drops,
+         ($s.median_mbits_all_trials | r3), ($s.worst_mbits_all_trials | r3),
+         (($s.interactive_median.p95_ms // 0) | r3), $packets, $erased, $drops,
          (if $packets > 0 then (100000 * $drops / $packets | round) / 1000 else 0 end)] | @tsv
     ' "$json" >>"$output/throughput.tsv"
 }
@@ -151,7 +158,7 @@ run_throughput() {
         local cell_trials=$trials
         [[ "$profile_set" != smoke ]] || cell_trials=1
         [[ "$importance" != important ]] || cell_trials=$important_trials
-        for mode in erasure bbr-tuic brutal-no-comp hysteria2; do
+        for mode in erasure erasure-wire-cap bbr-tuic brutal-no-comp hysteria2; do
             run_throughput_cell "$profile" "$rtt" "$rate" "$loss" "$burst" "$bytes" "$cell_trials" "$mode"
         done
     done <<<"$profiles"
@@ -166,6 +173,10 @@ run_policer_cell() {
     local extra=()
     case "$mode" in
         erasure) ;;
+        erasure-wire-cap)
+            controller=erasure
+            extra+=(--wire-cap-rate 95 --wire-interactive-reserve 10)
+            ;;
         erasure-budget)
             controller=erasure
             extra+=(--aggregate-rate 75 --interactive-reserve 10)
@@ -183,13 +194,14 @@ run_policer_cell() {
         --trials "$cell_trials" --timeout "$timeout" --interactive \
         --congestion "$controller" --json "$json" "${extra[@]}"
     jq -r --arg profile "$profile" --arg mode "$mode" '
+        def r3: (. * 1000 | round) / 1000;
         .summary[0] as $s |
         ([.trials[].path_counters.downstream.packets_in] | add // 0) as $packets |
         ([.trials[].path_counters.downstream.packets_erased] | add // 0) as $erased |
         ([.trials[].path_counters.downstream.bottleneck_dropped] | add // 0) as $drops |
         [$profile, $mode, .path.rtt_ms, .path.rate_mbits, .path.loss_percent,
          .path.policer_refill_ms, $s.trials, $s.completed,
-         $s.median_mbits_all_trials, ($s.interactive_median.p95_ms // 0),
+         ($s.median_mbits_all_trials | r3), (($s.interactive_median.p95_ms // 0) | r3),
          $packets, $erased, $drops,
          (if $packets > 0 then (100000 * $drops / $packets | round) / 1000 else 0 end)] | @tsv
     ' "$json" >>"$output/policer.tsv"
@@ -201,7 +213,7 @@ run_policer() {
     if [[ "$profile_set" == smoke ]]; then refills=8ms; cell_trials=1; fi
     for refill in $refills; do
         profile=refill-${refill%ms}ms
-        for mode in erasure erasure-budget brutal brutal-no-comp; do
+        for mode in erasure erasure-wire-cap erasure-budget brutal brutal-no-comp; do
             run_policer_cell "$profile" "$refill" "$mode" "$cell_trials"
         done
     done
@@ -215,6 +227,10 @@ run_udp_cell() {
     local extra=()
     case "$mode" in
         erasure-datagram) ;;
+        erasure-wire-cap-datagram)
+            extra+=(--wire-cap-rate "$(awk -v rate="$rate" 'BEGIN { printf "%.3f", rate * 0.95 }')"
+                --wire-interactive-reserve "$(awk -v rate="$rate" 'BEGIN { printf "%.3f", rate * 0.10 }')")
+            ;;
         bbr-tuic-datagram) controller=bbr-tuic ;;
         fixed-wire-datagram)
             controller=brutal-no-comp
@@ -236,6 +252,7 @@ run_udp_cell() {
         --congestion "$controller" --json "$json" "${extra[@]}"
     jq -r --arg profile "$profile" --arg mode "$mode" '
         def median: sort | if length == 0 then 0 elif length % 2 == 1 then .[length/2|floor] else ((.[length/2-1] + .[length/2]) / 2) end;
+        def r3: (. * 1000 | round) / 1000;
         ([.udp[] | select(.sent > 0)] | length) as $setup |
         ([.udp[].sent] | add // 0) as $sent |
         ([.udp[].received] | add // 0) as $received |
@@ -249,7 +266,7 @@ run_udp_cell() {
          (.udp | length), $setup, $sent, $received,
          (if $sent > 0 then (100000 * $received / $sent | round) / 1000 else 0 end),
          (if $sent > 0 then (100000 * ($sent-$received) / $sent | round) / 1000 else 100 end),
-         $p50, $p95, $max, $erased, $drops] | @tsv
+         ($p50 | r3), ($p95 | r3), ($max | r3), $erased, $drops] | @tsv
     ' "$json" >>"$output/udp.tsv"
 }
 
@@ -264,7 +281,7 @@ run_udp() {
         local cell_trials=$trials
         [[ "$profile_set" != smoke ]] || cell_trials=1
         [[ "$importance" != important ]] || cell_trials=$important_trials
-        local modes='erasure-datagram bbr-tuic-datagram fixed-wire-datagram erasure-stream hysteria2'
+        local modes='erasure-datagram erasure-wire-cap-datagram bbr-tuic-datagram fixed-wire-datagram erasure-stream hysteria2'
         [[ "$scope" != hol ]] || modes='erasure-datagram erasure-stream'
         for mode in $modes; do
             run_udp_cell "$profile" "$rtt" "$rate" "$loss" "$burst" "$payload" "$cell_trials" "$mode"
@@ -282,9 +299,10 @@ run_reuse_cell() {
         --congestion erasure --quic-pool="$pool" --latency --json "$json"
     jq -r --arg profile "$profile" --arg mode "$mode" '
         def median: sort | if length == 0 then 0 elif length % 2 == 1 then .[length/2|floor] else ((.[length/2-1] + .[length/2]) / 2) end;
+        def r3: (. * 1000 | round) / 1000;
         [.latency[] | select(.complete)] as $complete |
         [$profile, $mode, .path.rtt_ms, .path.loss_percent, (.latency | length),
-         ($complete | length), ([$complete[].cold_ms] | median), ([$complete[].warm_ms] | median)] | @tsv
+         ($complete | length), ([$complete[].cold_ms] | median | r3), ([$complete[].warm_ms] | median | r3)] | @tsv
     ' "$json" >>"$output/reuse.tsv"
 }
 

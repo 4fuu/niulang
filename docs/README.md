@@ -53,6 +53,9 @@ you choose the next document based on what you want to do.
 
 - [Benchmarking](BENCHMARKING.md) — reproducible short-lived, interactive, and
   bulk workload measurements.
+- [Low-latency, low-loss experiment](LOW-LATENCY-LOW-LOSS-EXPERIMENT.md) —
+  dated emulation results for shared pacing, UDP delivery, connection reuse,
+  Hysteria2, and the ordered-stream head-of-line control.
 - [Field validation](FIELD-VALIDATION.md) — the real-network matrix for NAT,
   middleboxes, access diversity, and release qualification.
 - [Field-result index](field-results/README.md) — current protocol-1 records;

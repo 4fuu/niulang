@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/apernet/quic-go"
+	quiccongestion "github.com/apernet/quic-go/congestion"
 	"github.com/bojieli/queqiao/internal/coded"
 	wancongestion "github.com/bojieli/queqiao/internal/congestion"
 	"github.com/bojieli/queqiao/internal/identity"
+	"github.com/bojieli/queqiao/internal/metrics"
 	"github.com/bojieli/queqiao/internal/netbind"
 	"github.com/bojieli/queqiao/internal/pathmodel"
 	"github.com/bojieli/queqiao/internal/protocol"
@@ -78,6 +80,49 @@ type congestionConfig struct {
 	brutalBytesPerSecond   uint64
 	adaptiveMinBytesPerSec uint64
 	adaptiveMaxBytesPerSec uint64
+	wireCaps               *wireCapSet
+	wireBulk               bool
+}
+
+// wireCapSet owns one scheduler per endpoint path for one client or server.
+// Keeping it outside pathmodel preserves the distinction between operator
+// policy and measurements learned from ACK/loss outcomes.
+type wireCapSet struct {
+	mu      sync.Mutex
+	total   uint64
+	reserve uint64
+	paths   map[string]*wancongestion.WireScheduler
+}
+
+func newWireCapSet(total, reserve uint64) *wireCapSet {
+	if total == 0 {
+		return nil
+	}
+	return &wireCapSet{total: total, reserve: reserve, paths: make(map[string]*wancongestion.WireScheduler)}
+}
+
+func (s *wireCapSet) scheduler(path string) *wancongestion.WireScheduler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	scheduler := s.paths[path]
+	if scheduler == nil {
+		scheduler = wancongestion.NewWireScheduler(s.total, s.reserve)
+		s.paths[path] = scheduler
+	}
+	return scheduler
+}
+
+func validateWireCap(total, reserve uint64, kind CongestionControlKind) error {
+	if total == 0 && reserve != 0 {
+		return errors.New("wire interactive reserve requires a wire cap")
+	}
+	if total != 0 && reserve >= total {
+		return errors.New("wire interactive reserve must leave bulk capacity below the wire cap")
+	}
+	if total != 0 && kind == CongestionReno {
+		return errors.New("wire cap requires an explicit QUIC congestion controller")
+	}
+	return nil
 }
 
 type udpHealth struct {
@@ -295,6 +340,7 @@ type quicStreamConn struct {
 	conn       *quic.Conn
 	packet     net.PacketConn
 	controller wancongestion.TelemetryProvider
+	metrics    *metrics.Registry
 	// closeConn is true for a dedicated lane. Streams obtained from the
 	// client pool and streams accepted by the server must only close their
 	// stream; closing the connection would tear down unrelated flows.
@@ -311,6 +357,18 @@ type quicStreamConn struct {
 // bulkPath lets the framing discover the coded substrate without every call
 // site that builds a lane having to thread it through.
 func (c *quicStreamConn) bulkPath() *coded.Path { return c.bulk }
+
+func (c *quicStreamConn) setWireBulk(bulk bool) {
+	if controller, ok := c.controller.(interface{ SetBulk(bool) }); ok {
+		controller.SetBulk(bulk)
+	}
+}
+
+func setWireBulk(conn streamConn, bulk bool) {
+	if setter, ok := conn.(interface{ setWireBulk(bool) }); ok {
+		setter.setWireBulk(bulk)
+	}
+}
 
 // pathIdentity is the uplink and peer this lane runs between, which is what
 // its measurements are recorded against.
@@ -363,6 +421,13 @@ func (c *quicStreamConn) CloseWrite() error {
 func (c *quicStreamConn) Close() error {
 	var err error
 	c.once.Do(func() {
+		// A flow can finish between one-second telemetry ticks. Bank the
+		// connection's final movement while the QUIC connection is still live;
+		// connectionTelemetry deduplicates pooled streams and concurrent flows.
+		if c.metrics != nil {
+			_, delta := c.connectionTelemetry(c.transportStats())
+			c.metrics.AddQUICConnectionCounters(delta)
+		}
 		// quic.Stream.Close closes only the send direction. CancelRead releases
 		// a blocked reader and its flow-control credit; omitting it retained
 		// aborted pooled streams indefinitely even though the logical lane was
@@ -571,7 +636,7 @@ func quicConfig(windows flowWindows) *quic.Config {
 	}
 }
 
-func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, observeTransientWrite func(error), ccfg congestionConfig, windows flowWindows) (streamConn, error) {
+func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, observeTransientWrite func(error), ccfg congestionConfig, windows flowWindows, registry *metrics.Registry) (streamConn, error) {
 	conn, packetConn, err := dialQUICConnection(ctx, remote, credentials, dialTimeout, localAddress, control, observeTransientWrite, windows)
 	if err != nil {
 		return nil, err
@@ -586,7 +651,7 @@ func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCre
 		return nil, err
 	}
 	return &quicStreamConn{
-		stream: stream, conn: conn, packet: packetConn, controller: controller,
+		stream: stream, conn: conn, packet: packetConn, controller: controller, metrics: registry,
 		closeConn: true, bulk: connBulkPath(conn, windows.codedQueue),
 	}, nil
 }
@@ -757,23 +822,23 @@ func resolveLocalAddress(spec string) (netip.Addr, error) {
 	return netbind.Resolve(spec)
 }
 
+type instrumentedController interface {
+	quiccongestion.CongestionControlEx
+	wancongestion.TelemetryProvider
+}
+
 func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestion.TelemetryProvider {
 	if conn == nil {
 		return nil
 	}
+	var controller instrumentedController
 	switch cfg.kind {
 	case CongestionBBR:
-		controller := wancongestion.NewBBRSender(conn.InitialPacketSize())
-		conn.SetCongestionControl(controller)
-		return controller
+		controller = wancongestion.NewBBRSender(conn.InitialPacketSize())
 	case CongestionBBRTUIC:
-		controller := wancongestion.NewTUICBBRSender(conn.InitialPacketSize())
-		conn.SetCongestionControl(controller)
-		return controller
+		controller = wancongestion.NewTUICBBRSender(conn.InitialPacketSize())
 	case CongestionAdaptive:
-		controller := wancongestion.NewAdaptiveSender(conn.InitialPacketSize(), cfg.adaptiveMinBytesPerSec, cfg.adaptiveMaxBytesPerSec)
-		conn.SetCongestionControl(controller)
-		return controller
+		controller = wancongestion.NewAdaptiveSender(conn.InitialPacketSize(), cfg.adaptiveMinBytesPerSec, cfg.adaptiveMaxBytesPerSec)
 	case CongestionErasure:
 		// Every lane to the same peer shares one model. Deciding alone is what
 		// made lanes cost more than they earn on this path: each measured the
@@ -781,16 +846,12 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestio
 		// bottleneck from only its own delivered rate, so the aggregate
 		// overshot by however many lanes there were. Live, four lanes
 		// delivered about 8 Mbit/s where one delivered 11.
-		controller := wancongestion.NewErasureSenderOn(
+		controller = wancongestion.NewErasureSenderOn(
 			conn.InitialPacketSize(), pathmodel.Shared(peerKey(conn)))
-		conn.SetCongestionControl(controller)
-		return controller
 	case CongestionBrutal, CongestionBrutalNoComp:
 		if cfg.brutalBytesPerSecond > 0 {
-			controller := wancongestion.NewBrutalSender(
+			controller = wancongestion.NewBrutalSender(
 				cfg.brutalBytesPerSecond, cfg.kind == CongestionBrutalNoComp)
-			conn.SetCongestionControl(controller)
-			return controller
 		}
 	case CongestionReno, "":
 		// Keep the controller selected by the QUIC implementation.
@@ -798,7 +859,17 @@ func configureQUICController(conn *quic.Conn, cfg congestionConfig) wancongestio
 		// Configuration is validated before dialing. Fail-safe to the stock
 		// controller if a future caller constructs an invalid config directly.
 	}
-	return nil
+	if controller == nil {
+		return nil
+	}
+	if cfg.wireCaps != nil {
+		controller = wancongestion.NewWireCapSender(
+			controller, controller, cfg.wireCaps.scheduler(peerKey(conn)),
+			cfg.wireCaps.total, cfg.wireCaps.reserve, cfg.wireBulk,
+		)
+	}
+	conn.SetCongestionControl(controller)
+	return controller
 }
 
 // peerKey identifies the endpoint pair a connection belongs to. It is the
@@ -873,13 +944,13 @@ func quicServerConfig(windows flowWindows) *quic.Config {
 	return cfg
 }
 
-func acceptQUICStream(ctx context.Context, conn *quic.Conn, controller wancongestion.TelemetryProvider) (streamConn, error) {
+func acceptQUICStream(ctx context.Context, conn *quic.Conn, controller wancongestion.TelemetryProvider, registry *metrics.Registry) (streamConn, error) {
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return &quicStreamConn{
-		stream: stream, conn: conn, controller: controller,
+		stream: stream, conn: conn, controller: controller, metrics: registry,
 		closeConn: false, bulk: connBulkPath(conn, 0),
 	}, nil
 }

@@ -17,6 +17,7 @@ case "$output" in /*) ;; *) output=$PWD/$output ;; esac
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
+source "$repo/scripts/benchmark_source.sh"
 command -v go >/dev/null || { echo "go is required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
@@ -46,7 +47,7 @@ mkdir -p "$output"
     if [[ -n "$sing_box" ]]; then echo "sing_box=$($sing_box version | head -n 1)"; fi
 } >"$output/manifest.txt"
 git status --porcelain=v1 --untracked-files=normal >"$output/source-status.txt"
-git diff --binary HEAD >"$output/source.patch"
+write_source_patch "$output/source.patch"
 
 printf 'path\tmode\tsetup\tsent\treceived\tresidual_loss_percent\tmedian_p50_ms\tmedian_p95_ms\tmedian_max_ms\tbottleneck_drops\n' >"$output/summary.tsv"
 

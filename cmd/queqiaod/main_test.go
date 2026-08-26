@@ -78,6 +78,9 @@ func TestRuntimeBoundsRejectUnsafeValues(t *testing.T) {
 		{"--log-max-backups", "101"},
 		{"--telemetry-log-interval", "500ms"},
 		{"--log-file", "none", "--log-stderr=false"},
+		{"--wire-interactive-reserve-bytes-per-sec", "1"},
+		{"--wire-cap-bytes-per-sec", "1", "--wire-interactive-reserve-bytes-per-sec", "1"},
+		{"--wire-cap-bytes-per-sec", "1", "--congestion", "reno"},
 	} {
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)

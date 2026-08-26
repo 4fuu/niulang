@@ -36,6 +36,17 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 			c.AggregateBytesPerSec = 2
 			c.InteractiveReserveBytesPerSec = 2
 		},
+		"wire reserve without cap": func(c *ClientConfig) {
+			c.WireInteractiveReserveBytesPerSec = 1
+		},
+		"wire reserve consumes cap": func(c *ClientConfig) {
+			c.WireCapBytesPerSec = 2
+			c.WireInteractiveReserveBytesPerSec = 2
+		},
+		"wire cap around Reno": func(c *ClientConfig) {
+			c.Congestion = CongestionReno
+			c.WireCapBytesPerSec = 2
+		},
 		"idle exceeds lifetime": func(c *ClientConfig) {
 			c.FlowIdleTimeout = 2 * time.Second
 			c.FlowMaxLifetime = time.Second
@@ -392,6 +403,17 @@ func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 		"reserve consumes whole budget": func(c *ServerConfig) {
 			c.AggregateBytesPerSec = 2
 			c.InteractiveReserveBytesPerSec = 2
+		},
+		"wire reserve without cap": func(c *ServerConfig) {
+			c.WireInteractiveReserveBytesPerSec = 1
+		},
+		"wire reserve consumes cap": func(c *ServerConfig) {
+			c.WireCapBytesPerSec = 2
+			c.WireInteractiveReserveBytesPerSec = 2
+		},
+		"wire cap around Reno": func(c *ServerConfig) {
+			c.Congestion = CongestionReno
+			c.WireCapBytesPerSec = 2
 		},
 		"idle exceeds lifetime": func(c *ServerConfig) {
 			c.FlowIdleTimeout = 2 * time.Second

@@ -24,6 +24,9 @@ func TestExperimentBudgetsRejectIncompleteConfigurations(t *testing.T) {
 		"uncompensated brutal without rate": {"--congestion", "brutal-no-comp"},
 		"reserve without aggregate":         {"--interactive-reserve", "1"},
 		"reserve consumes aggregate":        {"--aggregate-rate", "1", "--interactive-reserve", "1"},
+		"wire reserve without cap":          {"--wire-interactive-reserve", "1"},
+		"wire reserve consumes cap":         {"--wire-cap-rate", "1", "--wire-interactive-reserve", "1"},
+		"wire cap cannot wrap Reno":         {"--wire-cap-rate", "1", "--congestion", "reno"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := run(args); err == nil {
