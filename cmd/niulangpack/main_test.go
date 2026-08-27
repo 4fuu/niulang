@@ -153,6 +153,12 @@ func TestThirdPartyLicenseBundleUsesExactModuleText(t *testing.T) {
 	}
 }
 
+func TestHTTP3QPACKHasReviewedLicense(t *testing.T) {
+	if got := moduleLicenseID("github.com/quic-go/qpack"); got != "MIT" {
+		t.Fatalf("qpack license = %q, want MIT", got)
+	}
+}
+
 func TestSourceCheckoutMustMatchProvenanceAndBeClean(t *testing.T) {
 	dir := t.TempDir()
 	runGit := func(env []string, args ...string) string {

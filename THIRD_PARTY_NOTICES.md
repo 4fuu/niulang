@@ -8,6 +8,7 @@ following Go modules:
 | `github.com/andybalholm/brotli` | v1.0.6 | MIT |
 | `github.com/apernet/quic-go` | v0.61.1-0.20260806010916-184d081eef3e | MIT |
 | `github.com/klauspost/compress` | v1.18.7 | BSD-3-Clause |
+| `github.com/quic-go/qpack` | v0.6.0 | MIT |
 | `github.com/refraction-networking/utls` | v1.8.2 | BSD-3-Clause |
 | `golang.org/x/crypto` | v0.55.0 | BSD-3-Clause |
 | `golang.org/x/net` | v0.58.0 | BSD-3-Clause |
