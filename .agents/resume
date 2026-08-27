@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+for tool in go jq python3; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        printf 'Niulang orb is missing required tool: %s\n' "$tool" >&2
+        exit 1
+    fi
+done
+
+actual_go_version=$(go env GOVERSION)
+if [[ "$actual_go_version" != go1.25.13 ]]; then
+    printf 'Niulang requires Go 1.25.13, found %s\n' "$actual_go_version" >&2
+    exit 1
+fi
+
+printf 'Niulang orb ready (%s)\n' "$actual_go_version"

@@ -20,3 +20,6 @@ __pycache__/
 # Runtime captures
 *.pcap
 *.log
+
+# Amp orb runtime state
+/.amp/portals/*

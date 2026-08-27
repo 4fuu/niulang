@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+go_version=1.25.13
+go_root="$HOME/.local/share/go/go$go_version"
+
+run_step() {
+    local label=$1
+    shift
+    local started=$SECONDS
+
+    printf '==> %s\n' "$label"
+    "$@"
+    printf '<== %s (%ss)\n' "$label" "$((SECONDS - started))"
+}
+
+ensure_system_tools() {
+    local missing=()
+
+    command -v curl >/dev/null 2>&1 || missing+=(curl)
+    command -v git >/dev/null 2>&1 || missing+=(git)
+    command -v jq >/dev/null 2>&1 || missing+=(jq)
+    command -v python3 >/dev/null 2>&1 || missing+=(python3)
+    if ! dpkg-query -W -f='${Status}' ca-certificates 2>/dev/null | grep -Fqx 'install ok installed'; then
+        missing+=(ca-certificates)
+    fi
+
+    if ((${#missing[@]} == 0)); then
+        printf 'System tools already installed\n'
+        return
+    fi
+
+    sudo apt-get update
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+}
+
+install_go() {
+    local go_arch archive checksum temporary
+
+    case "$(uname -m)" in
+        x86_64)
+            go_arch=amd64
+            checksum=39042a078ea9ceebe3ecda4a7188f0f5b96e14a071d27923ba7f40b456e85ae3
+            ;;
+        aarch64 | arm64)
+            go_arch=arm64
+            checksum=adad240fcb6bd180cf973b4b7c747baf4ec81d08b7d40ca35940ee4531971490
+            ;;
+        *)
+            printf 'Unsupported orb architecture: %s\n' "$(uname -m)" >&2
+            return 1
+            ;;
+    esac
+
+    if [[ -x "$go_root/bin/go" ]] && [[ "$($go_root/bin/go env GOVERSION)" == "go$go_version" ]]; then
+        printf 'Go %s already installed\n' "$go_version"
+    else
+        archive="go$go_version.linux-$go_arch.tar.gz"
+        temporary=$(mktemp -d)
+        trap 'rm -rf "$temporary"' RETURN
+
+        curl -fL --retry 3 --output "$temporary/$archive" "https://go.dev/dl/$archive"
+        printf '%s  %s\n' "$checksum" "$temporary/$archive" | sha256sum --check -
+        tar -C "$temporary" -xzf "$temporary/$archive"
+        mkdir -p "$(dirname "$go_root")"
+        rm -rf "$go_root"
+        mv "$temporary/go" "$go_root"
+        rm -rf "$temporary"
+        trap - RETURN
+    fi
+
+    mkdir -p "$HOME/.local/bin"
+    ln -sfn "$go_root/bin/go" "$HOME/.local/bin/go"
+    ln -sfn "$go_root/bin/gofmt" "$HOME/.local/bin/gofmt"
+}
+
+download_go_modules() {
+    go mod download
+    go mod verify
+}
+
+printf 'Preparing the Niulang orb\n'
+run_step 'Ensure system tools' ensure_system_tools
+run_step "Install Go $go_version" install_go
+run_step 'Download and verify Go modules' download_go_modules
+printf 'Niulang orb setup complete (%s)\n' "$(go version)"
