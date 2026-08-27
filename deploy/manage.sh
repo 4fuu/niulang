@@ -1869,6 +1869,10 @@ show_legacy_status() {
 	for legacy_path in "$HOME/.config/queqiao" "$HOME/.local/bin/queqiaod"; do
 		[ -e "$legacy_path" ] && printf '  %s\n' "$legacy_path"
 	done
+	# A missing optional path is expected and must not become this function's
+	# status: callers run under set -e and still need to reach the migration
+	# confirmation after displaying the detected files.
+	return 0
 }
 
 legacy_native_enabled() {

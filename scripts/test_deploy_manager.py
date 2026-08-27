@@ -77,6 +77,21 @@ class DeployManagerTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_legacy_status_allows_migration_to_continue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            unit = root / "etc" / "systemd" / "system" / "queqiao-server.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\n", encoding="utf-8")
+
+            result = self.run_shell(
+                'show_legacy_status\nprintf "migration-ready\\n"',
+                root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("migration-ready", result.stdout)
+
     def test_legacy_stop_restore_and_removal_are_separate_lifecycle_steps(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
