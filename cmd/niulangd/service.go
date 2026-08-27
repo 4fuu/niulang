@@ -38,6 +38,7 @@ type serviceConfig struct {
 	localAddress  string
 	metricsListen string
 	logLevel      string
+	maxSessions   int
 }
 
 // arguments returns everything after the binary. The supervisor-specific tail
@@ -55,6 +56,7 @@ func (c serviceConfig) arguments() []string {
 	if c.metricsListen != "" {
 		args = append(args, "--metrics-listen", c.metricsListen)
 	}
+	args = append(args, "--max-sessions", strconv.Itoa(c.maxSessions))
 	return append(args,
 		"--log-level", c.logLevel,
 		"--log-format", "json",
@@ -191,6 +193,7 @@ func bindServiceFlags(fs *flag.FlagSet, c *serviceConfig) {
 	fs.StringVar(&c.localAddress, "local-address", "auto", "outer source: auto, IP, or if:NAME")
 	fs.StringVar(&c.metricsListen, "metrics-listen", "127.0.0.1:12090", "loopback metrics address, empty to disable")
 	fs.StringVar(&c.logLevel, "log-level", "info", "debug, info, warn, or error")
+	fs.IntVar(&c.maxSessions, "max-sessions", 2048, "global concurrent-session limit")
 	fs.StringVar(&c.label, "label", defaultServiceLabel, "macOS LaunchAgent label")
 	fs.StringVar(&c.unit, "service-name", defaultServiceUnit, "Linux systemd --user unit name")
 	fs.StringVar(&c.binary, "binary", "", "niulangd path to run (default: this executable)")
@@ -211,6 +214,9 @@ func (c *serviceConfig) resolve() error {
 	}
 	if c.providers != "" && c.listen != "127.0.0.1:12080" {
 		return errors.New("--listen cannot be combined with --providers; each provider carries its own listener")
+	}
+	if c.maxSessions < 1 || c.maxSessions > 65536 {
+		return errors.New("--max-sessions must be between 1 and 65536")
 	}
 	if c.binary == "" {
 		executable, err := os.Executable()

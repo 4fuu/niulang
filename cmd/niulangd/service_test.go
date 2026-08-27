@@ -15,6 +15,7 @@ func testServiceConfig() serviceConfig {
 		localAddress:  "auto",
 		metricsListen: "127.0.0.1:12090",
 		logLevel:      "info",
+		maxSessions:   2048,
 	}
 }
 
@@ -61,6 +62,9 @@ func TestServiceDefaultListenMatchesClientDefault(t *testing.T) {
 	if service.listen != "127.0.0.1:12080" {
 		t.Fatalf("default listen is %q, want the Clash profile's 127.0.0.1:12080", service.listen)
 	}
+	if service.maxSessions != runtimeOpts.maxSessions {
+		t.Fatalf("service default max sessions %d differs from client default %d", service.maxSessions, runtimeOpts.maxSessions)
+	}
 }
 
 func TestRenderLaunchAgentQuotesEveryArgument(t *testing.T) {
@@ -106,6 +110,9 @@ func TestRenderSystemdUnitQuotesEveryArgument(t *testing.T) {
 	if !strings.Contains(rendered, "Restart=on-failure") {
 		t.Fatalf("the client exits when a listener stops and must be restarted:\n%s", rendered)
 	}
+	if !strings.Contains(rendered, `"--max-sessions" "2048"`) {
+		t.Fatalf("the service must persist its shared session limit:\n%s", rendered)
+	}
 }
 
 // The client resolves --local-address by reading this machine's interfaces,
@@ -146,7 +153,7 @@ func TestSystemdQuoteEscapesMetacharacters(t *testing.T) {
 }
 
 func TestServiceResolveRejectsConflictingSources(t *testing.T) {
-	config := serviceConfig{label: defaultServiceLabel, unit: defaultServiceUnit, listen: "127.0.0.1:12080"}
+	config := serviceConfig{label: defaultServiceLabel, unit: defaultServiceUnit, listen: "127.0.0.1:12080", maxSessions: 2048}
 	if err := config.resolve(); err == nil {
 		t.Fatal("neither --profile nor --providers should be rejected")
 	}
@@ -166,13 +173,23 @@ func TestServiceResolveRejectsConflictingSources(t *testing.T) {
 
 func TestServiceResolveRejectsUnsafeNames(t *testing.T) {
 	for _, name := range []string{"../escape", "with/slash", "", "-leading"} {
-		config := serviceConfig{label: name, unit: defaultServiceUnit, profile: "/tmp/a.json", listen: "127.0.0.1:12080"}
+		config := serviceConfig{label: name, unit: defaultServiceUnit, profile: "/tmp/a.json", listen: "127.0.0.1:12080", maxSessions: 2048}
 		if err := config.resolve(); err == nil {
 			t.Fatalf("label %q became a file name without complaint", name)
 		}
-		config = serviceConfig{label: defaultServiceLabel, unit: name, profile: "/tmp/a.json", listen: "127.0.0.1:12080"}
+		config = serviceConfig{label: defaultServiceLabel, unit: name, profile: "/tmp/a.json", listen: "127.0.0.1:12080", maxSessions: 2048}
 		if err := config.resolve(); err == nil {
 			t.Fatalf("service name %q became a file name without complaint", name)
+		}
+	}
+}
+
+func TestServiceResolveRejectsInvalidMaxSessions(t *testing.T) {
+	for _, maxSessions := range []int{0, 65537} {
+		config := testServiceConfig()
+		config.maxSessions = maxSessions
+		if err := config.resolve(); err == nil {
+			t.Fatalf("max sessions %d was accepted", maxSessions)
 		}
 	}
 }

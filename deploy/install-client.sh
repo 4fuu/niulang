@@ -25,8 +25,12 @@ config_dir=
 base_port=12080
 metrics_listen=127.0.0.1:12090
 local_address=auto
+max_sessions=
 device_name=
 log_level=info
+metrics_listen_set=false
+local_address_set=false
+log_level_set=false
 label=me.01.niulang.client
 service_name=niulang-client
 binary_source=
@@ -61,6 +65,8 @@ Options:
                            owns the default route or two uplinks are active.
   --device-name NAME       device label shown to the provider (default hostname)
   --metrics-listen ADDR    loopback metrics address (default 127.0.0.1:12090)
+  --max-sessions N         shared concurrent-session limit (default 2048, or
+                           preserve the value from an existing service)
   --log-level LEVEL        debug, info, warn, or error (default info)
   --config-dir DIR         profiles and manifest (default: the same directory
                            `niulangd enroll` uses -- ~/Library/Application
@@ -155,6 +161,7 @@ while [ "$#" -gt 0 ]; do
 	--local-address)
 		next_value "$#" "$1"
 		local_address=$2
+		local_address_set=true
 		shift
 		;;
 	--device-name)
@@ -165,11 +172,18 @@ while [ "$#" -gt 0 ]; do
 	--metrics-listen)
 		next_value "$#" "$1"
 		metrics_listen=$2
+		metrics_listen_set=true
+		shift
+		;;
+	--max-sessions)
+		next_value "$#" "$1"
+		max_sessions=$2
 		shift
 		;;
 	--log-level)
 		next_value "$#" "$1"
 		log_level=$2
+		log_level_set=true
 		shift
 		;;
 	--config-dir)
@@ -429,6 +443,41 @@ file from backup before relocating."
 
 find_previous_install
 
+previous_argument() {
+	awk -v wanted="--$1" 'previous == wanted { print; exit } { previous = $0 }' \
+		"$work_dir/previous-args"
+}
+
+if [ -n "$previous_definition" ]; then
+	if [ "$local_address_set" = false ]; then
+		previous_local_address=$(previous_argument local-address)
+		[ -z "$previous_local_address" ] || local_address=$previous_local_address
+	fi
+	if [ "$metrics_listen_set" = false ]; then
+		previous_metrics_listen=$(previous_argument metrics-listen)
+		[ -z "$previous_metrics_listen" ] || metrics_listen=$previous_metrics_listen
+	fi
+	if [ "$log_level_set" = false ]; then
+		previous_log_level=$(previous_argument log-level)
+		[ -z "$previous_log_level" ] || log_level=$previous_log_level
+	fi
+fi
+
+if [ -z "$max_sessions" ] && [ -n "$previous_definition" ]; then
+	previous_max_sessions=$(previous_argument max-sessions)
+	case $previous_max_sessions in
+	'' | *[!0-9]*) ;;
+	*) max_sessions=$previous_max_sessions ;;
+	esac
+fi
+[ -n "$max_sessions" ] || max_sessions=2048
+case $max_sessions in
+'' | *[!0-9]*) usage_error "--max-sessions must be numeric" ;;
+esac
+if [ "$max_sessions" -lt 1 ] || [ "$max_sessions" -gt 65536 ]; then
+	usage_error "--max-sessions $max_sessions is out of range"
+fi
+
 relocating=false
 if [ -n "$previous_definition" ]; then
 	if [ "$previous_manifest" != "$manifest" ] ||
@@ -456,6 +505,8 @@ if [ "$dry_run" = true ]; then
 	echo "Would install $binary_path and write $manifest."
 	echo "Would enroll $(wc -l <"$pending" | tr -d ' ') invitation(s) with --local-address $local_address as device \"$device_name\"."
 	echo "Would allocate loopback SOCKS5 ports from $base_port upward."
+	echo "Would use a shared maximum of $max_sessions concurrent sessions."
+	echo "Would expose metrics at $metrics_listen and use log level $log_level."
 	if [ "$platform" = macos ]; then
 		echo "Would install the LaunchAgent $service_path."
 	else
@@ -604,6 +655,7 @@ install -m 0600 "$manifest_tmp" "$manifest"
 set -- service install \
 	--providers "$manifest" \
 	--local-address "$local_address" \
+	--max-sessions "$max_sessions" \
 	--log-level "$log_level" \
 	--metrics-listen "$metrics_listen" \
 	--label "$label" \

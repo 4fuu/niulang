@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import subprocess
@@ -20,6 +21,7 @@ class DeployManagerTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["NIULANG_MANAGER_TESTING"] = "1"
+        environment["NIULANG_INIT_SYSTEM"] = "systemd"
         if root is not None:
             home = root / "home" / "operator"
             home.mkdir(parents=True, exist_ok=True)
@@ -190,11 +192,290 @@ class DeployManagerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unknown argument: --user-max-sessions", result.stderr)
 
+    def test_client_installer_preserves_existing_runtime_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            config = home / ".config" / "niulang"
+            config.mkdir(parents=True)
+            manifest = config / "providers.json"
+            manifest.write_text(
+                '{"version":1,"providers":[{"name":"primary","profile":"primary.json","listen":"127.0.0.1:12080"}]}\n',
+                encoding="utf-8",
+            )
+            service_dir = home / ".config" / "systemd" / "user"
+            service_dir.mkdir(parents=True)
+            unit = service_dir / "niulang-client.service"
+            unit.write_text(
+                f'[Service]\nExecStart="{home}/.niulang/bin/niulangd" "client" '
+                f'"--providers" "{manifest}" "--local-address" "if:eth1" '
+                '"--max-sessions" "4096" "--log-level" "warn" '
+                '"--metrics-listen" "127.0.0.1:12999"\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["sh", str(CLIENT_INSTALLER), "--dry-run"],
+                cwd=REPOSITORY,
+                env={**os.environ, "HOME": str(home)},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--local-address if:eth1", result.stdout)
+            self.assertIn("shared maximum of 4096", result.stdout)
+            self.assertIn("metrics at 127.0.0.1:12999", result.stdout)
+            self.assertIn("log level warn", result.stdout)
+
     def test_manager_has_no_old_release_compatibility_branch(self):
         source = MANAGER.read_text(encoding="utf-8")
         self.assertNotIn("v0.2.0", source)
         self.assertNotIn("wire=1", source)
         self.assertNotIn("queqiao://", source)
+
+    def test_openwrt_defaults_and_service_rendering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            result = self.run_shell(
+                """
+                detect_init_system
+                test "$INIT_SYSTEM" = openwrt
+                test "$NATIVE_BINARY" = /usr/bin/niulangd
+                test "$DATA_DIR" = /etc/niulang
+                test "$RUNTIME_USER" = root
+                SERVER_PORT=8443
+                SERVER_TRANSPORT=auto
+                SERVER_MAX_SESSIONS=4096
+                SERVER_METRICS_PORT=19090
+                render_openwrt_service server >"$NIULANG_MANAGER_ROOT/server"
+                CLIENT_MODE=single
+                CLIENT_LOCAL_ADDRESS=openwrt:wan
+                OPENWRT_NETWORK=wan
+                CLIENT_MAX_SESSIONS=2048
+                CLIENT_METRICS_PORT=12090
+                render_openwrt_service client >"$NIULANG_MANAGER_ROOT/client"
+                """,
+                root,
+                {"NIULANG_INIT_SYSTEM": "openwrt"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            server = (root / "server").read_text(encoding="utf-8")
+            client = (root / "client").read_text(encoding="utf-8")
+            self.assertIn('procd_set_param command "$PROG" "server"', server)
+            self.assertIn('command --listen ":8443"', server)
+            self.assertIn('command --transport "auto"', server)
+            self.assertIn('local local_address="openwrt:wan"', client)
+            self.assertIn('network_get_ipaddr local_address "wan"', client)
+            self.assertIn("procd_add_interface_trigger", client)
+            self.assertIn("/etc/init.d/niulang-client restart", client)
+
+    def test_openrc_service_rendering_uses_runtime_account(self):
+        result = self.run_shell(
+            """
+            detect_init_system
+            test "$INIT_SYSTEM" = openrc
+            test "$NATIVE_BINARY" = /usr/local/bin/niulangd
+            render_openrc_service client '--profile /var/lib/niulang/client.json --max-sessions 2048'
+            """,
+            extra_environment={"NIULANG_INIT_SYSTEM": "openrc"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('command="/usr/local/bin/niulangd"', result.stdout)
+        self.assertIn('command_user="niulang:niulang"', result.stdout)
+        self.assertIn("supervisor=supervise-daemon", result.stdout)
+
+    def test_release_source_is_validated_persisted_and_reloaded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            result = self.run_shell(
+                """
+                run_root() { "$@"; }
+                detect_init_system
+                set_release_source example/niulang true
+                save_release_source
+                set_release_source 4fuu/niulang false
+                RELEASE_SOURCE_EXPLICIT=false
+                load_saved_release_source
+                test "$REPOSITORY" = example/niulang
+                test "$RELEASE_INCLUDE_PRERELEASE" = true
+                ! valid_repository 'https://github.com/example/niulang'
+                """,
+                root,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            source = root / "etc" / "niulang" / "release-source"
+            self.assertEqual(
+                source.read_text(encoding="utf-8"),
+                "repository=example/niulang\ninclude_prerelease=true\n",
+            )
+
+    def test_native_manifest_create_and_append_remain_valid_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest = root / "providers.json"
+            appended = root / "providers-appended.json"
+            result = self.run_shell(
+                f"""
+                create_provider_manifest '{manifest}' primary /etc/niulang/client.json 12080 secondary /etc/niulang/client-secondary.json 12081
+                append_provider_manifest '{manifest}' '{appended}' tertiary /etc/niulang/client-tertiary.json 12082
+                """,
+                root,
+                {"NIULANG_INIT_SYSTEM": "openwrt"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(appended.read_text(encoding="utf-8"))
+            self.assertEqual(payload["version"], 1)
+            self.assertEqual(
+                [provider["name"] for provider in payload["providers"]],
+                ["primary", "secondary", "tertiary"],
+            )
+
+    def test_openwrt_legacy_stop_restore_and_remove(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            init = root / "etc" / "init.d" / "queqiao-client"
+            init.parent.mkdir(parents=True)
+            log = root / "legacy.log"
+            init.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$1" >>"$LEGACY_LOG"\n'
+                'case "$1" in enabled|status) exit 0;; esac\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            init.chmod(0o755)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            (fake_bin / "ubus").write_text(
+                "#!/bin/sh\nprintf '%s\\n' '{\"running\":true}'\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "ubus").chmod(0o755)
+            snapshot = root / "snapshot.tsv"
+            result = self.run_shell(
+                f"""
+                run_root() {{ "$@"; }}
+                record_legacy_state client '{snapshot}'
+                stop_legacy_role client
+                restore_legacy_state '{snapshot}'
+                remove_legacy_role client
+                test ! -f '{init}'
+                """,
+                root,
+                {
+                    "NIULANG_INIT_SYSTEM": "openwrt",
+                    "LEGACY_LOG": str(log),
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actions = log.read_text(encoding="utf-8")
+            self.assertIn("disable", actions)
+            self.assertIn("enable", actions)
+            self.assertIn("stop", actions)
+            self.assertIn("start", actions)
+
+    def test_native_client_configuration_round_trips_shared_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            service = root / "etc" / "init.d" / "niulang-client"
+            service.parent.mkdir(parents=True)
+            result = self.run_shell(
+                """
+                detect_init_system
+                CLIENT_MODE=multi
+                CLIENT_LOCAL_ADDRESS=openwrt:wan2
+                OPENWRT_NETWORK=wan2
+                CLIENT_MAX_SESSIONS=3072
+                CLIENT_METRICS_PORT=12091
+                render_openwrt_service client >"$(native_service_path client)"
+                CLIENT_MODE=single
+                CLIENT_LOCAL_ADDRESS=auto
+                CLIENT_MAX_SESSIONS=1
+                CLIENT_METRICS_PORT=1
+                load_native_client_configuration
+                test "$CLIENT_MODE" = multi
+                test "$CLIENT_LOCAL_ADDRESS" = openwrt:wan2
+                test "$OPENWRT_NETWORK" = wan2
+                test "$CLIENT_MAX_SESSIONS" = 3072
+                test "$CLIENT_METRICS_PORT" = 12091
+                test "$PROVIDERS_PATH" = /etc/niulang/providers.json
+                """,
+                root,
+                {"NIULANG_INIT_SYSTEM": "openwrt"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_systemd_client_limit_update_preserves_other_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            home = root / "home" / "operator"
+            unit = home / ".config" / "systemd" / "user" / "niulang-client.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text(
+                '[Service]\nExecStart="/home/operator/niulangd" "client" '
+                '"--providers" "/home/operator/providers.json" '
+                '"--local-address" "if:eth1" "--metrics-listen" "127.0.0.1:12999" '
+                '"--log-level" "warn"\n',
+                encoding="utf-8",
+            )
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            (fake_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "systemctl").chmod(0o755)
+            result = self.run_shell(
+                "install_systemd_client_max_sessions 4096",
+                root,
+                {"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            updated = unit.read_text(encoding="utf-8")
+            self.assertIn('"--max-sessions" "4096"', updated)
+            self.assertIn('"--local-address" "if:eth1"', updated)
+            self.assertIn('"--metrics-listen" "127.0.0.1:12999"', updated)
+            self.assertIn('"--log-level" "warn"', updated)
+
+    def test_native_binary_install_and_service_definition_roll_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            installed = root / "usr" / "bin" / "niulangd"
+            installed.parent.mkdir(parents=True)
+            installed.write_text(
+                "#!/bin/sh\necho 'niulangd old wire=2'\n",
+                encoding="utf-8",
+            )
+            installed.chmod(0o755)
+            supplied = root / "new-niulangd"
+            supplied.write_text(
+                "#!/bin/sh\necho 'niulangd new wire=2'\n",
+                encoding="utf-8",
+            )
+            supplied.chmod(0o755)
+            service = root / "etc" / "init.d" / "niulang-client"
+            service.parent.mkdir(parents=True)
+            service.write_text("old service\n", encoding="utf-8")
+            service.chmod(0o755)
+            result = self.run_shell(
+                """
+                run_root() { "$@"; }
+                script_dir="$PWD/deploy"
+                detect_init_system
+                install_native_binary
+                test "$("$(root_path /usr/bin/niulangd)" version)" = 'niulangd new wire=2'
+                restore_native_binary
+                test "$("$(root_path /usr/bin/niulangd)" version)" = 'niulangd old wire=2'
+                native_start_service() { return 1; }
+                native_stop_service() { return 0; }
+                ! write_native_service client '--profile /etc/niulang/client.json --max-sessions 2048'
+                grep -qx 'old service' "$(native_service_path client)"
+                """,
+                root,
+                {
+                    "NIULANG_INIT_SYSTEM": "openwrt",
+                    "NIULANG_BINARY": str(supplied),
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -21,11 +21,13 @@ Confirm that this model fits your network before exposing a service.
 
 ## Install and manage with the scripts
 
-On Linux with systemd, [`deploy/manage.sh`](../deploy/manage.sh) is the
-interactive entry point for installing, updating, and operating Niulang. It
-downloads the selected stable release, verifies its `SHA256SUMS`, and uses the
-binary and deployment scripts from that same archive. It also manages provider
-users, invitations, and devices.
+On Linux, [`deploy/manage.sh`](../deploy/manage.sh) is the interactive entry
+point for installing, updating, and operating Niulang. It supports systemd,
+OpenRC, and OpenWrt procd on amd64 and arm64. It downloads the selected stable
+or prerelease build, verifies its `SHA256SUMS`, rejects binaries that do not
+report protocol 2, and uses deployment files from the same release. It also
+manages provider users, invitations, devices, multi-provider clients, and the
+client's shared session limit.
 
 ```sh
 ./deploy/manage.sh
@@ -43,14 +45,48 @@ configuration, and logs is a separate action requiring the exact confirmation
 phrase printed by the tool.
 
 The commands `legacy-stop`, `legacy-remove`, and `legacy-purge` separate the
-reversible stop, service removal, and irreversible data deletion steps. Client
-installation and migration must run as the login account that will use the
-tunnel; server and system-service operations request `sudo` when needed.
+reversible stop, service removal, and irreversible data deletion steps on all
+three init systems. `legacy-purge` also removes the former OpenWrt UCI firewall
+rule. On systemd, client installation and migration run as the login account
+that will use the tunnel, while the provider is a system service. OpenRC and
+OpenWrt use system services for both roles, so run the manager as root there.
 
-The two non-interactive installers remain available for automation. Read this
-section and skip to [Connect Clash or mihomo](#connect-clash-or-mihomo); the
-rest of the guide remains the reference for what they do and for hosts they do
-not cover.
+The most useful non-interactive commands are:
+
+```sh
+./deploy/manage.sh server
+./deploy/manage.sh client
+./deploy/manage.sh add-provider
+./deploy/manage.sh client-config
+./deploy/manage.sh provider
+./deploy/manage.sh update
+./deploy/manage.sh source
+./deploy/manage.sh status
+```
+
+`update` replaces the binary atomically, restarts every recognized Niulang
+service, and restores the old binary if a service cannot run. `source` stores
+the official or custom GitHub `owner/repository` and whether `latest` may pick
+a prerelease in `/etc/niulang/release-source`. A custom repository must publish
+Niulang's normal archive names and `SHA256SUMS`; it is a source choice, not a
+Queqiao or protocol-1 compatibility path.
+
+OpenWrt defaults to `/usr/bin/niulangd` and keeps durable profiles and provider
+state under `/etc/niulang`; runtime logs go to procd/logread rather than flash.
+The client binds its outer connection to the logical `wan` network by default,
+resolves its current IPv4 address at service start, and has a procd interface
+trigger that restarts it after address changes. Override the logical network
+with `NIULANG_OPENWRT_NETWORK=wan2`. If WAN has no IPv4 yet, an absent client
+instance is an expected delayed-start state rather than a successful data path.
+The provider's prompted port is opened for both TCP and UDP with a named UCI
+firewall rule. OpenRC defaults to `/usr/local/bin/niulangd`, a dedicated
+`niulang` account, and `/var/lib/niulang`; listening below port 1024 requires
+`setcap` from libcap.
+
+The two lower-level installers remain available for systemd and desktop
+automation. Read this section and skip to [Connect Clash or
+mihomo](#connect-clash-or-mihomo); the rest of the guide remains the reference
+for what they do and for hosts they do not cover.
 
 On the Linux gateway, as root:
 
