@@ -527,7 +527,7 @@ func moduleLicenseID(modulePath string) string {
 	case "github.com/andybalholm/brotli", "github.com/apernet/quic-go", "github.com/quic-go/qpack":
 		return "MIT"
 	case "github.com/klauspost/compress", "github.com/refraction-networking/utls",
-		"golang.org/x/crypto", "golang.org/x/net", "golang.org/x/sys":
+		"golang.org/x/crypto", "golang.org/x/net", "golang.org/x/sys", "golang.org/x/text":
 		return "BSD-3-Clause"
 	default:
 		return "NOASSERTION"

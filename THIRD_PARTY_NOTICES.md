@@ -13,6 +13,7 @@ following Go modules:
 | `golang.org/x/crypto` | v0.55.0 | BSD-3-Clause |
 | `golang.org/x/net` | v0.58.0 | BSD-3-Clause |
 | `golang.org/x/sys` | v0.47.0 | BSD-3-Clause |
+| `golang.org/x/text` | v0.41.0 | BSD-3-Clause |
 
 Every release archive contains `THIRD_PARTY_LICENSES.txt` with the complete
 license text read from the exact linked module versions at packaging time. Its

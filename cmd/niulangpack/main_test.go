@@ -153,9 +153,14 @@ func TestThirdPartyLicenseBundleUsesExactModuleText(t *testing.T) {
 	}
 }
 
-func TestHTTP3QPACKHasReviewedLicense(t *testing.T) {
-	if got := moduleLicenseID("github.com/quic-go/qpack"); got != "MIT" {
-		t.Fatalf("qpack license = %q, want MIT", got)
+func TestHTTP3DependenciesHaveReviewedLicenses(t *testing.T) {
+	for module, want := range map[string]string{
+		"github.com/quic-go/qpack": "MIT",
+		"golang.org/x/text":        "BSD-3-Clause",
+	} {
+		if got := moduleLicenseID(module); got != want {
+			t.Errorf("%s license = %q, want %q", module, got, want)
+		}
 	}
 }
 
