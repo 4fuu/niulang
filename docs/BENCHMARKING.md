@@ -1,8 +1,8 @@
 # Measuring this transport
 
 > [!NOTE]
-> **Status:** Current benchmark methodology for public protocol 1
-> **Last reviewed:** 2026-08-26
+> **Status:** Current benchmark methodology for Niulang protocol 2
+> **Last reviewed:** 2026-08-27
 
 This is the reproducibility guide for the measurement rig. It exists because the motivating
 link moved between roughly 0% and 50% packet loss within minutes, so
@@ -47,13 +47,32 @@ resource's start, connect, first-byte, completion, byte count, and status. The
 regression gate checks page-critical, video-first, and full-completion p95 in
 addition to completion and goodput.
 
-Every resource is a separate SOCKS TCP flow sharing the same warm outer QUIC
-connection. This models a browser using several origin/CDN connections, which
-is the layer Niulang can schedule without decrypting traffic. It does not claim
+Every resource is a separate SOCKS TCP flow sharing the same warm outer HTTP/3
+connection, with one Extended CONNECT request stream per Niulang lane. This
+models a browser using several origin/CDN connections, which is the layer
+Niulang can schedule without decrypting traffic. It does not claim
 to expose HTTP/2 or HTTP/3 stream priorities hidden inside one encrypted,
 ordered inner connection: bytes later in that connection cannot legally pass
 earlier bytes at the proxy. Use the profile to judge cross-flow isolation and
 fairness, not application-layer resource discovery.
+
+Niulang therefore schedules only what this layer can know honestly. DATA
+carrier handoffs on QUIC connections with the same stable provider-path
+identity share one default scheduling window; control frames, UDP packets, and
+TCP fallback bypass it. Each flow receives at most 512 KiB of preferred startup
+service. The path admits at most eight carrier handoffs at once and two per
+flow, serves preferred startup or interactive work against sustained bulk at a
+3:1 ratio, and ages bulk into service after 250 ms. Coded DATA releases its
+grant only after its source symbols reach the datagram carrier, not when they
+enter the coded path's own queue. Flow close wakes pending grants and reclaims
+granted ones.
+
+This is cross-flow fairness, not TLS content inference. The proxy does not know
+whether an encrypted flow is HTML, an image, or video; bounded startup service
+lets all of those make initial progress, while the existing observed flow
+classifier eventually moves sustained downloads and media tails to bulk.
+`--flow-scheduling=false` is the matched control, and
+`--flow-startup-bytes` overrides the startup bound for experiments.
 
 ```sh
 go run ./cmd/niulangbench --page --stacks baseline,niulang \
@@ -89,6 +108,32 @@ short-flow fanout on one warm congestion context and bound proactive secondary
 bulk connections. Niulang cannot identify a video segment hidden inside TLS;
 specific media priority requires an application-visible signal and must not be
 inferred from encrypted byte patterns.
+
+Three same-binary, matched 10-trial controls validated the cross-flow scheduler
+before it became the default. With scheduling disabled then enabled, a clean
+50 ms, 50 Mbit/s path (seed 7401) stayed 10/10 complete and changed median
+goodput from 45.031 to 45.141 Mbit/s. Visible-critical p50/p95 changed from
+1007/1091 to 1000/1023 ms, video-first p50/p95 from 595/667 to 596/692 ms, and
+full-page p95 from 2223 to 2226 ms. The page tail improved while media and total
+completion remained healthy rather than receiving strict priority.
+
+At 100 ms with 5% independent loss (seed 9401), both sides completed 10/10;
+goodput changed from 33.070 to 33.483 Mbit/s, visible-critical p50/p95 from
+1447/1554 to 1406/1509 ms, video-first p50/p95 from 1216/1282 to 1147/1268 ms,
+and full-page p95 from 3056 to 3020 ms. At 100 ms with 15% loss in mean bursts
+of six packets (seed 9601), completion changed from 9/10 to 10/10, median
+goodput from 26.245 to 26.892 Mbit/s, visible-critical p95 from 2266 to 1908 ms,
+and full-page p95 from 7889 to 4091 ms. Visible-critical p50 moved from 1746 to
+1760 ms and video-first p95 from 1746 to 1759 ms, so the burst result supports
+the tail and completion benefit without claiming every quantile improves.
+
+Five-trial 4 MiB download controls found no completion or material bulk
+regression. At 50 ms with no loss, one/eight-flow medians changed from
+39.141/47.149 to 39.066/47.183 Mbit/s. At 100 ms with 5% independent loss they
+changed from 25.946/41.330 to 26.013/42.106 Mbit/s. Every cell completed 5/5.
+These results establish the narrow default; they do not imply that application
+content can be recovered from TLS or that sustained media should be assigned a
+special hidden type.
 
 The campaign also found a correctness failure: a response producer could fill
 its local TCP buffer, close, and have the proxy's five-second ambiguous-close
@@ -493,6 +538,18 @@ AnyTLS's one-TCP-session-per-flow shape or padding as latency mechanisms. TCP
 multiplexing adds head-of-line coupling, and padding adds bytes and writes.
 The script tests only the reusable mechanism: cold and warm request latency
 with the pool enabled and disabled.
+
+A same-machine, same-seed 10-trial check compared the inherited raw-QUIC
+carrier with protocol 2's real HTTP/3 carrier at 100 ms RTT, 5% independent
+loss, 50 Mbit/s, and a 1 MiB flow (seed 12703). Both completed 10/10. Raw versus
+HTTP/3 median/mean goodput was 10.986/11.282 versus 11.139/11.243 Mbit/s. Warm
+request median/maximum was 102.383/102.810 versus 105.533/107.014 ms, and both
+delivered 200/200 UDP packets; median per-trial UDP p95 was 104.314 versus
+104.502 ms and the largest delivered latency was 106.066 versus 106.593 ms.
+Cold request median/maximum did move from 756.590/1042.485 to
+839.334/1533.205 ms. This narrow local-emulator result supports real HTTP/3
+with the existing warm pool without claiming that the cold path is free or
+that WAN performance is proven.
 
 `--udp-packets N` adds a bounded SOCKS UDP echo workload to each stack and
 trial. Its JSON records application datagrams sent, received, and lost plus

@@ -22,6 +22,7 @@ import (
 	"github.com/4fuu/niulang/internal/protocol"
 	"github.com/apernet/quic-go"
 	quiccongestion "github.com/apernet/quic-go/congestion"
+	"github.com/apernet/quic-go/http3"
 )
 
 type TransportKind string
@@ -32,10 +33,10 @@ const (
 	TransportAuto TransportKind = "auto"
 )
 
-// defaultALPN is the data plane's negotiated protocol. It lives with the
-// wire version in internal/protocol, because bumping one without the other is
-// the failure the pairing exists to prevent.
-const defaultALPN = protocol.DataALPN
+const (
+	quicDataALPN = protocol.QUICDataALPN
+	tcpDataALPN  = protocol.TCPDataALPN
+)
 
 const (
 	defaultAdaptiveMinBytesPerSec = 64 * 1024
@@ -349,19 +350,24 @@ func handshakeBound(conn streamConn, configured time.Duration) time.Duration {
 type quicStreamConn struct {
 	stream     quicBidiStream
 	conn       *quic.Conn
+	h3         *http3.ClientConn
 	packet     net.PacketConn
 	controller wancongestion.TelemetryProvider
 	metrics    *metrics.Registry
 	// closeConn is true for a dedicated lane. Streams obtained from the
 	// client pool and streams accepted by the server must only close their
 	// stream; closing the connection would tear down unrelated flows.
-	closeConn bool
-	once      sync.Once
-	writeOnce sync.Once
-	writeErr  error
-	// bulk carries this lane's data frames as coded datagrams when the path
-	// erases enough to make that worth doing. It belongs to the connection
-	// rather than the stream, so a pooled connection's streams share it.
+	closeConn      bool
+	cancelReadCode quic.StreamErrorCode
+	once           sync.Once
+	writeOnce      sync.Once
+	writeErr       error
+	// Coded counters belong to this request stream rather than conn. Keep a
+	// separate monotonic baseline so pooled lanes are summed, not deduplicated.
+	codedTelemetryMu       sync.Mutex
+	codedTelemetryPrevious metrics.QUICConnectionCounters
+	// bulk carries this lane's data frames as HTTP Datagrams scoped to this
+	// request stream. Every HTTP/3 lane owns and closes its coded path.
 	bulk *coded.Path
 }
 
@@ -390,6 +396,8 @@ func (c *quicStreamConn) pathIdentity() string { return peerKey(c.conn) }
 // assume that closing this flow owns a pooled connection.
 func (c *quicStreamConn) quicConnection() *quic.Conn { return c.conn }
 
+func (c *quicStreamConn) h3ClientConnection() *http3.ClientConn { return c.h3 }
+
 func (c *quicStreamConn) transportStats() laneTransportStats {
 	if c == nil || c.conn == nil {
 		return laneTransportStats{}
@@ -404,9 +412,6 @@ func (c *quicStreamConn) transportStats() laneTransportStats {
 		stats.controller = c.controller.Telemetry()
 	}
 	if c.bulk != nil {
-		// The coded path belongs to the connection, not the stream, so these
-		// are connection-scoped like the counters above and fold once however
-		// many lanes share it.
 		coded := c.bulk.Stats()
 		stats.codedSources = coded.Sources
 		stats.codedRecovered = coded.Recovered
@@ -441,19 +446,26 @@ func (c *quicStreamConn) Close() error {
 		// connection's final movement while the QUIC connection is still live;
 		// connectionTelemetry deduplicates pooled streams and concurrent flows.
 		if c.metrics != nil {
-			_, delta := c.connectionTelemetry(c.transportStats())
+			stats := c.transportStats()
+			_, delta := c.connectionTelemetry(stats)
+			delta.Add(c.laneCodedTelemetry(stats))
 			c.metrics.AddQUICConnectionCounters(delta)
 		}
-		// quic.Stream.Close closes only the send direction. CancelRead releases
+		if c.bulk != nil {
+			dropBulkDemux(c.bulk)
+			_ = c.bulk.Close()
+		}
+		// Closing the HTTP/3 request stream closes only the send direction.
+		// CancelRead releases
 		// a blocked reader and its flow-control credit; omitting it retained
 		// aborted pooled streams indefinitely even though the logical lane was
 		// already gone.
-		c.stream.CancelRead(0)
+		c.stream.CancelRead(c.cancelReadCode)
 		err = c.CloseWrite()
 		if c.closeConn {
 			// Dedicated lanes own their QUIC connection and socket. Pooled
 			// streams deliberately leave both alive for other flows.
-			if closeErr := c.conn.CloseWithError(0, "niulang lane closed"); closeErr != nil {
+			if closeErr := c.conn.CloseWithError(h3NoErrorCode, "niulang lane closed"); closeErr != nil {
 				err = closeErr
 			}
 			if c.packet != nil {
@@ -465,11 +477,11 @@ func (c *quicStreamConn) Close() error {
 }
 
 func tlsClientConfig(credentials identity.ClientCredentials) (*tls.Config, error) {
-	return identity.ClientTLSConfig(credentials, defaultALPN)
+	return identity.ClientTLSConfig(credentials, quicDataALPN)
 }
 
 func dialTCP(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error) (streamConn, error) {
-	return dialTCPALPN(ctx, remote, credentials, dialTimeout, localAddress, control, defaultALPN)
+	return dialTCPALPN(ctx, remote, credentials, dialTimeout, localAddress, control, tcpDataALPN)
 }
 
 func dialTCPALPN(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, alpn string) (streamConn, error) {
@@ -642,7 +654,8 @@ func quicConfig(windows flowWindows) *quic.Config {
 		InitialConnectionReceiveWindow: connectionWindow,
 		MaxConnectionReceiveWindow:     connectionMax,
 		MaxIncomingStreams:             incomingStreams,
-		MaxIncomingUniStreams:          0,
+		// HTTP/3 requires one peer control stream and two QPACK streams.
+		MaxIncomingUniStreams: 3,
 		// The China path has a smaller effective UDP MTU than this host's
 		// interface. Disable probing until path-specific MTU discovery is
 		// available; otherwise a successful probe can raise packets above the
@@ -662,17 +675,18 @@ func dialQUIC(ctx context.Context, remote string, credentials identity.ClientCre
 		return nil, err
 	}
 	controller := configureQUICController(conn, ccfg)
-	stream, err := conn.OpenStreamSync(ctx)
+	h3 := newH3ClientConn(conn)
+	stream, err := openH3Lane(ctx, h3, remote)
 	if err != nil {
-		_ = conn.CloseWithError(0, "unable to open niulang stream")
+		_ = conn.CloseWithError(h3NoErrorCode, "unable to open Niulang HTTP/3 lane")
 		if packetConn != nil {
 			_ = packetConn.Close()
 		}
 		return nil, err
 	}
 	return &quicStreamConn{
-		stream: stream, conn: conn, packet: packetConn, controller: controller, metrics: registry,
-		closeConn: true, bulk: connBulkPath(conn, windows.codedQueue),
+		stream: stream, conn: conn, h3: h3, packet: packetConn, controller: controller, metrics: registry,
+		closeConn: true, cancelReadCode: h3RequestCanceledCode, bulk: newH3CodedPath(stream, conn, windows.codedQueue),
 	}, nil
 }
 
@@ -819,7 +833,7 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 
 func explainDataHandshakeError(remote, transport string, err error) error {
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q rejected Niulang protocol 1 over %s; the endpoint may still run an incompatible development server or another TLS service: %w", remote, transport, err)
+		return fmt.Errorf("gateway %q rejected Niulang protocol 2 over %s; the endpoint may run an incompatible server or another TLS service: %w", remote, transport, err)
 	}
 	return err
 }
@@ -962,17 +976,6 @@ func addressHost(addr net.Addr) string {
 func quicServerConfig(windows flowWindows) *quic.Config {
 	cfg := quicConfig(windows)
 	return cfg
-}
-
-func acceptQUICStream(ctx context.Context, conn *quic.Conn, controller wancongestion.TelemetryProvider, registry *metrics.Registry) (streamConn, error) {
-	stream, err := conn.AcceptStream(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &quicStreamConn{
-		stream: stream, conn: conn, controller: controller, metrics: registry,
-		closeConn: false, bulk: connBulkPath(conn, 0),
-	}, nil
 }
 
 func transportError(kind TransportKind, err error) error {

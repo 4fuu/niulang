@@ -45,7 +45,7 @@ class ValidateReleaseTests(unittest.TestCase):
             "build_date": "2026-08-19T04:00:00Z",
             "target": "linux/amd64",
             "go": "go1.25.13",
-            "wire_protocol": "1",
+            "wire_protocol": "2",
             "binary_sha256": "b" * 64,
         }
 
@@ -61,7 +61,7 @@ class ValidateReleaseTests(unittest.TestCase):
             ("target", "linux/../amd64"),
             ("go", "go1.25"),
             ("go", "devel go1.25.13"),
-            ("wire_protocol", "2"),
+            ("wire_protocol", "1"),
             ("binary_sha256", "b" * 63),
         ):
             changed = dict(fields)
@@ -77,7 +77,7 @@ class ValidateReleaseTests(unittest.TestCase):
                 "build_date": "2026-08-19T04:00:00Z",
                 "target": target,
                 "go": "go1.25.13",
-                "wire_protocol": "1",
+                "wire_protocol": "2",
             }
             for target in sorted(MODULE.EXPECTED_TARGETS)
         ]

@@ -1,11 +1,11 @@
 {
-  "protocol": 1,
-  "note": "Frozen conformance vectors for Niulang protocol 1. Every credential-shaped value here is synthetic. Regenerating this file is a compatibility change; data-plane changes require protocol.Version and the data ALPN to move with them.",
+  "protocol": 2,
+  "note": "Frozen conformance vectors for Niulang protocol 2. Every credential-shaped value here is synthetic. Regenerating this file is a compatibility change; data-plane changes require protocol.Version and the carrier identifiers to move with them.",
   "frame_headers": {
     "accept": [
       {
         "name": "open",
-        "hex": "574f01010000101112131415161718191a1b1c1d1e1f010203040506070800000000000000000000001000000000",
+        "hex": "574f02010000101112131415161718191a1b1c1d1e1f010203040506070800000000000000000000001000000000",
         "type": 1,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -16,7 +16,7 @@
       },
       {
         "name": "open reserving the control lane",
-        "hex": "574f01010020101112131415161718191a1b1c1d1e1f000000000000000100000000000000000000001000000000",
+        "hex": "574f02010020101112131415161718191a1b1c1d1e1f000000000000000100000000000000000000001000000000",
         "type": 1,
         "flags": 32,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -27,7 +27,7 @@
       },
       {
         "name": "open ok",
-        "hex": "574f01020000101112131415161718191a1b1c1d1e1f000000000000000100000000000000000000000000000000",
+        "hex": "574f02020000101112131415161718191a1b1c1d1e1f000000000000000100000000000000000000000000000000",
         "type": 2,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -38,7 +38,7 @@
       },
       {
         "name": "join",
-        "hex": "574f01030000101112131415161718191a1b1c1d1e1f000000000000000100000000000000000000000800000000",
+        "hex": "574f02030000101112131415161718191a1b1c1d1e1f000000000000000100000000000000000000000800000000",
         "type": 3,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -49,7 +49,7 @@
       },
       {
         "name": "interactive data",
-        "hex": "574f01040000101112131415161718191a1b1c1d1e1f00000000000000010000000000001000000004b001000000",
+        "hex": "574f02040000101112131415161718191a1b1c1d1e1f00000000000000010000000000001000000004b001000000",
         "type": 4,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -60,7 +60,7 @@
       },
       {
         "name": "bulk data at the payload limit",
-        "hex": "574f01040000101112131415161718191a1b1c1d1e1f000000000000000100000100000000000002000002000000",
+        "hex": "574f02040000101112131415161718191a1b1c1d1e1f000000000000000100000100000000000002000002000000",
         "type": 4,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -71,7 +71,7 @@
       },
       {
         "name": "cumulative ack upstream",
-        "hex": "574f01050004101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000000001000000",
+        "hex": "574f02050004101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000000001000000",
         "type": 5,
         "flags": 4,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -82,7 +82,7 @@
       },
       {
         "name": "selective ack downstream",
-        "hex": "574f01050088101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000002001000000",
+        "hex": "574f02050088101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000002001000000",
         "type": 5,
         "flags": 136,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -93,7 +93,7 @@
       },
       {
         "name": "final ack",
-        "hex": "574f01050006101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000000001000000",
+        "hex": "574f02050006101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000000001000000",
         "type": 5,
         "flags": 6,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -104,7 +104,7 @@
       },
       {
         "name": "half close",
-        "hex": "574f01060001101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000000000000000",
+        "hex": "574f02060001101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000000000000000",
         "type": 6,
         "flags": 1,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -115,7 +115,7 @@
       },
       {
         "name": "aborting close",
-        "hex": "574f01060011101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000000000000000",
+        "hex": "574f02060011101112131415161718191a1b1c1d1e1f000000000000000100000000000020000000000000000000",
         "type": 6,
         "flags": 17,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -126,7 +126,7 @@
       },
       {
         "name": "reset",
-        "hex": "574f01070000101112131415161718191a1b1c1d1e1f000000000000000100000000000000000000001400000000",
+        "hex": "574f02070000101112131415161718191a1b1c1d1e1f000000000000000100000000000000000000001400000000",
         "type": 7,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -137,7 +137,7 @@
       },
       {
         "name": "packet",
-        "hex": "574f01080000101112131415161718191a1b1c1d1e1f000000000000000100000000000000070000004001000000",
+        "hex": "574f02080000101112131415161718191a1b1c1d1e1f000000000000000100000000000000070000004001000000",
         "type": 8,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -148,7 +148,7 @@
       },
       {
         "name": "packet at the largest legal size",
-        "hex": "574f01080000101112131415161718191a1b1c1d1e1f00000000000000010000000000000008000100e401000000",
+        "hex": "574f02080000101112131415161718191a1b1c1d1e1f00000000000000010000000000000008000100e401000000",
         "type": 8,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -159,7 +159,7 @@
       },
       {
         "name": "probe",
-        "hex": "574f01090000101112131415161718191a1b1c1d1e1f00000000000000000000000000000063000004b000000000",
+        "hex": "574f02090000101112131415161718191a1b1c1d1e1f00000000000000000000000000000063000004b000000000",
         "type": 9,
         "flags": 0,
         "session_id": "101112131415161718191a1b1c1d1e1f",
@@ -172,7 +172,7 @@
     "reject": [
       {
         "name": "wrong magic",
-        "hex": "584f01040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "hex": "584f02040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
         "why": "the first two bytes are not WO"
       },
       {
@@ -181,68 +181,73 @@
         "why": "a receiver speaks exactly one wire version and refuses every other"
       },
       {
-        "name": "version 2",
-        "hex": "574f02040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "name": "version 1",
+        "hex": "574f01040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "why": "the previous wire version has no compatibility path"
+      },
+      {
+        "name": "version 3",
+        "hex": "574f03040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
         "why": "a future version is refused rather than partially understood"
       },
       {
         "name": "frame type 0",
-        "hex": "574f01000000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "hex": "574f02000000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
         "why": "types are 1..9; there is no zero type"
       },
       {
         "name": "frame type 10",
-        "hex": "574f010a0000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "hex": "574f020a0000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
         "why": "an unknown type is refused, never ignored"
       },
       {
         "name": "class 3",
-        "hex": "574f01040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000803000000",
+        "hex": "574f02040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000803000000",
         "why": "classes are 0..2"
       },
       {
         "name": "reserved flag bit 6",
-        "hex": "574f01040040101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "hex": "574f02040040101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
         "why": "bit 6 is reserved and must be zero"
       },
       {
         "name": "reserved flag bit 8",
-        "hex": "574f01040100101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "hex": "574f02040100101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
         "why": "bits 8..15 are reserved and must be zero"
       },
       {
         "name": "ack-ranges flag on data",
-        "hex": "574f01040080101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "hex": "574f02040080101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
         "why": "the range flag is valid only on ACK"
       },
       {
         "name": "reserve-control flag on data",
-        "hex": "574f01040020101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
+        "hex": "574f02040020101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000000",
         "why": "the reserve flag is valid only on OPEN and JOIN"
       },
       {
         "name": "reserved byte 43 set",
-        "hex": "574f01040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801010000",
+        "hex": "574f02040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801010000",
         "why": "the three trailing header bytes are reserved and must be zero"
       },
       {
         "name": "reserved byte 44 set",
-        "hex": "574f01040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000100",
+        "hex": "574f02040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000100",
         "why": "the three trailing header bytes are reserved and must be zero"
       },
       {
         "name": "reserved byte 45 set",
-        "hex": "574f01040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000001",
+        "hex": "574f02040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100000000801000001",
         "why": "the three trailing header bytes are reserved and must be zero"
       },
       {
         "name": "payload one byte over the limit",
-        "hex": "574f01040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100002000101000000",
+        "hex": "574f02040000101112131415161718191a1b1c1d1e1f000000000000000100000000000000100002000101000000",
         "why": "131073 exceeds the fixed 131072-byte payload limit"
       },
       {
         "name": "payload at the 32-bit maximum",
-        "hex": "574f01040000101112131415161718191a1b1c1d1e1f00000000000000010000000000000010ffffffff01000000",
+        "hex": "574f02040000101112131415161718191a1b1c1d1e1f00000000000000010000000000000010ffffffff01000000",
         "why": "the length is refused before anything is allocated for it"
       }
     ]
@@ -1117,8 +1122,8 @@
     }
   ],
   "invitation": {
-    "uri": "niulang://enroll/eyJ2IjoxLCJuYW1lIjoiRXhhbXBsZSBQcm92aWRlciIsInByb3ZpZGVyIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJlbmRwb2ludCI6ImdhdGV3YXkuZXhhbXBsZS5pbnZhbGlkOjg0NDMiLCJnYXRld2F5IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDIiLCJyb290IjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsInRva2VuIjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsImV4cGlyZXMiOiIyMDI2LTAxLTA1VDAwOjAwOjAwWiJ9",
-    "version": 1,
+    "uri": "niulang://enroll/eyJ2IjoyLCJuYW1lIjoiRXhhbXBsZSBQcm92aWRlciIsInByb3ZpZGVyIjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJlbmRwb2ludCI6ImdhdGV3YXkuZXhhbXBsZS5pbnZhbGlkOjg0NDMiLCJnYXRld2F5IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDIiLCJyb290IjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsInRva2VuIjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsImV4cGlyZXMiOiIyMDI2LTAxLTA1VDAwOjAwOjAwWiJ9",
+    "version": 2,
     "provider_name": "Example Provider",
     "provider_id": "00000000000000000000000000000001",
     "endpoint": "gateway.example.invalid:8443",
@@ -1130,7 +1135,7 @@
   },
   "limits": {
     "header_size": 46,
-    "version": 1,
+    "version": 2,
     "max_payload": 131072,
     "max_ack_ranges": 16,
     "ack_range_size": 16,
@@ -1143,8 +1148,11 @@
     "max_probe_payload": 1200,
     "max_probe_frames": 128,
     "max_probe_bytes": 131072,
-    "data_alpn": "queqiao/1",
-    "enroll_alpn": "queqiao-enroll/1",
-    "renew_alpn": "queqiao-renew/1"
+    "quic_data_alpn": "h3",
+    "tcp_data_alpn": "niulang/2",
+    "h3_tunnel_protocol": "niulang",
+    "h3_tunnel_path": "/",
+    "enroll_alpn": "niulang-enroll/2",
+    "renew_alpn": "niulang-renew/2"
   }
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/4fuu/niulang/internal/protocol"
 	"github.com/4fuu/niulang/internal/session"
 	"github.com/apernet/quic-go"
+	"github.com/apernet/quic-go/http3"
 )
 
 // Must exceed the client's bounded lane-replacement wait so a final-ACK loss
@@ -65,6 +66,10 @@ type ServerConfig struct {
 	// it is a measurement control, and both endpoints must agree for the
 	// comparison to mean anything.
 	UDPOnStream bool
+	// DisableFlowScheduling and FlowStartupBytes expose the default cross-flow
+	// provider-path scheduler to matched benchmark controls.
+	DisableFlowScheduling bool
+	FlowStartupBytes      int
 	// testLaneWriteHook is intentionally unexported and nil in production. It
 	// lets package integration tests reproduce loss of a specific logical
 	// frame without depending on encrypted QUIC packet layout.
@@ -99,6 +104,7 @@ type Server struct {
 	budget          *limiter.Budget
 	metrics         *metrics.Registry
 	wireCaps        *wireCapSet
+	flowSchedulers  *flowSchedulerSet
 	// udpRelays holds the relay sockets of UDP associations whose lane died,
 	// so the replacement association keeps the source address the destination
 	// has been talking to.
@@ -348,6 +354,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		wireCaps:      newWireCapSet(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec),
 		udpRelays:     newUDPRelayStore(),
 	}
+	if !cfg.DisableFlowScheduling {
+		server.flowSchedulers = newFlowSchedulerSet(cfg.FlowStartupBytes)
+	}
 	return server, nil
 }
 
@@ -469,7 +478,7 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener) error
 		_ = listener.Close()
 	}()
 
-	tlsConfig, err := identity.ServerTLSConfigWithDataALPNs(s.cfg.Credentials, []string{defaultALPN, protocol.StandbyALPN}, s.cfg.Enrollment != nil)
+	tlsConfig, err := identity.ServerTLSConfigWithDataALPNs(s.cfg.Credentials, []string{tcpDataALPN, protocol.StandbyALPN}, s.cfg.Enrollment != nil)
 	if err != nil {
 		return fmt.Errorf("configure server TLS identity: %w", err)
 	}
@@ -544,7 +553,7 @@ func (s *Server) handleTCP(ctx context.Context, conn *tls.Conn) {
 		}
 		return
 	}
-	if state.NegotiatedProtocol != defaultALPN {
+	if state.NegotiatedProtocol != tcpDataALPN {
 		return
 	}
 	principal, err := identity.PrincipalFromTLS(state)
@@ -571,22 +580,43 @@ func (s *Server) serveQUIC(ctx context.Context) error {
 
 // ServePacketConn runs the QUIC listener on an already-bound UDP socket.
 func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn) error {
-	tlsConfig, err := identity.ServerTLSConfig(s.cfg.Credentials, defaultALPN, s.cfg.Enrollment != nil)
+	tlsConfig, err := identity.ServerTLSConfig(s.cfg.Credentials, quicDataALPN, false)
 	if err != nil {
 		_ = packetConn.Close()
 		return fmt.Errorf("configure server TLS identity: %w", err)
 	}
-	listener, err := quic.Listen(packetConn, tlsConfig, quicServerConfig(
-		flowWindows{stream: s.cfg.StreamReceiveWindow, connection: s.cfg.ConnectionReceiveWindow}))
+	qcfg := quicServerConfig(flowWindows{stream: s.cfg.StreamReceiveWindow, connection: s.cfg.ConnectionReceiveWindow})
+	tlsConfig = http3.ConfigureTLSConfig(tlsConfig)
+	listener, err := quic.Listen(packetConn, tlsConfig, qcfg)
 	if err != nil {
 		_ = packetConn.Close()
 		return fmt.Errorf("create QUIC listener: %w", err)
 	}
 	defer listener.Close()
 	defer packetConn.Close()
+	laneCtx, cancelLanes := context.WithCancel(context.Background())
+	laneCtx = context.WithValue(laneCtx, h3ShutdownContextKey{}, ctx)
+	h3Server := s.newH3Server(laneCtx, tlsConfig, qcfg)
 	go func() {
 		<-ctx.Done()
-		_ = listener.Close()
+		drainCtx, cancel := context.WithTimeout(context.Background(), h3DrainTimeout)
+		defer cancel()
+		shutdownDone := make(chan struct{})
+		go func() {
+			_ = h3Server.Shutdown(drainCtx)
+			close(shutdownDone)
+		}()
+		select {
+		case <-shutdownDone:
+		case <-drainCtx.Done():
+			// ServeQUICConn uses caller-owned connections, so http3.Server
+			// cannot force their request handlers to return when its graceful
+			// deadline expires. Cancel logical lanes at that boundary; the
+			// per-connection watcher below closes the carrier at the same time.
+			cancelLanes()
+			<-shutdownDone
+		}
+		cancelLanes()
 	}()
 	s.cfg.Logger.Info("remote QUIC listener ready", "address", listener.Addr().String())
 	var wg sync.WaitGroup
@@ -600,11 +630,11 @@ func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn)
 			return fmt.Errorf("accept QUIC lane: %w", acceptErr)
 		}
 		if !s.admitConnection() {
-			_ = conn.CloseWithError(0x100, "server connection limit reached")
+			_ = conn.CloseWithError(h3ExcessiveLoadCode, "server connection limit reached")
 			s.cfg.Logger.Warn("remote QUIC connection limit reached")
 			continue
 		}
-		// Session admission is performed per QUIC stream in handleQUIC. Holding
+		// Session admission is performed per HTTP/3 CONNECT request. Holding
 		// one slot from that session semaphore for the lifetime of a multiplexed
 		// connection would incorrectly reduce MaxSessions and prevent the
 		// connection from carrying the configured number of independent flows.
@@ -613,7 +643,24 @@ func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn)
 		go func() {
 			defer wg.Done()
 			defer s.releaseConnection()
-			s.handleQUIC(ctx, conn)
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					timer := time.NewTimer(h3DrainTimeout)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+						_ = conn.CloseWithError(h3NoErrorCode, "server shutdown")
+					case <-done:
+					}
+				case <-done:
+				}
+			}()
+			if serveErr := h3Server.ServeQUICConn(conn); serveErr != nil && ctx.Err() == nil {
+				s.cfg.Logger.Debug("serve HTTP/3 connection failed", "error", serveErr)
+			}
+			close(done)
 		}()
 	}
 }
@@ -639,119 +686,6 @@ func (s *Server) admitEnrollment() bool {
 }
 
 func (s *Server) releaseEnrollment() { <-s.enrollments }
-
-func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
-	var wg sync.WaitGroup
-	// Close the shared connection before waiting for stream handlers. This
-	// ordering is important during shutdown: a handler blocked in Read must be
-	// released before Wait can complete.
-	defer wg.Wait()
-	defer conn.CloseWithError(0, "niulang session complete")
-	controller := configureQUICController(conn, congestionConfig{
-		kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
-		adaptiveMinBytesPerSec: s.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: s.cfg.AdaptiveMaxBytesSec,
-		wireCaps: s.wireCaps,
-	})
-	state := conn.ConnectionState().TLS
-	if state.NegotiatedProtocol == identity.EnrollmentALPN {
-		if s.cfg.Enrollment == nil {
-			return
-		}
-		if !s.admitEnrollment() {
-			s.recordEnrollmentAdmission("enrollment")
-			return
-		}
-		defer s.releaseEnrollment()
-		stream, err := acceptQUICStream(ctx, conn, controller, s.metrics)
-		if err == nil {
-			_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
-			result, serveErr := s.cfg.Enrollment.Serve(stream)
-			s.recordEnrollment("enrollment", result, serveErr)
-			_ = stream.Close()
-		}
-		return
-	}
-	if state.NegotiatedProtocol == identity.RenewalALPN {
-		if s.cfg.Enrollment == nil {
-			return
-		}
-		if !s.admitEnrollment() {
-			s.recordEnrollmentAdmission("renewal")
-			return
-		}
-		defer s.releaseEnrollment()
-		principal, err := identity.PrincipalFromTLS(state)
-		if err != nil {
-			return
-		}
-		stream, err := acceptQUICStream(ctx, conn, controller, s.metrics)
-		if err == nil {
-			_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
-			result, renewErr := s.cfg.Enrollment.Renew(stream, principal)
-			s.recordEnrollment("renewal", result, renewErr)
-			_ = stream.Close()
-		}
-		return
-	}
-	if state.NegotiatedProtocol != defaultALPN {
-		return
-	}
-	principal, err := identity.PrincipalFromTLS(state)
-	if err != nil {
-		return
-	}
-	auth := &quicAuthState{principal: principal}
-	// Mutual TLS authenticates the whole QUIC connection before any stream is
-	// accepted. Every stream therefore begins directly with OPEN, JOIN, or
-	// destination-free PROBE.
-	dispatch := func(lane streamConn) bool {
-		select {
-		case s.semaphore <- struct{}{}:
-			wg.Add(1)
-			go func(lane streamConn) {
-				defer wg.Done()
-				defer func() { <-s.semaphore }()
-				s.handleSession(ctx, lane, principal, auth)
-			}(lane)
-			return true
-		default:
-			// A full active-session budget must not look like carrier loss to
-			// an existing UDP association. Admit a bounded number of overflow
-			// handlers, but let them parse only an authenticated,
-			// destination-free path PROBE; OPEN and JOIN remain refused.
-			select {
-			case s.probeOverflow <- struct{}{}:
-				wg.Add(1)
-				go func(lane streamConn) {
-					defer wg.Done()
-					defer func() { <-s.probeOverflow }()
-					s.handleOverflowPathProbe(lane, principal, auth)
-				}(lane)
-				return true
-			default:
-				_ = lane.Close()
-				s.cfg.Logger.Warn("remote session limit reached")
-				return false
-			}
-		}
-	}
-	for {
-		// Waiting for another stream is not a handshake operation. Applying the
-		// per-stream authentication timeout here used to close the entire QUIC
-		// connection after ten seconds without a *new* stream, even while an
-		// existing long download was actively transferring. Each accepted stream
-		// still gets the bounded authentication deadline in handleSession; the
-		// outer connection is bounded by QUIC's idle timeout and server shutdown.
-		stream, err := acceptQUICStream(ctx, conn, controller, s.metrics)
-		if err != nil {
-			if ctx.Err() == nil {
-				s.cfg.Logger.Debug("accept QUIC stream failed", "error", err)
-			}
-			return
-		}
-		dispatch(stream)
-	}
-}
 
 // handleOverflowPathProbe preserves path-health evidence when every ordinary
 // handler slot is occupied. The QUIC connection is already mutually
@@ -848,7 +782,8 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 	s.cfg.Logger.Debug("remote flow opened", "transport", transportKindForConn(conn), "account", principal.AccountID, "device", principal.DeviceID, "open_duration", destinationDialStarted.Sub(sessionStarted), "destination_dial_duration", time.Since(destinationDialStarted), "total_duration", time.Since(sessionStarted))
 	defer destinationConn.Close()
 	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics, s.cfg.Logger)
-	// Wire version 1 requires range acknowledgements on both endpoints.
+	flow.flowSchedulers = s.flowSchedulers
+	// Wire version 2 requires range acknowledgements on both endpoints.
 	flow.ackRanges.Store(true)
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime

@@ -1,20 +1,25 @@
-# Niulang protocol version 1
+# Niulang protocol version 2
 
 > [!IMPORTANT]
-> **Status:** First public wire contract
+> **Status:** Current independent wire contract
 >
-> **Wire version byte:** `1`
+> **Wire version byte:** `2`
 >
-> **Data ALPN:** `queqiao/1`
+> **QUIC ALPN:** `h3`
 >
-> **Compatibility:** Version 1 only; mismatches fail closed
-> **Last reviewed:** 2026-08-19
+> **TCP data ALPN:** `niulang/2`
+>
+> **HTTP/3 Extended CONNECT protocol:** `niulang`
+>
+> **Compatibility:** Version 2 only; mismatches fail closed
+>
+> **Last reviewed:** 2026-08-27
 
 This document specifies the protocol implemented by the current Niulang source
-tree. Earlier private development builds used higher internal wire numbers.
-Those builds were never a public compatibility contract; the first public
-protocol is deliberately numbered 1 and has no legacy handshake or downgrade
-path.
+tree. Protocol 2 uses a real HTTP/3 QUIC carrier and Niulang's own TCP ALPN and
+certificate-identity namespace. It has no legacy handshake, compatibility
+parser, state migration, or downgrade path. Provider state and client profiles
+from another wire version must be replaced, and devices must be re-enrolled.
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** describe protocol
 requirements. Unless stated otherwise, integers are unsigned and encoded in
@@ -22,17 +27,18 @@ network byte order (big-endian).
 
 ## 1. Protocol layers
 
-Niulang version 1 has four related layers:
+Niulang version 2 has four related layers:
 
 1. **Identity bootstrap:** a `niulang://` invitation and a bounded enrollment
    exchange create a per-device identity.
-2. **Authenticated carrier:** TLS 1.3 over QUIC/UDP or TCP establishes the
-   provider, gateway, account, and device principal.
+2. **Authenticated carrier:** HTTP/3 over mutually authenticated QUIC/TLS or
+   TLS 1.3 over TCP establishes the provider, gateway, account, and device
+   principal.
 3. **Logical flow protocol:** fixed-size frame headers carry TCP byte streams,
    UDP packets, acknowledgements, recovery state, and lane lifecycle.
-4. **Optional coded datagram substrate:** QUIC DATAGRAM carries selected DATA
-   frames through a sliding-window erasure code. The reliable QUIC stream
-   always remains the control substrate.
+4. **Optional coded datagram substrate:** RFC 9297 HTTP Datagrams carry selected
+   DATA frames through a sliding-window erasure code. HTTP/3 DATA frames on the
+   same request stream always remain the reliable control substrate.
 
 Application TLS is not terminated. Niulang sees the requested destination,
 frame sizes, and timing, then relays application bytes or datagrams.
@@ -43,11 +49,11 @@ The gateway normally listens on the same numeric port for UDP and TCP.
 
 | Purpose | Carrier | TLS authentication | ALPN |
 | --- | --- | --- | --- |
-| Data over QUIC | QUIC over UDP | mutual TLS | `queqiao/1` |
-| Data over TCP | TLS over TCP | mutual TLS | `queqiao/1` |
-| TCP hot standby | TLS over TCP | mutual TLS | `niulang-standby/1` |
-| First enrollment | TLS over TCP | pinned gateway; no client certificate | `queqiao-enroll/1` |
-| Device renewal | TLS over TCP | mutual TLS | `queqiao-renew/1` |
+| Data over QUIC | HTTP/3 over QUIC/UDP | mutual TLS | `h3` |
+| Data over TCP | TLS over TCP | mutual TLS | `niulang/2` |
+| TCP hot standby | TLS over TCP | mutual TLS | `niulang-standby/2` |
+| First enrollment | TLS over TCP | pinned gateway; no client certificate | `niulang-enroll/2` |
+| Device renewal | TLS over TCP | mutual TLS | `niulang-renew/2` |
 
 TLS 1.3 is mandatory. There is no plaintext data mode and no application-level
 shared tunnel secret.
@@ -59,14 +65,14 @@ The client validates a complete certificate chain to that exact root and checks
 one gateway URI identity:
 
 ```text
-queqiao://PROVIDER_ID/gateway/GATEWAY_ID
+niulang://PROVIDER_ID/gateway/GATEWAY_ID
 ```
 
 DNS names are routing inputs, not identities. A device certificate contains a
 client-auth identity of the form:
 
 ```text
-queqiao://PROVIDER_ID/account/ACCOUNT_ID/device/DEVICE_ID
+niulang://PROVIDER_ID/account/ACCOUNT_ID/device/DEVICE_ID
 ```
 
 Constrained gateway and device issuers separate certificate roles. A gateway
@@ -82,25 +88,36 @@ server-side revocation checks.
 ### 2.2 ALPN isolation
 
 The unauthenticated enrollment TLS configuration is selected only when the
-client offers exactly `queqiao-enroll/1`. Renewal is selected only when the
-client offers exactly `queqiao-renew/1`. Offering either control ALPN alongside
+client offers exactly `niulang-enroll/2`. Renewal is selected only when the
+client offers exactly `niulang-renew/2`. Offering either control ALPN alongside
 another protocol MUST NOT select the weaker enrollment configuration.
 
-A normal data connection that does not negotiate `queqiao/1` is incompatible
-and MUST be rejected. `niulang-standby/1` is accepted only on TLS/TCP and enters
-the auxiliary state machine below; it cannot open a destination. Neither
-endpoint falls back to a previous Niulang protocol.
+A normal QUIC data connection that does not negotiate `h3` is incompatible and
+MUST be rejected. The gateway MUST advertise Extended CONNECT and HTTP
+Datagrams; the client MUST advertise HTTP Datagrams. A normal TCP data
+connection must negotiate `niulang/2`. `niulang-standby/2` is accepted only on
+TLS/TCP and enters the auxiliary state machine below; it cannot open a
+destination. Neither endpoint falls back to a previous Niulang protocol.
 
 ### 2.3 QUIC and TCP carriage
 
-Each QUIC bidirectional stream or TLS/TCP connection carries a sequence of
-Niulang frames on its reliable byte stream. QUIC connections negotiate DATAGRAM
-support; when both endpoints support it, the same connection can additionally
-carry coded DATA frames and UDP PACKET frames as datagrams.
+The QUIC carrier is a conforming HTTP/3 connection: each endpoint opens the
+required control and QPACK streams, exchanges SETTINGS, and uses HTTP/3 framing.
+Every Niulang lane is one RFC 9220 Extended CONNECT request with `:protocol`
+`niulang` and `:path` `/`. The gateway returns status 200 before sending tunnel
+bytes. Reliable Niulang frame bytes are the request and response body carried
+in HTTP/3 DATA frames. Coded DATA and UDP PACKET frames use RFC 9297 HTTP
+Datagrams associated with that request stream.
 
-One QUIC connection may pool many logical flows on separate streams. QUIC
-datagrams are connection-scoped and are demultiplexed by the `flow_id` inside
-the recovered Niulang frame.
+One HTTP/3 connection may pool many logical flows on separate Extended CONNECT
+request streams. HTTP Datagrams are request-stream scoped, so each lane owns
+its coded path and receive loop. The `:protocol`, `:path`, SETTINGS, HEADERS,
+and DATA frame contents are encrypted after the QUIC handshake.
+
+Using real HTTP/3 removes the custom QUIC ALPN as a passive identifier. It does
+not make traffic indistinguishable from unrelated HTTP/3: the server address
+and SNI, TLS and QUIC implementation fingerprint, connection lifetime, packet
+sizes, timing, and traffic volume remain observable.
 
 The automatic carrier policy keeps a concurrent mixed-resource fanout on that
 pooled connection so short resources share one measured congestion state rather
@@ -129,10 +146,9 @@ byte-offset space above them.
 ### 2.4 Registered TCP standby
 
 Automatic clients maintain at most one hot TLS/TCP standby per provider path.
-It negotiates `niulang-standby/1`, which is a separately versioned auxiliary
-protocol that reuses the version-1 frame envelope without changing the
-`queqiao/1` data contract. A gateway that does not implement it rejects the
-ALPN; ordinary protocol-1 data remains interoperable.
+It negotiates `niulang-standby/2`, which is an isolated auxiliary protocol that
+reuses the version-2 frame envelope. A gateway that does not implement it
+rejects the ALPN.
 
 The first frame is PROBE with a random non-zero `session_id` used only as the
 standby generation, `flow_id` zero, sequence one, class NEW, and one-byte value
@@ -158,7 +174,7 @@ identifiers, authorization, account limits, and active-session capacity before
 acknowledging either form. For JOIN, both endpoints retire QUIC only after
 OPEN_OK for the staged TCP lane has been written; a malformed/refused
 activation or failed acknowledgement MUST leave existing QUIC lanes unchanged.
-The claimed standby then becomes the normal protocol-1 TCP data connection or
+The claimed standby then becomes the normal protocol-2 TCP data connection or
 UDP-on-stream association.
 
 ## 3. Identifiers and scope
@@ -179,10 +195,10 @@ of an identifier alone.
 
 Every logical frame begins with this fixed 46-byte header:
 
-| Offset | Size | Field | Version-1 rule |
+| Offset | Size | Field | Version-2 rule |
 | ---: | ---: | --- | --- |
 | 0 | 2 | magic | ASCII `WO` (`0x57 0x4f`) |
-| 2 | 1 | version | `0x01` |
+| 2 | 1 | version | `0x02` |
 | 3 | 1 | type | One value from §5 |
 | 4 | 2 | flags | Only flags valid for the frame type |
 | 6 | 16 | session ID | Opaque bytes |
@@ -204,13 +220,13 @@ is 131072, MUST reject one whose payload length is 131073 or more, and MUST
 apply the same limit in both directions. An implementation MUST NOT expose the
 limit as configuration.
 
-This is a consequence of version 1 having no capability negotiation. Two peers
+This is a consequence of version 2 having no capability negotiation. Two peers
 holding different limits are mutually intelligible in one direction only, and
 the symptom -- a frame the sender considers legal being refused as malformed --
 names neither the setting nor the peer that holds it. A limit that is not
 negotiated must therefore be fixed.
 
-The value is derived rather than round. The largest frame version 1 can require
+The value is derived rather than round. The largest frame version 2 can require
 a peer to accept is a PACKET (§13) carrying a maximum-size UDP datagram to a
 maximum-length destination:
 
@@ -233,7 +249,7 @@ it is invisible until a specific datagram arrives.
 
 ### 4.2 Rejection
 
-The receiver MUST reject bad magic, a version other than 1, an unknown type,
+The receiver MUST reject bad magic, a version other than 2, an unknown type,
 unknown flags, a class above 2, non-zero reserved bytes, or a payload length
 above 131072. A version mismatch is reported distinctly from malformed framing
 so an operator can perform a coordinated upgrade.
@@ -474,23 +490,27 @@ for the same flow.
 
 Every lane has a reliable control stream. Frame routing is:
 
-| Frame | QUIC with DATAGRAM | QUIC without DATAGRAM | TLS/TCP |
-| --- | --- | --- | --- |
-| OPEN, OPEN_OK, JOIN, ACK, CLOSE, RESET, PROBE | reliable stream | reliable stream | reliable stream |
-| DATA | coded datagram only while path coding and flow policy are active; otherwise stream | stream | stream |
-| PACKET | QUIC datagram | stream fallback | stream fallback |
+| Frame | HTTP/3 | TLS/TCP |
+| --- | --- | --- |
+| OPEN, OPEN_OK, JOIN, ACK, CLOSE, RESET, PROBE | HTTP/3 DATA | reliable stream |
+| DATA | coded HTTP Datagram only while path coding and flow policy are active; otherwise HTTP/3 DATA | stream |
+| PACKET | HTTP Datagram; refused sends fall back to HTTP/3 DATA | stream |
+
+Protocol-2 HTTP/3 tunnels require HTTP Datagram support at both endpoints and
+fail setup when it was not advertised. There is no peer-capability fallback to
+an HTTP/3 stream-only tunnel.
 
 Control never enters the coded substrate. A DATA frame not recovered by FEC is
 still missing at the logical-flow layer and can be reissued from retained
 byte-offset state. PACKET retains UDP semantics and is not retransmitted merely
-because its QUIC datagram was lost.
+because its HTTP Datagram was lost.
 
 ## 12. Coded datagram format
 
-The coded substrate is directional and scoped to one QUIC connection. It
-carries complete encoded Niulang frames inside source symbols and GF(256)
-repair symbols. Its delivery remains unreliable; FEC reduces erasure but does
-not create a second reliable stream.
+The coded substrate is directional and scoped to one Extended CONNECT request
+stream. It carries complete encoded Niulang frames inside source symbols and
+GF(256) repair symbols. Its delivery remains unreliable; FEC reduces erasure
+but does not create a second reliable stream.
 
 ### 12.1 Datagram headers
 
@@ -572,7 +592,7 @@ rows in §20 before it is used against a peer it did not build.
 
 Parity rate is sender policy derived from path state and is not negotiated.
 Window size is **not** sender policy alone: it is what the sender may ask the
-receiver to solve, so version 1 fixes both sides of it.
+receiver to solve, so version 2 fixes both sides of it.
 
 | Bound | Value | Applies to |
 | --- | ---: | --- |
@@ -624,7 +644,7 @@ The destination follows the same canonical rules as TCP OPEN and is at most
 encode the numeric source address observed on the relay socket.
 
 A maximum-size PACKET payload is therefore `2 + 255 + 65507 = 65764` bytes, and
-this is the largest payload version 1 can require any peer to accept. It is
+this is the largest payload version 2 can require any peer to accept. It is
 what fixes the frame payload limit in §4.1, and it is why that limit is not
 configurable: a receiver configured below 65764 bytes silently loses
 maximum-size UDP replies while every other flow appears healthy.
@@ -671,16 +691,16 @@ probe and an amplifier, and a peer free to answer with anything is not bound by
 them.
 
 An automatic client with active UDP associations MAY run a periodic one-frame
-exchange on a separate stream of the same QUIC connection. Associations pooled
-on one connection share that exchange. This is path-level liveness evidence,
-not an acknowledgement for an application datagram: QUIC DATAGRAM packets are
-not acknowledged or retransmitted and their disappearance is consequently
-absent from ordinary transport loss counters. The client runs this low-rate
-probe only while a recent registered-standby echo proves that clean TCP to the
-same gateway is available. It treats only silence lasting the normal sustained
-degradation window as failover evidence; a timely echo (within the larger of
-two RTTs and one decision interval) clears the pending observation, while a
-slow reliable echo retains it as HOL evidence.
+exchange on a separate Extended CONNECT request stream of the same HTTP/3
+connection. Associations pooled on one connection share that exchange. This
+is path-level liveness evidence, not an acknowledgement for an application
+datagram: HTTP Datagrams are not acknowledged or retransmitted and their
+disappearance is consequently absent from ordinary transport loss counters.
+The client runs this low-rate probe only while a recent registered-standby echo
+proves that clean TCP to the same gateway is available. It treats only silence
+lasting the normal sustained degradation window as failover evidence; a timely
+echo (within the larger of two RTTs and one decision interval) clears the
+pending observation, while a slow reliable echo retains it as HOL evidence.
 
 A gateway MAY reserve bounded handler capacity for these authenticated probes
 so a full active-session budget is not misreported as carrier failure. That
@@ -698,8 +718,8 @@ that sent `n` frames and read `m` echoes therefore faces exactly three cases:
    The client MUST treat it as an unfinished measurement and MUST NOT draw any
    conclusion about the peer from it.
 3. The stream ended, or an echo did not match, with `m < n`. The peer does not
-   implement §14.1. Because the version byte and the ALPN both said it did,
-   this is a disagreement about the wire and not a path condition.
+   implement §14.1. Because the version byte and authenticated carrier both
+   said it did, this is a disagreement about the wire and not a path condition.
 
 In case 3 the client MUST NOT continue using the connection. It MUST close the
 lane and MUST NOT reuse the underlying carrier for further flows; it SHOULD
@@ -708,10 +728,11 @@ call for opposite responses -- a failed lane is retried, and a peer that does
 not implement the protocol is not.
 
 A client MUST NOT tolerate a missing or partial echo as a compatibility
-allowance. Version 1 has no version below it and no capability negotiation, so
-a peer that negotiated `queqiao/1` and then did not echo is not an older build;
-it is a peer this client cannot make correct measurements against, and silently
-degrading to no measurement hides that.
+allowance. Version 2 has no supported downgrade and no capability negotiation,
+so a peer that accepted the protocol-2 HTTP/3 tunnel or negotiated the
+protocol-2 TCP ALPN and then did not echo is not an older build; it is a peer
+this client cannot make correct measurements against, and silently degrading
+to no measurement hides that.
 
 Invalid ordering, identifiers, flags, class, size, or totals terminate the
 probe at the gateway.
@@ -734,9 +755,10 @@ infrastructure detail. A RESET is terminal for the stream/attempt it addresses.
 
 ## 16. Enrollment and renewal messages
 
-Invitation/profile schema versions and enrollment-service version 1 are
-independent namespaces from the data-plane wire byte, even though all are `1`
-for the first public release.
+Invitation, client-profile, provider-state, enrollment-draft, and enrollment
+service schema versions are independent namespaces from the data-plane wire
+byte. Protocol 2 sets each of these current schemas to `2`; other versions are
+rejected rather than migrated.
 
 ### 16.1 Invitation URI
 
@@ -750,7 +772,7 @@ The decoded strict JSON object contains:
 
 | Field | Meaning |
 | --- | --- |
-| `v` | invitation schema, exactly `1` |
+| `v` | invitation schema, exactly `2` |
 | `name` | display name, 1–128 characters |
 | `provider` | provider ID |
 | `endpoint` | gateway `host:port` |
@@ -770,7 +792,7 @@ dedicated TLS connection. Every message is a 32-bit non-zero length followed by
 one strict JSON object. The maximum message length is 64 KiB. Unknown fields or
 trailing JSON values are invalid.
 
-Enrollment request fields are `version` (`1`), `token`, `device_name`, and the
+Enrollment request fields are `version` (`2`), `token`, `device_name`, and the
 raw-base64url Ed25519 `public_key`. The device private key is generated and
 persisted locally before the token is transmitted; it is never sent.
 
@@ -783,7 +805,7 @@ An exact retry after a lost enrollment response is idempotent for the already
 registered device name and public key. A different key or name is a replay
 failure, including after the invitation's original expiry.
 
-Renewal uses mutual TLS on `queqiao-renew/1`, a request containing version `1`,
+Renewal uses mutual TLS on `niulang-renew/2`, a request containing version `2`,
 and the same bounded response form. Renewal MUST preserve provider, account,
 device, and public-key identity.
 
@@ -810,17 +832,18 @@ lost.
 
 ## 18. Versioning and extension rules
 
-Version 1 has no generic capability-negotiation frame and no “ignore unknown”
+Version 2 has no generic capability-negotiation frame and no “ignore unknown”
 extension rule. Unknown frame types, flags, classes, reserved bits, and wire
 versions fail closed.
 
 A future change that alters parsing, authentication, frame semantics, coded
 datagram decoding, or state-machine behavior MUST increment the data protocol
-version and change the data ALPN accordingly. It must document whether and how
-operators can run both versions during a coordinated migration. Pre-1.0
-software versioning does not waive this wire rule.
+version and change the TCP data ALPN and/or HTTP/3 tunnel identifier as needed.
+It must document whether and how operators can run both versions during a
+coordinated migration. Pre-1.0 software versioning does not waive this wire
+rule.
 
-Changes to sender-only tuning that preserve every version-1 wire invariant—such
+Changes to sender-only tuning that preserve every version-2 wire invariant—such
 as pacing gains, classification thresholds, FEC rate selection, queue limits,
 or fallback timing—do not require a wire increment.
 
@@ -845,7 +868,7 @@ applies, or a regression was introduced; there is no third case.
 
 ## 20. Conformance vectors
 
-Prose is not sufficient to specify all of version 1. The repair coefficients of
+Prose is not sufficient to specify all of version 2. The repair coefficients of
 §12.3 are computed on both endpoints and never transmitted, so an
 implementation that gets one shift or one multiplier wrong is not detectably
 wrong on the wire -- its repairs arrive well-formed and fail to solve, and the
@@ -854,7 +877,7 @@ Destination canonicalization has the same shape: two implementations that
 canonicalize differently disagree about the identity of a destination without
 either observing a parse error.
 
-[`testdata/protocol1/vectors.json`](../testdata/protocol1/vectors.json) is
+[`testdata/protocol2/vectors.json`](../testdata/protocol2/vectors.json) is
 therefore normative. It is a frozen artifact, not a generated one. It covers:
 
 | Section | What it pins |

@@ -15,10 +15,11 @@ this file as a substitute for the detailed contracts.
 - The supported release targets are Linux, macOS, and Windows on amd64 and
   arm64. Do not add mobile platform code or packaging.
 - Public invitations use only `niulang://enroll/...`.
-- Protocol 1 deliberately retains the `queqiao/1`, `queqiao-enroll/1`, and
-  `queqiao-renew/1` ALPNs and `queqiao://...` certificate identity URIs. These
-  are wire-compatibility identifiers, not stale branding. Changing them is a
-  protocol change.
+- Protocol 2 is the only supported contract. QUIC uses real HTTP/3 (`h3`) with
+  a `niulang` Extended CONNECT tunnel; TCP uses the `niulang/2`,
+  `niulang-standby/2`, `niulang-enroll/2`, and `niulang-renew/2` ALPNs. Identity
+  URIs use `niulang://...`. There is no inherited wire, credential, or state
+  compatibility and no downgrade path.
 - Niulang is experiment-led. Every experimental transport behavior that shows
   a reproducible benefit in a supported path or workload should graduate into
   the automatic default policy instead of remaining behind a manual flag. Scope
@@ -68,8 +69,8 @@ history before deciding which is wrong. Do not silently preserve both stories.
 - **`scripts/`** contains benchmark campaigns, result summarizers, release
   validation, and their Python tests. Campaign output is generated evidence,
   not source.
-- **`testdata/`** contains checked-in deterministic fixtures. Protocol 1
-  conformance vectors live in `testdata/protocol1/vectors.json`.
+- **`testdata/`** contains checked-in deterministic fixtures. Protocol 2
+  conformance vectors live in `testdata/protocol2/vectors.json`.
 - **`.github/workflows/`** contains the supported-platform test and cross-build
   matrix.
 
@@ -78,9 +79,10 @@ history before deciding which is wrong. Do not silently preserve both stories.
 - Use Go 1.25.13 and keep the module path `github.com/4fuu/niulang`.
 - Make the smallest change that fully owns the behavior. Prefer an existing
   package boundary over a one-use wrapper or parallel source of truth.
-- Preserve protocol 1 compatibility unless the task explicitly changes the
-  wire contract. A wire change requires a versioning and migration decision,
-  conformance coverage, and a matching protocol-document update.
+- Preserve protocol 2 unless the task explicitly changes the wire contract. A
+  wire change requires a versioning and migration decision, conformance
+  coverage, and a matching protocol-document update; never add an implicit
+  legacy parser or downgrade.
 - Keep benchmark comparisons matched and seeded. Alternate trial order where
   time-varying load could bias one side, retain raw per-trial output, and report
   completion and tail behavior as well as medians.

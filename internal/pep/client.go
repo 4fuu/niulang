@@ -23,6 +23,7 @@ import (
 	"github.com/4fuu/niulang/internal/session"
 	"github.com/4fuu/niulang/internal/socks5"
 	"github.com/apernet/quic-go"
+	"github.com/apernet/quic-go/http3"
 )
 
 // A peer that accepts a replacement stream and immediately closes it must not
@@ -137,7 +138,12 @@ type ClientConfig struct {
 	// where the QUIC connection negotiated datagrams. It is the control for
 	// measuring the datagram substrate against the one it replaced, and both
 	// endpoints must be set the same way for the comparison to mean anything.
-	UDPOnStream                   bool
+	UDPOnStream bool
+	// DisableFlowScheduling is a benchmark control for the default cross-flow
+	// provider-path scheduler. FlowStartupBytes overrides its bounded startup
+	// service; zero keeps the measured default.
+	DisableFlowScheduling         bool
+	FlowStartupBytes              int
 	Congestion                    CongestionControlKind
 	BrutalBytesPerSec             uint64
 	AdaptiveMinBytesSec           uint64
@@ -179,15 +185,16 @@ type ClientConfig struct {
 }
 
 type Client struct {
-	cfg           ClientConfig
-	udpHealth     *udpHealth
-	budget        *limiter.Budget
-	sessionLimit  *SessionLimit
-	sendMemory    *memlimit.Budget
-	receiveMemory *memlimit.Budget
-	memoryLimits  flowMemoryLimits
-	metrics       *metrics.Registry
-	wireCaps      *wireCapSet
+	cfg            ClientConfig
+	udpHealth      *udpHealth
+	budget         *limiter.Budget
+	sessionLimit   *SessionLimit
+	sendMemory     *memlimit.Budget
+	receiveMemory  *memlimit.Budget
+	memoryLimits   flowMemoryLimits
+	metrics        *metrics.Registry
+	wireCaps       *wireCapSet
+	flowSchedulers *flowSchedulerSet
 
 	credentialsMu sync.RWMutex
 	credentials   identity.ClientCredentials
@@ -360,6 +367,7 @@ func (l *SessionLimit) acquire() (sessionSlot, bool) {
 // bulk lane joins.
 type bulkConn struct {
 	conn       *quic.Conn
+	h3         *http3.ClientConn
 	packet     net.PacketConn
 	controller wancongestion.TelemetryProvider
 	busy       bool
@@ -373,6 +381,7 @@ type bulkConn struct {
 type controlQUICGeneration struct {
 	id         uint64
 	conn       *quic.Conn
+	h3         *http3.ClientConn
 	packet     net.PacketConn
 	controller wancongestion.TelemetryProvider
 	closeOnce  sync.Once
@@ -384,7 +393,7 @@ func (g *controlQUICGeneration) close(reason string) {
 	}
 	g.closeOnce.Do(func() {
 		if g.conn != nil {
-			_ = g.conn.CloseWithError(0, reason)
+			_ = g.conn.CloseWithError(h3NoErrorCode, reason)
 		}
 		if g.packet != nil {
 			_ = g.packet.Close()
@@ -409,7 +418,7 @@ func (b *bulkConn) close(reason string) {
 		b.idleTimer = nil
 	}
 	if b.conn != nil {
-		_ = b.conn.CloseWithError(0, reason)
+		_ = b.conn.CloseWithError(h3NoErrorCode, reason)
 	}
 	if b.packet != nil {
 		_ = b.packet.Close()
@@ -561,13 +570,17 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{
+	client := &Client{
 		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
 		credentials: cfg.Credentials, budget: budget,
 		metrics: cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
 		wireCaps: newWireCapSet(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec),
-	}, nil
+	}
+	if !cfg.DisableFlowScheduling {
+		client.flowSchedulers = newFlowSchedulerSet(cfg.FlowStartupBytes)
+	}
+	return client, nil
 }
 
 func (c *Client) MemoryStats() MemoryStats {
@@ -830,6 +843,7 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	}
 	c.cfg.Logger.Debug("local flow opened", "transport", flow.kind, "duration", time.Since(flowOpenStarted))
 	flowSession := newMultipathFlowWithMemory(ctx, inner, flow.sessionID, flow.flowID, c.cfg.ChunkSize, protocol.FlagAckUp, protocol.FlagAckDown, c.budget, c.metrics, c.cfg.Logger, c.memoryLimits, c.sendMemory, c.receiveMemory)
+	flowSession.flowSchedulers = c.flowSchedulers
 	flowSession.ackRanges.Store(true)
 	flowSession.idleTimeout = c.cfg.FlowIdleTimeout
 	flowSession.maxLifetime = c.cfg.FlowMaxLifetime
@@ -1423,28 +1437,37 @@ func (c *Client) dialPooledQUICLane(ctx context.Context, ccfg congestionConfig) 
 		dialCtx, cancel = context.WithTimeout(ctx, c.cfg.DialTimeout)
 		defer cancel()
 	}
-	generation, err := c.acquireControlQUICGeneration(dialCtx, ccfg)
-	if err != nil {
-		return nil, err
-	}
-	stream, err := generation.conn.OpenStreamSync(dialCtx)
-	if err != nil {
-		if generation.conn.Context().Err() != nil {
-			c.retireControlQUICGeneration(generation, "niulang pooled connection failed")
+	for attempt := 0; attempt < 2; attempt++ {
+		generation, err := c.acquireControlQUICGeneration(dialCtx, ccfg)
+		if err != nil {
+			return nil, err
 		}
-		return nil, err
+		stream, err := openH3Lane(dialCtx, generation.h3, c.cfg.RemoteAddr)
+		if err != nil {
+			if dialCtx.Err() != nil {
+				return nil, err
+			}
+			// GOAWAY leaves the QUIC connection alive but forbids new request
+			// streams. Retire that generation and redial once for this caller.
+			c.retireControlQUICGeneration(generation, "Niulang HTTP/3 pool stopped accepting lanes")
+			if attempt == 0 {
+				continue
+			}
+			return nil, err
+		}
+		// Track how many flows share the control connection. Bulk isolation is
+		// only worth its cost when there is something to protect.
+		opened := time.Now()
+		if active := c.quicPoolActive.Add(1); active == 2 {
+			c.quicFanoutStarted.Store(opened.UnixNano())
+		}
+		outer := &controlPoolStreamConn{
+			quicStreamConn: &quicStreamConn{stream: stream, conn: generation.conn, h3: generation.h3, controller: generation.controller, metrics: c.metrics, closeConn: false, cancelReadCode: h3RequestCanceledCode, bulk: newH3CodedPath(stream, generation.conn, c.memoryLimits.eventQueue)},
+			owner:          c, generation: generation, opened: opened,
+		}
+		return outer, nil
 	}
-	// Track how many flows share the control connection. Bulk isolation is
-	// only worth its cost when there is something to protect.
-	opened := time.Now()
-	if active := c.quicPoolActive.Add(1); active == 2 {
-		c.quicFanoutStarted.Store(opened.UnixNano())
-	}
-	outer := &controlPoolStreamConn{
-		quicStreamConn: &quicStreamConn{stream: stream, conn: generation.conn, controller: generation.controller, metrics: c.metrics, closeConn: false, bulk: connBulkPath(generation.conn, c.memoryLimits.eventQueue)},
-		owner:          c, generation: generation, opened: opened,
-	}
-	return outer, nil
+	panic("unreachable")
 }
 
 func (c *Client) acquireControlQUICGeneration(ctx context.Context, ccfg congestionConfig) (*controlQUICGeneration, error) {
@@ -1499,9 +1522,10 @@ func (c *Client) runControlQUICDial(ctx context.Context, attempt *controlQUICDia
 	conn, packet, err := dialQUICConnection(ctx, c.cfg.RemoteAddr, c.currentCredentials(), c.cfg.DialTimeout, c.cfg.LocalAddress, c.cfg.SocketControl, c.observeTransientUDPSendFailure, c.windows())
 	var generation *controlQUICGeneration
 	if err == nil {
+		controller := configureQUICController(conn, ccfg)
 		generation = &controlQUICGeneration{
-			id: attempt.epoch, conn: conn, packet: packet,
-			controller: configureQUICController(conn, ccfg),
+			id: attempt.epoch, conn: conn, h3: newH3ClientConn(conn), packet: packet,
+			controller: controller,
 		}
 	}
 
@@ -1691,20 +1715,27 @@ func (c *Client) openBulkPoolStream(ctx context.Context, ramp bool) (streamConn,
 		dialCtx, cancel = context.WithTimeout(ctx, c.cfg.DialTimeout)
 		defer cancel()
 	}
-	entry, err := c.reserveBulkConnMode(dialCtx, ramp)
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < 2; attempt++ {
+		entry, err := c.reserveBulkConnMode(dialCtx, ramp)
+		if err != nil {
+			return nil, err
+		}
+		stream, err := openH3Lane(dialCtx, entry.h3, c.cfg.RemoteAddr)
+		if err != nil {
+			dead := dialCtx.Err() == nil || entry.conn.Context().Err() != nil
+			c.releaseBulkConn(entry, dead)
+			if dead && attempt == 0 {
+				continue
+			}
+			return nil, err
+		}
+		c.cfg.Logger.Debug("bulk pool stream opened", "duration", time.Since(started), "connections", c.bulkConnCount())
+		return &bulkPoolStreamConn{
+			quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, h3: entry.h3, controller: entry.controller, metrics: c.metrics, closeConn: false, cancelReadCode: h3RequestCanceledCode, bulk: newH3CodedPath(stream, entry.conn, c.memoryLimits.eventQueue)},
+			owner:          c, entry: entry,
+		}, nil
 	}
-	stream, err := entry.conn.OpenStreamSync(dialCtx)
-	if err != nil {
-		c.releaseBulkConn(entry, entry.conn.Context().Err() != nil)
-		return nil, err
-	}
-	c.cfg.Logger.Debug("bulk pool stream opened", "duration", time.Since(started), "connections", c.bulkConnCount())
-	return &bulkPoolStreamConn{
-		quicStreamConn: &quicStreamConn{stream: stream, conn: entry.conn, controller: entry.controller, metrics: c.metrics, closeConn: false, bulk: connBulkPath(entry.conn, c.memoryLimits.eventQueue)},
-		owner:          c, entry: entry,
-	}, nil
+	panic("unreachable")
 }
 
 // reserveBulkConn returns an idle authenticated connection, or establishes a
@@ -1819,6 +1850,7 @@ func (c *Client) dialBulkConn(ctx context.Context) (*bulkConn, error) {
 		adaptiveMinBytesPerSec: c.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: c.cfg.AdaptiveMaxBytesSec,
 		wireCaps: c.wireCaps, wireBulk: true,
 	})
+	entry.h3 = newH3ClientConn(conn)
 	c.cfg.Logger.Debug("bulk QUIC pool authenticated", "duration", time.Since(started))
 	return entry, nil
 }
@@ -2545,9 +2577,9 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 			return context.Canceled
 		}
 		if c.cfg.Transport == TransportQUIC {
-			// Protocol-v1 development peers predating control-role JOINs reject the flag.
-			// One ordinary QUIC join preserves rolling-upgrade recovery; a new
-			// peer which genuinely lost the session rejects this one as well.
+			// A QUIC-only client cannot commit to the TCP standby. Give it one
+			// ordinary dedicated QUIC join after the shared pool generation is
+			// unavailable; a gateway that lost the logical session rejects it.
 			lane, err = c.openJoinLane(recoveryCtx, TransportQUIC, sessionID, flowID, laneID)
 		} else {
 			if standbyErr := c.openStandbyRecoveryLaneID(flow, sessionID, flowID, laneID, time.Now()); standbyErr == nil {

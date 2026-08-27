@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,8 +58,10 @@ func TestFinishedFlowStopsPublishingQUICTelemetry(t *testing.T) {
 // Every such lane reads the same cumulative counters out of the same
 // connection.
 type pooledStatsConn struct {
-	stats  laneTransportStats
-	shared *connTelemetry
+	stats         laneTransportStats
+	shared        *connTelemetry
+	codedPrevious metrics.QUICConnectionCounters
+	codedMu       sync.Mutex
 }
 
 func (c *pooledStatsConn) Read([]byte) (int, error)           { return 0, io.EOF }
@@ -68,6 +71,17 @@ func (c *pooledStatsConn) transportStats() laneTransportStats { return c.stats }
 
 func (c *pooledStatsConn) connectionTelemetry(stats laneTransportStats) (uint64, metrics.QUICConnectionCounters) {
 	return c.shared.id, c.shared.advance(connectionCounters(stats))
+}
+
+func (c *pooledStatsConn) laneCodedTelemetry(stats laneTransportStats) metrics.QUICConnectionCounters {
+	c.codedMu.Lock()
+	defer c.codedMu.Unlock()
+	current := metrics.QUICConnectionCounters{
+		CodedSources: stats.codedSources, CodedRecovered: stats.codedRecovered, CodedLost: stats.codedLost,
+	}
+	delta := current.Advance(c.codedPrevious)
+	c.codedPrevious = current
+	return delta
 }
 
 func pooledLane(id uint64, shared *connTelemetry, stats laneTransportStats) *mpLane {
@@ -123,6 +137,28 @@ func TestPooledConnectionCountsOncePerConnectionNotPerLane(t *testing.T) {
 	if got.QUICErasureSend != 0.20 || got.QUICErasureFloorSend != 0.05 || got.QUICCongestiveLossSend != 0.15 {
 		t.Fatalf("erasure/floor/congestive = %.2f/%.2f/%.2f, want 0.20/0.05/0.15",
 			got.QUICErasureSend, got.QUICErasureFloorSend, got.QUICCongestiveLossSend)
+	}
+}
+
+func TestHTTP3LaneCodedCountersSumAcrossOnePooledConnection(t *testing.T) {
+	registry := metrics.New()
+	local, remote := net.Pipe()
+	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
+	flow := newMultipathFlow(context.Background(), local, [16]byte{1}, 7, 0, 0, 0, nil, registry)
+	shared := &connTelemetry{id: 1}
+	flow.lanes[0] = pooledLane(0, shared, laneTransportStats{codedSources: 70, codedRecovered: 20, codedLost: 10})
+	flow.lanes[1] = pooledLane(1, shared, laneTransportStats{codedSources: 35, codedRecovered: 5, codedLost: 2})
+
+	flow.snapshot()
+	got := registry.Snapshot()
+	if got.QUICCodedSources != 105 || got.QUICCodedRecovered != 25 || got.QUICCodedLost != 12 {
+		t.Fatalf("two HTTP/3 lanes reported coded outcomes %d/%d/%d, want 105/25/12",
+			got.QUICCodedSources, got.QUICCodedRecovered, got.QUICCodedLost)
+	}
+	flow.snapshot()
+	got = registry.Snapshot()
+	if got.QUICCodedSources != 105 || got.QUICCodedRecovered != 25 || got.QUICCodedLost != 12 {
+		t.Fatalf("unchanged lane counters were added twice: %d/%d/%d", got.QUICCodedSources, got.QUICCodedRecovered, got.QUICCodedLost)
 	}
 }
 

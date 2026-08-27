@@ -45,9 +45,9 @@ type frameConn struct {
 	// buffered, so reading a 46-byte header directly from it costs one full
 	// stream-lock acquisition per frame in addition to the payload reads.
 	reader *bufio.Reader
-	// bulkQueueFrames is a tiny per-flow descriptor queue into the one shared
-	// connection-level datagram demultiplexer. Payload capacity remains bounded
-	// by the connection and endpoint budgets.
+	// bulkQueueFrames is a tiny per-flow descriptor queue into this HTTP/3
+	// lane's datagram demultiplexer. Payload capacity remains bounded by the
+	// lane and endpoint budgets.
 	bulkQueueFrames int
 
 	// wantsCoding reports whether this lane's flow would rather spend bytes
@@ -189,8 +189,8 @@ func (c *frameConn) bulkFrame(f protocol.Frame) bool {
 	}
 }
 
-// packetsOnDatagrams reports whether this lane's SOCKS UDP packets go over the
-// connection's datagrams.
+// packetsOnDatagrams reports whether this lane's SOCKS UDP packets go over its
+// request-stream-scoped HTTP Datagrams.
 //
 // It does not ask whether the path is coding, which is the one place this
 // differs from data. A data frame is on the coded path for its parity, and
@@ -201,10 +201,11 @@ func (c *frameConn) bulkFrame(f protocol.Frame) bool {
 // on a stream it does at every gap. Both of those are true on a clean path as
 // well as a lossy one, so the question is only whether the substrate exists.
 //
-// It exists exactly when QUIC negotiated DATAGRAM in both directions, which
-// is also what makes this symmetric without a capability of its own: both
-// endpoints build their coded path from the same connection state, so a
-// sender never routes a packet to a substrate its peer is not reading.
+// It exists exactly when QUIC and HTTP/3 negotiated datagrams in both
+// directions, which is also what makes this symmetric without a capability of
+// its own: both endpoints build their coded path from the same connection
+// state, so a sender never routes a packet to a substrate its peer is not
+// reading.
 // A TLS/TCP lane has no such path and keeps the stream framing unchanged.
 func (c *frameConn) packetsOnDatagrams() bool {
 	return c.bulk != nil && !c.packetsForcedToStream
@@ -247,12 +248,12 @@ func (c *frameConn) Read() (protocol.Frame, error) {
 	return protocol.ReadFrame(c.reader)
 }
 
-// bulkFrames claims this lane's flow's share of the connection's coded
-// datagrams. Nil when the lane has no coded substrate.
+// bulkFrames claims this flow's share of the lane's coded datagrams. Nil when
+// the lane has no coded substrate.
 //
-// The claim is by flow rather than by lane because the datagrams belong to the
-// connection: one stream of them carries every flow multiplexed on it, so a
-// reader per lane would consume frames belonging to other flows.
+// The claim is by flow because a replacement lane can overlap its predecessor,
+// and each request-stream-scoped datagram path may briefly carry frames for the
+// same logical flow.
 func (c *frameConn) bulkFrames(flowID uint64) <-chan protocol.Frame {
 	demux := connBulkDemux(c.bulk, c.bulkQueueFrames)
 	if demux == nil {
@@ -311,16 +312,22 @@ func (c *frameConn) countData(f protocol.Frame, coded bool) {
 func (c *frameConn) Write(f protocol.Frame) error {
 	if c.bulkFrame(f) {
 		c.countData(f, true)
-		if err := c.writeCoded(f); err != nil {
-			return err
-		}
 		if c.needsOpenSafetyCopy(f) {
+			// Put the reliable copy immediately behind OPEN before handing the
+			// coded copy to HTTP/3. The first client HTTP Datagram must wait
+			// until the peer has registered its CONNECT request stream, while
+			// HTTP/3 DATA on that stream is already ordered behind HEADERS.
+			// Sending the Datagram first would therefore turn this safety copy
+			// into a full-round-trip wait on every new flow over a lossy path.
 			c.countData(f, false)
 			c.writeMu.Lock()
-			defer c.writeMu.Unlock()
-			return c.writeLocked(f)
+			err := c.writeLocked(f)
+			c.writeMu.Unlock()
+			if err != nil {
+				return err
+			}
 		}
-		return nil
+		return c.writeCoded(f)
 	}
 	c.countData(f, false)
 	c.writeMu.Lock()
@@ -332,14 +339,23 @@ func (c *frameConn) Write(f protocol.Frame) error {
 // control stream if it will not take it: correctness is not worth trading for
 // the coding.
 func (c *frameConn) writeCoded(f protocol.Frame) error {
+	return c.writeCodedTracked(f, nil)
+}
+
+func (c *frameConn) writeCodedTracked(f protocol.Frame, done func()) error {
 	buf, err := protocol.AppendFrame(nil, f)
 	if err != nil {
 		return err
 	}
-	if err := c.bulk.Send(buf); err != nil {
+	if err := c.bulk.SendTracked(buf, done); err != nil {
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
-		return c.writeLocked(f)
+		if err := c.writeLocked(f); err != nil {
+			return err
+		}
+		if done != nil {
+			done()
+		}
 	}
 	return nil
 }
@@ -370,22 +386,36 @@ const frameWriteTimeout = 15 * time.Second
 // deadline; transports without that optional method retain their normal
 // behavior and are still interruptible by Close from the flow coordinator.
 func (c *frameConn) WriteContext(ctx context.Context, f protocol.Frame) error {
+	return c.WriteContextTracked(ctx, f, nil)
+}
+
+// WriteContextTracked calls done when the carrier has taken the frame. Stream
+// writes complete synchronously; coded datagrams keep the callback until the
+// coded sender emits or abandons all source symbols for the frame.
+func (c *frameConn) WriteContextTracked(ctx context.Context, f protocol.Frame, done func()) error {
 	if c.bulkFrame(f) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		c.countData(f, true)
-		if err := c.writeCoded(f); err != nil {
-			return err
+		if c.needsOpenSafetyCopy(f) {
+			// The reliable copy must be queued behind OPEN before an HTTP
+			// Datagram can overtake the CONNECT request at the peer.
+			c.countData(f, false)
+			if err := c.writeControlContext(ctx, f); err != nil {
+				return err
+			}
 		}
-		if !c.needsOpenSafetyCopy(f) {
-			return nil
-		}
-		c.countData(f, false)
-		return c.writeControlContext(ctx, f)
+		return c.writeCodedTracked(f, done)
 	}
 	c.countData(f, false)
-	return c.writeControlContext(ctx, f)
+	if err := c.writeControlContext(ctx, f); err != nil {
+		return err
+	}
+	if done != nil {
+		done()
+	}
+	return nil
 }
 
 func (c *frameConn) needsOpenSafetyCopy(f protocol.Frame) bool {
@@ -417,9 +447,8 @@ func (c *frameConn) writeControlContext(ctx context.Context, f protocol.Frame) e
 // one.
 func (c *frameConn) transport() io.ReadWriteCloser { return c.control }
 
-// Close ends this lane's framing. The coded substrate is deliberately left
-// alone: it belongs to the QUIC connection and is shared with every other lane
-// on it, so closing it here would take those down too.
+// Close ends this lane's framing. The transport owns the request-scoped coded
+// path and closes it together with the HTTP/3 request stream.
 func (c *frameConn) Close() error {
 	c.closeOnce.Do(func() { close(c.done) })
 	return c.control.Close()

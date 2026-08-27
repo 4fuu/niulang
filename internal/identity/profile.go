@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	InvitationVersion = 1
-	ProfileVersion    = 1
+	InvitationVersion = 2
+	ProfileVersion    = 2
 	maxInvitationSize = 4096
+	identityURIScheme = "niulang"
 )
 
 type Invitation struct {
@@ -132,7 +133,7 @@ func (i Invitation) URI() (string, error) {
 	if len(data) > maxInvitationSize {
 		return "", errors.New("invitation is too large")
 	}
-	return "niulang://enroll/" + base64.RawURLEncoding.EncodeToString(data), nil
+	return identityURIScheme + "://enroll/" + base64.RawURLEncoding.EncodeToString(data), nil
 }
 
 func ParseInvitation(text string, now time.Time) (Invitation, error) {
@@ -140,7 +141,7 @@ func ParseInvitation(text string, now time.Time) (Invitation, error) {
 		return Invitation{}, errors.New("invitation URI is too large")
 	}
 	u, err := url.Parse(strings.TrimSpace(text))
-	if err != nil || u.Scheme != "niulang" || u.Host != "enroll" || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != identityURIScheme || u.Host != "enroll" || u.RawQuery != "" || u.Fragment != "" {
 		return Invitation{}, errors.New("invalid Niulang invitation URI")
 	}
 	raw := strings.TrimPrefix(u.EscapedPath(), "/")

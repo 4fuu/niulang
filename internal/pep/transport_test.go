@@ -15,6 +15,8 @@ import (
 	"github.com/apernet/quic-go"
 )
 
+const rawQUICTestALPN = "niulang-raw-quic-test"
+
 type routeErrorPacketConn struct{ err error }
 
 func (*routeErrorPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
@@ -133,11 +135,11 @@ func TestTransientRouteWrapperPreservesAndProtectsQUICFastPath(t *testing.T) {
 
 func TestQUICConnectionSurvivesATransientLocalRouteOutage(t *testing.T) {
 	serverCredentials, clientCredentials := testCertificate(t)
-	serverTLS, err := identity.ServerTLSConfig(serverCredentials, defaultALPN, false)
+	serverTLS, err := identity.ServerTLSConfig(serverCredentials, rawQUICTestALPN, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientTLS, err := tlsClientConfig(clientCredentials)
+	clientTLS, err := identity.ClientTLSConfig(clientCredentials, rawQUICTestALPN)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,11 +223,11 @@ func TestQUICConnectionSurvivesATransientLocalRouteOutage(t *testing.T) {
 
 func TestQUICConnectionClosesWhenItsBoundSourceDisappears(t *testing.T) {
 	serverCredentials, clientCredentials := testCertificate(t)
-	serverTLS, err := identity.ServerTLSConfig(serverCredentials, defaultALPN, false)
+	serverTLS, err := identity.ServerTLSConfig(serverCredentials, rawQUICTestALPN, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientTLS, err := tlsClientConfig(clientCredentials)
+	clientTLS, err := identity.ClientTLSConfig(clientCredentials, rawQUICTestALPN)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,12 +420,12 @@ func TestResolveLocalAddressAutoOrInterfaceReportsOperationalState(t *testing.T)
 }
 
 func TestALPNFailureExplainsEndpointOrVersionMismatch(t *testing.T) {
-	if defaultALPN != "queqiao/1" {
-		t.Fatalf("data ALPN = %q, want first public protocol ALPN", defaultALPN)
+	if quicDataALPN != "h3" || tcpDataALPN != "niulang/2" {
+		t.Fatalf("data ALPNs = QUIC %q, TCP %q; want real HTTP/3 and independent Niulang/TCP", quicDataALPN, tcpDataALPN)
 	}
 	err := explainDataHandshakeError("gateway.example:443", "TCP", errors.New("remote error: tls: no application protocol"))
 	message := err.Error()
-	if !strings.Contains(message, "protocol 1") || !strings.Contains(message, "gateway.example:443") || !strings.Contains(message, "incompatible") {
+	if !strings.Contains(message, "protocol 2") || !strings.Contains(message, "gateway.example:443") || !strings.Contains(message, "incompatible") {
 		t.Fatalf("unhelpful ALPN error: %v", err)
 	}
 	original := errors.New("connection refused")

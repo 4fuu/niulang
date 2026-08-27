@@ -2,10 +2,15 @@
 
 ## Supported security design
 
-Niulang protocol version 1 has one data-plane security mode: TLS 1.3 with
+Niulang protocol version 2 has one data-plane security mode: TLS 1.3 with
 provider-pinned gateway authentication and provider-issued per-device mutual
 authentication. Plaintext transport and application-level shared secrets do
 not exist.
+
+Protocol 2 defines a separate Niulang trust domain. Provider state, profiles,
+and certificates from another protocol version are rejected rather than
+migrated; replacing either endpoint requires creating new provider state and
+re-enrolling every device.
 
 The provider root is an Ed25519 public-key trust anchor. Its SHA-256 fingerprint
 and the expected provider/gateway identities are carried in a one-time
@@ -45,10 +50,18 @@ provider pin and TLS policy apply regardless of the selected source address.
 
 ## Authorization and isolation
 
-Every data connection is authorized during the TLS handshake. Long-lived QUIC
-connections are re-authorized for every new stream. Active flows and UDP
-associations periodically recheck authorization, so device revocation, account
-disablement, and account expiry take effect without restarting the server.
+Every data connection is authorized during the TLS handshake. Long-lived
+HTTP/3 connections are re-authorized for every new Extended CONNECT request.
+Active flows and UDP associations periodically recheck authorization, so
+device revocation, account disablement, and account expiry take effect without
+restarting the server.
+
+The QUIC carrier uses the standard `h3` ALPN, legal HTTP/3 control streams,
+Extended CONNECT, DATA frames, and HTTP Datagrams. The encrypted tunnel
+protocol and path are not passive cleartext identifiers. Endpoint metadata,
+TLS/QUIC implementation fingerprints, packet sizes, timing, and long-lived
+traffic patterns remain observable; HTTP/3 carriage is not an anonymity or
+traffic-indistinguishability guarantee.
 
 Per-user session limits span all devices. Session IDs, flow IDs, lane IDs, and
 UDP resume tokens are not identities. Lane joins and UDP relay reclamation must

@@ -164,12 +164,14 @@ func TestDescribePathRecordsPolicerAndApplicationBudgets(t *testing.T) {
 		rttMillis: 200, rateMbits: 25, policerRefill: 8 * time.Millisecond,
 		policerBurst: 4000, brutalMbits: 24, aggregateMbits: 20,
 		interactiveReserveMbits: 2, congestion: "brutal-no-comp", udpOnStream: true,
+		flowScheduling: true, flowStartupBytes: 512 << 10,
 	}
 	got := describePath(opts, pathsim.Config{
 		PolicerRefillPeriod: opts.policerRefill, PolicerBurstBytes: opts.policerBurst,
 	})
 	if got.PolicerRefillMillis != 8 || got.PolicerBurstBytes != 4000 ||
-		got.BrutalRateMbits != 24 || got.AggregateRateMbits != 20 || got.InteractiveReserveMbits != 2 || !got.UDPOnStream {
+		got.BrutalRateMbits != 24 || got.AggregateRateMbits != 20 || got.InteractiveReserveMbits != 2 ||
+		!got.FlowScheduling || got.FlowStartupBytes != 512<<10 || !got.UDPOnStream {
 		t.Fatalf("path report omitted experiment controls: %+v", got)
 	}
 }

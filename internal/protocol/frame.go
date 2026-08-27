@@ -14,36 +14,38 @@ const (
 	// Version is the framing this build speaks, and the only thing that stops
 	// two builds that disagree from appearing to work.
 	//
-	// Version 1 is the first public wire contract. Earlier development wire
-	// numbers were never released. Every connection is authenticated by
-	// provider-issued mutual TLS before a frame is accepted, and streams begin
-	// directly with OPEN or JOIN.
-	Version    = byte(1)
+	// Version 2 is Niulang's first independent wire contract. It deliberately
+	// has no compatibility path to the inherited protocol namespace. Every
+	// connection is authenticated by provider-issued mutual TLS before a frame
+	// is accepted, and streams begin directly with OPEN or JOIN.
+	Version    = byte(2)
 	HeaderSize = 46
-	// DataALPN is the application protocol negotiated for the data plane. It
-	// carries the wire version because that is what makes the versioning
-	// fail-closed: there is no capability exchange to discover a disagreement
-	// after the fact, so two builds that speak different framing must fail to
-	// negotiate rather than connect and then misunderstand each other.
-	DataALPN = "queqiao/1"
+	// QUICDataALPN selects the real HTTP/3 carrier. The encrypted Extended
+	// CONNECT protocol and path below identify Niulang lanes inside HTTP/3.
+	QUICDataALPN     = "h3"
+	H3TunnelProtocol = "niulang"
+	H3TunnelPath     = "/"
+	// TCPDataALPN is the distinct TLS/TCP carrier used by the hot standby.
+	// It carries the wire version so incompatible framing fails at ALPN
+	// negotiation rather than after application bytes have been exchanged.
+	TCPDataALPN = "niulang/2"
 	// StandbyALPN is the auxiliary TLS/TCP control protocol used to register
-	// and health-check a hot standby before it is attached to a protocol-1
-	// flow. Keeping it on a distinct, versioned ALPN lets old protocol-1
-	// gateways reject the optional optimization during TLS negotiation while
-	// ordinary data connections remain fully interoperable.
-	StandbyALPN = "niulang-standby/1"
-	// MaxPayload is the frame payload limit for protocol 1. It is a constant
+	// and health-check a hot standby before it is attached to a protocol-2
+	// flow. Its distinct ALPN isolates the standby state machine from ordinary
+	// destination-opening data connections.
+	StandbyALPN = "niulang-standby/2"
+	// MaxPayload is the frame payload limit for protocol 2. It is a constant
 	// of the wire, not a deployment setting: a receiver MUST accept a payload
 	// this large and MUST reject a larger one, in both directions.
 	//
 	// A configurable receive limit was the alternative, and it does not work
-	// without negotiation. Version 1 has no capability exchange, so two peers
+	// without negotiation. Version 2 has no capability exchange, so two peers
 	// configured differently are mutually unintelligible in exactly one
 	// direction, and the symptom -- a frame the sender considers legal being
 	// refused as malformed -- names neither the setting nor the peer that
 	// holds it.
 	//
-	// The value is derived rather than round. The largest frame version 1 can
+	// The value is derived rather than round. The largest frame version 2 can
 	// require is a PACKET carrying a maximum UDP datagram to a maximum-length
 	// destination: 2 + 255 + 65507 = 65764 bytes. Everything else is smaller
 	// by construction (a destination OPEN is at most 255, an ACK at most 256,
@@ -84,7 +86,7 @@ const (
 	//
 	// A striped flow's sender otherwise learns only the contiguous receive
 	// point, which sits behind whatever the slowest lane has not delivered, so
-	// its retention window has to cover the whole reorder span. Protocol v1
+	// its retention window has to cover the whole reorder span. Protocol v2
 	// requires both peers to understand it.
 	FlagAckRanges uint16 = 1 << 7
 	knownFlags           = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl | FlagAckRanges
@@ -232,7 +234,7 @@ func (h Header) Encode(dst []byte) error {
 	return nil
 }
 
-// Validate checks a decoded header against the version-1 rules. Keeping this
+// Validate checks a decoded header against the version-2 rules. Keeping this
 // separate from Encode makes it possible for callers to validate a decoded
 // frame before handing it to a flow state machine.
 func (h Header) Validate() error {

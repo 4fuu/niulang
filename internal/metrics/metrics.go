@@ -73,7 +73,7 @@ type Registry struct {
 	// duplicate capacity to keep the reorder span bounded.
 	reinjections atomic.Uint64
 	// peerProtocolViolations counts peers that completed mutual TLS on a
-	// protocol-1 ALPN and then behaved in a way protocol 1 forbids. It is
+	// protocol-2 ALPN and then behaved in a way protocol 2 forbids. It is
 	// deliberately separate from lane failures: a lane that dies is a network
 	// event, while this is a peer whose build disagrees about the wire, and the
 	// two need different responses from whoever is on call.
@@ -370,19 +370,20 @@ type QUICObservation struct {
 	ControllerWireCapDebt      time.Duration
 }
 
-// QUICConnectionCounters is the cumulative half of one QUIC connection's
-// telemetry.  Every field counts since that connection was established and
-// only ever moves forward.
+// QUICConnectionCounters is the cumulative transport-counter payload folded
+// into process telemetry. Every field only moves forward. QUIC byte,
+// packet, loss, controller, and wire-cap fields are connection-scoped; coded
+// outcomes are scoped to one HTTP/3 lane and are added separately per lane.
 //
-// These are connection-scoped, and a connection is not a flow.  Connections
-// are pooled: many lanes belonging to many flows read the same numbers from
-// the same connection.  Summing what every live flow currently reports
-// therefore counts one connection once per flow that references it, and makes
-// the process total rise and fall as flows and lanes enter and leave the live
-// set.  A value that moves in both directions is not a counter, and a
-// dashboard differencing it reports whatever the churn happened to be rather
-// than what the path did -- a loss rate assembled from two such differences is
-// noise in both the numerator and the denominator.
+// The connection-scoped fields require deduplication because a connection is
+// not a flow. Connections are pooled: many lanes belonging to many flows read
+// the same numbers from the same connection. Summing what every live flow
+// currently reports therefore counts one connection once per flow that
+// references it, and makes the process total rise and fall as flows and lanes
+// enter and leave the live set. A value that moves in both directions is not a
+// counter, and a dashboard differencing it reports whatever the churn happened
+// to be rather than what the path did -- a loss rate assembled from two such
+// differences is noise in both the numerator and the denominator.
 //
 // The process totals are accumulated from forward deltas measured once per
 // connection instead.  See AddQUICConnectionCounters.
@@ -621,8 +622,8 @@ func (r *Registry) AccountAdmissionRefused(reason AccountRefusal) {
 	r.accountAdmissionRefusals[reason].Add(1)
 }
 
-// PeerProtocolViolation records a peer that authenticated as a protocol-1
-// endpoint and then did something protocol 1 forbids.
+// PeerProtocolViolation records a peer that authenticated as a protocol-2
+// endpoint and then did something protocol 2 forbids.
 func (r *Registry) PeerProtocolViolation() { r.peerProtocolViolations.Add(1) }
 
 func (r *Registry) CompletionTimeout() { r.completionTimeouts.Add(1) }

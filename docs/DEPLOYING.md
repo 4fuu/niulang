@@ -1,13 +1,13 @@
 # Deployment guide
 
 > [!NOTE]
-> **Status:** Current operational guide for public protocol 1
-> **Last reviewed:** 2026-08-21
+> **Status:** Current operational guide for Niulang protocol 2
+> **Last reviewed:** 2026-08-27
 
 This guide takes you from an empty host to a working paired deployment: a
 provider gateway, one-time user enrollment, a desktop SOCKS client, and
 Clash/mihomo integration. It also covers multi-provider clients, service
-operation, upgrades, and rollback. Protocol 1 is the only supported wire
+operation, upgrades, and rollback. Protocol 2 is the only supported wire
 protocol, so client and server must be upgraded together.
 
 **Download the binary first:** use the [latest
@@ -62,7 +62,7 @@ niulangd service install --profile "$PROFILE"
 
 Both scripts take `--dry-run`, use `--binary PATH` when you have a reviewed
 release artifact instead of a source tree, and refuse any binary that does not
-report `wire=1`.
+report `wire=2`.
 
 The one thing `install-server.sh` will not do twice is create a provider trust
 root. Re-running it against an initialized state directory stops before
@@ -102,7 +102,7 @@ sudo install -m 0755 ./niulangd /usr/local/bin/niulangd
 /usr/local/bin/niulangd --version
 ```
 
-The output must contain `wire=1`. Create a dedicated account once:
+The output must contain `wire=2`. Create a dedicated account once:
 
 ```sh
 sudo useradd --system --user-group \
@@ -166,6 +166,10 @@ sudo tail -n 5 /var/log/niulang/server.log
 
 With `--transport auto`, two listener rows are expected: TCP and UDP on the
 same port. Permit both in the host firewall and the cloud security group.
+The UDP listener is a mutually authenticated HTTP/3 endpoint using the `h3`
+ALPN and Niulang Extended CONNECT requests. Forward it at layer 4; a generic
+HTTP reverse proxy that terminates TLS cannot preserve Niulang's provider pin,
+device certificate authorization, or tunnel handler.
 Binding metrics to loopback avoids exposing an unauthenticated operations
 endpoint. The server runtime log is independent of `/metrics`: it contains the
 same performance counters as timestamped JSON records and rotates internally
@@ -529,36 +533,37 @@ more important than provider order.
 
 ## Upgrade an existing deployment
 
-Protocol 1 deliberately has no shared-secret or wire-compatibility mode. An old
-client cannot use a new server, and a new client cannot use an old server.
-Replacing a service on the same endpoint therefore requires a brief coordinated
-restart; existing flows cannot survive the protocol boundary.
+Protocol 2 deliberately has no state migration, shared-secret compatibility,
+or wire downgrade. Provider state, profiles, and certificates created by a
+different protocol version are rejected. Replacing a previous deployment on
+the same endpoint therefore requires a new trust domain, device re-enrollment,
+and a brief coordinated restart; existing flows cannot survive the boundary.
 
 Use this order:
 
 1. Record the old client/server versions, arguments, listener, and a known-good
    proxy request.
-2. Copy the old binaries, service definitions, client plist, and old credential
-   files into timestamped rollback directories. Do not overwrite them.
-3. Install the protocol-1 binary under its final path without restarting the
-   old service.
-4. Create `/var/lib/niulang/provider`, add the user, and generate an invitation
-   while the old process still owns the public port.
-5. Install the new server unit and restart the gateway. Verify protocol 1,
-   TCP and UDP listeners, and loopback metrics before touching the client.
-6. Enroll with the new CLI. Its default `--local-address auto` bypasses a host
+2. Copy the old binaries, service definitions, client configuration, provider
+   state, and profiles into timestamped rollback directories. Do not overwrite
+   them.
+3. Create a new, empty protocol-2 provider-state directory, add the user, and
+   generate a fresh invitation while the old process still owns the public
+   port. Never initialize over the previous state directory.
+4. Install the protocol-2 binary and server unit, then restart the gateway.
+   Verify `wire=2`, TCP and UDP listeners, and loopback metrics before touching
+   the client.
+5. Enroll with the new CLI. Its default `--local-address auto` bypasses a host
    TUN; specify `if:en0` when the machine has multiple physical interfaces.
-7. Atomically install the new client binary and profile-based service arguments,
+6. Atomically install the new client binary and profile-based service arguments,
    then restart the client service.
-8. Force a SOCKS request with `--noproxy ''`, confirm server flow counters and
+7. Force a SOCKS request with `--noproxy ''`, confirm server flow counters and
    QUIC or TCP lanes, and only then delete the consumed invitation copy.
 
-Generate the provider state beside the old credential files, not on top of
-them. If the new service fails before enrollment, restore the old server unit
-and binary. If it fails after the client changes, restore both client and
-server as one rollback; mixed protocol versions will never connect. Keep the
-new provider state and enrolled profile for diagnosis or a later retry unless
-they are known to be compromised.
+If the new service fails before enrollment, restore the old server unit,
+binary, and provider state. If it fails after the client changes, restore the
+old client binary and profile as well; a rollback is one complete trust domain,
+not a mixture of old and new state. Keep the new provider state and enrolled
+profile for diagnosis or a later retry unless they are known to be compromised.
 
 ## User and device lifecycle
 
@@ -623,7 +628,7 @@ without redaction.
 
 | Symptom | Action |
 |---|---|
-| `does not support Niulang enrollment` or `rejected Niulang protocol 1` | Confirm the invitation endpoint, client/server `wire=1`, and that no old TLS service still owns the port. |
+| `does not support Niulang enrollment` or `rejected Niulang protocol 2` | Confirm the invitation endpoint, client/server `wire=2`, and that no other TLS service still owns the port. |
 | `more than one physical IPv4 address is active` | Choose the intended uplink with `--local-address if:NAME`; use the same value for enroll and client. |
 | `interface … has no active IPv4 address` | Correct the interface name or connect it before retrying. The saved enrollment draft remains reusable. |
 | Enrollment reports a pinned-identity error | The URI belongs to another provider, the provider state was replaced, or traffic is intercepted. Never bypass pin verification. |

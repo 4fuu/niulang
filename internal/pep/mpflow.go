@@ -205,17 +205,18 @@ type laneFailure struct {
 }
 
 type multipathFlow struct {
-	ctx           context.Context
-	inner         net.Conn
-	sessionID     [16]byte
-	flowID        uint64
-	chunkSize     int
-	budget        *limiter.Budget
-	metrics       *metrics.Registry
-	logger        *slog.Logger
-	memoryLimits  flowMemoryLimits
-	sendMemory    *memlimit.Budget
-	receiveMemory *memlimit.Budget
+	ctx            context.Context
+	inner          net.Conn
+	sessionID      [16]byte
+	flowID         uint64
+	chunkSize      int
+	flowSchedulers *flowSchedulerSet
+	budget         *limiter.Budget
+	metrics        *metrics.Registry
+	logger         *slog.Logger
+	memoryLimits   flowMemoryLimits
+	sendMemory     *memlimit.Budget
+	receiveMemory  *memlimit.Budget
 
 	sendAckFlag uint16
 	recvAckFlag uint16
@@ -340,7 +341,7 @@ type multipathFlow struct {
 	// A coded lane uses it to place one reliable safety copy behind OPEN while
 	// still sending the latency-sensitive coded copy immediately.
 	openConfirmationRequired atomic.Bool
-	// ackRanges is mandatory in protocol v1. It is useful to striped flows and
+	// ackRanges is mandatory in protocol v2. It is useful to striped flows and
 	// harmless for a single lane.
 	ackRanges atomic.Bool
 	// tcpStriping is negotiated per flow. When true, and only while every
@@ -584,8 +585,25 @@ func (f *multipathFlow) writeLane(lane *mpLane) {
 				return
 			}
 		}
-		err := lane.fc.WriteContext(f.ctx, frame)
+		var release func()
+		if frame.Header.Type == protocol.TypeData && f.flowSchedulers != nil {
+			if path, ok := flowSchedulingPath(lane); ok {
+				var err error
+				release, err = f.flowSchedulers.acquire(f.ctx, f.done, path, f.flowID, frame.Header.Class, len(frame.Payload))
+				if err != nil {
+					if errors.Is(err, errFlowSchedulingClosed) || f.finished.Load() || f.doneChanClosed() {
+						return
+					}
+					f.failLane(lane, fmt.Errorf("lane %d flow scheduling: %w", lane.id, err))
+					return
+				}
+			}
+		}
+		err := lane.fc.WriteContextTracked(f.ctx, frame, release)
 		if err != nil {
+			if release != nil {
+				release()
+			}
 			f.failLane(lane, fmt.Errorf("lane %d write: %w", lane.id, err))
 			return
 		}
@@ -599,6 +617,18 @@ func (f *multipathFlow) writeLane(lane *mpLane) {
 			queued.onWritten()
 		}
 	}
+}
+
+func flowSchedulingPath(lane *mpLane) (string, bool) {
+	if lane == nil || lane.fc == nil {
+		return "", false
+	}
+	identified, ok := lane.fc.transport().(interface{ pathIdentity() string })
+	if !ok {
+		return "", false
+	}
+	path := identified.pathIdentity()
+	return path, path != ""
 }
 
 // nextLaneFrame gives the interactive queue strict preference without
@@ -736,6 +766,9 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 		}
 		if stats.smoothedRTT > observation.SmoothedRTT {
 			observation.SmoothedRTT = stats.smoothedRTT
+		}
+		if coded, ok := provider.(laneCodedProvider); ok {
+			moved.Add(coded.laneCodedTelemetry(stats))
 		}
 		if counted, ok := provider.(laneConnectionProvider); ok {
 			id, delta := counted.connectionTelemetry(stats)
@@ -1204,9 +1237,9 @@ func (f *multipathFlow) laneReady(lane *mpLane) bool {
 // return its bounded bundle. The ordering matters only for control.
 //
 // This is the flow's control and data plane split, and it is a second one --
-// the framing has already split control from bulk *within* a connection, by
-// putting control frames on the QUIC stream and coded bulk on that
-// connection's datagrams. The two are not alternatives and neither subsumes
+// the framing has already split control from bulk *within* an HTTP/3 lane, by
+// putting control frames in DATA and coded bulk in that request stream's HTTP
+// Datagrams. The two are not alternatives and neither subsumes
 // the other, because they cover different flows:
 //
 //   - A flow that would rather spend bytes than round trips gets the substrate
@@ -2773,6 +2806,10 @@ func (f *multipathFlow) closeAll() {
 		// can observe the resulting EOF concurrently; those expected shutdown
 		// errors must not be exported as transport failures.
 		f.finished.Store(true)
+		f.signalDone()
+		if f.flowSchedulers != nil {
+			f.flowSchedulers.closeFlow(f.flowID)
+		}
 		_ = f.inner.Close()
 		f.lanesMu.RLock()
 		defer f.lanesMu.RUnlock()

@@ -73,6 +73,8 @@ type options struct {
 	wireReserveMbits        float64
 	chunkSize               int
 	quicPool                bool
+	flowScheduling          bool
+	flowStartupBytes        int
 	udpOnStream             bool
 	udpPackets              int
 	udpPayload              int
@@ -128,6 +130,8 @@ func run(args []string) error {
 	fs.Float64Var(&opts.wireReserveMbits, "wire-interactive-reserve", 0, "portion of --wire-cap-rate reserved from bulk QUIC connections in Mbit/s")
 	fs.IntVar(&opts.chunkSize, "chunk", 0, "niulang data frame size in bytes (0 selects the default)")
 	fs.BoolVar(&opts.quicPool, "quic-pool", true, "enable the niulang pooled QUIC connection")
+	fs.BoolVar(&opts.flowScheduling, "flow-scheduling", true, "coordinate niulang DATA carrier writes across flows sharing one provider path")
+	fs.IntVar(&opts.flowStartupBytes, "flow-startup-bytes", 0, "override the scheduler's per-flow startup service in bytes (0 selects the default)")
 	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry niulang SOCKS UDP packets on ordered streams instead of QUIC datagrams")
 	fs.IntVar(&opts.udpPackets, "udp-packets", 0, "also measure this many SOCKS UDP echo packets per stack and trial (0 disables)")
 	fs.IntVar(&opts.udpPayload, "udp-payload", 256, "UDP echo payload size in bytes")
@@ -163,6 +167,9 @@ func run(args []string) error {
 	}
 	if opts.udpPackets < 0 || opts.udpPayload < 4 || opts.udpPayload > 60*1024 || opts.udpInterval < 0 || opts.udpSettle <= 0 {
 		return errors.New("UDP packets and interval must not be negative, payload must be 4..61440 bytes, and settle must be positive")
+	}
+	if opts.flowStartupBytes < 0 {
+		return errors.New("flow startup bytes must not be negative")
 	}
 	if opts.contend != "" && opts.udpPackets > 0 {
 		return errors.New("--udp-packets cannot be combined with --contend")
@@ -699,6 +706,8 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			InteractiveReserveBytesPerSec:     uint64(opts.interactiveReserveMbits * 1e6 / 8),
 			WireCapBytesPerSec:                uint64(opts.wireCapMbits * 1e6 / 8),
 			WireInteractiveReserveBytesPerSec: uint64(opts.wireReserveMbits * 1e6 / 8),
+			DisableFlowScheduling:             !opts.flowScheduling,
+			FlowStartupBytes:                  opts.flowStartupBytes,
 			UDPOnStream:                       opts.udpOnStream,
 			Metrics:                           h.serverMetrics,
 			Logger:                            logger,
@@ -719,6 +728,8 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			InteractiveReserveBytesPerSec:     uint64(opts.interactiveReserveMbits * 1e6 / 8),
 			WireCapBytesPerSec:                uint64(opts.wireCapMbits * 1e6 / 8),
 			WireInteractiveReserveBytesPerSec: uint64(opts.wireReserveMbits * 1e6 / 8),
+			DisableFlowScheduling:             !opts.flowScheduling,
+			FlowStartupBytes:                  opts.flowStartupBytes,
 			UDPOnStream:                       opts.udpOnStream,
 			Metrics:                           h.clientMetrics,
 			Logger:                            logger,

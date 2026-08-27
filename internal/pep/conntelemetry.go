@@ -112,9 +112,6 @@ func connectionCounters(stats laneTransportStats) metrics.QUICConnectionCounters
 		PacketsSent:             stats.packetsSent,
 		PacketsReceived:         stats.packetsReceived,
 		LossObservedPackets:     stats.controller.PacketsLostObserved,
-		CodedSources:            stats.codedSources,
-		CodedRecovered:          stats.codedRecovered,
-		CodedLost:               stats.codedLost,
 		ControllerBytesLost:     stats.controller.BytesLost,
 		ControllerPacketsLost:   stats.controller.PacketsLost,
 		ControllerSamples:       stats.controller.Samples,
@@ -135,6 +132,13 @@ type laneConnectionProvider interface {
 	connectionTelemetry(laneTransportStats) (uint64, metrics.QUICConnectionCounters)
 }
 
+// laneCodedProvider reports counters scoped to one HTTP/3 request stream.
+// Unlike QUIC transport and controller counters, these must be summed across
+// lanes even when those lanes share one pooled connection.
+type laneCodedProvider interface {
+	laneCodedTelemetry(laneTransportStats) metrics.QUICConnectionCounters
+}
+
 func (c *quicStreamConn) connectionTelemetry(stats laneTransportStats) (uint64, metrics.QUICConnectionCounters) {
 	if c == nil || c.conn == nil {
 		return 0, metrics.QUICConnectionCounters{}
@@ -145,4 +149,18 @@ func (c *quicStreamConn) connectionTelemetry(stats laneTransportStats) (uint64, 
 		return 0, metrics.QUICConnectionCounters{}
 	}
 	return entry.id, entry.advance(current)
+}
+
+func (c *quicStreamConn) laneCodedTelemetry(stats laneTransportStats) metrics.QUICConnectionCounters {
+	if c == nil {
+		return metrics.QUICConnectionCounters{}
+	}
+	current := metrics.QUICConnectionCounters{
+		CodedSources: stats.codedSources, CodedRecovered: stats.codedRecovered, CodedLost: stats.codedLost,
+	}
+	c.codedTelemetryMu.Lock()
+	delta := current.Advance(c.codedTelemetryPrevious)
+	c.codedTelemetryPrevious = current
+	c.codedTelemetryMu.Unlock()
+	return delta
 }

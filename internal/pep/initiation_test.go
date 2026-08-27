@@ -264,7 +264,7 @@ func TestThePrewarmLeavesTheUplinkMeasured(t *testing.T) {
 }
 
 // The probe echo is an obligation, not a courtesy. A gateway that authenticates
-// on a protocol-1 ALPN has agreed to reflect the sequence, so a client that
+// on a protocol-2 ALPN has agreed to reflect the sequence, so a client that
 // quietly accepted a short or altered echo would be carrying a peer whose
 // disagreement about the wire it never learned about -- and would draw its
 // erasure model from traffic it never sent.

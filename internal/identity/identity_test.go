@@ -135,8 +135,8 @@ func TestInvitationIsCompactStrictExpiringAndOneTime(t *testing.T) {
 	if err != nil || parsed != invitation {
 		t.Fatalf("parse invitation: %v", err)
 	}
-	if _, err := ParseInvitation("queqiao"+strings.TrimPrefix(uri, "niulang"), now); err == nil {
-		t.Fatal("legacy Queqiao invitation scheme was accepted")
+	if _, err := ParseInvitation("other"+strings.TrimPrefix(uri, "niulang"), now); err == nil {
+		t.Fatal("an unrelated invitation scheme was accepted")
 	}
 	if _, err := ParseInvitation(uri, now.Add(2*time.Hour)); err == nil {
 		t.Fatal("expired invitation was accepted")
@@ -324,6 +324,64 @@ func TestProfilesAreSelfContainedStrictAndPrivate(t *testing.T) {
 	}
 }
 
+func TestProtocol2RejectsEarlierIdentityState(t *testing.T) {
+	now := time.Now()
+	provider := testProvider(t, "127.0.0.1:443", now)
+	account, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, invitation, err := provider.CreateInvitation(account.ID, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldInvitation := invitation
+	oldInvitation.Version = 1
+	if err := oldInvitation.validateEnvelope(); err == nil {
+		t.Fatal("protocol-1 invitation schema was accepted")
+	}
+	oldProfile := localProfile(t, provider, account, "laptop", now)
+	oldProfile.Version = 1
+	if _, err := oldProfile.Credentials(); err == nil {
+		t.Fatal("protocol-1 client profile was accepted")
+	}
+	oldDraft := EnrollmentDraft{Version: 1, Invitation: invitation, DeviceName: "laptop"}
+	if _, err := oldDraft.privateKey(); err == nil {
+		t.Fatal("protocol-1 enrollment draft was accepted")
+	}
+
+	providerPath := filepath.Join(provider.Directory, providerFile)
+	metadata, err := os.ReadFile(providerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata = bytes.Replace(metadata, []byte(`"version": 2`), []byte(`"version": 1`), 1)
+	if err := os.WriteFile(providerPath, metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProvider(provider.Directory); err == nil {
+		t.Fatal("protocol-1 provider metadata was accepted")
+	}
+
+	authorizationPath := filepath.Join(provider.Directory, authorizationFile)
+	authorization, err := os.ReadFile(authorizationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization = bytes.Replace(authorization, []byte(`"version": 2`), []byte(`"version": 1`), 1)
+	if err := os.WriteFile(authorizationPath, authorization, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(authorizationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Load(); err == nil {
+		t.Fatal("protocol-1 authorization state was accepted")
+	}
+}
+
 func tlsHandshake(t *testing.T, serverConfig, clientConfig *tls.Config) error {
 	t.Helper()
 	serverRaw, clientRaw := net.Pipe()
@@ -350,22 +408,22 @@ func TestMutualTLSRequiresAnAuthorizedDeviceAndPinnedGateway(t *testing.T) {
 	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	profile := localProfile(t, provider, account, "laptop", now)
 	clientCredentials, _ := profile.Credentials()
-	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", false)
+	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "niulang/2", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientConfig, _ := ClientTLSConfig(clientCredentials, "queqiao/1")
+	clientConfig, _ := ClientTLSConfig(clientCredentials, "niulang/2")
 	if err := tlsHandshake(t, serverConfig, clientConfig); err != nil {
 		t.Fatalf("authorized mutual TLS failed: %v", err)
 	}
 	withoutDevice := EnrollmentTLSConfig(provider.Metadata.RootPin, provider.Metadata.ProviderID, provider.Metadata.GatewayID)
-	withoutDevice.NextProtos = []string{"queqiao/1"}
+	withoutDevice.NextProtos = []string{"niulang/2"}
 	if err := tlsHandshake(t, serverConfig, withoutDevice); err == nil {
 		t.Fatal("client without a device certificate was accepted")
 	}
 	wrongGateway := clientCredentials
 	wrongGateway.GatewayID = strings.Repeat("a", 32)
-	wrongGatewayConfig, err := ClientTLSConfig(wrongGateway, "queqiao/1")
+	wrongGatewayConfig, err := ClientTLSConfig(wrongGateway, "niulang/2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +439,7 @@ func TestMutualTLSRequiresAnAuthorizedDeviceAndPinnedGateway(t *testing.T) {
 	other := testProvider(t, "127.0.0.1:443", now)
 	wrongPin := clientCredentials
 	wrongPin.Root, wrongPin.RootPin, wrongPin.ProviderID = other.RootCert, other.Metadata.RootPin, other.Metadata.ProviderID
-	wrongConfig, _ := ClientTLSConfig(wrongPin, "queqiao/1")
+	wrongConfig, _ := ClientTLSConfig(wrongPin, "niulang/2")
 	if wrongConfig != nil && tlsHandshake(t, serverConfig, wrongConfig) == nil {
 		t.Fatal("gateway was accepted under another provider root")
 	}
@@ -393,25 +451,32 @@ func TestMultipleDataALPNsRetainMutualTLSAndControlIsolation(t *testing.T) {
 	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	profile := localProfile(t, provider, account, "laptop", now)
 	clientCredentials, _ := profile.Credentials()
-	serverConfig, err := ServerTLSConfigWithDataALPNs(provider.ServerCredentials(), []string{"queqiao/1", "niulang-standby/1"}, true)
+	serverConfig, err := ServerTLSConfigWithDataALPNs(provider.ServerCredentials(), []string{"niulang/2", "niulang-standby/2"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	standbyClient, err := ClientTLSConfig(clientCredentials, "niulang-standby/1")
+	standbyClient, err := ClientTLSConfig(clientCredentials, "niulang-standby/2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := tlsHandshake(t, serverConfig, standbyClient); err != nil {
 		t.Fatalf("second mutually authenticated data ALPN failed: %v", err)
 	}
+	oldClient, err := ClientTLSConfig(clientCredentials, "niulang/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tlsHandshake(t, serverConfig, oldClient); err == nil {
+		t.Fatal("previous data ALPN was accepted")
+	}
 	withoutDevice := EnrollmentTLSConfig(provider.Metadata.RootPin, provider.Metadata.ProviderID, provider.Metadata.GatewayID)
-	withoutDevice.NextProtos = []string{EnrollmentALPN, "niulang-standby/1"}
+	withoutDevice.NextProtos = []string{EnrollmentALPN, "niulang-standby/2"}
 	if err := tlsHandshake(t, serverConfig, withoutDevice); err == nil {
 		t.Fatal("mixed enrollment/data offer selected the unauthenticated enrollment profile")
 	}
 	for _, protocols := range [][]string{
 		nil,
-		{"queqiao/1", "queqiao/1"},
+		{"niulang/2", "niulang/2"},
 		{EnrollmentALPN},
 		{RenewalALPN},
 	} {
@@ -436,7 +501,7 @@ func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
 	if _, err := ParseInvitation(uri, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", true)
+	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "niulang/2", true)
 	service := EnrollmentService{Provider: provider}
 	serveOne := func() {
 		raw, acceptErr := listener.Accept()
@@ -508,7 +573,7 @@ func TestEnrollmentExplainsProtocolALPNMismatch(t *testing.T) {
 		_ = tls.Server(raw, serverConfig).Handshake()
 	}()
 	_, err = EnrollWithOptions(context.Background(), invitation, "laptop", DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
-	if err == nil || !strings.Contains(err.Error(), "does not support Niulang enrollment") || !strings.Contains(err.Error(), "protocol 1") {
+	if err == nil || !strings.Contains(err.Error(), "does not support Niulang enrollment") || !strings.Contains(err.Error(), "protocol 2") {
 		t.Fatalf("ALPN mismatch produced unhelpful error: %v", err)
 	}
 }
@@ -526,7 +591,7 @@ func TestRenewalPreservesDeviceAndRejectsRevocation(t *testing.T) {
 	if err != nil || !needs {
 		t.Fatalf("near-expiry profile needs renewal=%t err=%v", needs, err)
 	}
-	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", true)
+	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "niulang/2", true)
 	service := EnrollmentService{Provider: provider}
 	serveRenewal := func() {
 		raw, acceptErr := listener.Accept()
@@ -596,7 +661,7 @@ func TestAuthorizationStoreRejectsUnknownAndInconsistentFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unknown := bytes.Replace(data, []byte(`"version": 1,`), []byte(`"version": 1, "unexpected": true,`), 1)
+	unknown := bytes.Replace(data, []byte(`"version": 2,`), []byte(`"version": 2, "unexpected": true,`), 1)
 	if bytes.Equal(unknown, data) {
 		t.Fatal("test did not alter authorization JSON")
 	}
@@ -606,78 +671,6 @@ func TestAuthorizationStoreRejectsUnknownAndInconsistentFields(t *testing.T) {
 	store, _ := NewStore(path)
 	if err := store.Load(); err == nil {
 		t.Fatal("authorization store accepted an unknown field")
-	}
-}
-
-// A provider state written before the flow limit was renamed still calls it
-// max_sessions. The store rejects unknown fields and keeps the last known-good
-// state when a replacement will not decode, so failing to read the old name
-// would not degrade gracefully: it would leave a running gateway pinned to
-// stale authorization and a provider CLI unable to load the state at all.
-func TestLegacyMaxSessionsIsReadAsTheFlowLimit(t *testing.T) {
-	provider := testProvider(t, "127.0.0.1:443", time.Now())
-	path := filepath.Join(provider.Directory, authorizationFile)
-	if _, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{MaxFlows: 16}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy := bytes.Replace(data, []byte(`"max_flows"`), []byte(`"max_sessions"`), 1)
-	if bytes.Equal(legacy, data) {
-		t.Fatal("test did not rewrite the flow limit to its old name")
-	}
-	if err := os.WriteFile(path, legacy, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, _ := NewStore(path)
-	if err := store.Load(); err != nil {
-		t.Fatalf("state naming the flow limit max_sessions did not load: %v", err)
-	}
-	account, ok := store.FindAccount("alice")
-	if !ok || account.MaxFlows != 16 {
-		t.Fatalf("legacy limit read as %d, want 16", account.MaxFlows)
-	}
-	// The old name is compatibility on read only. Saving must write the
-	// current one so the store has a single spelling of the limit.
-	if err := store.SetAccountEnabled(account.ID, false); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(saved, []byte(`"max_sessions"`)) {
-		t.Fatal("saving rewrote the flow limit under its old name")
-	}
-	if !bytes.Contains(saved, []byte(`"max_flows"`)) {
-		t.Fatal("saving dropped the flow limit")
-	}
-}
-
-// Both spellings at once is a state nobody can have written on purpose, and
-// guessing which one the operator meant is guessing at a security policy.
-func TestConflictingFlowLimitSpellingsAreRejected(t *testing.T) {
-	provider := testProvider(t, "127.0.0.1:443", time.Now())
-	path := filepath.Join(provider.Directory, authorizationFile)
-	if _, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{MaxFlows: 16}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	both := bytes.Replace(data, []byte(`"max_flows": 16`), []byte(`"max_flows": 16, "max_sessions": 8`), 1)
-	if bytes.Equal(both, data) {
-		t.Fatal("test did not add the conflicting field")
-	}
-	if err := os.WriteFile(path, both, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, _ := NewStore(path)
-	if err := store.Load(); err == nil {
-		t.Fatal("a store naming two different flow limits was accepted")
 	}
 }
 
@@ -766,6 +759,49 @@ func TestCertificateRolesCannotBeSwapped(t *testing.T) {
 	}
 }
 
+func TestCertificateIdentityURIsUseNiulangScheme(t *testing.T) {
+	provider := testProvider(t, "127.0.0.1:443", time.Now())
+	account, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceID := strings.Repeat("a", 32)
+	devicePEM, err := provider.IssueDevice(account.ID, deviceID, publicKey, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(devicePEM)
+	device, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := x509.ParseCertificate(provider.GatewayCertificate().Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	wants := map[string]string{
+		"gateway issuer": "niulang://" + provider.Metadata.ProviderID + "/gateway-issuer",
+		"device issuer":  "niulang://" + provider.Metadata.ProviderID + "/device-issuer",
+		"gateway":        "niulang://" + provider.Metadata.ProviderID + "/gateway/" + provider.Metadata.GatewayID,
+		"device":         "niulang://" + provider.Metadata.ProviderID + "/account/" + account.ID + "/device/" + deviceID,
+	}
+	certificates := map[string]*x509.Certificate{
+		"gateway issuer": provider.GatewayIssuer,
+		"device issuer":  provider.DeviceIssuer,
+		"gateway":        gateway,
+		"device":         device,
+	}
+	for name, certificate := range certificates {
+		if got := singleCertificateURI(certificate); got != wants[name] {
+			t.Fatalf("%s identity = %q, want %q", name, got, wants[name])
+		}
+	}
+}
+
 func TestGatewayRenewalIsVisibleToExistingTLSConfiguration(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	provider := testProvider(t, "127.0.0.1:443", now)
@@ -775,7 +811,7 @@ func TestGatewayRenewalIsVisibleToExistingTLSConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "queqiao/1", false)
+	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "niulang/2", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -788,7 +824,7 @@ func TestGatewayRenewalIsVisibleToExistingTLSConfiguration(t *testing.T) {
 	if bytes.Equal(before, after) {
 		t.Fatal("gateway renewal retained the old leaf")
 	}
-	clientConfig, err := ClientTLSConfig(clientCredentials, "queqiao/1")
+	clientConfig, err := ClientTLSConfig(clientCredentials, "niulang/2")
 	if err != nil {
 		t.Fatal(err)
 	}

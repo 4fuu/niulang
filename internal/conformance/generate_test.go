@@ -15,24 +15,24 @@ import (
 	"github.com/4fuu/niulang/internal/session"
 )
 
-var update = flag.Bool("update", false, "rewrite the committed protocol-1 vectors from this build")
+var update = flag.Bool("update", false, "rewrite the committed protocol-2 vectors from this build")
 
 // vectorPath is deliberately outside this package. The vectors describe the
 // protocol, not this package's tests, and a second implementation should be
 // able to find them without reading Go.
 func vectorPath() string {
-	return filepath.Join("..", "..", "testdata", "protocol1", "vectors.json")
+	return filepath.Join("..", "..", "testdata", "protocol2", "vectors.json")
 }
 
 func loadVectors(t *testing.T) File {
 	t.Helper()
 	raw, err := os.ReadFile(vectorPath())
 	if err != nil {
-		t.Fatalf("read protocol-1 vectors: %v", err)
+		t.Fatalf("read protocol-2 vectors: %v", err)
 	}
 	var f File
 	if err := json.Unmarshal(raw, &f); err != nil {
-		t.Fatalf("parse protocol-1 vectors: %v", err)
+		t.Fatalf("parse protocol-2 vectors: %v", err)
 	}
 	return f
 }
@@ -54,16 +54,16 @@ func TestVectorsAreCurrent(t *testing.T) {
 		if err := os.WriteFile(vectorPath(), encoded, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Log("protocol-1 vectors rewritten")
+		t.Log("protocol-2 vectors rewritten")
 		return
 	}
 	committed, err := os.ReadFile(vectorPath())
 	if err != nil {
-		t.Fatalf("read protocol-1 vectors: %v", err)
+		t.Fatalf("read protocol-2 vectors: %v", err)
 	}
 	if string(committed) != string(encoded) {
-		t.Fatalf("this build no longer produces the committed protocol-1 vectors.\n"+
-			"A data-wire change requires a matching protocol.Version and data ALPN; an\n"+
+		t.Fatalf("this build no longer produces the committed protocol-2 vectors.\n"+
+			"A data-wire change requires matching protocol and carrier identifiers; an\n"+
 			"identity-bootstrap change requires an explicit compatibility decision. If\n"+
 			"neither changed deliberately, this is a regression. After review, run:\n"+
 			"    go test ./internal/conformance -update\n"+
@@ -75,9 +75,9 @@ func generate(t *testing.T) File {
 	t.Helper()
 	return File{
 		Protocol: int(protocol.Version),
-		Note: "Frozen conformance vectors for Niulang protocol 1. Every credential-shaped " +
+		Note: "Frozen conformance vectors for Niulang protocol 2. Every credential-shaped " +
 			"value here is synthetic. Regenerating this file is a compatibility change; data-plane " +
-			"changes require protocol.Version and the data ALPN to move with them.",
+			"changes require protocol.Version and the carrier identifiers to move with them.",
 		FrameHeaders:    frameHeaderVectors(t),
 		AckRanges:       ackRangeVectors(t),
 		Destinations:    destinationVectors(t),
@@ -156,7 +156,8 @@ func frameHeaderVectors(t *testing.T) FrameHeaderVectors {
 	out.Reject = []RejectVector{
 		{"wrong magic", mutate(func(raw []byte) { raw[0] = 'X' }), "the first two bytes are not WO"},
 		{"version 0", mutate(func(raw []byte) { raw[2] = 0 }), "a receiver speaks exactly one wire version and refuses every other"},
-		{"version 2", mutate(func(raw []byte) { raw[2] = 2 }), "a future version is refused rather than partially understood"},
+		{"version 1", mutate(func(raw []byte) { raw[2] = 1 }), "the previous wire version has no compatibility path"},
+		{"version 3", mutate(func(raw []byte) { raw[2] = 3 }), "a future version is refused rather than partially understood"},
 		{"frame type 0", mutate(func(raw []byte) { raw[3] = 0 }), "types are 1..9; there is no zero type"},
 		{"frame type 10", mutate(func(raw []byte) { raw[3] = 10 }), "an unknown type is refused, never ignored"},
 		{"class 3", mutate(func(raw []byte) { raw[42] = 3 }), "classes are 0..2"},
@@ -538,7 +539,10 @@ func limitVector() LimitVector {
 		MaxProbePayload:      protocol.MaxProbePayload,
 		MaxProbeFrames:       protocol.MaxProbeFrames,
 		MaxProbeBytes:        protocol.MaxProbeBytes,
-		DataALPN:             protocol.DataALPN,
+		QUICDataALPN:         protocol.QUICDataALPN,
+		TCPDataALPN:          protocol.TCPDataALPN,
+		H3TunnelProtocol:     protocol.H3TunnelProtocol,
+		H3TunnelPath:         protocol.H3TunnelPath,
 		EnrollALPN:           identity.EnrollmentALPN,
 		RenewALPN:            identity.RenewalALPN,
 	}

@@ -125,12 +125,13 @@ const (
 // drops put more traffic into the queue that was already overflowing -- and
 // that is what the floor was defending against. It does not, because a repair
 // symbol is not additional load. It crosses the same congestion window as a
-// source symbol: coded.QUICCarrier runs on QUIC datagrams, whose congestion
-// controller, pacer and loss detector all apply. ErasureSender compensates its
-// wire rate from the separately retained erasure floor, not from this total
-// loss, and caps that rate at this lane's share of the endpoint pair's measured
-// bottleneck. Raising this estimate therefore changes how a fixed window is
-// spent -- more parity, less payload -- and never how much is put on the wire.
+// source symbol: the coded carrier runs on HTTP Datagrams over QUIC, whose
+// congestion controller, pacer and loss detector all apply. ErasureSender
+// compensates its wire rate from the separately retained erasure floor, not
+// from this total loss, and caps that rate at this lane's share of the endpoint
+// pair's measured bottleneck. Raising this estimate therefore changes how a
+// fixed window is spent -- more parity, less payload -- and never how much is
+// put on the wire.
 //
 // What made the floor look necessary was that the window was not fixed in
 // practice: the bandwidth estimate behind it could be latched at a burst rate

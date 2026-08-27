@@ -468,7 +468,7 @@ func TestCompletionFromBeforeCurrentFanoutCannotClassifyIt(t *testing.T) {
 }
 
 // The internal off state remains safe for tests and partial flow setup even
-// though protocol v1 enables ranges on every established flow.
+// though protocol v2 enables ranges on every established flow.
 func TestRangesAreNotSentBeforeRangeTrackingIsEnabled(t *testing.T) {
 	conn := newAckCaptureConn(0, nil)
 	flow := newAckTestFlow(conn)

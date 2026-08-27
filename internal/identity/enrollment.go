@@ -25,7 +25,7 @@ import (
 
 const maxEnrollmentMessage = 64 * 1024
 
-const EnrollmentDraftVersion = 1
+const EnrollmentDraftVersion = 2
 
 // DialOptions controls the outer TCP connection used for enrollment and
 // renewal. LocalAddress accepts "auto", "if:NAME", or a literal IP. An empty
@@ -519,7 +519,7 @@ func dialIdentityEndpoint(ctx context.Context, endpoint, purpose string, options
 
 func explainIdentityHandshakeError(endpoint, purpose string, err error) error {
 	if strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q does not support Niulang %s; confirm that this endpoint runs protocol 1 with %s enabled: %w", endpoint, purpose, purpose, err)
+		return fmt.Errorf("gateway %q does not support Niulang %s; confirm that this endpoint runs protocol 2 with %s enabled: %w", endpoint, purpose, purpose, err)
 	}
 	return fmt.Errorf("verify the pinned provider identity at gateway %q for %s: %w", endpoint, purpose, err)
 }

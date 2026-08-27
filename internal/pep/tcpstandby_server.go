@@ -86,7 +86,7 @@ func standbyReset(fc *frameConn, frame protocol.Frame, message string) {
 	}, Payload: session.ResetPayload(session.ResetProtocol, message)})
 }
 
-// handleTCPStandby owns the auxiliary niulang-standby/1 state machine. The
+// handleTCPStandby owns the auxiliary niulang-standby/2 state machine. The
 // registration and every heartbeat are equal-size authenticated echoes. Only
 // a final JOIN transfers the already-authenticated socket into a live flow.
 // Registration alone cannot name a destination, consume a flow slot, or

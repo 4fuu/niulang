@@ -4,15 +4,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apernet/quic-go"
-
 	"github.com/4fuu/niulang/internal/coded"
 	"github.com/4fuu/niulang/internal/fec"
 	"github.com/4fuu/niulang/internal/pathmodel"
 	"github.com/4fuu/niulang/internal/protocol"
 )
 
-// A lane's bulk payload can travel over the connection's unreliable datagrams,
+// A lane's bulk payload can travel over its HTTP/3 request stream's unreliable
+// HTTP Datagrams,
 // repaired by an erasure code, while everything else stays on its stream.
 //
 // The split is what makes coding worth having here. A stream delivers in
@@ -25,19 +24,11 @@ import (
 // coming back the other.
 //
 // So a lane is not one substrate or the other. It is a stream for control and
-// datagrams for bulk, on one connection, and every lane has the stream.
-// bulkDemux routes a connection's coded datagrams to the flow each frame
-// belongs to.
-//
-// The datagrams are the connection's, not a lane's: one stream of them carries
-// every flow multiplexed on that connection. Reading it from each lane, as the
-// first version did, has every reader competing for frames that mostly belong
-// to somebody else -- a frame consumed by the wrong flow is a frame the right
-// one waits for forever -- and leaves a reader blocked on a connection-scoped
-// receive long after its flow has gone.
-//
-// So there is one reader, and it demultiplexes on the flow identity the
-// protocol already puts in every frame.
+// datagrams for bulk, on one connection, and every lane has the stream. RFC
+// 9297 scopes those datagrams to the Extended CONNECT request stream, so every
+// lane owns one coded path and one reader. bulkDemux still routes by the flow
+// identity already in every frame because a replacement lane may join the
+// same flow before its predecessor has fully drained.
 type bulkDemux struct {
 	path        *coded.Path
 	queueFrames int
@@ -219,22 +210,12 @@ func (d *bulkDemux) release(flowID uint64) {
 	close(sub.frames)
 }
 
-// bulkPaths holds one coded path per QUIC connection.
-//
-// Datagrams are a connection-level facility, not a stream-level one, so a path
-// per stream would put several receive loops on one connection competing for
-// the same arrivals -- and on a pooled connection would leave some streams
-// with a coded substrate and some without, which is worse than none having
-// one: a sender that codes into a receiver with no bulk reader loses every
-// data frame it sends.
 var (
-	bulkPaths   sync.Map // *quic.Conn -> *coded.Path
 	bulkDemuxs  sync.Map // *coded.Path -> *bulkDemux
-	bulkPathMu  sync.Mutex
 	bulkDemuxMu sync.Mutex
 )
 
-// connBulkDemux returns the demultiplexer for a connection's coded path.
+// connBulkDemux returns the demultiplexer for an HTTP/3 lane's coded path.
 func connBulkDemux(path *coded.Path, queueFrames int) *bulkDemux {
 	if path == nil {
 		return nil
@@ -249,40 +230,16 @@ func connBulkDemux(path *coded.Path, queueFrames int) *bulkDemux {
 	return created
 }
 
-// connBulkPath returns the connection's coded path, creating it once. It is
-// closed with the connection, so no caller owns its lifetime.
-func connBulkPath(conn *quic.Conn, queueFrames int) *coded.Path {
-	bulkPathMu.Lock()
-	defer bulkPathMu.Unlock()
-	if existing, ok := bulkPaths.Load(conn); ok {
-		return existing.(*coded.Path)
+func dropBulkDemux(path *coded.Path) {
+	if path == nil {
+		return
 	}
-	created := newCodedPath(conn, 0, queueFrames)
-	if created == nil {
-		return nil
-	}
-	bulkPaths.Store(conn, created)
-	go func() {
-		<-conn.Context().Done()
-		bulkPathMu.Lock()
-		bulkPaths.Delete(conn)
-		bulkPathMu.Unlock()
-		bulkDemuxMu.Lock()
-		bulkDemuxs.Delete(created)
-		bulkDemuxMu.Unlock()
-		_ = created.Close()
-	}()
-	return created
+	bulkDemuxMu.Lock()
+	bulkDemuxs.Delete(path)
+	bulkDemuxMu.Unlock()
 }
 
-func newCodedPath(conn *quic.Conn, roundTrip time.Duration, queueFrames int) *coded.Path {
-	if support := conn.ConnectionState().SupportsDatagrams; !support.Local || !support.Remote {
-		return nil
-	}
-	carrier, err := coded.NewQUICCarrier(conn)
-	if err != nil {
-		return nil
-	}
+func newCodedPath(carrier coded.Carrier, pathKey string, roundTrip time.Duration, queueFrames int) *coded.Path {
 	if roundTrip <= 0 {
 		roundTrip = 300 * time.Millisecond
 	}
@@ -293,7 +250,7 @@ func newCodedPath(conn *quic.Conn, roundTrip time.Duration, queueFrames int) *co
 		RoundTrip: roundTrip,
 		// What the endpoint pair has already been measured to do, so the first
 		// symbol is coded for the path rather than for a clean one.
-		Path: pathmodel.Shared(peerKey(conn)),
+		Path: pathmodel.Shared(pathKey),
 		// This bounds both the sender and receiver channel in coded.Path.
 		// Zero deliberately preserves the throughput-oriented desktop default.
 		Pending: queueFrames,

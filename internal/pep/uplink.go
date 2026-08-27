@@ -243,9 +243,9 @@ func (c *Client) probePath(lane *authenticatedLane) {
 	// reading that echo makes the connection carry enough server-to-client
 	// traffic for the gateway's own controller to measure that direction.
 	//
-	// The echo is required rather than hoped for. Version 1 has no capability
+	// The echo is required rather than hoped for. Version 2 has no capability
 	// negotiation and no compatibility window: a peer that speaks the ALPN and
-	// completes mutual TLS has agreed to all of protocol 1, so a gateway that
+	// completes mutual TLS has agreed to all of protocol 2, so a gateway that
 	// accepts the probe and does not reflect it is not an older build to be
 	// tolerated -- it is a peer whose behaviour this client cannot account for,
 	// on a connection it was about to hand real traffic to.
@@ -261,7 +261,7 @@ func (c *Client) probePath(lane *authenticatedLane) {
 }
 
 // probeEchoViolation is a gateway that did not reflect the probe sequence
-// protocol 1 requires it to reflect.
+// protocol 2 requires it to reflect.
 //
 // It is kept distinct from a slow path because the two call for opposite
 // responses. The probe rides the reliable control stream, so a short echo is
@@ -317,7 +317,7 @@ func (c *Client) readPathProbeEchoes(lane *authenticatedLane, sent int) error {
 // pooled connection would outlive the evidence that it is unsound. Dropping the
 // pool costs one handshake and is recovered by the next dial.
 func (c *Client) rejectProbePeer(lane *authenticatedLane, err error) {
-	c.cfg.Logger.Warn("gateway violated the protocol-1 path probe contract", "error", err)
+	c.cfg.Logger.Warn("gateway violated the protocol-2 path probe contract", "error", err)
 	if c.metrics != nil {
 		c.metrics.PeerProtocolViolation()
 	}

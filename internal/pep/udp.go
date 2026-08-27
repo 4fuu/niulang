@@ -4,11 +4,11 @@ package pep
 // carried as individual authenticated niulang TypePacket frames, so packet
 // boundaries survive whichever substrate carries them.
 //
-// Where the lane's QUIC connection negotiated DATAGRAM in both directions,
-// those frames go over the connection's datagrams; otherwise -- a TLS/TCP
-// lane, a peer without datagram support, or a datagram the transport refuses
-// -- they go over the control stream. QUIC's transport negotiation tells both
-// endpoints whether the datagram substrate is available.
+// Where the lane's HTTP/3 connection negotiated datagrams in both directions,
+// those frames go over request-stream-scoped HTTP Datagrams; a TLS/TCP lane or
+// a datagram the transport refuses uses the reliable control substrate. A
+// protocol-2 HTTP/3 peer that does not advertise datagrams is rejected during
+// tunnel setup.
 //
 // The substrate is chosen for its semantics rather than its speed. An
 // application that chose UDP has already decided a late packet is worse than
@@ -35,6 +35,7 @@ import (
 	"github.com/4fuu/niulang/internal/socks5"
 	"github.com/4fuu/niulang/internal/udperr"
 	"github.com/apernet/quic-go"
+	"github.com/apernet/quic-go/http3"
 )
 
 const (
@@ -56,9 +57,9 @@ type udpCounters struct {
 }
 
 // udpPathProbeState is shared by every UDP association on one QUIC
-// connection. QUIC DATAGRAM packets are neither acknowledged nor retransmitted
+// connection. HTTP Datagrams are neither acknowledged nor retransmitted
 // and therefore don't contribute usable loss events to ConnectionStats. A
-// bounded protocol-1 path PROBE supplies that missing evidence without adding
+// bounded protocol-2 path PROBE supplies that missing evidence without adding
 // an acknowledgement to every application datagram.
 type udpPathProbeState struct {
 	mu           sync.Mutex
@@ -102,18 +103,19 @@ func (s *udpPathProbeState) stalled(now time.Time, window time.Duration) (time.D
 
 type quicConnectionSource interface {
 	quicConnection() *quic.Conn
+	h3ClientConnection() *http3.ClientConn
 }
 
 // observeUDPPathProbe starts at most one reliable echo per decision interval
 // on the association's QUIC connection. It uses the existing destination-free
 // path PROBE state machine on a separate stream, so this health check doesn't
-// extend the UDP-association wire grammar and remains protocol-1 compatible.
+// extend the protocol-2 UDP-association wire grammar.
 func (c *Client) observeUDPPathProbe(lane *authenticatedLane, now time.Time, window time.Duration, tcpHealthy bool) (time.Duration, bool) {
 	if !tcpHealthy || lane == nil || lane.kind != TransportQUIC || lane.outer == nil {
 		return 0, false
 	}
 	source, ok := lane.outer.(quicConnectionSource)
-	if !ok || source.quicConnection() == nil {
+	if !ok || source.quicConnection() == nil || source.h3ClientConnection() == nil {
 		return 0, false
 	}
 	conn := source.quicConnection()
@@ -145,22 +147,22 @@ func (c *Client) observeUDPPathProbe(lane *authenticatedLane, now time.Time, win
 		if healthyLatency < laneDecisionInterval {
 			healthyLatency = laneDecisionInterval
 		}
-		go c.runUDPPathProbe(conn, state, lane.sessionID, window, healthyLatency)
+		go c.runUDPPathProbe(conn, source.h3ClientConnection(), state, lane.sessionID, window, healthyLatency)
 	}
 	return state.stalled(now, window)
 }
 
-func (c *Client) runUDPPathProbe(conn *quic.Conn, state *udpPathProbeState, sessionID [16]byte, timeout, healthyLatency time.Duration) {
+func (c *Client) runUDPPathProbe(conn *quic.Conn, h3 *http3.ClientConn, state *udpPathProbeState, sessionID [16]byte, timeout, healthyLatency time.Duration) {
 	started := time.Now()
 	acknowledged := false
 	defer func() { state.finish(acknowledged, time.Since(started), healthyLatency) }()
 	ctx, cancel := context.WithTimeout(conn.Context(), timeout)
 	defer cancel()
-	stream, err := conn.OpenStreamSync(ctx)
+	stream, err := openH3Lane(ctx, h3, c.cfg.RemoteAddr)
 	if err != nil {
 		return
 	}
-	outer := &quicStreamConn{stream: stream, conn: conn, closeConn: false}
+	outer := &quicStreamConn{stream: stream, conn: conn, h3: h3, closeConn: false, cancelReadCode: h3RequestCanceledCode}
 	fc := newFrameConn(outer)
 	defer fc.Close()
 	probe := protocol.Frame{Header: protocol.Header{
@@ -997,10 +999,10 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 			}
 		}
 	}()
-	// The connection's datagrams feed the same channel. Only packets arrive
-	// there -- the close handshake and every other control frame stay on the
-	// stream -- so the loop below reads one channel and does not have to know
-	// which substrate a packet crossed on.
+	// The request stream's HTTP Datagrams feed the same channel. Only packets
+	// arrive there -- the close handshake and every other control frame stay
+	// on the stream -- so the loop below reads one channel and does not have to
+	// know which substrate a packet crossed on.
 	if bulk := fc.bulkFrames(flowID); bulk != nil {
 		defer fc.releaseBulk(flowID)
 		go func() {
@@ -1155,11 +1157,12 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 			counters.down.Add(uint64(len(packet.payload)))
 			resetIdle()
 		case err := <-frameErr:
-			if assocCtx.Err() != nil {
+			if assocCtx.Err() != nil || h3ServerShuttingDown(ctx) {
 				// Service shutdown closes the transport and cancels this context
-				// concurrently. The reader's EOF can win the select even though
-				// the association did not fail; keep shutdown from incrementing
-				// the failure counter nondeterministically.
+				// concurrently. During HTTP/3 draining, the parent service context
+				// is canceled before this lane context so existing streams get a
+				// bounded chance to finish. The reader's EOF can win either race;
+				// neither means that the association failed.
 				retain = true
 				goto done
 			}
@@ -1175,7 +1178,7 @@ func (s *Server) handleUDPAssociation(ctx context.Context, conn streamConn, fc *
 			s.cfg.Logger.Debug("UDP relay frame reader ended", "error", err)
 			goto done
 		case err := <-packetErr:
-			if assocCtx.Err() != nil {
+			if assocCtx.Err() != nil || h3ServerShuttingDown(ctx) {
 				// The relay read deadline observes the same cancellation. As with
 				// the frame reader, selecting its error first is still a clean
 				// service shutdown.

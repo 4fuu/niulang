@@ -76,46 +76,6 @@ func (a Account) Limits() AccountLimits {
 	return AccountLimits{MaxFlows: a.MaxFlows, MaxClients: a.MaxClients}
 }
 
-// accountJSON is the on-disk shape of an account. max_sessions is the name
-// MaxFlows was written under before there was a device limit beside it; it is
-// still read so an existing provider state survives this upgrade in place, and
-// it is never written back. Unknown fields stay rejected here exactly as the
-// store's own decoder rejects them: Refresh keeps the last known-good state
-// when a replacement will not decode, so a field this build does not
-// understand must fail loudly rather than be silently dropped on the next
-// save.
-type accountJSON struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Enabled    bool   `json:"enabled"`
-	ExpiresAt  string `json:"expires_at,omitempty"`
-	MaxFlows   int    `json:"max_flows,omitempty"`
-	MaxClients int    `json:"max_clients,omitempty"`
-	// LegacyMaxSessions is read-only compatibility; see the type comment.
-	LegacyMaxSessions int    `json:"max_sessions,omitempty"`
-	CreatedAt         string `json:"created_at"`
-}
-
-func (a *Account) UnmarshalJSON(data []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var raw accountJSON
-	if err := decoder.Decode(&raw); err != nil {
-		return err
-	}
-	if raw.LegacyMaxSessions != 0 {
-		if raw.MaxFlows != 0 && raw.MaxFlows != raw.LegacyMaxSessions {
-			return errors.New("account carries conflicting max_flows and legacy max_sessions")
-		}
-		raw.MaxFlows = raw.LegacyMaxSessions
-	}
-	*a = Account{
-		ID: raw.ID, Name: raw.Name, Enabled: raw.Enabled, ExpiresAt: raw.ExpiresAt,
-		MaxFlows: raw.MaxFlows, MaxClients: raw.MaxClients, CreatedAt: raw.CreatedAt,
-	}
-	return nil
-}
-
 type Device struct {
 	ID        string `json:"id"`
 	AccountID string `json:"account_id"`

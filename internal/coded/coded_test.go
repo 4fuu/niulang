@@ -53,6 +53,102 @@ func TestConfiguredPendingBoundsBothPathMailboxes(t *testing.T) {
 	}
 }
 
+type trackedCarrier struct {
+	started   chan struct{}
+	unblock   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newTrackedCarrier() *trackedCarrier {
+	return &trackedCarrier{
+		started: make(chan struct{}), unblock: make(chan struct{}), closed: make(chan struct{}),
+	}
+}
+
+func (c *trackedCarrier) Send([]byte) error {
+	c.startOnce.Do(func() { close(c.started) })
+	<-c.unblock
+	return nil
+}
+
+func (c *trackedCarrier) Receive() ([]byte, error) {
+	<-c.closed
+	return nil, io.EOF
+}
+
+func (c *trackedCarrier) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.unblock)
+		close(c.closed)
+	})
+	return nil
+}
+
+func TestTrackedSendReleasesAfterCarrierHandoff(t *testing.T) {
+	carrier := newTrackedCarrier()
+	path := New(carrier, Config{Pending: 2})
+	done := make(chan struct{})
+	if err := path.SendTracked([]byte("tracked"), func() { close(done) }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-carrier.started:
+	case <-time.After(time.Second):
+		t.Fatal("coded sender did not reach the carrier")
+	}
+	select {
+	case <-done:
+		t.Fatal("tracked send released while the carrier still held its bytes")
+	default:
+	}
+	if err := carrier.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("tracked send did not release after carrier handoff")
+	}
+	if err := path.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTrackedSendCloseReclaimsQueuedCallbacks(t *testing.T) {
+	carrier := newTrackedCarrier()
+	path := New(carrier, Config{Pending: 2})
+	done := make(chan struct{}, 2)
+	callback := func() { done <- struct{}{} }
+	if err := path.SendTracked([]byte("in carrier"), callback); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-carrier.started:
+	case <-time.After(time.Second):
+		t.Fatal("coded sender did not reach the carrier")
+	}
+	if err := path.SendTracked([]byte("still queued"), callback); err != nil {
+		t.Fatal(err)
+	}
+	if err := path.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("coded close did not reclaim every tracked callback")
+		}
+	}
+	select {
+	case <-done:
+		t.Fatal("coded close invoked a tracked callback more than once")
+	default:
+	}
+}
+
 func (p *lossyPipe) Send(d []byte) error {
 	p.mu.Lock()
 	if p.closed {

@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	EnrollmentALPN = "queqiao-enroll/1"
-	RenewalALPN    = "queqiao-renew/1"
+	EnrollmentALPN = "niulang-enroll/2"
+	RenewalALPN    = "niulang-renew/2"
 )
 
 type ServerCredentials struct {
@@ -320,7 +320,7 @@ func PrincipalFromCertificate(cert *x509.Certificate) (Principal, error) {
 		return Principal{}, errors.New("device certificate has no unique Niulang identity")
 	}
 	u := cert.URIs[0]
-	if u.Scheme != "queqiao" || u.Host == "" {
+	if u.Scheme != identityURIScheme || u.Host == "" {
 		return Principal{}, errors.New("device certificate identity is malformed")
 	}
 	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")

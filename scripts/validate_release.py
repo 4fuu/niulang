@@ -174,8 +174,8 @@ def parse_buildinfo(data: bytes) -> dict[str, str]:
         raise ValueError("BUILDINFO target is invalid")
     if GO_VERSION.fullmatch(result["go"]) is None:
         raise ValueError("BUILDINFO Go version is not a patched release toolchain")
-    if result["wire_protocol"] != "1":
-        raise ValueError("BUILDINFO does not declare wire protocol 1")
+    if result["wire_protocol"] != "2":
+        raise ValueError("BUILDINFO does not declare wire protocol 2")
     if CHECKSUM.fullmatch(result["binary_sha256"]) is None:
         raise ValueError("BUILDINFO binary hash is invalid")
     return result
@@ -227,8 +227,8 @@ def validate_sbom(
     if component.get("licenses") != [{"license": {"id": "MIT"}}]:
         raise ValueError(f"{archive_name}: invalid root SBOM license")
     component_properties = properties(component)
-    if component_properties.get("niulang:wire-protocol") != "1":
-        raise ValueError(f"{archive_name}: SBOM does not declare wire protocol 1")
+    if component_properties.get("niulang:wire-protocol") != "2":
+        raise ValueError(f"{archive_name}: SBOM does not declare wire protocol 2")
     buildinfo = parse_buildinfo(archive["BUILDINFO"][0])
     for sbom_key, build_key in (
         ("niulang:commit", "commit"),

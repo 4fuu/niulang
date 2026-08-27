@@ -42,7 +42,9 @@ func TestTheSpecificationStatesTheLimitsThisBuildEnforces(t *testing.T) {
 		{"probe payload limit", fmt.Sprint(limits.MaxProbePayload)},
 		{"probe frame limit", fmt.Sprint(limits.MaxProbeFrames)},
 		{"probe byte limit", fmt.Sprint(limits.MaxProbeBytes)},
-		{"data ALPN", limits.DataALPN},
+		{"QUIC data ALPN", limits.QUICDataALPN},
+		{"TCP data ALPN", limits.TCPDataALPN},
+		{"HTTP/3 tunnel protocol", limits.H3TunnelProtocol},
 		{"enrollment ALPN", limits.EnrollALPN},
 		{"renewal ALPN", limits.RenewALPN},
 	} {
@@ -50,9 +52,12 @@ func TestTheSpecificationStatesTheLimitsThisBuildEnforces(t *testing.T) {
 			t.Errorf("docs/PROTOCOL.md does not mention the %s (%s) this build enforces", tc.what, tc.value)
 		}
 	}
+	if want := "`:path` `" + limits.H3TunnelPath + "`"; !strings.Contains(spec, want) {
+		t.Errorf("docs/PROTOCOL.md does not state the HTTP/3 tunnel path %q", limits.H3TunnelPath)
+	}
 
 	// The vectors are only normative if the specification says they are.
-	if !strings.Contains(spec, "testdata/protocol1/vectors.json") {
+	if !strings.Contains(spec, "testdata/protocol2/vectors.json") {
 		t.Error("docs/PROTOCOL.md does not point at the conformance vectors")
 	}
 
@@ -61,7 +66,7 @@ func TestTheSpecificationStatesTheLimitsThisBuildEnforces(t *testing.T) {
 	// which is the failure mode this whole package is about.
 	for _, forbidden := range []string{"MAY configure a smaller limit", "max-payload"} {
 		if strings.Contains(spec, forbidden) {
-			t.Errorf("docs/PROTOCOL.md still describes %q, which version 1 does not have", forbidden)
+			t.Errorf("docs/PROTOCOL.md still describes %q, which version 2 does not have", forbidden)
 		}
 	}
 }

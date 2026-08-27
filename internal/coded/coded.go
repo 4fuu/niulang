@@ -140,15 +140,22 @@ type Path struct {
 	cfg     Config
 	carrier Carrier
 
-	pending  chan []byte
+	pending  []outboundFrame
+	sendMu   sync.Mutex
+	sendWake chan struct{}
+	closed   bool
 	received chan []byte
 
 	// The sending side belongs to one goroutine, and nothing else touches it.
 	encoder *fec.WindowEncoder
 	packed  []byte
-	nextSeq uint32
-	nextRID uint32
-	credit  float64
+	// packedDone releases every producer whose small frame shares packed.
+	// Release follows carrier handoff rather than queue insertion so an outer
+	// path scheduler cannot be bypassed by this path's own pending queue.
+	packedDone []func()
+	nextSeq    uint32
+	nextRID    uint32
+	credit     float64
 	// burst counts what has been sent since the producer last drained, which
 	// is what the tail protection is sized from. tail caches how much that
 	// costs, because the answer is a binomial search and the question is asked
@@ -180,7 +187,7 @@ type Path struct {
 	// and can exceed one without anything being wrong with the path.
 	arrivals atomic.Uint64
 	sources  atomic.Uint64
-	// malformed counts datagrams a peer sent that protocol 1 does not permit.
+	// malformed counts datagrams a peer sent that protocol 2 does not permit.
 	// It is kept apart from the erasure estimate on purpose: a rejected
 	// datagram is a peer disagreeing about the wire, and folding it into loss
 	// would have this path answer a non-conforming sender by buying more
@@ -191,6 +198,11 @@ type Path struct {
 	done      chan struct{}
 	wg        sync.WaitGroup
 	err       atomic.Pointer[error]
+}
+
+type outboundFrame struct {
+	frame []byte
+	done  func()
 }
 
 // coding is the code the path is currently using: the plan it came from, how
@@ -206,7 +218,8 @@ func New(carrier Carrier, cfg Config) *Path {
 	cfg = cfg.withDefaults()
 	p := &Path{
 		cfg: cfg, carrier: carrier,
-		pending:   make(chan []byte, cfg.Pending),
+		pending:   make([]outboundFrame, 0, cfg.Pending),
+		sendWake:  make(chan struct{}),
 		received:  make(chan []byte, cfg.Pending),
 		encoder:   fec.NewWindowEncoder(initialWindow),
 		decoder:   fec.NewWindowDecoder(),
@@ -227,24 +240,37 @@ const initialWindow = 16
 // Send queues a frame. Delivery is not guaranteed: the code repairs what the
 // path erases, and what it cannot repair is the caller's to notice.
 func (p *Path) Send(frame []byte) error {
+	return p.SendTracked(frame, nil)
+}
+
+// SendTracked queues a frame and calls done after its source symbols have
+// been handed to the carrier, or after close abandons them. The callback does
+// not promise delivery; it marks only the point at which an outer scheduler
+// may hand another flow to this path without filling an unseen second queue.
+func (p *Path) SendTracked(frame []byte, done func()) error {
 	if len(frame) > maxFrameBytes {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(frame))
 	}
-	// Closed is checked before the queue, not alongside it: a select chooses
-	// at random among ready cases, so offering both would accept sends on a
-	// closed path whenever the queue happened to have room.
-	select {
-	case <-p.done:
-		return p.failure()
-	default:
-	}
-	queued := make([]byte, len(frame))
-	copy(queued, frame)
-	select {
-	case p.pending <- queued:
-		return nil
-	case <-p.done:
-		return p.failure()
+	queued := outboundFrame{frame: append([]byte(nil), frame...), done: done}
+	for {
+		p.sendMu.Lock()
+		if p.closed {
+			p.sendMu.Unlock()
+			return p.failure()
+		}
+		if len(p.pending) < cap(p.pending) {
+			p.pending = append(p.pending, queued)
+			p.signalSendSpaceLocked()
+			p.sendMu.Unlock()
+			return nil
+		}
+		wake := p.sendWake
+		p.sendMu.Unlock()
+		select {
+		case <-wake:
+		case <-p.done:
+			return p.failure()
+		}
 	}
 }
 
@@ -281,23 +307,19 @@ func (p *Path) Receive() ([]byte, error) {
 // left bare, and they are the ones an interactive exchange consists of.
 func (p *Path) sendLoop() {
 	defer p.wg.Done()
+	defer p.abandonPending()
 	for {
-		var frame []byte
-		select {
-		case <-p.done:
+		frame, ok := p.takePending(true)
+		if !ok {
 			return
-		case frame = <-p.pending:
 		}
 		for {
-			if err := p.appendFrame(frame); err != nil {
+			if err := p.appendFrame(frame.frame, frame.done); err != nil {
 				return
 			}
-			select {
-			case frame = <-p.pending:
+			frame, ok = p.takePending(false)
+			if ok {
 				continue
-			case <-p.done:
-				return
-			default:
 			}
 			break
 		}
@@ -310,6 +332,62 @@ func (p *Path) sendLoop() {
 	}
 }
 
+// takePending removes one queued frame. A blocking caller sleeps on a channel
+// generation that every queue or close transition replaces, waking all
+// waiters without accepting a frame after close.
+func (p *Path) takePending(block bool) (outboundFrame, bool) {
+	for {
+		p.sendMu.Lock()
+		if p.closed {
+			p.sendMu.Unlock()
+			return outboundFrame{}, false
+		}
+		if len(p.pending) > 0 {
+			frame := p.pending[0]
+			copy(p.pending, p.pending[1:])
+			p.pending[len(p.pending)-1] = outboundFrame{}
+			p.pending = p.pending[:len(p.pending)-1]
+			p.signalSendSpaceLocked()
+			p.sendMu.Unlock()
+			return frame, true
+		}
+		if !block {
+			p.sendMu.Unlock()
+			return outboundFrame{}, false
+		}
+		wake := p.sendWake
+		p.sendMu.Unlock()
+		select {
+		case <-wake:
+		case <-p.done:
+			return outboundFrame{}, false
+		}
+	}
+}
+
+func (p *Path) signalSendSpaceLocked() {
+	close(p.sendWake)
+	p.sendWake = make(chan struct{})
+}
+
+// abandonPending releases scheduling credit for frames the path did not hand
+// to its carrier. It runs on the sole sender goroutine, so packed callbacks
+// cannot race a flush.
+func (p *Path) abandonPending() {
+	p.sendMu.Lock()
+	pending := p.pending
+	p.pending = p.pending[:0]
+	p.signalSendSpaceLocked()
+	p.sendMu.Unlock()
+	for _, frame := range pending {
+		callDone(frame.done)
+	}
+	for _, done := range p.packedDone {
+		callDone(done)
+	}
+	p.packedDone = p.packedDone[:0]
+}
+
 // appendFrame puts one frame on the wire, whole where it fits and in fragments
 // where it does not.
 //
@@ -317,22 +395,27 @@ func (p *Path) sendLoop() {
 // frames and one that carries a fragment, because that is what would make one
 // symbol's loss cost another symbol's frames. Small frames share a symbol with
 // their neighbours; a large one occupies symbols of its own.
-func (p *Path) appendFrame(frame []byte) error {
+func (p *Path) appendFrame(frame []byte, done func()) error {
 	limit := p.symbolPayload()
 	if frameHeader+len(frame) > limit {
 		if err := p.flushPacked(); err != nil {
+			callDone(done)
 			return err
 		}
-		return p.sendFragments(frame, limit)
+		err := p.sendFragments(frame, limit)
+		callDone(done)
+		return err
 	}
 	if len(p.packed)+frameHeader+len(frame) > limit {
 		if err := p.flushPacked(); err != nil {
+			callDone(done)
 			return err
 		}
 	}
 	var head [frameHeader]byte
 	binary.BigEndian.PutUint32(head[:], uint32(len(frame)))
 	p.packed = append(append(p.packed, head[:]...), frame...)
+	p.packedDone = append(p.packedDone, done)
 	return nil
 }
 
@@ -363,7 +446,17 @@ func (p *Path) flushPacked() error {
 	}
 	err := p.emit(p.packed, 0, 1)
 	p.packed = p.packed[:0]
+	for _, done := range p.packedDone {
+		callDone(done)
+	}
+	p.packedDone = p.packedDone[:0]
 	return err
+}
+
+func callDone(done func()) {
+	if done != nil {
+		done()
+	}
 }
 
 // emit codes one symbol, sends it, and sends whatever repairs the running rate
@@ -554,7 +647,7 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		}
 		count := int(binary.BigEndian.Uint16(d[13:]))
 		// The count is two bytes on the wire and so can name a span of 65535,
-		// which is far wider than protocol 1 permits and would ask this
+		// which is far wider than protocol 2 permits and would ask this
 		// receiver to solve over a system it has no obligation to hold. The
 		// bound belongs here, before the symbol reaches the decoder, because
 		// this is the last point that still knows the datagram came from a
@@ -926,7 +1019,18 @@ func (p *Path) fail(err error) {
 		wrapped := fmt.Errorf("coded: carrier: %w", err)
 		p.err.CompareAndSwap(nil, &wrapped)
 	}
+	p.closePath()
+}
+
+func (p *Path) closePath() {
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
+	if p.closed {
+		return
+	}
+	p.closed = true
 	p.closeOnce.Do(func() { close(p.done) })
+	p.signalSendSpaceLocked()
 }
 
 func (p *Path) failure() error {
@@ -938,7 +1042,7 @@ func (p *Path) failure() error {
 
 // Close stops the path and its carrier.
 func (p *Path) Close() error {
-	p.closeOnce.Do(func() { close(p.done) })
+	p.closePath()
 	err := p.carrier.Close()
 	p.wg.Wait()
 	return err

@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	ProviderStateVersion = 1
+	ProviderStateVersion = 2
 	defaultGatewayTTL    = 30 * 24 * time.Hour
 	defaultDeviceTTL     = 30 * 24 * time.Hour
 	certificateClockSkew = 5 * time.Minute
@@ -446,7 +446,7 @@ func newIssuer(parent *x509.Certificate, parentKey ed25519.PrivateKey, commonNam
 	if err != nil {
 		return nil, nil, err
 	}
-	uri, _ := url.Parse(fmt.Sprintf("queqiao://%s/%s", providerID, role))
+	uri, _ := url.Parse(fmt.Sprintf("%s://%s/%s", identityURIScheme, providerID, role))
 	tmpl := &x509.Certificate{
 		SerialNumber: serial, Subject: pkix.Name{CommonName: commonName}, URIs: []*url.URL{uri},
 		NotBefore: now.Add(-certificateClockSkew), NotAfter: now.AddDate(5, 0, 0),
@@ -544,12 +544,12 @@ func providerID(cert *x509.Certificate) string {
 }
 
 func gatewayURI(providerID, gatewayID string) *url.URL {
-	u, _ := url.Parse(fmt.Sprintf("queqiao://%s/gateway/%s", providerID, gatewayID))
+	u, _ := url.Parse(fmt.Sprintf("%s://%s/gateway/%s", identityURIScheme, providerID, gatewayID))
 	return u
 }
 
 func deviceURI(providerID, accountID, deviceID string) *url.URL {
-	u, _ := url.Parse(fmt.Sprintf("queqiao://%s/account/%s/device/%s", providerID, url.PathEscape(accountID), url.PathEscape(deviceID)))
+	u, _ := url.Parse(fmt.Sprintf("%s://%s/account/%s/device/%s", identityURIScheme, providerID, url.PathEscape(accountID), url.PathEscape(deviceID)))
 	return u
 }
 
@@ -672,7 +672,7 @@ func verifyIssuer(certificate, root *x509.Certificate, expectedProvider, role st
 	if _, ok := certificate.PublicKey.(ed25519.PublicKey); !ok {
 		return errors.New("issuer does not use Ed25519")
 	}
-	want := fmt.Sprintf("queqiao://%s/%s", expectedProvider, role)
+	want := fmt.Sprintf("%s://%s/%s", identityURIScheme, expectedProvider, role)
 	if singleCertificateURI(certificate) != want {
 		return errors.New("issuer role identity is invalid")
 	}

@@ -76,6 +76,8 @@ type PathReport struct {
 	WireReserveMbits        float64 `json:"wire_interactive_reserve_mbits,omitempty"`
 	ChunkSize               int     `json:"chunk_size,omitempty"`
 	QUICPool                bool    `json:"quic_pool"`
+	FlowScheduling          bool    `json:"flow_scheduling"`
+	FlowStartupBytes        int     `json:"flow_startup_bytes,omitempty"`
 	UDPOnStream             bool    `json:"udp_on_stream,omitempty"`
 }
 
@@ -269,7 +271,9 @@ func describePath(opts options, cfg pathsim.Config) PathReport {
 		Congestion: opts.congestion, BrutalRateMbits: opts.brutalMbits,
 		AggregateRateMbits: opts.aggregateMbits, InteractiveReserveMbits: opts.interactiveReserveMbits,
 		WireCapRateMbits: opts.wireCapMbits, WireReserveMbits: opts.wireReserveMbits,
-		ChunkSize: opts.chunkSize, QUICPool: opts.quicPool, UDPOnStream: opts.udpOnStream,
+		ChunkSize: opts.chunkSize, QUICPool: opts.quicPool,
+		FlowScheduling: opts.flowScheduling, FlowStartupBytes: opts.flowStartupBytes,
+		UDPOnStream: opts.udpOnStream,
 	}
 }
 
