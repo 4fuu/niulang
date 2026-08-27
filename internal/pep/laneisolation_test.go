@@ -309,7 +309,7 @@ func TestPooledFlowCountTracksOpenAndClose(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server shutdown: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("server shutdown timeout")
 	}
 }

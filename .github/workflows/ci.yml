@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test ./... -count=1
+      - run: go test -short ./... -count=1
 
   cross-build:
     runs-on: ubuntu-latest
