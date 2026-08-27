@@ -275,7 +275,16 @@ func TestRegisteredTCPStandbyActivatesAtomicHandoff(t *testing.T) {
 	if err := client.openStandbyRecoveryLane(clientFlow, sessionID, 7, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	clientLanes, serverLanes := clientFlow.healthyLanes(), serverMPFlow.healthyLanes()
+	// Reading OPEN_OK releases the client while the server goroutine may still
+	// be activating its staged lane. Wait for that post-ack commit rather than
+	// racing an immediate snapshot against it.
+	deadline := time.Now().Add(time.Second)
+	serverLanes := serverMPFlow.healthyLanes()
+	for (len(serverLanes) != 1 || serverLanes[0].kind != TransportTCP) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		serverLanes = serverMPFlow.healthyLanes()
+	}
+	clientLanes := clientFlow.healthyLanes()
 	if len(clientLanes) != 1 || len(serverLanes) != 1 {
 		t.Fatalf("client/server lanes = %d/%d, want 1/1", len(clientLanes), len(serverLanes))
 	}
