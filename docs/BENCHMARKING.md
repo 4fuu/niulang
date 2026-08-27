@@ -551,6 +551,44 @@ Cold request median/maximum did move from 756.590/1042.485 to
 with the existing warm pool without claiming that the cold path is free or
 that WAN performance is proven.
 
+The 2026-08-27 HTTP/3 startup campaign then isolated a half-round-trip which
+was not inherent to the carrier. The gateway used a regular QUIC listener, so
+it could not start HTTP/3 until mutual TLS had completed and its SETTINGS
+arrived another half round trip later. Using an early listener lets only the
+static SETTINGS overlap the handshake; each request handler still waits for
+the completed mutually authenticated handshake before deriving or authorizing
+the device identity. The path congestion controller is also installed only
+after authentication, preserving the previous handshake and data-controller
+boundary.
+
+Final tests alternated the `a7f4ce138d54df5d9a67b3558b62b0d4aa4b438e`
+baseline and candidate for every seeded trial on one otherwise idle Linux
+x86_64 machine. At 200 ms RTT, 50 Mbit/s, and 5% independent loss, the pooled
+cold p50/p95 fell from 1625.585/2866.361 ms to 1465.493/2103.855 ms
+(-9.85%/-26.60%). Pooled warm p50 remained 205.433 versus 205.471 ms, while
+warm p95 improved from 414.597 to 407.356 ms. Both completed 30/30. The
+candidate cold p50 was 103.54% of the previously recorded direct pre-HTTP/3
+result, inside the 105% acceptance bound. Unpooled cold p50/p95 fell from
+2166.831/3279.580 ms to 1880.729/3114.432 ms; warm p50/p95 fell from
+623.300/1325.423 ms to 415.112/1018.351 ms.
+
+At 100 ms RTT, 50 Mbit/s, and 15% loss in mean bursts of six, both versions
+opened all 30 UDP associations and both completed 29/30 bulk objects. Baseline
+and candidate bulk medians were 8.707 and 8.749 Mbit/s. UDP delivery was
+2673/3000 versus 2665/3000, delivered p95 median was 105.490 versus 105.393 ms,
+and the largest delivered latency was 780.592 versus 677.097 ms. Because the
+matched baseline had no setup failure, this result does not claim that the
+previously observed isolated EOF was fixed.
+
+The 100 ms RTT, 50 Mbit/s, 5% independent-loss guard completed 10/10 on both
+versions. Candidate bulk median was 1.86% lower, interactive p95 median was
+4.332 ms higher, UDP delivery moved from 99.8% to 99.7%, and UDP p95 moved by
++0.295 ms. Ambient erasures were 1516 versus 1513 and neither version caused a
+bottleneck drop. These stay within the predetermined bulk and UDP guards. The
+full manifest, per-trial JSON and logs, resource records, checksums, machine
+details, and source patch are retained outside the repository at
+`.amp/campaigns/http3-startup-20260827-final/`.
+
 `--udp-packets N` adds a bounded SOCKS UDP echo workload to each stack and
 trial. Its JSON records application datagrams sent, received, and lost plus
 delivered-packet p50/p95/max latency. `--udp-on-stream` is the ordered-stream

@@ -587,7 +587,13 @@ func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn)
 	}
 	qcfg := quicServerConfig(flowWindows{stream: s.cfg.StreamReceiveWindow, connection: s.cfg.ConnectionReceiveWindow})
 	tlsConfig = http3.ConfigureTLSConfig(tlsConfig)
-	listener, err := quic.Listen(packetConn, tlsConfig, qcfg)
+	// Start HTTP/3 as soon as QUIC has forward-secure keys so its static
+	// SETTINGS can cross the path while mutual TLS is still completing. A
+	// regular listener publishes the connection only after the handshake and
+	// needlessly puts SETTINGS another half round trip behind it. HTTP/3 may
+	// dispatch a request before mutual TLS completes, so the handler explicitly
+	// waits for completion before deriving or authorizing the device identity.
+	listener, err := quic.ListenEarly(packetConn, tlsConfig, qcfg)
 	if err != nil {
 		_ = packetConn.Close()
 		return fmt.Errorf("create QUIC listener: %w", err)

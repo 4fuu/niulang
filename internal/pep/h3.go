@@ -187,8 +187,26 @@ type h3ServerConnState struct {
 	laneCtx    context.Context
 	principal  identity.Principal
 	controller wancongestion.TelemetryProvider
+	ccfg       congestionConfig
 	auth       *quicAuthState
+	authOnce   sync.Once
 	err        error
+}
+
+func (s *h3ServerConnState) authenticate(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.conn.HandshakeComplete():
+	}
+	s.authOnce.Do(func() {
+		s.principal, s.err = identity.PrincipalFromTLS(s.conn.ConnectionState().TLS)
+		if s.err == nil {
+			s.controller = configureQUICController(s.conn, s.ccfg)
+			s.auth = &quicAuthState{principal: s.principal}
+		}
+	})
+	return s.err
 }
 
 func (s *Server) newH3Server(laneCtx context.Context, tlsConfig *tls.Config, qcfg *quic.Config) *http3.Server {
@@ -199,16 +217,11 @@ func (s *Server) newH3Server(laneCtx context.Context, tlsConfig *tls.Config, qcf
 		MaxHeaderBytes:  8 << 10,
 	}
 	server.ConnContext = func(ctx context.Context, conn *quic.Conn) context.Context {
-		state := &h3ServerConnState{conn: conn, laneCtx: laneCtx}
-		state.controller = configureQUICController(conn, congestionConfig{
+		state := &h3ServerConnState{conn: conn, laneCtx: laneCtx, ccfg: congestionConfig{
 			kind: s.cfg.Congestion, brutalBytesPerSecond: s.cfg.BrutalBytesPerSec,
 			adaptiveMinBytesPerSec: s.cfg.AdaptiveMinBytesSec, adaptiveMaxBytesPerSec: s.cfg.AdaptiveMaxBytesSec,
 			wireCaps: s.wireCaps,
-		})
-		state.principal, state.err = identity.PrincipalFromTLS(conn.ConnectionState().TLS)
-		if state.err == nil {
-			state.auth = &quicAuthState{principal: state.principal}
-		}
+		}}
 		return context.WithValue(ctx, h3ServerStateKey{}, state)
 	}
 	server.Handler = http.HandlerFunc(s.handleH3Lane)
@@ -217,7 +230,7 @@ func (s *Server) newH3Server(laneCtx context.Context, tlsConfig *tls.Config, qcf
 
 func (s *Server) handleH3Lane(w http.ResponseWriter, request *http.Request) {
 	state, ok := request.Context().Value(h3ServerStateKey{}).(*h3ServerConnState)
-	if !ok || state == nil || state.err != nil {
+	if !ok || state == nil || state.authenticate(request.Context()) != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

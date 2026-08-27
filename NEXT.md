@@ -122,6 +122,57 @@ and candidate order and retain per-trial results.
 
 ### Result
 
-Pending. Replace this paragraph with the final baseline/candidate table,
-artifact location, commit range, statistical interpretation, and ship/stop
-decision before starting another optimization group.
+Ship. The candidate starts HTTP/3 on an early QUIC connection so the gateway's
+static SETTINGS overlaps mutual TLS instead of following it by half a round
+trip. CONNECT handling still waits for the completed mutually authenticated
+handshake before deriving or authorizing the device identity, and the path
+congestion controller is installed at that same post-authentication boundary.
+
+The matched baseline was
+`a7f4ce138d54df5d9a67b3558b62b0d4aa4b438e`; the candidate is the source patch
+stored with the campaign. Tests alternated baseline and candidate order for
+every trial.
+
+Connection reuse cell, 30 trials per mode:
+
+| Mode/version | Complete | Cold p50 | Cold p95 | Cold max | Warm p50 | Warm p95 | Warm max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Pooled baseline | 30/30 | 1625.585 ms | 2866.361 ms | 3179.393 ms | 205.433 ms | 414.597 ms | 635.111 ms |
+| Pooled candidate | 30/30 | 1465.493 ms | 2103.855 ms | 2927.943 ms | 205.471 ms | 407.356 ms | 407.830 ms |
+| Unpooled baseline | 30/30 | 2166.831 ms | 3279.580 ms | 3592.576 ms | 623.300 ms | 1325.423 ms | 1427.422 ms |
+| Unpooled candidate | 30/30 | 1880.729 ms | 3114.432 ms | 3335.972 ms | 415.112 ms | 1018.351 ms | 1022.726 ms |
+
+The pooled candidate improved cold p50 by 160.092 ms (9.85%) and p95 by
+762.506 ms (26.60%). Its cold p50 was 103.54% of the recorded direct
+pre-HTTP/3 result, within the 105% bound. Warm p50 changed by 0.038 ms and warm
+p95 improved by 7.241 ms.
+
+Burst startup cell, 30 trials:
+
+| Version | UDP setup | Bulk complete | Bulk median | UDP delivered | Delivery | Delivered p95 median | Worst delivered |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 30/30 | 29/30 | 8.707 Mbit/s | 2673/3000 | 89.10% | 105.490 ms | 780.592 ms |
+| Candidate | 30/30 | 29/30 | 8.749 Mbit/s | 2665/3000 | 88.83% | 105.393 ms | 677.097 ms |
+
+The matched baseline also had no setup failure, so this does not claim that an
+unobserved EOF was fixed. The candidate changed UDP delivery by -0.27
+percentage points and delivered p95 by -0.097 ms; bulk completion and tails
+remain a separate optimization group.
+
+Low-loss guard, 10 trials:
+
+| Version | Bulk complete | Bulk median | Interactive p95 median | UDP delivered | UDP p95 median | Ambient erasures | Bottleneck drops |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 10/10 | 12.121 Mbit/s | 109.075 ms | 998/1000 | 104.780 ms | 1516 | 0 |
+| Candidate | 10/10 | 11.896 Mbit/s | 113.407 ms | 997/1000 | 105.075 ms | 1513 | 0 |
+
+Candidate bulk median decreased 1.86%, UDP delivery decreased 0.10 percentage
+points, and UDP p95 increased 0.295 ms, all inside the predetermined guards.
+Across the final cells candidate CPU was no higher than baseline; peak RSS was
+within 1.3%. Resource details and per-run wall time are in the campaign.
+
+The full manifest, machine details, raw JSON, logs, resource records,
+checksums, summaries, and `source.patch` are retained outside the repository at
+`.amp/campaigns/http3-startup-20260827-final/`. The comparison and
+interpretation are also recorded in `docs/BENCHMARKING.md`. Do not replace this
+completed group until the next optimization group is chosen.
