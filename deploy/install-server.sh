@@ -146,12 +146,6 @@ while [ "$#" -gt 0 ]; do
 		user_max_flows=$2
 		shift
 		;;
-	--user-max-sessions)
-		next_value "$#" "$1"
-		printf '%s\n' "install-server.sh: --user-max-sessions is the former name of --user-max-flows; use --user-max-clients to limit devices." >&2
-		user_max_flows=$2
-		shift
-		;;
 	--invite-expires-in)
 		next_value "$#" "$1"
 		invite_expires_in=$2

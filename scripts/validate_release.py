@@ -26,6 +26,7 @@ REQUIRED_ARCHIVE_FILES = {
     "deploy/clash-niulang.yaml",
     "deploy/install-client.sh",
     "deploy/install-server.sh",
+    "deploy/manage.sh",
     "deploy/niulangd-dev.service",
     "deploy/niulangd.service",
     "deploy/tune-server.sh",
@@ -41,6 +42,7 @@ REQUIRED_ARCHIVE_FILES = {
 EXECUTABLE_ARCHIVE_FILES = {
     "deploy/install-client.sh",
     "deploy/install-server.sh",
+    "deploy/manage.sh",
     "deploy/tune-server.sh",
 }
 CHECKSUM = re.compile(r"[0-9a-f]{64}")

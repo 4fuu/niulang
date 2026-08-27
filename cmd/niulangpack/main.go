@@ -417,6 +417,7 @@ func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 		"deploy/clash-niulang.yaml",
 		"deploy/install-client.sh",
 		"deploy/install-server.sh",
+		"deploy/manage.sh",
 		"deploy/niulangd.service",
 		"deploy/niulangd-dev.service",
 		"deploy/tune-server.sh",
@@ -428,6 +429,7 @@ func readDistributionFiles(repoRoot string) ([]archiveFile, error) {
 	executable := map[string]bool{
 		"deploy/install-client.sh": true,
 		"deploy/install-server.sh": true,
+		"deploy/manage.sh":         true,
 		"deploy/tune-server.sh":    true,
 	}
 	files := make([]archiveFile, 0, len(names))

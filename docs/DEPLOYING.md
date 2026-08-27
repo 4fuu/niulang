@@ -19,12 +19,38 @@ development or for an uncovered platform.
 Niulang assumes a paired client and gateway under the same operator's control.
 Confirm that this model fits your network before exposing a service.
 
-## Install with the scripts
+## Install and manage with the scripts
 
-Two scripts perform everything below and verify the result. Read this section
-and skip to [Connect Clash or mihomo](#connect-clash-or-mihomo); the rest of
-the guide remains the reference for what they do, for hosts they do not cover,
-and for the lifecycle work that has no installer.
+On Linux with systemd, [`deploy/manage.sh`](../deploy/manage.sh) is the
+interactive entry point for installing, updating, and operating Niulang. It
+downloads the selected stable release, verifies its `SHA256SUMS`, and uses the
+binary and deployment scripts from that same archive. It also manages provider
+users, invitations, and devices.
+
+```sh
+./deploy/manage.sh
+```
+
+If a service definition from the former Queqiao deployment is present, the
+manager asks at startup whether to migrate it. Migration stops the old role,
+installs and verifies Niulang, and restores the old service's enabled/running
+state if the new installation fails. It never converts or copies Queqiao
+provider state, profiles, certificates, users, devices, or invitations:
+protocol 2 creates a new trust domain, and every client must enroll with a new
+`niulang://enroll/...` invitation. After verification, the manager can remove
+the old service definition and binary. Deleting old keys, profiles,
+configuration, and logs is a separate action requiring the exact confirmation
+phrase printed by the tool.
+
+The commands `legacy-stop`, `legacy-remove`, and `legacy-purge` separate the
+reversible stop, service removal, and irreversible data deletion steps. Client
+installation and migration must run as the login account that will use the
+tunnel; server and system-service operations request `sudo` when needed.
+
+The two non-interactive installers remain available for automation. Read this
+section and skip to [Connect Clash or mihomo](#connect-clash-or-mihomo); the
+rest of the guide remains the reference for what they do and for hosts they do
+not cover.
 
 On the Linux gateway, as root:
 

@@ -18,6 +18,8 @@ class ValidateReleaseTests(unittest.TestCase):
     def test_essential_documents_are_required_in_every_archive(self):
         self.assertIn("README.md", MODULE.REQUIRED_ARCHIVE_FILES)
         self.assertIn("SECURITY.md", MODULE.REQUIRED_ARCHIVE_FILES)
+        self.assertIn("deploy/manage.sh", MODULE.REQUIRED_ARCHIVE_FILES)
+        self.assertIn("deploy/manage.sh", MODULE.EXECUTABLE_ARCHIVE_FILES)
 
     def test_checksums_reject_paths_and_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:

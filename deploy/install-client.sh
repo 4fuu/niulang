@@ -122,10 +122,10 @@ entries=$work_dir/entries
 # the name. An unnamed provider leaves the trailing field empty instead.
 record_invite() {
 	case $1 in
-	niulang://*)
+	niulang://enroll/?*)
 		printf '%s\t\n' "$1" >>"$pending"
 		;;
-	[A-Za-z0-9]*=niulang://*)
+	[A-Za-z0-9]*=niulang://enroll/?*)
 		invite_name=${1%%=*}
 		case $invite_name in
 		*[!A-Za-z0-9._-]*)
