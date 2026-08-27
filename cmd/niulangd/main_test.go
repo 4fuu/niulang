@@ -185,6 +185,10 @@ func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
 	registry := metrics.New()
 	registry.FlowStarted()
+	registry.TCPStandbyReady()
+	registry.TCPStandbyRegistration()
+	registry.TCPStandbyClaim()
+	registry.QUICDegradationFailover()
 	registry.ObserveQUIC(1, metrics.QUICObservation{
 		Lanes: 1, SmoothedRTT: 210 * time.Millisecond, ControllerKind: "bbr-tuic",
 		ControllerPacingRate: 9999,
@@ -204,6 +208,8 @@ func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
 		"niulang_quic_smoothed_rtt_seconds": 0.21, "niulang_quic_bytes_received": float64(5678),
 		"niulang_quic_packets_sent": float64(123), "niulang_quic_packets_received": float64(119),
 		"niulang_quic_controller_kind": "bbr-tuic", "niulang_quic_controller_pacing_rate_bytes_per_second": float64(9999),
+		"niulang_tcp_standbys_ready": float64(1), "niulang_tcp_standby_registrations_total": float64(1),
+		"niulang_tcp_standby_claims_total": float64(1), "niulang_quic_degradation_failovers_total": float64(1),
 	} {
 		if record[key] != want {
 			t.Fatalf("%s = %#v, want %#v in %#v", key, record[key], want, record)

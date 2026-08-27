@@ -74,12 +74,16 @@ type ServerConfig struct {
 type Server struct {
 	cfg              ServerConfig
 	semaphore        chan struct{}
+	probeOverflow    chan struct{}
 	connections      chan struct{}
 	enrollments      chan struct{}
 	sessionsMu       sync.RWMutex
 	sessions         map[[16]byte]*serverFlow
 	accountMu        sync.Mutex
 	accountUsage     map[string]*accountUsage
+	standbyMu        sync.Mutex
+	standbys         map[standbyPrincipalKey]*serverStandby
+	standbyLimit     int
 	maxObservedLanes atomic.Int64
 	// These keep three kinds of record readable during a storm: lane-join
 	// refusals, account admission refusals, and enrollment or renewal
@@ -162,6 +166,62 @@ func (s *serverFlow) addLane(lane *mpLane) error {
 		}
 	}
 	if err := s.flow.addLane(lane); err != nil {
+		return err
+	}
+	if s.tcpMode && s.maxLanes > 1 {
+		s.flow.tcpStriping.Store(true)
+	}
+	return nil
+}
+
+// commitJoinedLane stages admission, writes the peer's acknowledgement, and
+// only then changes carrier policy. In particular, a TCP JOIN that cannot be
+// acknowledged must never retire the working QUIC lanes it was meant to
+// rescue. The server-flow lock serializes the whole short commit so two
+// concurrent replacements cannot both make their admission decision against
+// the same lane count.
+func (s *serverFlow) commitJoinedLane(lane *mpLane, acknowledge func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tcpMode && lane.kind != TransportTCP {
+		return errors.New("flow has switched to TCP fallback")
+	}
+	handoff := lane.kind == TransportTCP && !s.tcpMode
+	if !handoff && s.flow.laneCount() >= s.maxLanes {
+		// Admission may exceed the ceiling only when an existing lane with the
+		// same role is available to retire after the acknowledgement.
+		canReplace := false
+		for _, current := range s.flow.healthyLanes() {
+			if s.flow.laneIsControl(current) == lane.control {
+				canReplace = true
+				break
+			}
+		}
+		if !canReplace {
+			return errors.New("flow lane limit reached")
+		}
+	}
+	if err := s.flow.addLane(lane); err != nil {
+		return err
+	}
+	if err := acknowledge(); err != nil {
+		s.flow.retireLane(lane)
+		return err
+	}
+	if handoff {
+		s.flow.retireLanesExcept(TransportTCP)
+		s.tcpMode = true
+		s.maxLanes = s.tcpMaxLanes
+	} else if s.flow.laneCount() > s.maxLanes {
+		// The preflight above found a same-role victim while this server-flow
+		// lock excluded another admission. If a lane fails concurrently, the
+		// count has already fallen and no retirement is needed. OPEN_OK has
+		// been sent, so there is deliberately no failure path after this point
+		// for a capacity race the peer cannot roll back.
+		_ = s.flow.retireOldestLane(lane.control)
+	}
+	if err := s.flow.activateLane(lane); err != nil {
+		s.flow.retireLane(lane)
 		return err
 	}
 	if s.tcpMode && s.maxLanes > 1 {
@@ -266,19 +326,27 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if !cfg.EnableTCP && !cfg.EnableQUIC {
 		cfg.EnableTCP = true
 	}
+	// Hot standbys are physical authenticated connections, not active flows.
+	// Bound them separately and reserve the original MaxSessions connection
+	// capacity for active work. One quarter is enough to cover many providers
+	// without allowing idle readiness sockets to dominate a gateway.
+	standbyLimit := max(1, min(cfg.MaxSessions/4, 256))
 	budget := limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec})
 	cfg.ChunkSize = chunkSizeForBudget(cfg.ChunkSize, budget)
 	server := &Server{
-		cfg:          cfg,
-		semaphore:    make(chan struct{}, cfg.MaxSessions),
-		connections:  make(chan struct{}, cfg.MaxSessions),
-		enrollments:  make(chan struct{}, min(cfg.MaxSessions, 64)),
-		sessions:     make(map[[16]byte]*serverFlow),
-		accountUsage: make(map[string]*accountUsage),
-		budget:       budget,
-		metrics:      cfg.Metrics,
-		wireCaps:     newWireCapSet(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec),
-		udpRelays:    newUDPRelayStore(),
+		cfg:           cfg,
+		semaphore:     make(chan struct{}, cfg.MaxSessions),
+		probeOverflow: make(chan struct{}, standbyLimit),
+		connections:   make(chan struct{}, cfg.MaxSessions+standbyLimit),
+		enrollments:   make(chan struct{}, min(cfg.MaxSessions, 64)),
+		sessions:      make(map[[16]byte]*serverFlow),
+		accountUsage:  make(map[string]*accountUsage),
+		standbys:      make(map[standbyPrincipalKey]*serverStandby),
+		standbyLimit:  standbyLimit,
+		budget:        budget,
+		metrics:       cfg.Metrics,
+		wireCaps:      newWireCapSet(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec),
+		udpRelays:     newUDPRelayStore(),
 	}
 	return server, nil
 }
@@ -401,7 +469,7 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener) error
 		_ = listener.Close()
 	}()
 
-	tlsConfig, err := identity.ServerTLSConfig(s.cfg.Credentials, defaultALPN, s.cfg.Enrollment != nil)
+	tlsConfig, err := identity.ServerTLSConfigWithDataALPNs(s.cfg.Credentials, []string{defaultALPN, protocol.StandbyALPN}, s.cfg.Enrollment != nil)
 	if err != nil {
 		return fmt.Errorf("configure server TLS identity: %w", err)
 	}
@@ -421,16 +489,16 @@ func (s *Server) ServeListener(ctx context.Context, listener net.Listener) error
 			return fmt.Errorf("configure accepted TLS/TCP congestion control: %w", err)
 		}
 		select {
-		case s.semaphore <- struct{}{}:
+		case s.connections <- struct{}{}:
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				defer func() { <-s.semaphore }()
+				defer s.releaseConnection()
 				s.handleTCP(ctx, tls.Server(raw, tlsConfig))
 			}()
 		default:
 			_ = raw.Close()
-			s.cfg.Logger.Warn("remote session limit reached")
+			s.cfg.Logger.Warn("remote physical connection limit reached")
 		}
 	}
 }
@@ -469,11 +537,25 @@ func (s *Server) handleTCP(ctx context.Context, conn *tls.Conn) {
 		}
 		return
 	}
+	if state.NegotiatedProtocol == protocol.StandbyALPN {
+		principal, err := identity.PrincipalFromTLS(state)
+		if err == nil {
+			s.handleTCPStandby(ctx, conn, principal)
+		}
+		return
+	}
 	if state.NegotiatedProtocol != defaultALPN {
 		return
 	}
 	principal, err := identity.PrincipalFromTLS(state)
 	if err != nil {
+		return
+	}
+	select {
+	case s.semaphore <- struct{}{}:
+		defer func() { <-s.semaphore }()
+	default:
+		s.cfg.Logger.Warn("remote session limit reached")
 		return
 	}
 	s.handleSession(ctx, conn, principal, nil)
@@ -620,7 +702,8 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 	}
 	auth := &quicAuthState{principal: principal}
 	// Mutual TLS authenticates the whole QUIC connection before any stream is
-	// accepted. Every stream therefore begins directly with OPEN or JOIN.
+	// accepted. Every stream therefore begins directly with OPEN, JOIN, or
+	// destination-free PROBE.
 	dispatch := func(lane streamConn) bool {
 		select {
 		case s.semaphore <- struct{}{}:
@@ -632,9 +715,24 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 			}(lane)
 			return true
 		default:
-			_ = lane.Close()
-			s.cfg.Logger.Warn("remote session limit reached")
-			return false
+			// A full active-session budget must not look like carrier loss to
+			// an existing UDP association. Admit a bounded number of overflow
+			// handlers, but let them parse only an authenticated,
+			// destination-free path PROBE; OPEN and JOIN remain refused.
+			select {
+			case s.probeOverflow <- struct{}{}:
+				wg.Add(1)
+				go func(lane streamConn) {
+					defer wg.Done()
+					defer func() { <-s.probeOverflow }()
+					s.handleOverflowPathProbe(lane, principal, auth)
+				}(lane)
+				return true
+			default:
+				_ = lane.Close()
+				s.cfg.Logger.Warn("remote session limit reached")
+				return false
+			}
 		}
 	}
 	for {
@@ -653,6 +751,28 @@ func (s *Server) handleQUIC(ctx context.Context, conn *quic.Conn) {
 		}
 		dispatch(stream)
 	}
+}
+
+// handleOverflowPathProbe preserves path-health evidence when every ordinary
+// handler slot is occupied. The QUIC connection is already mutually
+// authenticated, this stream still has the normal bounded opening deadline,
+// and the only accepted frame names no destination and has an equal-size echo.
+func (s *Server) handleOverflowPathProbe(conn streamConn, principal identity.Principal, auth *quicAuthState) {
+	defer conn.Close()
+	if auth != nil {
+		auth.flows.Add(1)
+		defer auth.flows.Add(-1)
+	}
+	_ = conn.SetDeadline(time.Now().Add(handshakeBound(conn, s.cfg.HandshakeTimeout)))
+	fc := newFrameConn(conn)
+	first, err := fc.Read()
+	if err != nil || first.Header.Type != protocol.TypeProbe {
+		return
+	}
+	if _, err := s.cfg.Credentials.Store.Authorize(principal, time.Now()); err != nil {
+		return
+	}
+	s.handlePathProbe(fc, first)
 }
 
 func (s *Server) handleSession(ctx context.Context, conn streamConn, principal identity.Principal, auth *quicAuthState) {
@@ -947,7 +1067,6 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 		return
 	}
 	setWireBulk(conn, !controlReplacement)
-	_ = conn.SetDeadline(time.Time{})
 	if serverSession.completed.Load() {
 		s.cfg.Logger.Debug("lane join reached a completed session", "lane", laneID)
 		if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
@@ -984,18 +1103,18 @@ func (s *Server) handleLaneJoinOpen(ctx context.Context, conn streamConn, fc *fr
 		id: laneID, kind: kind, fc: fc, writeHook: s.cfg.testLaneWriteHook,
 		control: controlReplacement, staged: true,
 	}
-	if err := serverSession.addLane(replacement); err != nil {
+	acknowledge := func() error {
+		return fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}})
+	}
+	if err := serverSession.commitJoinedLane(replacement, acknowledge); err != nil {
 		s.cfg.Logger.Debug("lane join admission refused", "lane", laneID, "error", err)
-		s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinLaneUnavailable, session.ResetFlowLimit, "lane unavailable")
+		if !replacement.closed.Load() {
+			s.refuseLaneJoin(fc, sessionID, open.Header.FlowID, laneID, metrics.LaneJoinLaneUnavailable, session.ResetFlowLimit, "lane unavailable")
+		}
 		return
 	}
-	if err := fc.Write(protocol.Frame{Header: protocol.Header{Version: protocol.Version, Type: protocol.TypeOpenOK, SessionID: sessionID, FlowID: open.Header.FlowID, Class: protocol.ClassBulk}}); err != nil {
-		return
-	}
-	if err := serverSession.flow.activateLane(replacement); err != nil {
-		return
-	}
-	s.cfg.Logger.Debug("lane joined", "lane", laneID, "transport", kind, "control", controlReplacement, "lanes", serverSession.flow.laneCount())
+	_ = conn.SetDeadline(time.Time{})
+	s.cfg.Logger.Debug("lane joined", "lane", laneID, "transport", kind, "control", replacement.control, "lanes", serverSession.flow.laneCount())
 	s.observeLanes(serverSession.flow.laneCount())
 	// A replacement can arrive after the destination has already reached EOF
 	// but before the original lane carried the logical FIN. Replay any known

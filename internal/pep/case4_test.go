@@ -9,17 +9,20 @@ import (
 	"github.com/4fuu/niulang/internal/pathsim"
 )
 
-// A known falsification case for the controller, and it fails.
+// A known falsification case for the controller, which remains only partly
+// resolved.
 //
 // A policer drops what it cannot pass and holds nothing, so overload produces
 // loss and no delay. Loss is no longer a congestion signal and there is no
-// queue for the delay bound to measure, so neither brake can act. The design
-// predicted this case would fail; it does, and by more than expected.
+// queue for the delay bound to measure. Compensating only for the retained
+// erasure floor removes one positive-feedback loop, but it still does not tell
+// the sender the policer's sustained rate.
 //
 // This is a characterization test. It asserts the defect rather than the fix,
 // so that the behaviour cannot change silently in either direction. If it
-// starts failing because the sender no longer overdrives, that is the case
-// being resolved: update this characterization and its rationale together.
+// starts failing because the sender no longer overdrives and loses packets,
+// that is the case being resolved: update this characterization and its
+// rationale together.
 //
 // It matters more than a hypothetical, because internal/pathsim records that
 // the live path this project targets is a policer -- "at twice the bottleneck
@@ -120,13 +123,16 @@ func TestCase4APolicedPathIsStillUnbraked(t *testing.T) {
 			"is no longer the unbraked case and the design document should say so",
 			maxQueue, maxBrake)
 	}
-	// The overdrive this case records, after the compensation was bounded and a
-	// stale peak stopped being re-seeded: 42x became 7.3x became 2.4x. It is
-	// still an overdrive and the path is still unbraked, so this still asserts
-	// the defect -- but it asserts the current one.
-	if float64(peakPacing) < shaped*1.8 {
-		t.Errorf("peak pacing %d is only %.1fx a %d path; the overdrive this case records has "+
-			"been reduced again -- re-measure and update the design document",
-			peakPacing, float64(peakPacing)/shaped, shaped)
+	// The overdrive this case records, after compensation was bounded, a stale
+	// peak stopped being re-seeded, and compensation was separated from total
+	// loss: 42x became 7.3x became 2.4x and now varies from 1.4x to 2.5x on the
+	// same seeded path. An instantaneous pacing peak is sensitive to which BBR
+	// probe cycle fits in this 24-second observation, so it is not a stable
+	// defect metric by itself. Sender-induced loss is direct and remained
+	// 23.3--31.2% across the full-suite run and eight isolated repetitions.
+	if float64(peakPacing) < shaped*1.25 || lastLoss < 20 {
+		t.Errorf("policed path no longer reproduces the residual overdrive: peak pacing %d "+
+			"(%.1fx %d) with %.1f%% loss; re-measure and update the design document",
+			peakPacing, float64(peakPacing)/shaped, shaped, lastLoss)
 	}
 }

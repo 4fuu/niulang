@@ -26,6 +26,12 @@ const (
 	// after the fact, so two builds that speak different framing must fail to
 	// negotiate rather than connect and then misunderstand each other.
 	DataALPN = "queqiao/1"
+	// StandbyALPN is the auxiliary TLS/TCP control protocol used to register
+	// and health-check a hot standby before it is attached to a protocol-1
+	// flow. Keeping it on a distinct, versioned ALPN lets old protocol-1
+	// gateways reject the optional optimization during TLS negotiation while
+	// ordinary data connections remain fully interoperable.
+	StandbyALPN = "niulang-standby/1"
 	// MaxPayload is the frame payload limit for protocol 1. It is a constant
 	// of the wire, not a deployment setting: a receiver MUST accept a payload
 	// this large and MUST reject a larger one, in both directions.

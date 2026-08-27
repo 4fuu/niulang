@@ -109,7 +109,7 @@ func (p *lossyPipe) stats() (sent, lost int) {
 // connection.
 func measuredPath(floor float64) *pathmodel.PathModel {
 	m := pathmodel.NewPathModel()
-	m.Report(1, pathmodel.Observation{Erasure: floor, BurstFactor: 1, ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 0})
+	m.Report(1, pathmodel.Observation{Erasure: floor, Floor: floor, BurstFactor: 1, ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 0})
 	return m
 }
 
@@ -460,7 +460,7 @@ func TestTheCodeIsSizedFromTheMeasurementNotTheFloor(t *testing.T) {
 	const measured, conservativeFloor = 0.199, 0.0176
 	m := pathmodel.NewPathModel()
 	m.Report(1, pathmodel.Observation{
-		Erasure: measured, BurstFactor: 1,
+		Erasure: measured, Floor: conservativeFloor, BurstFactor: 1,
 		ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 250 * time.Millisecond,
 	})
 
@@ -471,6 +471,9 @@ func TestTheCodeIsSizedFromTheMeasurementNotTheFloor(t *testing.T) {
 	channel := p.channel()
 	if channel.Loss != measured {
 		t.Fatalf("the code is reading %.4f from a path measured at %.4f", channel.Loss, measured)
+	}
+	if channel.Floor != conservativeFloor {
+		t.Fatalf("the code reports floor %.4f, want %.4f", channel.Floor, conservativeFloor)
 	}
 	plan := p.coding().plan
 	t.Logf("floor %.4f, measured %.4f: coded=%v rate=%.3f sized_for=%.4f residual=%.2e",
@@ -577,7 +580,7 @@ func TestParityCostsACodeRateAndNotAByteRate(t *testing.T) {
 	send := func(erasure float64) (wireBytes, payloadFrames int) {
 		m := pathmodel.NewPathModel()
 		m.Report(1, pathmodel.Observation{
-			Erasure: erasure, BurstFactor: 1,
+			Erasure: erasure, Floor: erasure, BurstFactor: 1,
 			ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 200 * time.Millisecond,
 		})
 		pa, _ := newBudgetedPipes(budget)

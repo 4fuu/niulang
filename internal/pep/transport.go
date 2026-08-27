@@ -260,6 +260,17 @@ func (h *udpHealth) failure(now time.Time) {
 	h.mu.Unlock()
 }
 
+// degraded records a sustained differential path observation rather than one
+// failed operation. It enters cooldown immediately: opening several new QUIC
+// flows merely to repeat the same multi-second evidence would extend the
+// outage, while the existing TCP standby has already proven the alternative.
+func (h *udpHealth) degraded(now time.Time) {
+	h.mu.Lock()
+	h.failures = 0
+	h.blockedTo = now.Add(h.cooldown)
+	h.mu.Unlock()
+}
+
 func (h *udpHealth) observe(evidence quicPathEvidence, now time.Time) {
 	switch evidence {
 	case quicPathAvailable:
@@ -293,9 +304,9 @@ type laneTransportStats struct {
 	// sent ends in exactly one of the three, which is what makes them a
 	// denominator: arrived, reconstructed by the code, or left the window
 	// still missing and re-issued by the session a round trip later.
-	codedSources, codedRecovered, codedLost uint64
-	packetsSent, packetsReceived            uint64
-	controller                              wancongestion.ControllerTelemetry
+	codedSources, codedRecovered, codedLost   uint64
+	packetsSent, packetsReceived, packetsLost uint64
+	controller                                wancongestion.ControllerTelemetry
 }
 
 type laneStatsProvider interface {
@@ -374,6 +385,11 @@ func setWireBulk(conn streamConn, bulk bool) {
 // its measurements are recorded against.
 func (c *quicStreamConn) pathIdentity() string { return peerKey(c.conn) }
 
+// quicConnection exposes the connection shared by this stream to path-level
+// monitors in this package. Callers must open independent streams and must not
+// assume that closing this flow owns a pooled connection.
+func (c *quicStreamConn) quicConnection() *quic.Conn { return c.conn }
+
 func (c *quicStreamConn) transportStats() laneTransportStats {
 	if c == nil || c.conn == nil {
 		return laneTransportStats{}
@@ -382,7 +398,7 @@ func (c *quicStreamConn) transportStats() laneTransportStats {
 	stats := laneTransportStats{
 		latestRTT: s.LatestRTT, smoothedRTT: s.SmoothedRTT,
 		bytesSent: s.BytesSent, bytesReceived: s.BytesReceived,
-		packetsSent: s.PacketsSent, packetsReceived: s.PacketsReceived,
+		packetsSent: s.PacketsSent, packetsReceived: s.PacketsReceived, packetsLost: s.PacketsLost,
 	}
 	if c.controller != nil {
 		stats.controller = c.controller.Telemetry()
@@ -453,6 +469,10 @@ func tlsClientConfig(credentials identity.ClientCredentials) (*tls.Config, error
 }
 
 func dialTCP(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error) (streamConn, error) {
+	return dialTCPALPN(ctx, remote, credentials, dialTimeout, localAddress, control, defaultALPN)
+}
+
+func dialTCPALPN(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, alpn string) (streamConn, error) {
 	var localAddr net.Addr
 	if localAddress != "" {
 		ip, err := resolveLocalAddress(localAddress)
@@ -461,7 +481,7 @@ func dialTCP(ctx context.Context, remote string, credentials identity.ClientCred
 		}
 		localAddr = &net.TCPAddr{IP: ip.AsSlice()}
 	}
-	tlsConfig, err := tlsClientConfig(credentials)
+	tlsConfig, err := identity.ClientTLSConfig(credentials, alpn)
 	if err != nil {
 		return nil, err
 	}
@@ -473,9 +493,9 @@ func dialTCP(ctx context.Context, remote string, credentials identity.ClientCred
 		return nil, explainDataHandshakeError(remote, "TCP", err)
 	}
 	tlsConn := conn.(*tls.Conn)
-	if tlsConn.ConnectionState().NegotiatedProtocol != defaultALPN {
+	if tlsConn.ConnectionState().NegotiatedProtocol != alpn {
 		_ = tlsConn.Close()
-		return nil, fmt.Errorf("gateway %q did not negotiate Niulang protocol 1 over TCP; check that the endpoint and server version match", remote)
+		return nil, fmt.Errorf("gateway %q did not negotiate %q over TCP; check that the endpoint and server version match", remote, alpn)
 	}
 	return tlsConn, nil
 }

@@ -54,6 +54,7 @@ type ModuleReport struct {
 }
 
 type PathReport struct {
+	Workload                string  `json:"workload,omitempty"`
 	RTTMillis               int     `json:"rtt_ms"`
 	LossPercent             float64 `json:"loss_percent"`
 	UpstreamLossPercent     float64 `json:"upstream_loss_percent,omitempty"`
@@ -79,16 +80,18 @@ type PathReport struct {
 }
 
 type TrialRecord struct {
-	Stack        string              `json:"stack"`
-	Flows        int                 `json:"flows"`
-	Trial        int                 `json:"trial"`
-	Seconds      float64             `json:"seconds"`
-	MbitsPerSec  float64             `json:"mbits_per_sec"`
-	Complete     bool                `json:"complete"`
-	Note         string              `json:"note,omitempty"`
-	Interactive  *InteractiveReport  `json:"interactive,omitempty"`
-	PathCounters *PathCountersReport `json:"path_counters,omitempty"`
-	WireCap      *WireCapReport      `json:"wire_cap,omitempty"`
+	Stack          string              `json:"stack"`
+	Flows          int                 `json:"flows"`
+	Trial          int                 `json:"trial"`
+	Seconds        float64             `json:"seconds"`
+	MbitsPerSec    float64             `json:"mbits_per_sec"`
+	Complete       bool                `json:"complete"`
+	Note           string              `json:"note,omitempty"`
+	Interactive    *InteractiveReport  `json:"interactive,omitempty"`
+	Page           *PageReport         `json:"page,omitempty"`
+	BulkIsolations uint64              `json:"bulk_isolations,omitempty"`
+	PathCounters   *PathCountersReport `json:"path_counters,omitempty"`
+	WireCap        *WireCapReport      `json:"wire_cap,omitempty"`
 }
 
 type WireCapReport struct {
@@ -173,6 +176,48 @@ type InteractiveReport struct {
 	FirstByteP95Ms float64 `json:"first_byte_p95_ms"`
 }
 
+// PageReport records one storefront-v1 navigation. Critical completion is the
+// moment every visible resource and the first video segment has arrived; full
+// completion additionally includes the background video tail. Keeping both
+// prevents a scheduler from making the page look fast by starving sustained
+// media, or making aggregate throughput look fast while the page stays blank.
+type PageReport struct {
+	Profile                 string               `json:"profile"`
+	CriticalBytes           int64                `json:"critical_bytes"`
+	TotalBytes              int64                `json:"total_bytes"`
+	BulkIsolations          uint64               `json:"bulk_isolations,omitempty"`
+	CriticalCompleteMillis  float64              `json:"critical_complete_ms"`
+	CriticalSpreadMillis    float64              `json:"critical_spread_ms"`
+	VideoFirstSegmentMillis float64              `json:"video_first_segment_ms"`
+	FullCompleteMillis      float64              `json:"full_complete_ms"`
+	Resources               []PageResourceReport `json:"resources"`
+}
+
+type PageResourceReport struct {
+	Name            string  `json:"name"`
+	Bytes           int64   `json:"bytes"`
+	Received        int64   `json:"received"`
+	Critical        bool    `json:"critical"`
+	StartedMillis   float64 `json:"started_ms"`
+	ConnectMillis   float64 `json:"connect_ms"`
+	FirstByteMillis float64 `json:"first_byte_ms"`
+	CompleteMillis  float64 `json:"complete_ms"`
+	Complete        bool    `json:"complete"`
+	Note            string  `json:"note,omitempty"`
+}
+
+type PageSummary struct {
+	Samples                    int     `json:"samples"`
+	BulkIsolationsP50          float64 `json:"bulk_isolations_p50"`
+	CriticalCompleteP50Millis  float64 `json:"critical_complete_p50_ms"`
+	CriticalCompleteP95Millis  float64 `json:"critical_complete_p95_ms"`
+	CriticalSpreadP50Millis    float64 `json:"critical_spread_p50_ms"`
+	VideoFirstSegmentP50Millis float64 `json:"video_first_segment_p50_ms"`
+	VideoFirstSegmentP95Millis float64 `json:"video_first_segment_p95_ms"`
+	FullCompleteP50Millis      float64 `json:"full_complete_p50_ms"`
+	FullCompleteP95Millis      float64 `json:"full_complete_p95_ms"`
+}
+
 // CellSummary aggregates every trial of one (stack, flows) cell.
 //
 // The statistics deliberately include failed trials at their partial rate. A
@@ -201,10 +246,18 @@ type CellSummary struct {
 	// compared across stacks with different completion rates.
 	MedianCompleteMbits float64            `json:"median_mbits_completed_only"`
 	Interactive         *InteractiveReport `json:"interactive_median,omitempty"`
+	Page                *PageSummary       `json:"page,omitempty"`
 }
 
 func describePath(opts options, cfg pathsim.Config) PathReport {
+	workload := "bulk"
+	objectBytes := opts.bytes
+	if opts.page {
+		workload = storefrontPageProfile.name
+		objectBytes = storefrontPageProfile.totalBytes()
+	}
 	return PathReport{
+		Workload:  workload,
 		RTTMillis: opts.rttMillis, LossPercent: opts.lossPercent,
 		UpstreamLossPercent: opts.lossUp, LossBurstPackets: opts.lossBurst,
 		JitterMillis: opts.jitterMillis, WanderMillis: opts.wanderMillis,
@@ -212,7 +265,7 @@ func describePath(opts options, cfg pathsim.Config) PathReport {
 		QueueBytes:          cfg.QueueBytes,
 		PolicerRefillMillis: round3(float64(cfg.PolicerRefillPeriod) / float64(time.Millisecond)),
 		PolicerBurstBytes:   cfg.PolicerBurstBytes,
-		Seed:                opts.seed, ObjectBytes: opts.bytes,
+		Seed:                opts.seed, ObjectBytes: objectBytes,
 		Congestion: opts.congestion, BrutalRateMbits: opts.brutalMbits,
 		AggregateRateMbits: opts.aggregateMbits, InteractiveReserveMbits: opts.interactiveReserveMbits,
 		WireCapRateMbits: opts.wireCapMbits, WireReserveMbits: opts.wireReserveMbits,
@@ -319,6 +372,7 @@ func summarize(trials []TrialRecord) []CellSummary {
 		all := make([]float64, 0, len(group))
 		completed := make([]float64, 0, len(group))
 		interactive := make([]InteractiveReport, 0, len(group))
+		pages := make([]PageReport, 0, len(group))
 		setupFailures := 0
 		for _, trial := range group {
 			if isSetupFailure(trial) {
@@ -331,6 +385,9 @@ func summarize(trials []TrialRecord) []CellSummary {
 			}
 			if trial.Interactive != nil {
 				interactive = append(interactive, *trial.Interactive)
+			}
+			if trial.Page != nil {
+				pages = append(pages, *trial.Page)
 			}
 		}
 		sort.Float64s(all)
@@ -350,9 +407,40 @@ func summarize(trials []TrialRecord) []CellSummary {
 		if len(interactive) > 0 {
 			summary.Interactive = medianInteractive(interactive)
 		}
+		if len(pages) > 0 {
+			summary.Page = summarizePages(pages)
+		}
 		summaries = append(summaries, summary)
 	}
 	return summaries
+}
+
+func summarizePages(reports []PageReport) *PageSummary {
+	if len(reports) == 0 {
+		return nil
+	}
+	pick := func(get func(PageReport) float64, q float64) float64 {
+		values := make([]float64, len(reports))
+		for i, report := range reports {
+			values[i] = get(report)
+		}
+		sort.Float64s(values)
+		return round3(values[int(q*float64(len(values)-1))])
+	}
+	critical := func(r PageReport) float64 { return r.CriticalCompleteMillis }
+	video := func(r PageReport) float64 { return r.VideoFirstSegmentMillis }
+	full := func(r PageReport) float64 { return r.FullCompleteMillis }
+	return &PageSummary{
+		Samples:                    len(reports),
+		BulkIsolationsP50:          pick(func(r PageReport) float64 { return float64(r.BulkIsolations) }, 0.5),
+		CriticalCompleteP50Millis:  pick(critical, 0.5),
+		CriticalCompleteP95Millis:  pick(critical, 0.95),
+		CriticalSpreadP50Millis:    pick(func(r PageReport) float64 { return r.CriticalSpreadMillis }, 0.5),
+		VideoFirstSegmentP50Millis: pick(video, 0.5),
+		VideoFirstSegmentP95Millis: pick(video, 0.95),
+		FullCompleteP50Millis:      pick(full, 0.5),
+		FullCompleteP95Millis:      pick(full, 0.95),
+	}
 }
 
 // isSetupFailure reports whether a trial never reached the transfer stage.
@@ -383,16 +471,25 @@ func printSummary(summaries []CellSummary) {
 	if len(summaries) == 0 {
 		return
 	}
-	fmt.Printf("\nstack\tflows\tcomplete\tsetup_fail\tmedian_mbits\tmean_mbits\tworst_mbits\tinteractive_p50_ms\tinteractive_p95_ms\n")
+	fmt.Printf("\nstack\tflows\tcomplete\tsetup_fail\tmedian_mbits\tmean_mbits\tworst_mbits\tinteractive_p50_ms\tinteractive_p95_ms\tpage_critical_p50_ms\tpage_critical_p95_ms\tvideo_first_p50_ms\tvideo_first_p95_ms\tpage_full_p50_ms\n")
 	for _, s := range summaries {
 		p50, p95 := "", ""
 		if s.Interactive != nil {
 			p50 = fmt.Sprintf("%.0f", s.Interactive.P50Millis)
 			p95 = fmt.Sprintf("%.0f", s.Interactive.P95Millis)
 		}
-		fmt.Printf("%s\t%d\t%d/%d\t%d\t%.2f\t%.2f\t%.2f\t%s\t%s\n",
+		pageCriticalP50, pageCriticalP95, videoP50, videoP95, pageFullP50 := "", "", "", "", ""
+		if s.Page != nil {
+			pageCriticalP50 = fmt.Sprintf("%.0f", s.Page.CriticalCompleteP50Millis)
+			pageCriticalP95 = fmt.Sprintf("%.0f", s.Page.CriticalCompleteP95Millis)
+			videoP50 = fmt.Sprintf("%.0f", s.Page.VideoFirstSegmentP50Millis)
+			videoP95 = fmt.Sprintf("%.0f", s.Page.VideoFirstSegmentP95Millis)
+			pageFullP50 = fmt.Sprintf("%.0f", s.Page.FullCompleteP50Millis)
+		}
+		fmt.Printf("%s\t%d\t%d/%d\t%d\t%.2f\t%.2f\t%.2f\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			s.Stack, s.Flows, s.Completed, s.Trials-s.SetupFailures, s.SetupFailures,
-			s.MedianMbits, s.MeanMbits, s.WorstMbits, p50, p95)
+			s.MedianMbits, s.MeanMbits, s.WorstMbits, p50, p95,
+			pageCriticalP50, pageCriticalP95, videoP50, videoP95, pageFullP50)
 	}
 }
 
@@ -434,6 +531,19 @@ func gateReport(summaries []CellSummary, tolerance float64) error {
 			failures = append(failures, fmt.Sprintf(
 				"%d flows: median %.2f Mbit/s is below the %.2f floor (reference %.2f, tolerance %.0f%%)",
 				f, subject.MedianMbits, floor, reference.MedianMbits, tolerance*100))
+		}
+		if reference.Page != nil && subject.Page != nil {
+			pageCeiling := func(metric string, subjectValue, referenceValue float64) {
+				ceiling := referenceValue * (1 + tolerance)
+				if referenceValue > 0 && subjectValue > ceiling {
+					failures = append(failures, fmt.Sprintf(
+						"%d flows: %s %.0f ms exceeds the %.0f ms ceiling (reference %.0f, tolerance %.0f%%)",
+						f, metric, subjectValue, ceiling, referenceValue, tolerance*100))
+				}
+			}
+			pageCeiling("page critical p95", subject.Page.CriticalCompleteP95Millis, reference.Page.CriticalCompleteP95Millis)
+			pageCeiling("video first-segment p95", subject.Page.VideoFirstSegmentP95Millis, reference.Page.VideoFirstSegmentP95Millis)
+			pageCeiling("page full p95", subject.Page.FullCompleteP95Millis, reference.Page.FullCompleteP95Millis)
 		}
 	}
 	if compared == 0 {

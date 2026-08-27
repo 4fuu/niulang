@@ -126,11 +126,11 @@ const (
 // that is what the floor was defending against. It does not, because a repair
 // symbol is not additional load. It crosses the same congestion window as a
 // source symbol: coded.QUICCarrier runs on QUIC datagrams, whose congestion
-// controller, pacer and loss detector all apply, and ErasureSender.bandwidth
-// caps that window at this lane's share of the endpoint pair's measured
-// bottleneck so that lanes cannot compound. Raising this estimate therefore
-// changes how a fixed window is spent -- more parity, less payload -- and
-// never how much is put on the wire.
+// controller, pacer and loss detector all apply. ErasureSender compensates its
+// wire rate from the separately retained erasure floor, not from this total
+// loss, and caps that rate at this lane's share of the endpoint pair's measured
+// bottleneck. Raising this estimate therefore changes how a fixed window is
+// spent -- more parity, less payload -- and never how much is put on the wire.
 //
 // What made the floor look necessary was that the window was not fixed in
 // practice: the bandwidth estimate behind it could be latched at a burst rate
@@ -138,8 +138,8 @@ const (
 // path had never sustained and never bound. That is a defect in the estimate
 // rather than a reason to under-size a code, and it is fixed in the filter.
 //
-// So the classification has no consumer left here, and the number that is
-// actually measurable is the one used.
+// The floor therefore controls wire-rate compensation, while the total loss
+// controls how that fixed wire budget is divided here.
 //
 // The rate is the one that delivers a block soonest, not one that meets a
 // residual target. A target cannot be checked -- the sender never observes the

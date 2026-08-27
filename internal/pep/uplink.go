@@ -134,6 +134,10 @@ func (c *Client) onUplinkChanged(ctx context.Context) {
 	if c.udpHealth != nil {
 		c.udpHealth.reset()
 	}
+	// A TCP standby is bound to the old source address just as the QUIC pool
+	// is. Keeping it would make the next degradation decision claim a socket
+	// whose heartbeat described a path that no longer exists.
+	c.invalidateTCPStandby()
 	// The pooled connection is bound to the address that is gone. Even where
 	// it survives by migrating, its congestion state, its erasure floor and
 	// its bottleneck all describe the old path.

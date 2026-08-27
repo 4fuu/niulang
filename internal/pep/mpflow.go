@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"sort"
 	"sync"
@@ -368,6 +369,10 @@ type multipathFlow struct {
 	telemetryID    uint64
 	baselineRTTNS  atomic.Int64
 	currentRTTNS   atomic.Int64
+	currentErasure atomic.Uint64
+	currentAckRate atomic.Uint64
+	currentPacing  atomic.Uint64
+	currentFlight  atomic.Uint64
 	idleTimeout    time.Duration
 	maxLifetime    time.Duration
 
@@ -502,6 +507,28 @@ func (f *multipathFlow) activateLane(lane *mpLane) error {
 	return nil
 }
 
+// retireLane removes one staged or active lane without reporting a path
+// failure. It is used when a JOIN acknowledgement cannot be written: the peer
+// never learned that lane was admitted, so leaving it in the map would consume
+// capacity with a lane that can never become usable.
+func (f *multipathFlow) retireLane(lane *mpLane) {
+	if lane == nil {
+		return
+	}
+	f.lanesMu.Lock()
+	if f.lanes[lane.id] == lane {
+		delete(f.lanes, lane.id)
+	}
+	lane.closed.Store(true)
+	f.lanesMu.Unlock()
+	if sched := f.scheduler.Load(); sched != nil {
+		sched.RetireLane(lane.id)
+	}
+	if lane.fc != nil {
+		_ = lane.fc.Close()
+	}
+}
+
 func (f *multipathFlow) startLane(lane *mpLane) {
 	// This is the one point a lane actually begins carrying traffic, reached
 	// from addLane for an immediate lane and from activateLane for a staged
@@ -615,15 +642,21 @@ func nextLaneFrame(lane *mpLane, done <-chan struct{}, ctxDone <-chan struct{}) 
 }
 
 type flowSnapshot struct {
-	Class        classifier.Class
-	CurrentLanes int
-	HealthyLanes int
-	Bytes        uint64
-	BytesUp      uint64
-	BytesDown    uint64
-	Elapsed      time.Duration
-	BaselineRTT  time.Duration
-	CurrentRTT   time.Duration
+	Class         classifier.Class
+	CurrentLanes  int
+	HealthyLanes  int
+	Bytes         uint64
+	BytesUp       uint64
+	BytesDown     uint64
+	Elapsed       time.Duration
+	BaselineRTT   time.Duration
+	CurrentRTT    time.Duration
+	Erasure       float64
+	AckRate       uint64
+	PacingRate    uint64
+	BytesInFlight uint64
+	PacketsSent   uint64
+	PacketsLost   uint64
 }
 
 func (f *multipathFlow) snapshot() flowSnapshot {
@@ -634,6 +667,8 @@ func (f *multipathFlow) snapshot() flowSnapshot {
 		Class: classifier.Class(f.classifier.Class()), CurrentLanes: f.laneCount(), HealthyLanes: len(lanes),
 		Bytes: bytesUp + bytesDown, BytesUp: bytesUp, BytesDown: bytesDown, Elapsed: time.Since(f.started),
 		BaselineRTT: time.Duration(f.baselineRTTNS.Load()), CurrentRTT: time.Duration(f.currentRTTNS.Load()),
+		Erasure: math.Float64frombits(f.currentErasure.Load()), AckRate: f.currentAckRate.Load(),
+		PacingRate: f.currentPacing.Load(), BytesInFlight: f.currentFlight.Load(),
 	}
 }
 
@@ -745,6 +780,12 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 			if controller.Erasure > observation.ControllerErasure {
 				observation.ControllerErasure = controller.Erasure
 			}
+			if controller.ErasureFloor > observation.ControllerErasureFloor {
+				observation.ControllerErasureFloor = controller.ErasureFloor
+			}
+			if controller.CongestiveLoss > observation.ControllerCongestiveLoss {
+				observation.ControllerCongestiveLoss = controller.CongestiveLoss
+			}
 			if controller.SampleMax > observation.ControllerSampleMax {
 				observation.ControllerSampleMax = controller.SampleMax
 				observation.ControllerSampleDelivered = controller.SampleMaxDelivered
@@ -772,6 +813,10 @@ func (f *multipathFlow) observeTransport(lanes []*mpLane) {
 		f.currentRTTNS.Store(observation.SmoothedRTT.Nanoseconds())
 		f.baselineRTTNS.CompareAndSwap(0, observation.SmoothedRTT.Nanoseconds())
 	}
+	f.currentErasure.Store(math.Float64bits(observation.ControllerErasure))
+	f.currentAckRate.Store(observation.ControllerLatestAckRate)
+	f.currentPacing.Store(observation.ControllerPacingRate)
+	f.currentFlight.Store(observation.ControllerBytesInFlight)
 	// The connection totals are banked whether or not this flow may still
 	// publish its own gauges. They are monotonic and belong to the connection,
 	// so a late reading can neither pin nor inflate them, and discarding it
@@ -1901,16 +1946,17 @@ func (f *multipathFlow) replacementBudget(now time.Time, grace time.Duration) ti
 // starts from a full grace.
 func (f *multipathFlow) endReplacementOutage() { f.replacementDeadline.Store(0) }
 
-func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) error {
+func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) (bool, error) {
 	f.replayMu.Lock()
 	if sequence > f.highestSent {
 		f.replayMu.Unlock()
-		return fmt.Errorf("acknowledgement %d exceeds sent sequence %d", sequence, f.highestSent)
+		return false, fmt.Errorf("acknowledgement %d exceeds sent sequence %d", sequence, f.highestSent)
 	}
 	if sequence < f.acked {
 		f.replayMu.Unlock()
-		return nil // delayed ACK from a slower lane
+		return false, nil // delayed ACK from a slower lane
 	}
+	advanced := sequence > f.acked
 	f.acked = sequence
 	if f.ackTrack != nil {
 		f.ackTrack.Advance(sequence)
@@ -1919,7 +1965,7 @@ func (f *multipathFlow) acknowledgeReplay(sequence uint64, final bool) error {
 		f.closeFrame = nil
 	}
 	f.replayMu.Unlock()
-	return nil
+	return advanced, nil
 }
 
 // noteSent records that bytes have been written without retaining them.
@@ -2403,8 +2449,18 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					return errors.New("acknowledgement has wrong direction")
 				}
 				if frame.Header.Flags&protocol.FlagAckFinal == 0 {
-					if err := f.acknowledgeReplay(frame.Header.Sequence, false); err != nil {
+					advanced, err := f.acknowledgeReplay(frame.Header.Sequence, false)
+					if err != nil {
 						return err
+					}
+					if advanced && f.localClosed.Load() && abortTimer != nil {
+						// The peer is still consuming this direction. In particular, a
+						// response may already be buffered in the local TCP socket when
+						// its producer closes, and can take much longer than one abort
+						// grace to cross a slow path. Measure inactivity from real
+						// cumulative ACK progress; duplicate ACKs must not retain an
+						// abandoned flow indefinitely.
+						resetAbortTimer(f.localAbortGrace())
 					}
 					if frame.Header.Flags&protocol.FlagAckRanges != 0 {
 						ranges, err := protocol.DecodeAckRanges(frame.Payload, frame.Header.Sequence)
@@ -2416,7 +2472,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 					continue
 				}
 				if frame.Header.Sequence == f.finSequence.Load() {
-					if err := f.acknowledgeReplay(frame.Header.Sequence, true); err != nil {
+					if _, err := f.acknowledgeReplay(frame.Header.Sequence, true); err != nil {
 						return err
 					}
 					select {

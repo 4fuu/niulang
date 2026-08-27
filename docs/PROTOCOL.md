@@ -45,6 +45,7 @@ The gateway normally listens on the same numeric port for UDP and TCP.
 | --- | --- | --- | --- |
 | Data over QUIC | QUIC over UDP | mutual TLS | `queqiao/1` |
 | Data over TCP | TLS over TCP | mutual TLS | `queqiao/1` |
+| TCP hot standby | TLS over TCP | mutual TLS | `niulang-standby/1` |
 | First enrollment | TLS over TCP | pinned gateway; no client certificate | `queqiao-enroll/1` |
 | Device renewal | TLS over TCP | mutual TLS | `queqiao-renew/1` |
 
@@ -85,8 +86,10 @@ client offers exactly `queqiao-enroll/1`. Renewal is selected only when the
 client offers exactly `queqiao-renew/1`. Offering either control ALPN alongside
 another protocol MUST NOT select the weaker enrollment configuration.
 
-A data connection that does not negotiate `queqiao/1` is incompatible and MUST
-be rejected. Neither endpoint falls back to a previous Niulang protocol.
+A normal data connection that does not negotiate `queqiao/1` is incompatible
+and MUST be rejected. `niulang-standby/1` is accepted only on TLS/TCP and enters
+the auxiliary state machine below; it cannot open a destination. Neither
+endpoint falls back to a previous Niulang protocol.
 
 ### 2.3 QUIC and TCP carriage
 
@@ -99,11 +102,64 @@ One QUIC connection may pool many logical flows on separate streams. QUIC
 datagrams are connection-scoped and are demultiplexed by the `flow_id` inside
 the recovered Niulang frame.
 
+The automatic carrier policy keeps a concurrent mixed-resource fanout on that
+pooled connection so short resources share one measured congestion state rather
+than starting several independent probes against the same bottleneck. Sustained
+bulk may occupy at most one proactive secondary QUIC connection at a time. A
+pending proactive dial is one scheduling decision, not permission for another
+dedicated fallback. Healthy-flow isolation and failed-lane recovery have
+different ceilings: recovery may exceed the one-secondary healthy-path limit,
+but remains bounded by the existing lane, connection, and memory limits.
+
+All QUIC controllers for one provider path contribute to one path model. The
+model retains total measured erasure separately from its lower envelope. Total
+erasure sizes adaptive FEC; only the lower envelope may compensate the pacing
+rate and congestion window. Loss above that envelope remains congestion
+evidence and MUST NOT enlarge the wire rate. In particular, startup queue loss
+from a secondary connection cannot overwrite a previously measured clean lower
+envelope. This separation preserves FEC while preventing sender overshoot from
+feeding back as apparent ambient erasure.
+
 TCP uses the identical reliable frame stream. A flow that has handed off to
 TCP MUST NOT simultaneously schedule data over QUIC. A configured TCP-only
 bundle may attach additional authenticated TCP lanes with JOIN; each socket
 retains its kernel congestion controller, while Niulang preserves one logical
 byte-offset space above them.
+
+### 2.4 Registered TCP standby
+
+Automatic clients maintain at most one hot TLS/TCP standby per provider path.
+It negotiates `niulang-standby/1`, which is a separately versioned auxiliary
+protocol that reuses the version-1 frame envelope without changing the
+`queqiao/1` data contract. A gateway that does not implement it rejects the
+ALPN; ordinary protocol-1 data remains interoperable.
+
+The first frame is PROBE with a random non-zero `session_id` used only as the
+standby generation, `flow_id` zero, sequence one, class NEW, and one-byte value
+1 selecting atomic handoff. Subsequent heartbeats repeat that generation with strictly
+increasing sequence numbers. The gateway echoes each accepted PROBE exactly;
+the latest echo is positive application-level evidence that authenticated TCP
+to the same endpoint is healthy. Other values are rejected. Matched experiments
+found that retaining a degraded QUIC data lane after TCP activation amplified
+cross-carrier reordering and head-of-line stalls, so it is not a protocol mode.
+
+The gateway re-authorizes every heartbeat, admits at most one standby per
+provider/account/device principal, bounds aggregate standby capacity
+separately from active flows, and expires standbys. A duplicate registration
+for a principal with a live standby is refused, preventing two processes that
+share a device profile from replacing each other continuously. Registration
+consumes no destination, logical-flow, or account-flow slot.
+
+Activation replaces a heartbeat with either an ordinary JOIN naming an
+existing byte-stream flow or a resumable UDP-association OPEN. The latter can
+only reclaim or create a destination-free UDP relay; an arbitrary destination
+OPEN on the standby ALPN is rejected. The gateway validates principal,
+identifiers, authorization, account limits, and active-session capacity before
+acknowledging either form. For JOIN, both endpoints retire QUIC only after
+OPEN_OK for the staged TCP lane has been written; a malformed/refused
+activation or failed acknowledgement MUST leave existing QUIC lanes unchanged.
+The claimed standby then becomes the normal protocol-1 TCP data connection or
+UDP-on-stream association.
 
 ## 3. Identifiers and scope
 
@@ -370,6 +426,17 @@ direction, and returns ACK with the corresponding direction bit plus
 stop both directions and release the destination without waiting for missing
 bytes, but it still returns the best-effort final ACK.
 
+A local TCP EOF alone does not distinguish a half-close from full abandonment
+and MUST NOT immediately produce `CLOSE_ABORT`. Once additional receive-side
+evidence arms a bounded abandonment timer, a successful write to the local
+receive half or a strictly advancing cumulative ACK for this endpoint's
+outbound bytes restarts the inactivity interval. A delayed or duplicate ACK is
+not progress and cannot retain the flow indefinitely. Expiry without progress,
+or an explicit failure writing to the local application, may produce
+`CLOSE_ABORT`. This rule permits a response already buffered by its producer to
+take longer than one cleanup interval to cross a slow path without weakening
+bounded cleanup for a genuinely abandoned flow.
+
 Final CLOSE and ACK state is idempotent. A server may retain a bounded,
 metadata-only tombstone after both directions complete. A correctly
 authenticated late JOIN can then receive the final ACK/CLOSE state; no
@@ -603,6 +670,23 @@ rather than advisory: the bounds above are the only thing standing between a
 probe and an amplifier, and a peer free to answer with anything is not bound by
 them.
 
+An automatic client with active UDP associations MAY run a periodic one-frame
+exchange on a separate stream of the same QUIC connection. Associations pooled
+on one connection share that exchange. This is path-level liveness evidence,
+not an acknowledgement for an application datagram: QUIC DATAGRAM packets are
+not acknowledged or retransmitted and their disappearance is consequently
+absent from ordinary transport loss counters. The client runs this low-rate
+probe only while a recent registered-standby echo proves that clean TCP to the
+same gateway is available. It treats only silence lasting the normal sustained
+degradation window as failover evidence; a timely echo (within the larger of
+two RTTs and one decision interval) clears the pending observation, while a
+slow reliable echo retains it as HOL evidence.
+
+A gateway MAY reserve bounded handler capacity for these authenticated probes
+so a full active-session budget is not misreported as carrier failure. That
+capacity accepts only a conforming destination-free PROBE and MUST NOT increase
+OPEN, JOIN, account-flow, or active-session capacity.
+
 ### 14.2 The client's obligation
 
 The stream is reliable, so a probe frame cannot be lost in transit. A client
@@ -705,11 +789,18 @@ device, and public-key identity.
 
 ## 17. Fallback behavior
 
-Fallback is local policy around the same protocol, not a new wire version.
-In automatic mode the client prefers QUIC and may prepare a delayed TLS/TCP
-candidate. A merely slower TCP handshake is not proof that UDP failed. Only
-differential evidence—QUIC failing while authenticated TCP reaches the same
-endpoint—may place the endpoint in a temporary TCP-only cooldown.
+Fallback is local policy around the same data protocol. In automatic mode the
+client prefers QUIC and maintains the registered TLS/TCP standby in §2.4. A
+merely slower TCP handshake is not proof that UDP failed. An established flow
+hands off only after severe QUIC erasure or lack of progress remains sustained
+for a bounded observation window, the flow materially degrades from its own
+healthy history, and a recent standby heartbeat proves TCP to the same endpoint
+is healthy. For a DATAGRAM-only UDP association, sustained silence on the
+shared reliable path probe in §14 supplies the evidence that transport loss
+counters cannot. A short loss burst clears pending evidence instead of
+switching. A successful differential handoff places new automatic flows in the
+existing TCP cooldown rather than forcing each one to rediscover the same path
+failure.
 
 An existing TCP byte stream can survive carrier loss by authenticating a JOIN
 on the replacement transport and replaying unacknowledged logical offsets. UDP

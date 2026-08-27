@@ -92,6 +92,7 @@ func TestPooledConnectionCountsOncePerConnectionNotPerLane(t *testing.T) {
 		controller: wancongestion.ControllerTelemetry{
 			Kind: "erasure", CongestionWindow: 400_000, PacingRate: 1_250_000,
 			PacketsLost: 4, PacketsLostObserved: 4, Samples: 12,
+			Erasure: 0.20, ErasureFloor: 0.05, CongestiveLoss: 0.15,
 		},
 	}
 	flow.lanes[0] = pooledLane(0, shared, stats)
@@ -118,6 +119,10 @@ func TestPooledConnectionCountsOncePerConnectionNotPerLane(t *testing.T) {
 	if got.QUICControllerCongestionWindow != 400_000 || got.QUICControllerPacingRate != 1_250_000 {
 		t.Fatalf("connection gauges added per lane: cwnd=%d pacing=%d, want 400000/1250000",
 			got.QUICControllerCongestionWindow, got.QUICControllerPacingRate)
+	}
+	if got.QUICErasureSend != 0.20 || got.QUICErasureFloorSend != 0.05 || got.QUICCongestiveLossSend != 0.15 {
+		t.Fatalf("erasure/floor/congestive = %.2f/%.2f/%.2f, want 0.20/0.05/0.15",
+			got.QUICErasureSend, got.QUICErasureFloorSend, got.QUICCongestiveLossSend)
 	}
 }
 

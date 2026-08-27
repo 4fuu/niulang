@@ -164,11 +164,29 @@ func verifyTLSCertificate(certificate tls.Certificate, root *x509.Certificate, u
 // offers exactly that ALPN. All normal data connections require a valid device
 // certificate and current authorization before TLS completes.
 func ServerTLSConfig(credentials ServerCredentials, dataALPN string, allowEnrollment bool) (*tls.Config, error) {
+	return ServerTLSConfigWithDataALPNs(credentials, []string{dataALPN}, allowEnrollment)
+}
+
+// ServerTLSConfigWithDataALPNs builds one mutually authenticated data profile
+// for several versioned data-plane ALPNs. Enrollment and renewal retain their
+// exact-one-ALPN isolation: merely including either control ALPN alongside a
+// data ALPN never selects the unauthenticated enrollment profile.
+func ServerTLSConfigWithDataALPNs(credentials ServerCredentials, dataALPNs []string, allowEnrollment bool) (*tls.Config, error) {
 	if err := credentials.Validate(); err != nil {
 		return nil, err
 	}
-	if dataALPN == "" || dataALPN == EnrollmentALPN {
-		return nil, errors.New("invalid data ALPN")
+	if len(dataALPNs) == 0 {
+		return nil, errors.New("at least one data ALPN is required")
+	}
+	seen := make(map[string]struct{}, len(dataALPNs))
+	for _, dataALPN := range dataALPNs {
+		if dataALPN == "" || dataALPN == EnrollmentALPN || dataALPN == RenewalALPN {
+			return nil, errors.New("invalid data ALPN")
+		}
+		if _, duplicate := seen[dataALPN]; duplicate {
+			return nil, errors.New("duplicate data ALPN")
+		}
+		seen[dataALPN] = struct{}{}
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(credentials.Root)
@@ -178,7 +196,7 @@ func ServerTLSConfig(credentials ServerCredentials, dataALPN string, allowEnroll
 	}
 	data := &tls.Config{
 		MinVersion: tls.VersionTLS13, GetCertificate: getCertificate,
-		NextProtos: []string{dataALPN}, ClientAuth: tls.RequireAndVerifyClientCert,
+		NextProtos: append([]string(nil), dataALPNs...), ClientAuth: tls.RequireAndVerifyClientCert,
 		ClientCAs: roots,
 	}
 	data.VerifyConnection = func(state tls.ConnectionState) error {
@@ -202,7 +220,7 @@ func ServerTLSConfig(credentials ServerCredentials, dataALPN string, allowEnroll
 	renewal := data.Clone()
 	renewal.NextProtos = []string{RenewalALPN}
 	base := data.Clone()
-	base.NextProtos = []string{dataALPN, EnrollmentALPN, RenewalALPN}
+	base.NextProtos = append(append([]string(nil), dataALPNs...), EnrollmentALPN, RenewalALPN)
 	base.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		if len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == EnrollmentALPN {
 			return enrollment, nil

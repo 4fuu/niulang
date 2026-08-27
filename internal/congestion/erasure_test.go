@@ -44,6 +44,8 @@ func TestExplicitCongestionOutcomesDoNotInferAmbiguousPacketGaps(t *testing.T) {
 // the controller compensates for its own queue drops and sends still faster.
 func TestClusteredStartupLossDoesNotBecomeAnErasureFloor(t *testing.T) {
 	e := NewErasureSender(1200)
+	e.inner.minRTT = 200 * time.Millisecond
+	e.SetRTTStatsProvider(&fixedRTT{min: 200 * time.Millisecond, smoothed: 200 * time.Millisecond})
 	var acked []quiccongestion.AckedPacketInfo
 	var lost []quiccongestion.LostPacketInfo
 	for pn := 0; pn < 1000; pn++ {
@@ -202,8 +204,8 @@ func TestTheCongestionWindowIsCompensated(t *testing.T) {
 func TestAJoiningSenderStartsFromWhatIsAlreadyKnown(t *testing.T) {
 	model := pathmodel.NewPathModel()
 	const perMember = 2e6
-	model.Report(1, pathmodel.Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perMember, RoundTrip: 0})
-	model.Report(2, pathmodel.Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perMember, RoundTrip: 0})
+	model.Report(1, pathmodel.Observation{Erasure: 0.42, Floor: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perMember, RoundTrip: 0})
+	model.Report(2, pathmodel.Observation{Erasure: 0.42, Floor: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: perMember, RoundTrip: 0})
 
 	seeded := NewErasureSenderOn(1200, model)
 	if seeded.Share() <= 0 {
@@ -213,6 +215,25 @@ func TestAJoiningSenderStartsFromWhatIsAlreadyKnown(t *testing.T) {
 	if seeded.bandwidth() <= fresh.bandwidth() {
 		t.Fatalf("seeded sender starts at %d, no better than an unseeded %d",
 			seeded.bandwidth(), fresh.bandwidth())
+	}
+}
+
+func TestJoiningSenderCompensatesFromFloorAndPublishesTotalErasure(t *testing.T) {
+	model := pathmodel.NewPathModel()
+	model.Report(1, pathmodel.Observation{
+		Erasure: 0.45, Floor: 0.10, BurstFactor: 1,
+		ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 200 * time.Millisecond,
+	})
+
+	seeded := NewErasureSenderOn(1200, model)
+	if got := seeded.arrivalRate(); got < 0.89 || got > 0.91 {
+		t.Fatalf("joining sender arrival = %.3f, want floor-derived 0.900", got)
+	}
+	if got := seeded.Telemetry().Erasure; got < 0.44 || got > 0.46 {
+		t.Fatalf("joining sender publishes erasure %.3f, want total 0.450", got)
+	}
+	if got := seeded.Telemetry().ErasureFloor; got < 0.09 || got > 0.11 {
+		t.Fatalf("joining sender publishes floor %.3f, want 0.100", got)
 	}
 }
 
@@ -227,7 +248,7 @@ func TestAJoiningSenderStartsFromWhatIsAlreadyKnown(t *testing.T) {
 func TestAJoiningSenderStartsWithTheWindowItsRateImplies(t *testing.T) {
 	const rate, roundTrip = 2e6, 250 * time.Millisecond
 	model := pathmodel.NewPathModel()
-	model.Report(1, pathmodel.Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: rate, RoundTrip: roundTrip})
+	model.Report(1, pathmodel.Observation{Erasure: 0.42, Floor: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: rate, RoundTrip: roundTrip})
 
 	seeded := NewErasureSenderOn(1200, model)
 	fresh := NewErasureSender(1200)
@@ -247,7 +268,7 @@ func TestAJoiningSenderStartsWithTheWindowItsRateImplies(t *testing.T) {
 	// sender must still start from the rate rather than refusing to start.
 	blind := NewErasureSenderOn(1200, func() *pathmodel.PathModel {
 		m := pathmodel.NewPathModel()
-		m.Report(1, pathmodel.Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: rate, RoundTrip: 0})
+		m.Report(1, pathmodel.Observation{Erasure: 0.42, Floor: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: rate, RoundTrip: 0})
 		return m
 	}())
 	if blind.bandwidth() <= NewErasureSender(1200).bandwidth() {
@@ -388,7 +409,7 @@ func TestTheSenderPublishesTheMeasurementItsCodeIsSizedFrom(t *testing.T) {
 	model := pathmodel.NewPathModel()
 	// A model whose floor and measurement disagree the way the live one did.
 	model.Report(2, pathmodel.Observation{
-		Erasure: 0.199, BurstFactor: 1,
+		Erasure: 0.199, Floor: 0.0176, BurstFactor: 1,
 		ObservedSamples: 5000, Delivered: 2e6, RoundTrip: 200 * time.Millisecond,
 	})
 	e := NewErasureSenderOn(1200, model)

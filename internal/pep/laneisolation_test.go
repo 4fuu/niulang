@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/4fuu/niulang/internal/classifier"
 	"github.com/4fuu/niulang/internal/identity"
 	"github.com/4fuu/niulang/internal/protocol"
 )
@@ -350,13 +351,25 @@ func TestBulkIsolationCapacityCannotEscapeIntoDedicatedConnections(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.memoryLimits.maxBulkConnections = 1
+	client.memoryLimits.maxBulkConnections = 2
 
 	occupied, err := client.reserveBulkConn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer occupied.close("test complete")
+	if _, err := client.reserveBulkConn(ctx); !errors.Is(err, errBulkConnectionLimit) {
+		t.Fatalf("second proactive bulk connection = %v, want capacity decision", err)
+	}
+	if got := sockets.Load(); got != 1 {
+		t.Fatalf("capacity decision opened %d UDP sockets, want one", got)
+	}
+	recovery, err := client.reserveBulkConnMode(ctx, false)
+	if err != nil {
+		t.Fatalf("recovery was blocked by the proactive isolation limit: %v", err)
+	}
+	client.releaseBulkConn(recovery, true)
+	client.memoryLimits.maxBulkConnections = 1
 
 	const waiters = 16
 	var wg sync.WaitGroup
@@ -376,8 +389,8 @@ func TestBulkIsolationCapacityCannotEscapeIntoDedicatedConnections(t *testing.T)
 			t.Fatalf("over-budget lane = %v, want capacity decision", laneErr)
 		}
 	}
-	if got := sockets.Load(); got != 1 {
-		t.Fatalf("over-budget isolation opened %d UDP sockets, want the one admitted connection", got)
+	if got := sockets.Load(); got != 2 {
+		t.Fatalf("over-budget isolation opened %d UDP sockets, want only the isolation and recovery admissions", got)
 	}
 
 	client.closeQUICPool()
@@ -399,11 +412,58 @@ func TestDedicatedBulkFallbackIsReservedForRecoverablePoolFailures(t *testing.T)
 	if dedicatedBulkFallbackAllowed(fmt.Errorf("wrapped: %w", errBulkConnectionLimit)) {
 		t.Fatal("wrapped capacity decision was treated as a pool failure")
 	}
+	if dedicatedBulkFallbackAllowed(errBulkConnectionPending) {
+		t.Fatal("pending decision was treated as a pool failure")
+	}
 	if dedicatedBulkFallbackAllowed(context.Canceled) || dedicatedBulkFallbackAllowed(context.DeadlineExceeded) {
 		t.Fatal("expired caller started a dedicated fallback")
 	}
 	if !dedicatedBulkFallbackAllowed(errors.New("pooled stream unavailable")) {
 		t.Fatal("recoverable pool failure did not retain dedicated fallback")
+	}
+}
+
+func TestShortPooledCompletionMarksAndClearsMixedFanout(t *testing.T) {
+	client := &Client{}
+	client.quicPoolActive.Store(4)
+	client.quicFanoutStarted.Store(time.Now().Add(-time.Second).UnixNano())
+	client.noteControlPoolFlowClosed(time.Now().Add(-classifier.DefaultConfig().NewAge - time.Second))
+	if client.shortFlowFanout.Load() {
+		t.Fatal("an old bulk completion was classified as a mixed-resource fanout")
+	}
+
+	client.quicPoolActive.Store(4)
+	client.quicFanoutStarted.Store(time.Now().Add(-time.Second).UnixNano())
+	client.noteControlPoolFlowClosed(time.Now())
+	if !client.shortFlowFanout.Load() {
+		t.Fatal("a short completion with three active siblings did not protect the shared pool")
+	}
+	client.noteControlPoolFlowClosed(time.Time{})
+	if !client.shortFlowFanout.Load() {
+		t.Fatal("mixed-resource protection cleared while two flows remained")
+	}
+	client.noteControlPoolFlowClosed(time.Time{})
+	if client.shortFlowFanout.Load() {
+		t.Fatal("mixed-resource protection survived after fanout ended")
+	}
+}
+
+func TestCompletionFromBeforeCurrentFanoutCannotClassifyIt(t *testing.T) {
+	client := &Client{}
+	client.quicPoolActive.Store(4)
+	client.noteControlPoolFlowClosed(time.Now())
+	if client.shortFlowFanout.Load() {
+		t.Fatal("a completion classified fanout before an overlap boundary existed")
+	}
+
+	client.quicPoolActive.Store(4)
+	started := time.Now().Add(-time.Second)
+	client.quicFanoutStarted.Store(started.UnixNano())
+
+	client.noteControlPoolFlowClosed(started.Add(-time.Millisecond))
+
+	if client.shortFlowFanout.Load() {
+		t.Fatal("a previous warm-up flow classified the following fanout as mixed")
 	}
 }
 

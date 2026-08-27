@@ -30,6 +30,73 @@ For a transport or controller change, report applicable results from every
 family. A bulk improvement is incomplete evidence if it moves interactive tail
 latency or small-flow setup in the wrong direction.
 
+### Mixed storefront pages
+
+`niulangbench --page` replaces the uniform bulk object with the fixed
+`storefront-v1` profile: a document, styles, JavaScript, icons, thumbnails,
+screenshot, hero image, and a 512 KiB first video segment begin together. An
+8 MiB video tail begins only after the first segment completes. The visible
+critical set is 4000 KiB and the complete workload is 12192 KiB.
+
+The primary page metric is `critical_complete_ms`, the time until every visible
+resource and the first video segment has arrived. `video_first_segment_ms`
+checks media startup independently, `critical_spread_ms` exposes a straggling
+visible resource, and `full_complete_ms` plus goodput prevents a scheduler from
+making the page look fast by starving sustained media. JSON retains each
+resource's start, connect, first-byte, completion, byte count, and status. The
+regression gate checks page-critical, video-first, and full-completion p95 in
+addition to completion and goodput.
+
+Every resource is a separate SOCKS TCP flow sharing the same warm outer QUIC
+connection. This models a browser using several origin/CDN connections, which
+is the layer Niulang can schedule without decrypting traffic. It does not claim
+to expose HTTP/2 or HTTP/3 stream priorities hidden inside one encrypted,
+ordered inner connection: bytes later in that connection cannot legally pass
+earlier bytes at the proxy. Use the profile to judge cross-flow isolation and
+fairness, not application-layer resource discovery.
+
+```sh
+go run ./cmd/niulangbench --page --stacks baseline,niulang \
+    --congestion erasure --rtt 100 --rate 50 --loss 1 \
+    --trials 5 --seed 4701 --json /tmp/page.json
+```
+
+The 2026-08-27 development campaign used five trials per cell, seed 7401,
+the one-BDP queue, and the complete profile above. Times are milliseconds; a
+failed trial remains in its cell's completion count and tail statistics.
+
+| RTT / rate / loss | Reference complete | Reference critical / video / full p95 | Niulang complete | Niulang critical / video / full p95 |
+| --- | ---: | ---: | ---: | ---: |
+| 50 ms / 50 Mbit/s / 0% | 5/5 | 906 / 680 / 2213 | 5/5 | 1008 / 694 / 2220 |
+| 226 ms / 50 Mbit/s / 0% | 5/5 | 1908 / 1694 / 3379 | 5/5 | 1729 / 1514 / 3333 |
+| 50 ms / 50 Mbit/s / 1% | 5/5 | 14172 / 7075 / 33779 | 5/5 | 1039 / 721 / 2302 |
+| 100 ms / 50 Mbit/s / 5% | 0/5 | incomplete | 5/5 | 1468 / 1316 / 3017 |
+| 100 ms / 50 Mbit/s / 15%, burst 6 | 0/5 | incomplete | 5/5 | 1949 / 1670 / 3776 |
+| 226 ms / 10 Mbit/s / 1% | 0/5 | 59534 / 31259 / 59538 | 5/5 | 5475 / 3930 / 12471 |
+
+This is not a universal latency win. On the clean 50 ms path, full completion
+and goodput were effectively equal while Niulang's visible-set p95 was 102 ms
+slower. It reduced median sender-induced queue drops from 748 to 282 in that
+cell. At 226 ms and 50 Mbit/s it was faster on all three page tails and reduced
+median queue drops from 3542 to 101. With path loss, completion and tails were
+the larger distinction.
+
+A clean-path BBR diagnostic made the visible set faster (761 ms p95) but raised
+median sender-induced drops to 4465, versus 282 under the erasure policy. That
+is an overshoot trade, not a low-loss improvement, so it is not evidence for a
+more aggressive default. The useful general policy is instead to keep a mixed
+short-flow fanout on one warm congestion context and bound proactive secondary
+bulk connections. Niulang cannot identify a video segment hidden inside TLS;
+specific media priority requires an application-visible signal and must not be
+inferred from encrypted byte patterns.
+
+The campaign also found a correctness failure: a response producer could fill
+its local TCP buffer, close, and have the proxy's five-second ambiguous-close
+timer abort the still-progressing remote transfer. Strictly advancing
+cumulative response ACKs now renew that inactivity grace; duplicate ACKs do
+not. The previously failing 226 ms / 10 Mbit/s / 1% cell changed from 0/5 to
+5/5 after that fix.
+
 ## The three pieces
 
 **`internal/pathsim`** — a deterministic UDP path emulator. Clients send to the
@@ -408,6 +475,17 @@ bottleneck drops at 8 and 16 ms refill intervals, but still dropped 6.996% at
 host timer granularity. It is evidence to keep the prototype opt-in, not a
 reason to relabel it as a hard cap.
 
+The default erasure controller also remains unable to infer a queue-less
+policer's sustained rate. Separating total loss from the retained erasure floor
+removed one positive-feedback loop, but did not turn that controller into a
+wire cap. On the seeded 300 ms, 250000 B/s, 8 ms-refill characterization path,
+one full-suite run and eight isolated repetitions produced 1.4--2.5x peak
+pacing and 23.3--31.2% sender-induced loss. The peak depends on which BBR probe
+cycle fits in the observation window; the consistently high policer loss is
+the direct unresolved signal. `internal/pep/case4_test.go` therefore gates both
+residual overdrive and at least 20% loss instead of treating a single transient
+peak as a stable product metric.
+
 The connection-reuse script borrows the useful latency property of AnyTLS's
 idle-session pool -- keep a path warm so a request does not pay another outer
 handshake. Niulang already does this with `--quic-pool`; it should not import
@@ -596,5 +674,32 @@ policer. It does not model middlebox behavior, path MTU changes, or NAT
 rebinding. Both endpoints run on one machine, so it cannot expose a defect that
 only appears with a real NIC or a real scheduler.
 
-It says nothing about correctness under lane failure, UDP blocking, or restart;
-those require separate correctness and failure-mode tests.
+The throughput matrix says nothing about correctness under lane failure, UDP
+blocking, or restart; those require separate correctness and failure-mode
+tests. The opt-in QoS recovery tests keep seeded QUIC and TCP paths matched,
+then raise loss only on the outer UDP path while TCP remains clean:
+
+```sh
+# Sustained QoS: a handoff is required. Vary RTT, burst, payload, and seed.
+NIULANG_UDP_QOS_EXPERIMENT=1 \
+NIULANG_QOS_LOSS=0.95 NIULANG_QOS_RTT_MS=226 \
+NIULANG_QOS_UDP_PAYLOAD=1200 NIULANG_QOS_SEED=771 \
+go test ./internal/pep -run '^TestUDPQoSDifferentialRecoveryExperiment$' \
+    -count=1 -v -timeout=30s
+
+# One-second transient: retain QUIC and report the result without requiring a
+# switch. Repeat across seeds; one non-switch is not a false-positive bound.
+NIULANG_UDP_QOS_EXPERIMENT=1 NIULANG_QOS_LOSS=0.95 \
+NIULANG_QOS_RECOVER_AFTER_MS=1000 NIULANG_QOS_REQUIRE_FAILOVER=0 \
+go test ./internal/pep -run '^TestUDPQoSDifferentialRecoveryExperiment$' \
+    -count=1 -v -timeout=30s
+```
+
+Retain each JSON record and the environment matrix. Interpret delivery over the
+whole post-step interval together with `failover_ms`: packets emitted before
+the decision are expected to preserve UDP loss semantics and are not replayed
+on TCP. `latency_p95_ms` and `latency_max_ms` expose the ordered-stream HOL cost
+after activation. The controller and transport packet-loss fields are
+diagnostics, not application delivery: a DATAGRAM-only QUIC workload may lose
+nearly every application packet while both remain low because those datagrams
+are not acknowledged or retransmitted by the transport.

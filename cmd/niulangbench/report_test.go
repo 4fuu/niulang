@@ -78,6 +78,24 @@ func TestGateFailsOnCompletionShortfall(t *testing.T) {
 	}
 }
 
+func TestGateChecksPageReadinessAndVideoStartupSeparatelyFromGoodput(t *testing.T) {
+	summaries := []CellSummary{
+		{Stack: "baseline", Flows: 1, CompletionRate: 1, MedianMbits: 40, Page: &PageSummary{
+			CriticalCompleteP95Millis: 1000, VideoFirstSegmentP95Millis: 500, FullCompleteP95Millis: 3000,
+		}},
+		{Stack: "niulang", Flows: 1, CompletionRate: 1, MedianMbits: 45, Page: &PageSummary{
+			CriticalCompleteP95Millis: 1000, VideoFirstSegmentP95Millis: 700, FullCompleteP95Millis: 3000,
+		}},
+	}
+	if err := gateReport(summaries, 0.10); err == nil {
+		t.Fatal("a video first-segment tail regression passed because aggregate goodput improved")
+	}
+	summaries[1].Page.VideoFirstSegmentP95Millis = 550
+	if err := gateReport(summaries, 0.10); err != nil {
+		t.Fatalf("page metrics at the latency ceiling failed: %v", err)
+	}
+}
+
 func TestGateRequiresBothStacks(t *testing.T) {
 	summaries := summarize([]TrialRecord{trial("niulang", 1, 10, true)})
 	err := gateReport(summaries, 0.10)
@@ -101,11 +119,12 @@ func TestReportRoundTripsAsJSON(t *testing.T) {
 		SchemaVersion: 1,
 		Arguments:     []string{"--rtt", "200", "--seed", "7"},
 		Path: PathReport{
-			RTTMillis: 200, LossPercent: 1, RateMbits: 100, Seed: 7,
+			Workload: "storefront-v1", RTTMillis: 200, LossPercent: 1, RateMbits: 100, Seed: 7,
 			PolicerRefillMillis: 8, PolicerBurstBytes: 4000,
 		},
 		Trials: []TrialRecord{{
 			Stack: "niulang", Flows: 1, MbitsPerSec: 10, Complete: true,
+			Page: &PageReport{Profile: "storefront-v1", CriticalCompleteMillis: 800, VideoFirstSegmentMillis: 500},
 			PathCounters: &PathCountersReport{
 				Downstream: DirectionCountersReport{PacketsIn: 100, PacketsOut: 80, BottleneckDropped: 20},
 			},
@@ -132,8 +151,9 @@ func TestReportRoundTripsAsJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.SchemaVersion != 1 || decoded.Path.Seed != 7 || decoded.Path.PolicerRefillMillis != 8 ||
+	if decoded.SchemaVersion != 1 || decoded.Path.Seed != 7 || decoded.Path.Workload != "storefront-v1" || decoded.Path.PolicerRefillMillis != 8 ||
 		len(decoded.Latency) != 1 || len(decoded.UDP) != 1 || decoded.UDP[0].Lost != 3 ||
+		decoded.Trials[0].Page == nil || decoded.Trials[0].Page.VideoFirstSegmentMillis != 500 ||
 		decoded.Trials[0].PathCounters.Downstream.BottleneckDropped != 20 {
 		t.Fatalf("report lost reproducibility fields: %+v", decoded)
 	}

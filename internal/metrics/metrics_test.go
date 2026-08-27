@@ -17,6 +17,12 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	r.LaneFailure()
 	r.LaneReplacement()
 	r.Fallback()
+	r.TCPStandbyRegistration()
+	r.TCPStandbyReady()
+	r.TCPStandbyClaim()
+	r.QUICDegradationFailover()
+	r.TCPStandbyClosed()
+	r.TCPStandbyFailure()
 	r.UDPPathUnavailable()
 	r.EndpointTransportRaceFailure()
 	r.TransientUDPSendError()
@@ -50,12 +56,15 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	if s.UDPPathUnavailable != 1 || s.EndpointTransportRaceFailures != 1 || s.TransientUDPSendErrors != 1 {
 		t.Fatalf("unexpected endpoint transport snapshot: %+v", s)
 	}
+	if s.TCPStandbysReady != 0 || s.TCPStandbyRegistrations != 1 || s.TCPStandbyClaims != 1 || s.TCPStandbyFailures != 1 || s.QUICDegradationFailovers != 1 {
+		t.Fatalf("unexpected standby snapshot: %+v", s)
+	}
 	if s.QUICPacketsSent != 80 || s.QUICPacketsReceived != 75 || s.QUICLossObservedPackets != 4 {
 		t.Fatalf("unexpected loss telemetry snapshot: %+v", s)
 	}
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "niulang_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_path_unavailable_total 1") || !strings.Contains(rec.Body.String(), "niulang_endpoint_transport_races_failed_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_transient_send_errors_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "niulang_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_sent 80") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_received 75") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_sample_bytes_per_second 900000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_ack_rate_bytes_per_second 1100000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_non_app_limited_samples_total 10") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_state_misses_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_round 7") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_rate_bytes_per_second 1000000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_charged_bytes_total 90") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_overshoot_packets_total 2") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_debt_seconds 0.002000000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_in_recovery 1") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "niulang_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "niulang_tcp_standby_registrations_total 1") || !strings.Contains(rec.Body.String(), "niulang_tcp_standby_claims_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_degradation_failovers_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_path_unavailable_total 1") || !strings.Contains(rec.Body.String(), "niulang_endpoint_transport_races_failed_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_transient_send_errors_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "niulang_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_sent 80") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_received 75") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_sample_bytes_per_second 900000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_ack_rate_bytes_per_second 1100000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_non_app_limited_samples_total 10") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_state_misses_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_round 7") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_rate_bytes_per_second 1000000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_charged_bytes_total 90") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_overshoot_packets_total 2") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_debt_seconds 0.002000000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_in_recovery 1") {
 		t.Fatalf("unexpected exposition: %s", rec.Body.String())
 	}
 }
@@ -467,10 +476,15 @@ func TestTheMeasuredErasureIsPublishedBesideTheFloorAndLabelledByDirection(t *te
 	r := New()
 	r.ObserveQUIC(1, QUICObservation{
 		ControllerKind: "erasure", ControllerErasure: 0.199,
+		ControllerErasureFloor: 0.0176, ControllerCongestiveLoss: 0.1814,
 	})
 	s := r.Snapshot()
 	if s.QUICErasureSend != 0.199 {
 		t.Fatalf("measured send erasure = %v, want 0.199", s.QUICErasureSend)
+	}
+	if s.QUICErasureFloorSend != 0.0176 || s.QUICCongestiveLossSend != 0.1814 {
+		t.Fatalf("send floor/congestive = %v/%v, want 0.0176/0.1814",
+			s.QUICErasureFloorSend, s.QUICCongestiveLossSend)
 	}
 
 	rec := httptest.NewRecorder()
@@ -478,6 +492,8 @@ func TestTheMeasuredErasureIsPublishedBesideTheFloorAndLabelledByDirection(t *te
 	body := rec.Body.String()
 	for _, want := range []string{
 		`niulang_erasure_ratio{direction="send"} 0.199000000`,
+		`niulang_quic_controller_erasure_floor_ratio 0.017600000`,
+		`niulang_quic_controller_congestive_loss_ratio 0.181400000`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("exposition is missing %q", want)
@@ -491,11 +507,12 @@ func TestTheMeasuredErasureIsPublishedBesideTheFloorAndLabelledByDirection(t *te
 // single lane right now" and jump between 1.8% and 6.9% within minutes.
 func TestErasureFoldsAcrossEndpointPairsNotLanes(t *testing.T) {
 	r := New()
-	r.ObserveQUIC(1, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.05})
-	r.ObserveQUIC(2, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.30})
-	r.ObserveQUIC(3, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.10})
-	if s := r.Snapshot(); s.QUICErasureSend != 0.30 {
-		t.Fatalf("send erasure = %v across three pairs, want the worst at 0.30", s.QUICErasureSend)
+	r.ObserveQUIC(1, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.05, ControllerErasureFloor: 0.03})
+	r.ObserveQUIC(2, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.30, ControllerErasureFloor: 0.08})
+	r.ObserveQUIC(3, QUICObservation{ControllerKind: "erasure", ControllerErasure: 0.10, ControllerErasureFloor: 0.04})
+	if s := r.Snapshot(); s.QUICErasureSend != 0.30 || s.QUICErasureFloorSend != 0.08 {
+		t.Fatalf("send erasure/floor = %v/%v across three pairs, want worst 0.30/0.08",
+			s.QUICErasureSend, s.QUICErasureFloorSend)
 	}
 }
 

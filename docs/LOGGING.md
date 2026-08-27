@@ -109,6 +109,8 @@ Prometheus `/metrics` names. They cover:
 - delivery, ACK, send, pacing, and maximum-bandwidth estimates;
 - congestion window, bytes in flight, controller round/mode/recovery;
 - lanes, failures, replacements, reinjections, fallbacks, and timeouts;
+- registered TCP standbys ready, registrations, failures, claims, and
+  sustained differential-QUIC failovers;
 - transient local UDP send errors absorbed into QUIC loss recovery;
 - flow telemetry entries expired because nothing refreshed them, which is how
   a round-trip aggregate frozen at a stale constant announces itself;
@@ -116,7 +118,11 @@ Prometheus `/metrics` names. They cover:
 - the erasure the path is measured to be applying to the direction this
   endpoint sends into, published as `niulang_erasure_ratio{direction="send"}`
   and as `niulang_erasure_ratio_send` in the log. A gateway's send direction is
-  its downstream. This is what a code is sized from;
+  its downstream. This total is what the adaptive code is sized from. The
+  separately published `niulang_quic_controller_erasure_floor_ratio` is the
+  retained lower envelope used for pacing and congestion-window compensation,
+  while `niulang_quic_controller_congestive_loss_ratio` is the loss above that
+  floor attributed to the sender's current load;
 - the shape of the delivery-rate samples the bandwidth estimate is built from:
   `niulang_quic_sample_mean_bytes_per_second`,
   `niulang_quic_sample_max_bytes_per_second`, and the
@@ -230,23 +236,28 @@ repair and the session had to re-issue. Both are taken over
 `fec_source_symbols_total` and are therefore in [0,1]. The `coded_substrate`
 summary string carries the same two as `recv_residual` and `recv_erasure`.
 
-An endpoint therefore reports three different erasure figures, and comparing
-them without knowing which direction each measures is how an asymmetric path
-reads as a fault:
+An endpoint therefore reports two directional families of loss figures.
+Comparing them without knowing which direction each measures is how an
+asymmetric path reads as a fault:
 
 | Field | Direction | Measured from |
 | --- | --- | --- |
 | `fec_receive_erasure` | what this endpoint receives | source symbols the decoder accounted for |
 | `fec_observed_loss` | what this endpoint receives | gaps in the peer's transmission sequence |
-| `niulang_quic_controller_erasure_floor_ratio` | what this endpoint sends into | the controller's own acknowledgements |
+| `niulang_erasure_ratio{direction="send"}` | what this endpoint sends into | total loss in the controller's acknowledgements; sizes adaptive FEC |
+| `niulang_quic_controller_erasure_floor_ratio` | what this endpoint sends into | retained lower envelope; sizes pacing and window compensation |
+| `niulang_quic_controller_congestive_loss_ratio` | what this endpoint sends into | loss above the lower envelope attributed to current sender load |
 
 On a path whose downstream erases and whose upstream does not, the first two
-are large while the third is near zero, and all three are correct. The
-controller's floor is the one that sizes this endpoint's parity, because the
-direction a sender codes for is the direction it sends into. Failed flows are warning-level records with the
-same performance and FEC fields plus the error, so they remain visible at the
-default `info` level. `NIULANG_LANE_TRACE=1` remains an opt-in raw
-per-lane diagnostic. It is not needed for the standard aggregate dashboard.
+are large at the receiver while the three send-direction figures are large at
+the sender, and both endpoint records are correct. Total send erasure sizes
+parity because a code must survive all loss it observes. Only the lower floor
+compensates pacing because increasing wire rate in response to sender-induced
+queue or policer drops creates positive feedback. Failed flows are
+warning-level records with the same performance and FEC fields plus the error,
+so they remain visible at the default `info` level. `NIULANG_LANE_TRACE=1`
+remains an opt-in raw per-lane diagnostic. It is not needed for the standard
+aggregate dashboard.
 
 No application payload is logged. Operational logs can contain configured
 endpoint addresses and error text; debug records may also contain local uplink

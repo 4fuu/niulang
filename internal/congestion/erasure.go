@@ -100,6 +100,9 @@ type ErasureSender struct {
 	// arrival is the last computed arrival rate, published for the pacer and
 	// the congestion window, which run outside the callback that computes it.
 	arrival atomic.Uint64 // arrival rate in parts per million
+	// floor is the pooled lower envelope used to compute arrival. Keeping it
+	// beside total erasure makes sender overshoot observable in telemetry.
+	floor atomic.Uint64
 
 	// congestive is the share of loss the estimator attributes to this
 	// instant's sending rate rather than to the channel's own erasure, in
@@ -180,15 +183,16 @@ func NewErasureSenderOn(initialPacketSize quiccongestion.ByteCount, path *pathmo
 		if state.ObservedSamples > 0 {
 			e.observed.Store(uint64(state.ObservedSamples))
 		}
-		// The measured erasure is path knowledge, so a replacement lane paces
-		// from it rather than rediscovering it. On a channel that erases 42% of
-		// packets that rediscovery is expensive -- it is the same ramp that
-		// costs a loss-based controller the path in the first place -- and a
-		// lane opened because its predecessor died would pay it every time.
+		// Total erasure sizes FEC, while only the retained floor compensates
+		// pacing. A replacement therefore inherits ambient channel loss without
+		// multiplying its wire rate by sender-induced queue drops.
 		if state.Erasure > 0 {
-			e.arrival.Store(uint64((1 - state.Erasure) * partsPerMillion))
 			e.erasure.Store(uint64(state.Erasure * partsPerMillion))
 		}
+		if state.Floor > 0 {
+			e.arrival.Store(uint64((1 - state.Floor) * partsPerMillion))
+		}
+		e.floor.Store(uint64(state.Floor * partsPerMillion))
 		if state.Seed > 0 {
 			if state.Share > 0 {
 				e.share.Store(uint64(state.Share))
@@ -530,26 +534,25 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	} else {
 		e.congestive.Store(0)
 	}
-	erasure := snapshot.Loss
+	erasure, floor := snapshot.Loss, snapshot.Floor
 	if e.path != nil {
 		// Pool with the other lanes: the estimate converges on all their
 		// samples together, and the share is what stops their probes
 		// compounding.
 		state := e.path.Report(e.id(), pathmodel.Observation{
-			Erasure: snapshot.Loss, BurstFactor: snapshot.BurstFactor,
+			Erasure: snapshot.Loss, Floor: snapshot.Floor, BurstFactor: snapshot.BurstFactor,
 			ObservedSamples: float64(snapshot.Decided),
 			Delivered:       float64(e.inner.bandwidth()),
 			RoundTrip:       e.inner.minRoundTrip(),
 		})
-		erasure = state.Erasure
+		erasure, floor = state.Erasure, state.Floor
 		e.share.Store(uint64(state.Share))
 	}
 	e.erasure.Store(uint64(erasure * partsPerMillion))
-	// The compensation rides on the measurement rather than on a floor biased
-	// low for pacing. Under-compensating is not the safe direction it looks
-	// like: pacing a delivered-rate estimate makes the sending rate its own
-	// input, and the loop walks down to nothing rather than converging on the
-	// bottleneck.
+	e.floor.Store(uint64(floor * partsPerMillion))
+	// Compensation follows only the retained floor. Total erasure still sizes
+	// FEC, but queue or policer drops created by this sender must not increase
+	// its congestion window and pacing rate: that is a positive feedback loop.
 	//
 	// But it waits for the delay bound to be able to act. A first flight can
 	// overrun a clean path's queue before the controller has found its
@@ -563,7 +566,7 @@ func (e *ErasureSender) OnCongestionEventEx(priorInFlight quiccongestion.ByteCou
 	// makes no judgement about what kind of loss this is; it says only that
 	// compensation may not run ahead of the brake that bounds it.
 	if _, minRTT := e.queueDelay(); minRTT > 0 {
-		e.arrival.Store(uint64(e.compensationFor(1-erasure) * partsPerMillion))
+		e.arrival.Store(uint64(e.compensationFor(1-floor) * partsPerMillion))
 	}
 
 	e.passed.Add(uint64(len(lost)))
@@ -596,6 +599,8 @@ func (e *ErasureSender) Telemetry() ControllerTelemetry {
 	// two independently derived, which is what lets a test assert they agree.
 	t.PacketsLostObserved = e.passed.Load()
 	t.Erasure = float64(e.erasure.Load()) / partsPerMillion
+	t.ErasureFloor = float64(e.floor.Load()) / partsPerMillion
+	t.CongestiveLoss = float64(e.congestive.Load()) / partsPerMillion
 	// Read, never recomputed. This method runs on the flow telemetry goroutine
 	// while quic-go invokes the controller on its packet goroutine, which is
 	// why everything else here comes from an atomic. Recomputing the brake

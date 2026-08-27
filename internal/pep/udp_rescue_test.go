@@ -229,6 +229,14 @@ func TestUDPAssociationRescuesToTCP(t *testing.T) {
 	}
 
 	send("before-rescue")
+	standbyDeadline := time.Now().Add(3 * time.Second)
+	for !client.standbyReady(time.Now()) && time.Now().Before(standbyDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !client.standbyReady(time.Now()) {
+		t.Fatal("TCP standby did not become ready before UDP rescue")
+	}
+	claimsBefore := client.Metrics().Snapshot().TCPStandbyClaims
 	quicCancel()
 	deadline := time.Now().Add(5 * time.Second)
 	for client.Metrics().Snapshot().UDPAssociationReconnects == 0 && time.Now().Before(deadline) {
@@ -240,6 +248,9 @@ func TestUDPAssociationRescuesToTCP(t *testing.T) {
 	send("after-rescue")
 	if got := client.Metrics().Snapshot(); got.UDPAssociationRescueFailures != 0 || got.Fallbacks == 0 {
 		t.Fatalf("unexpected UDP rescue metrics: %+v", got)
+	}
+	if got := client.Metrics().Snapshot().TCPStandbyClaims; got != claimsBefore+1 {
+		t.Fatalf("TCP standby claims = %d, want %d", got, claimsBefore+1)
 	}
 
 	serviceCancel()

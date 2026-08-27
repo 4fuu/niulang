@@ -12,15 +12,20 @@ import (
 )
 
 type Registry struct {
-	activeFlows      atomic.Int64
-	flowsStarted     atomic.Uint64
-	flowsCompleted   atomic.Uint64
-	flowsFailed      atomic.Uint64
-	bytesUp          atomic.Uint64
-	bytesDown        atomic.Uint64
-	laneFailures     atomic.Uint64
-	laneReplacements atomic.Uint64
-	fallbacks        atomic.Uint64
+	activeFlows              atomic.Int64
+	flowsStarted             atomic.Uint64
+	flowsCompleted           atomic.Uint64
+	flowsFailed              atomic.Uint64
+	bytesUp                  atomic.Uint64
+	bytesDown                atomic.Uint64
+	laneFailures             atomic.Uint64
+	laneReplacements         atomic.Uint64
+	fallbacks                atomic.Uint64
+	tcpStandbysReady         atomic.Int64
+	tcpStandbyRegistrations  atomic.Uint64
+	tcpStandbyFailures       atomic.Uint64
+	tcpStandbyClaims         atomic.Uint64
+	quicDegradationFailovers atomic.Uint64
 	// udpPathUnavailable counts conservative differential failures: QUIC
 	// explicitly failed while TLS/TCP reached the same configured endpoint.
 	// A pending QUIC handshake and a faster TCP handshake are not failures. It
@@ -277,6 +282,9 @@ func (t *quicCounterTotals) load() QUICConnectionCounters {
 type Snapshot struct {
 	ActiveFlows, FlowsStarted, FlowsCompleted, FlowsFailed        int64
 	BytesUp, BytesDown, LaneFailures, LaneReplacements, Fallbacks uint64
+	TCPStandbysReady                                              int64
+	TCPStandbyRegistrations, TCPStandbyFailures, TCPStandbyClaims uint64
+	QUICDegradationFailovers                                      uint64
 	UDPPathUnavailable, EndpointTransportRaceFailures             uint64
 	TransientUDPSendErrors                                        uint64
 	UDPAssociationReconnects, UDPAssociationRescueFailures        uint64
@@ -311,7 +319,7 @@ type Snapshot struct {
 	QUICWireCapDebt                                               time.Duration
 	QUICSampleMean, QUICSampleMax, QUICSampleDelivered            uint64
 	QUICSampleInterval                                            time.Duration
-	QUICErasureSend                                               float64
+	QUICErasureSend, QUICErasureFloorSend, QUICCongestiveLossSend float64
 	QUICDelayBrake                                                float64
 	QUICControllerInRecovery                                      bool
 	// QUICObservationsExpired counts flow telemetry entries dropped because
@@ -353,6 +361,8 @@ type QUICObservation struct {
 	ControllerSampleDelivered  uint64
 	ControllerSampleInterval   time.Duration
 	ControllerErasure          float64
+	ControllerErasureFloor     float64
+	ControllerCongestiveLoss   float64
 	ControllerDelayBrake       float64
 	ControllerInRecovery       bool
 	ControllerWireCapRate      uint64
@@ -516,6 +526,42 @@ func (r *Registry) FlowFinished(bytesUp, bytesDown uint64, failed bool) {
 func (r *Registry) LaneFailure()     { r.laneFailures.Add(1) }
 func (r *Registry) LaneReplacement() { r.laneReplacements.Add(1) }
 func (r *Registry) Fallback()        { r.fallbacks.Add(1) }
+func (r *Registry) TCPStandbyReady() {
+	if r != nil {
+		r.tcpStandbysReady.Add(1)
+	}
+}
+func (r *Registry) TCPStandbyRegistration() {
+	if r != nil {
+		r.tcpStandbyRegistrations.Add(1)
+	}
+}
+func (r *Registry) TCPStandbyClosed() {
+	if r == nil {
+		return
+	}
+	for {
+		ready := r.tcpStandbysReady.Load()
+		if ready <= 0 || r.tcpStandbysReady.CompareAndSwap(ready, ready-1) {
+			return
+		}
+	}
+}
+func (r *Registry) TCPStandbyFailure() {
+	if r != nil {
+		r.tcpStandbyFailures.Add(1)
+	}
+}
+func (r *Registry) TCPStandbyClaim() {
+	if r != nil {
+		r.tcpStandbyClaims.Add(1)
+	}
+}
+func (r *Registry) QUICDegradationFailover() {
+	if r != nil {
+		r.quicDegradationFailovers.Add(1)
+	}
+}
 func (r *Registry) UDPPathUnavailable() {
 	r.udpPathUnavailable.Add(1)
 }
@@ -661,6 +707,9 @@ func (r *Registry) Snapshot() Snapshot {
 		FlowsCompleted: int64(r.flowsCompleted.Load()), FlowsFailed: int64(r.flowsFailed.Load()),
 		BytesUp: r.bytesUp.Load(), BytesDown: r.bytesDown.Load(), LaneFailures: r.laneFailures.Load(),
 		LaneReplacements: r.laneReplacements.Load(), Fallbacks: r.fallbacks.Load(),
+		TCPStandbysReady: r.tcpStandbysReady.Load(), TCPStandbyRegistrations: r.tcpStandbyRegistrations.Load(),
+		TCPStandbyFailures: r.tcpStandbyFailures.Load(), TCPStandbyClaims: r.tcpStandbyClaims.Load(),
+		QUICDegradationFailovers:                r.quicDegradationFailovers.Load(),
 		UDPPathUnavailable:                      r.udpPathUnavailable.Load(),
 		EndpointTransportRaceFailures:           r.endpointRaceFailures.Load(),
 		TransientUDPSendErrors:                  r.transientUDPSendErrors.Load(),
@@ -698,7 +747,7 @@ func (r *Registry) Snapshot() Snapshot {
 	var controllerLatestAckRate, controllerLatestSendRate uint64
 	var controllerRound uint64
 	var controllerMinRTT time.Duration
-	var controllerErasure, controllerDelayBrake float64
+	var controllerErasure, controllerErasureFloor, controllerCongestiveLoss, controllerDelayBrake float64
 	var sampleMean, sampleMax, sampleDelivered uint64
 	var sampleInterval time.Duration
 	var controllerRecovery bool
@@ -764,6 +813,12 @@ func (r *Registry) Snapshot() Snapshot {
 			// per-lane estimates would have meant.
 			if o.ControllerErasure > controllerErasure {
 				controllerErasure = o.ControllerErasure
+			}
+			if o.ControllerErasureFloor > controllerErasureFloor {
+				controllerErasureFloor = o.ControllerErasureFloor
+			}
+			if o.ControllerCongestiveLoss > controllerCongestiveLoss {
+				controllerCongestiveLoss = o.ControllerCongestiveLoss
 			}
 			// The widest sample any lane produced, with the interval and
 			// delivery that produced it, so the three stay from one sample.
@@ -835,6 +890,8 @@ func (r *Registry) Snapshot() Snapshot {
 	s.QUICSampleMean, s.QUICSampleMax = sampleMean, sampleMax
 	s.QUICSampleDelivered, s.QUICSampleInterval = sampleDelivered, sampleInterval
 	s.QUICErasureSend = controllerErasure
+	s.QUICErasureFloorSend = controllerErasureFloor
+	s.QUICCongestiveLossSend = controllerCongestiveLoss
 	s.QUICDelayBrake = controllerDelayBrake
 	s.QUICControllerInRecovery = controllerRecovery
 	return s
@@ -859,6 +916,11 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "niulang_lane_failures_total %d\n", s.LaneFailures)
 	fmt.Fprintf(w, "niulang_lane_replacements_total %d\n", s.LaneReplacements)
 	fmt.Fprintf(w, "niulang_fallbacks_total %d\n", s.Fallbacks)
+	fmt.Fprintf(w, "niulang_tcp_standbys_ready %d\n", s.TCPStandbysReady)
+	fmt.Fprintf(w, "niulang_tcp_standby_registrations_total %d\n", s.TCPStandbyRegistrations)
+	fmt.Fprintf(w, "niulang_tcp_standby_failures_total %d\n", s.TCPStandbyFailures)
+	fmt.Fprintf(w, "niulang_tcp_standby_claims_total %d\n", s.TCPStandbyClaims)
+	fmt.Fprintf(w, "niulang_quic_degradation_failovers_total %d\n", s.QUICDegradationFailovers)
 	fmt.Fprintf(w, "niulang_udp_path_unavailable_total %d\n", s.UDPPathUnavailable)
 	fmt.Fprintf(w, "niulang_endpoint_transport_races_failed_total %d\n", s.EndpointTransportRaceFailures)
 	fmt.Fprintf(w, "niulang_udp_transient_send_errors_total %d\n", s.TransientUDPSendErrors)
@@ -928,6 +990,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// downstream, which is the direction that was invisible when the only
 	// erasure figure published was the floor below.
 	fmt.Fprintf(w, "niulang_erasure_ratio{direction=\"send\"} %.9f\n", s.QUICErasureSend)
+	fmt.Fprintf(w, "niulang_quic_controller_erasure_floor_ratio %.9f\n", s.QUICErasureFloorSend)
+	fmt.Fprintf(w, "niulang_quic_controller_congestive_loss_ratio %.9f\n", s.QUICCongestiveLossSend)
 	// The receive direction, measured by this endpoint's decoders rather than
 	// inferred from acknowledgements. Every source symbol the peer sent ends in
 	// exactly one of the three outcomes below, so they are a denominator and

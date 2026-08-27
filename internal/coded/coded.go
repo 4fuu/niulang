@@ -752,16 +752,15 @@ func (p *Path) channel() lossmodel.Snapshot {
 		return lossmodel.Snapshot{BurstFactor: 1, ArrivalAfterLoss: 1}
 	}
 	state := p.cfg.Path.Current()
-	// The measured erasure. There is no longer a separate floor to choose
-	// wrongly between: the classifier that produced one is gone, and this is
-	// what the path is doing. Floor is set to the same figure because the
-	// snapshot type still carries the field for the estimator's own use.
+	// Total measured erasure sizes the code. Floor remains separate because it
+	// is the conservative input to congestion-control compensation; using it
+	// here would under-protect payload when sender-induced loss is present.
 	burst := state.BurstFactor
 	if burst < 1 {
 		burst = 1
 	}
 	return lossmodel.Snapshot{
-		Loss: state.Erasure, Floor: state.Erasure, Recent: state.Erasure,
+		Loss: state.Erasure, Floor: state.Floor, Recent: state.Erasure,
 		BurstFactor: burst, ArrivalAfterLoss: 1 - state.Erasure,
 		Samples: state.ObservedSamples, Decided: uint64(state.ObservedSamples),
 	}

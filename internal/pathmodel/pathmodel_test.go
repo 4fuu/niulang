@@ -10,7 +10,7 @@ import (
 // lanes' worth of samples rather than each waiting for its own, and so that
 // they agree. Lanes that disagree compensate differently and the aggregate
 // stops being predictable.
-func TestTheFloorIsPooledAcrossLanes(t *testing.T) {
+func TestErasureIsPooledAcrossLanes(t *testing.T) {
 	m := NewPathModel()
 	// Three lanes with plenty of samples agree on 0.42; a fourth has just
 	// started and has seen almost nothing.
@@ -26,6 +26,38 @@ func TestTheFloorIsPooledAcrossLanes(t *testing.T) {
 	// not have to rediscover the path.
 	if erasure < 0.4 {
 		t.Fatalf("a joining lane was left with its own uninformed erasure of %.3f", erasure)
+	}
+}
+
+func TestPathModelKeepsFloorSeparateFromErasure(t *testing.T) {
+	m := NewPathModel()
+	m.Report(1, Observation{
+		Erasure: 0.45, Floor: 0.05, BurstFactor: 2,
+		ObservedSamples: 5000, Delivered: 1e6,
+	})
+
+	state := m.Current()
+	if math.Abs(state.Erasure-0.45) > 0.001 || math.Abs(state.Floor-0.05) > 0.001 {
+		t.Fatalf("state erasure/floor = %.3f/%.3f, want 0.450/0.050", state.Erasure, state.Floor)
+	}
+}
+
+func TestKnownCleanFloorIsNotRaisedBySecondaryStartup(t *testing.T) {
+	m := NewPathModel()
+	m.Report(1, Observation{
+		Erasure: 0, Floor: 0, BurstFactor: 1,
+		ObservedSamples: 100, Delivered: 1e6,
+	})
+	state := m.Report(2, Observation{
+		Erasure: 0.45, Floor: 0.45, BurstFactor: 6,
+		ObservedSamples: 5000, Delivered: 1e6,
+	})
+
+	if state.Floor != 0 {
+		t.Fatalf("secondary startup raised a measured clean floor to %.3f", state.Floor)
+	}
+	if state.Erasure < 0.40 {
+		t.Fatalf("total erasure %.3f did not follow the secondary's measured loss", state.Erasure)
 	}
 }
 

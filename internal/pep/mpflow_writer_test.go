@@ -298,6 +298,94 @@ func TestResponseProgressRenewsLocalHalfCloseGrace(t *testing.T) {
 	}
 }
 
+// A response producer may fill its local TCP send buffer and close before the
+// proxy has carried that response over a slow path. The producer's EOF arms the
+// full-close heuristic once the request has been delivered, but cumulative ACK
+// progress proves that the remote application is still receiving the response.
+// Delayed or duplicate ACKs are not progress and must not retain an abandoned
+// flow forever.
+func TestOutboundACKProgressRenewsLocalHalfCloseGrace(t *testing.T) {
+	inner, application := net.Pipe()
+	defer application.Close()
+	outer := newAckCaptureConn(0, nil)
+	flow := newMultipathFlow(context.Background(), inner, [16]byte{1}, 7, 1024,
+		protocol.FlagAckUp, protocol.FlagAckDown, nil, nil)
+	flow.abortGrace = halfCloseGraceProbeGrace
+	flow.abortDrainGrace = 20 * time.Millisecond
+	flow.lanes[0] = &mpLane{id: 0, fc: newFrameConn(outer)}
+	flow.noteSent(0, halfCloseGraceProbeFrames)
+	flow.noteLocalClose(halfCloseGraceProbeFrames)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- flow.receiveInner(ctx) }()
+
+	// Deliver one request byte after local EOF. This is the evidence that arms
+	// the ambiguous full-close timer in the same order as the server-side page
+	// response which exposed the regression.
+	flow.events <- inboundEvent{frame: protocol.Frame{Header: protocol.Header{
+		Version: protocol.Version, Type: protocol.TypeData,
+		SessionID: [16]byte{1}, FlowID: 7, Sequence: 0,
+	}, Payload: []byte{'x'}}}
+	var got [1]byte
+	if _, err := io.ReadFull(application, got[:]); err != nil {
+		t.Fatal(err)
+	}
+
+	for sequence := uint64(1); sequence <= halfCloseGraceProbeFrames; sequence++ {
+		if sequence > 1 {
+			time.Sleep(halfCloseGraceProbeGap)
+		}
+		flow.events <- inboundEvent{frame: protocol.Frame{Header: protocol.Header{
+			Version: protocol.Version, Type: protocol.TypeAck, Flags: protocol.FlagAckUp,
+			SessionID: [16]byte{1}, FlowID: 7, Sequence: sequence,
+		}}}
+		waitCtx, waitCancel := context.WithTimeout(ctx, time.Second)
+		if err := flow.ackTrack.Wait(waitCtx, sequence-1, sequence); err != nil {
+			waitCancel()
+			t.Fatalf("cumulative ACK %d was not processed: %v", sequence, err)
+		}
+		waitCancel()
+	}
+	if flow.localAbortSent.Load() {
+		t.Fatal("advancing response ACKs were escalated to a full-close abort")
+	}
+
+	// Keep sending the last cumulative point. If arbitrary ACK traffic reset
+	// the timer this loop would run to its deadline; real inactivity must still
+	// produce a bounded abort.
+	duplicateTicker := time.NewTicker(halfCloseGraceProbeGap)
+	defer duplicateTicker.Stop()
+	duplicateDeadline := time.NewTimer(2 * halfCloseGraceProbeGrace)
+	defer duplicateDeadline.Stop()
+	for {
+		select {
+		case frame := <-outer.frames:
+			if frame.Header.Type != protocol.TypeClose || frame.Header.Flags != protocol.FlagFin|protocol.FlagCloseAbort {
+				t.Fatalf("stalled ACK progress produced type=%d flags=%#x, want CLOSE FIN|CLOSE_ABORT",
+					frame.Header.Type, frame.Header.Flags)
+			}
+			select {
+			case err := <-result:
+				if !errors.Is(err, errLocalApplicationClose) {
+					t.Fatalf("bounded abort ended receive loop with %v, want local close", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("receive loop did not end after the bounded abort drain")
+			}
+			return
+		case <-duplicateTicker.C:
+			flow.events <- inboundEvent{frame: protocol.Frame{Header: protocol.Header{
+				Version: protocol.Version, Type: protocol.TypeAck, Flags: protocol.FlagAckUp,
+				SessionID: [16]byte{1}, FlowID: 7, Sequence: halfCloseGraceProbeFrames,
+			}}}
+		case <-duplicateDeadline.C:
+			t.Fatal("duplicate ACKs retained a flow after cumulative progress stopped")
+		}
+	}
+}
+
 // The injected write failure is taken from this platform's half-close sample
 // list rather than written as syscall.EPIPE. There is no EPIPE on a Windows
 // socket -- a send there reports WSAECONNRESET or WSAECONNABORTED -- and the

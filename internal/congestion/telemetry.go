@@ -72,12 +72,12 @@ type ControllerTelemetry struct {
 	// the direction this controller sends into, pooled across the lanes that
 	// share it. It is what a code is sized from.
 	//
-	// ErasureFloor below is not a substitute for it and is not a smaller
-	// version of it. The floor is biased low on purpose so that pacing errs
-	// towards slowing down, and it is a lower envelope for the lifetime of a
-	// connection, so it keeps what a clean window established while this
-	// follows the path. On the live incident the two read 1.76% and 19.9%.
-	Erasure float64
+	// The pacing floor is not a substitute for it or merely a smaller version.
+	// That floor is biased low on purpose so pacing errs towards slowing down,
+	// while this follows the total loss the code must survive.
+	Erasure        float64
+	ErasureFloor   float64
+	CongestiveLoss float64
 	// WireCap fields describe the optional shared path pacer wrapped around
 	// this controller. The controller kind and erasure estimate remain those
 	// of the inner sender so adaptive FEC can still identify and use them.

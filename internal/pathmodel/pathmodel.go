@@ -69,8 +69,10 @@ type PathModel struct {
 
 type pathKnowledge struct {
 	erasure         float64
+	floor           float64
 	burst           float64
 	erasureKnown    bool
+	floorKnown      bool
 	observedSamples float64
 	roundTrip       time.Duration
 }
@@ -81,6 +83,7 @@ type Member uint64
 
 type report struct {
 	erasure   float64
+	floor     float64
 	burst     float64
 	observed  float64
 	delivered float64
@@ -105,6 +108,10 @@ type Observation struct {
 	// to be sized against; neither is safe to pace from.
 	Erasure     float64
 	BurstFactor float64
+	// Floor is the contributor's lower envelope of loss: the part observed
+	// even when its queue drains. It is deliberately biased low because it is
+	// the only erasure safe to compensate for by increasing the wire rate.
+	Floor float64
 	// ObservedSamples records measurement progress even while the floor is
 	// still unknown, which is what distinguishes a measured clean path from an
 	// unmeasured one.
@@ -123,6 +130,11 @@ type State struct {
 	// arrived in runs. This is what a code is sized against.
 	Erasure     float64
 	BurstFactor float64
+	// Floor is the retained lower envelope of path loss. It is separate from
+	// Erasure because the two have opposite safety biases: FEC must not
+	// under-size for total loss, while pacing must not compensate for loss the
+	// sender created itself.
+	Floor float64
 	// ObservedSamples is how many packet outcomes contributors have measured,
 	// including outcomes not yet sufficient to establish a non-zero erasure
 	// floor. It distinguishes a measured clean path from an unmeasured one
@@ -155,6 +167,11 @@ type bandwidthSample struct {
 }
 
 const (
+	// floorEvidenceSamples distinguishes a measured clean path from a new
+	// contributor whose zero-valued floor means only "unknown". It matches the
+	// controller's small-flight evidence bound and is well below the standard
+	// 100-packet path prewarm.
+	floorEvidenceSamples = 32
 	// memberIdle is how long a contributor may go without reporting before it
 	// stops counting. It is several round trips on a long-haul path, so one
 	// that is merely quiet is not evicted and made to rediscover the path.
@@ -200,7 +217,7 @@ func (m *PathModel) Report(member Member, o Observation) State {
 		entry = &report{}
 		m.members[member] = entry
 	}
-	entry.erasure, entry.burst = o.Erasure, o.BurstFactor
+	entry.erasure, entry.floor, entry.burst = o.Erasure, o.Floor, o.BurstFactor
 	entry.observed, entry.delivered, entry.at = o.ObservedSamples, o.Delivered, now
 	if o.RoundTrip > 0 {
 		entry.roundTrip = o.RoundTrip
@@ -225,6 +242,10 @@ func (m *PathModel) Report(member Member, o Observation) State {
 		if other.roundTrip > 0 && (state.RoundTrip == 0 || other.roundTrip < state.RoundTrip) {
 			state.RoundTrip = other.roundTrip
 		}
+		if other.observed >= floorEvidenceSamples &&
+			(!m.knowledge.floorKnown || other.floor < m.knowledge.floor) {
+			m.knowledge.floor, m.knowledge.floorKnown = other.floor, true
+		}
 	}
 	if observed > 0 {
 		state.Erasure = erasureWeighted / observed
@@ -233,6 +254,9 @@ func (m *PathModel) Report(member Member, o Observation) State {
 		m.knowledge.erasureKnown = true
 	} else if m.knowledge.erasureKnown {
 		state.Erasure, state.BurstFactor = m.knowledge.erasure, m.knowledge.burst
+	}
+	if m.knowledge.floorKnown {
+		state.Floor = m.knowledge.floor
 	}
 	if state.BurstFactor < 1 {
 		// A burst factor below one is not a channel, it is an unmeasured or
@@ -310,6 +334,10 @@ func (m *PathModel) Current() State {
 		if entry.roundTrip > 0 && (state.RoundTrip == 0 || entry.roundTrip < state.RoundTrip) {
 			state.RoundTrip = entry.roundTrip
 		}
+		if entry.observed >= floorEvidenceSamples &&
+			(!m.knowledge.floorKnown || entry.floor < m.knowledge.floor) {
+			m.knowledge.floor, m.knowledge.floorKnown = entry.floor, true
+		}
 	}
 	if observed > 0 {
 		state.Erasure = erasureWeighted / observed
@@ -318,6 +346,9 @@ func (m *PathModel) Current() State {
 		m.knowledge.erasureKnown = true
 	} else if m.knowledge.erasureKnown {
 		state.Erasure, state.BurstFactor = m.knowledge.erasure, m.knowledge.burst
+	}
+	if m.knowledge.floorKnown {
+		state.Floor = m.knowledge.floor
 	}
 	if state.BurstFactor < 1 {
 		// A burst factor below one is not a channel, it is an unmeasured or

@@ -83,6 +83,7 @@ type options struct {
 	verbose                 bool
 	latency                 bool
 	interactive             bool
+	page                    bool
 	singBox                 string
 	kcptunClient            string
 	kcptunServer            string
@@ -137,6 +138,7 @@ func run(args []string) error {
 	fs.BoolVar(&opts.verbose, "verbose", false, "log transport diagnostics")
 	fs.BoolVar(&opts.latency, "latency", false, "also measure small-request latency")
 	fs.BoolVar(&opts.interactive, "interactive", false, "issue small requests during the bulk transfer and report their latency")
+	fs.BoolVar(&opts.page, "page", false, "replace the uniform bulk workload with the storefront-v1 mixed-resource page profile")
 	fs.StringVar(&opts.singBox, "sing-box", "", "path to a sing-box binary, enabling the tuic and hysteria2 stacks")
 	fs.StringVar(&opts.kcptunClient, "kcptun-client", "", "path to a kcptun client binary, enabling the kcptun stack")
 	fs.StringVar(&opts.kcptunServer, "kcptun-server", "", "path to a kcptun server binary, which kcptun ships separately from its client")
@@ -207,6 +209,14 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if opts.page {
+		if len(flowCounts) != 1 || flowCounts[0] != 1 {
+			return errors.New("--page requires --flows 1")
+		}
+		if opts.contend != "" || opts.interactive {
+			return errors.New("--page cannot be combined with --contend or --interactive")
+		}
+	}
 	pathCfg := pathsim.Config{
 		OneWayDelay:            time.Duration(opts.rttMillis) * time.Millisecond / 2,
 		LossRate:               opts.lossPercent / 100,
@@ -228,9 +238,13 @@ func run(args []string) error {
 	}
 	defer origin.Close()
 
+	object := humanBytes(opts.bytes)
+	if opts.page {
+		object = fmt.Sprintf("%s/%s", storefrontPageProfile.name, humanBytes(storefrontPageProfile.totalBytes()))
+	}
 	fmt.Printf("# path rtt=%dms loss=%.2f%% burst=%.1f rate=%.1fMbit/s per_flow=%.1fMbit/s bottleneck=%s seed=%d object=%s congestion=%s\n",
 		opts.rttMillis, opts.lossPercent, opts.lossBurst, opts.rateMbits, opts.perFlowMbits, humanBottleneck(pathCfg), opts.seed,
-		humanBytes(opts.bytes), opts.congestion)
+		object, opts.congestion)
 	fmt.Printf("stack\tflows\ttrial\tseconds\tmbits_per_sec\tcomplete\tnote\n")
 
 	report := Report{
@@ -259,15 +273,21 @@ func run(args []string) error {
 			for trial := 1; trial <= opts.trials; trial++ {
 				// Each trial gets a fresh emulator and fresh proxy processes so
 				// no trial inherits another trial's congestion state or queue.
-				result := measure(stack, opts, pathCfg, origin, flows, trial)
+				var result trialResult
+				if opts.page {
+					result = measurePage(stack, opts, pathCfg, origin, trial)
+				} else {
+					result = measure(stack, opts, pathCfg, origin, flows, trial)
+				}
 				fmt.Printf("%s\t%d\t%d\t%.3f\t%.3f\t%d\t%s\n",
 					stack, flows, trial, result.seconds, result.mbitsPerSec, boolInt(result.complete), result.note)
 				report.Trials = append(report.Trials, TrialRecord{
 					Stack: stack, Flows: flows, Trial: trial,
 					Seconds: round3(result.seconds), MbitsPerSec: round3(result.mbitsPerSec),
-					Complete: result.complete, Note: result.note, Interactive: result.interactive,
-					PathCounters: result.pathCounters,
-					WireCap:      result.wireCap,
+					Complete: result.complete, Note: result.note, Interactive: result.interactive, Page: result.page,
+					BulkIsolations: result.bulkIsolations,
+					PathCounters:   result.pathCounters,
+					WireCap:        result.wireCap,
 				})
 			}
 		}
@@ -296,13 +316,15 @@ func run(args []string) error {
 }
 
 type trialResult struct {
-	seconds      float64
-	mbitsPerSec  float64
-	complete     bool
-	note         string
-	interactive  *InteractiveReport
-	pathCounters *PathCountersReport
-	wireCap      *WireCapReport
+	seconds        float64
+	mbitsPerSec    float64
+	complete       bool
+	note           string
+	interactive    *InteractiveReport
+	page           *PageReport
+	bulkIsolations uint64
+	pathCounters   *PathCountersReport
+	wireCap        *WireCapReport
 }
 
 func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin, flows, trial int) trialResult {
@@ -415,14 +437,20 @@ func measure(stack string, opts options, pathCfg pathsim.Config, origin *origin,
 		interactive = summarizeProbeReport(probes)
 		note = summarizeProbes(probes) + " " + note
 	}
+	var bulkIsolations uint64
+	if harness.clientMetrics != nil {
+		bulkIsolations = harness.clientMetrics.Snapshot().BulkIsolations
+		note += fmt.Sprintf(" bulk_isolations=%d", bulkIsolations)
+	}
 	return trialResult{
-		seconds:      elapsed.Seconds(),
-		mbitsPerSec:  float64(total) * 8 / elapsed.Seconds() / 1e6,
-		complete:     complete,
-		note:         note,
-		interactive:  interactive,
-		pathCounters: &pathCounters,
-		wireCap:      harness.wireCapReport(),
+		seconds:        elapsed.Seconds(),
+		mbitsPerSec:    float64(total) * 8 / elapsed.Seconds() / 1e6,
+		complete:       complete,
+		note:           note,
+		interactive:    interactive,
+		bulkIsolations: bulkIsolations,
+		pathCounters:   &pathCounters,
+		wireCap:        harness.wireCapReport(),
 	}
 }
 
@@ -827,9 +855,11 @@ func externalCongestion(name string) string {
 type origin struct {
 	listener      net.Listener
 	smallListener net.Listener
+	pageListener  net.Listener
 	udp           net.PacketConn
 	addr          string
 	smallAddr     string
+	pageAddr      string
 	udpAddr       string
 	smallSize     int64
 	size          int64
@@ -845,19 +875,27 @@ func newOrigin(size int64) (*origin, error) {
 		_ = listener.Close()
 		return nil, err
 	}
-	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	pageListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		_ = listener.Close()
 		_ = smallListener.Close()
 		return nil, err
 	}
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		_ = listener.Close()
+		_ = smallListener.Close()
+		_ = pageListener.Close()
+		return nil, err
+	}
 	o := &origin{
-		listener: listener, smallListener: smallListener, udp: udp,
+		listener: listener, smallListener: smallListener, pageListener: pageListener, udp: udp,
 		addr: listener.Addr().String(), smallAddr: smallListener.Addr().String(),
-		udpAddr: udp.LocalAddr().String(), size: size, smallSize: 1024,
+		pageAddr: pageListener.Addr().String(), udpAddr: udp.LocalAddr().String(), size: size, smallSize: 1024,
 	}
 	go o.serve(listener, size)
 	go o.serve(smallListener, o.smallSize)
+	go o.servePage()
 	go o.serveUDP()
 	return o, nil
 }
@@ -910,6 +948,7 @@ func (o *origin) serveUDP() {
 func (o *origin) Close() {
 	_ = o.listener.Close()
 	_ = o.smallListener.Close()
+	_ = o.pageListener.Close()
 	_ = o.udp.Close()
 }
 
@@ -935,6 +974,10 @@ type requestStages struct {
 }
 
 func fetchTimed(ctx context.Context, socksAddr, destination string, expect int64) (int64, requestStages, error) {
+	return fetchTimedRequest(ctx, socksAddr, destination, expect, []byte{'g'})
+}
+
+func fetchTimedRequest(ctx context.Context, socksAddr, destination string, expect int64, request []byte) (int64, requestStages, error) {
 	var stages requestStages
 	started := time.Now()
 	dialer := &net.Dialer{}
@@ -950,7 +993,7 @@ func fetchTimed(ctx context.Context, socksAddr, destination string, expect int64
 		return 0, stages, err
 	}
 	stages.Connect = time.Since(started)
-	if _, err := conn.Write([]byte{'g'}); err != nil {
+	if _, err := conn.Write(request); err != nil {
 		return 0, stages, err
 	}
 	var first [1]byte

@@ -387,6 +387,40 @@ func TestMutualTLSRequiresAnAuthorizedDeviceAndPinnedGateway(t *testing.T) {
 	}
 }
 
+func TestMultipleDataALPNsRetainMutualTLSAndControlIsolation(t *testing.T) {
+	now := time.Now()
+	provider := testProvider(t, "127.0.0.1:443", now)
+	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
+	profile := localProfile(t, provider, account, "laptop", now)
+	clientCredentials, _ := profile.Credentials()
+	serverConfig, err := ServerTLSConfigWithDataALPNs(provider.ServerCredentials(), []string{"queqiao/1", "niulang-standby/1"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	standbyClient, err := ClientTLSConfig(clientCredentials, "niulang-standby/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tlsHandshake(t, serverConfig, standbyClient); err != nil {
+		t.Fatalf("second mutually authenticated data ALPN failed: %v", err)
+	}
+	withoutDevice := EnrollmentTLSConfig(provider.Metadata.RootPin, provider.Metadata.ProviderID, provider.Metadata.GatewayID)
+	withoutDevice.NextProtos = []string{EnrollmentALPN, "niulang-standby/1"}
+	if err := tlsHandshake(t, serverConfig, withoutDevice); err == nil {
+		t.Fatal("mixed enrollment/data offer selected the unauthenticated enrollment profile")
+	}
+	for _, protocols := range [][]string{
+		nil,
+		{"queqiao/1", "queqiao/1"},
+		{EnrollmentALPN},
+		{RenewalALPN},
+	} {
+		if _, err := ServerTLSConfigWithDataALPNs(provider.ServerCredentials(), protocols, true); err == nil {
+			t.Fatalf("invalid data ALPN list was accepted: %#v", protocols)
+		}
+	}
+}
+
 func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

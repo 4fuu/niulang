@@ -465,7 +465,7 @@ func TestTCPFallbackCongestionNameNormalization(t *testing.T) {
 	}
 }
 
-func TestQUICConnectionsHaveAnAdmissionBound(t *testing.T) {
+func TestPhysicalConnectionsIncludeBoundedStandbyCapacity(t *testing.T) {
 	credentials, _ := testCertificate(t)
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Credentials: credentials, MaxSessions: 2,
@@ -473,18 +473,20 @@ func TestQUICConnectionsHaveAnAdmissionBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !server.admitConnection() {
-		t.Fatal("the first configured connection slot was not admitted")
+	if got := cap(server.connections); got != 3 {
+		t.Fatalf("physical connection capacity = %d, want two active slots plus one bounded standby slot", got)
 	}
-	if !server.admitConnection() {
-		t.Fatal("the configured connection capacity was not admitted")
+	for i := 0; i < cap(server.connections); i++ {
+		if !server.admitConnection() {
+			t.Fatalf("physical connection slot %d was not admitted", i+1)
+		}
 	}
 	if server.admitConnection() {
-		t.Fatal("an unauthenticated QUIC connection exceeded the admission bound")
+		t.Fatal("a physical connection exceeded the active-plus-standby admission bound")
 	}
 	server.releaseConnection()
 	if !server.admitConnection() {
-		t.Fatal("released QUIC connection capacity was not reusable")
+		t.Fatal("released physical connection capacity was not reusable")
 	}
 }
 

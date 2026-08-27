@@ -164,7 +164,7 @@ func TestSmallExchangesAreRepairedOnceThePathIsKnown(t *testing.T) {
 	// learns this from its own traffic or from the prewarm; only the floor is
 	// seeded, because a delivered rate would also claim a share of the
 	// bottleneck and that is a different experiment.
-	pathmodel.Shared(key).Report(99, pathmodel.Observation{Erasure: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 0, RoundTrip: 0})
+	pathmodel.Shared(key).Report(99, pathmodel.Observation{Erasure: 0.42, Floor: 0.42, BurstFactor: 1, ObservedSamples: 5000, Delivered: 0, RoundTrip: 0})
 	knowingSamples := exchange(10, time.Minute)
 	knowing := median(knowingSamples)
 
@@ -828,7 +828,7 @@ func TestAShortFlowCostsARoundTrip(t *testing.T) {
 	// timing test explicitly so scheduler speed under -race cannot decide how
 	// many of its measured flows run before the asynchronous prewarm finishes.
 	loopback := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
-	pathmodel.Shared(pathKey(loopback, loopback)).Report(99, pathmodel.Observation{Erasure: path.LossRate, BurstFactor: 1, ObservedSamples: 5000, Delivered: 0, RoundTrip: 0})
+	pathmodel.Shared(pathKey(loopback, loopback)).Report(99, pathmodel.Observation{Erasure: path.LossRate, Floor: path.LossRate, BurstFactor: 1, ObservedSamples: 5000, Delivered: 0, RoundTrip: 0})
 	// Warm the shared transport independently of the path measurement.
 	warm := dialWithRetries(t, socks, destination, 3)
 	request := make([]byte, 16)
