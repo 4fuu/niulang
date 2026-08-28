@@ -46,7 +46,7 @@ func defaultFlowMemoryLimits() flowMemoryLimits {
 		maxSendBytes: maxFlowOutstandingBytes, maxReceiveBytes: maxReassemblyBytes,
 		maxOutstanding: maxFlowOutstandingChunks, maxReceiveFrames: maxReassemblyFrames,
 		eventQueue: maxLaneEvents, laneWriteQueue: maxLaneWriteQueue,
-		laneControlReserve: maxLaneInteractiveReserve, frameReadBuffer: frameReadBuffer,
+		laneControlReserve: maxLaneInteractiveReserve, frameReadBuffer: defaultFrameReadBuffer,
 		maxUDPPacketBytes:  65535,
 		maxBulkConnections: isolatedBulkConns,
 	}
@@ -115,8 +115,8 @@ func resolveMemoryLimits(configured *MemoryLimits, chunkSize int) (flowMemoryLim
 	if limits.laneControlReserve < 1 || limits.laneControlReserve >= limits.laneWriteQueue {
 		return flowMemoryLimits{}, nil, nil, fmt.Errorf("lane control reserve must be smaller than the write queue")
 	}
-	if limits.frameReadBuffer < 512 || limits.frameReadBuffer > frameReadBuffer {
-		return flowMemoryLimits{}, nil, nil, fmt.Errorf("frame read buffer must be between 512 and %d bytes", frameReadBuffer)
+	if limits.frameReadBuffer < 512 || limits.frameReadBuffer > maxFrameReadBuffer {
+		return flowMemoryLimits{}, nil, nil, fmt.Errorf("frame read buffer must be between 512 and %d bytes", maxFrameReadBuffer)
 	}
 	if limits.maxUDPPacketBytes < 1280 || limits.maxUDPPacketBytes > 65535 {
 		return flowMemoryLimits{}, nil, nil, fmt.Errorf("UDP packet buffer must be between 1280 and 65535 bytes")

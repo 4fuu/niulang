@@ -2,6 +2,12 @@ package pep
 
 import "testing"
 
+func TestDefaultMemoryLimitsUseDefaultFrameReadBuffer(t *testing.T) {
+	if got := defaultFlowMemoryLimits().frameReadBuffer; got != defaultFrameReadBuffer {
+		t.Fatalf("default frame reader limit = %d, want %d", got, defaultFrameReadBuffer)
+	}
+}
+
 func TestExplicitMemoryLimitsCreateSharedBudgets(t *testing.T) {
 	configured := &MemoryLimits{
 		SendBudgetBytes: 256 * 1024, ReceiveBudgetBytes: 512 * 1024,
@@ -22,6 +28,27 @@ func TestExplicitMemoryLimitsCreateSharedBudgets(t *testing.T) {
 	}
 	if got := receive.Snapshot().Capacity; got != configured.ReceiveBudgetBytes {
 		t.Fatalf("receive capacity = %d", got)
+	}
+}
+
+func TestFrameReadMemoryLimitAllowsExplicitMaximum(t *testing.T) {
+	configured := &MemoryLimits{
+		SendBudgetBytes: 64 * 1024, ReceiveBudgetBytes: 64 * 1024,
+		MaxFlowSendBytes: 64 * 1024, MaxFlowReceiveBytes: 64 * 1024,
+		MaxFlowOutstanding: 4, MaxFlowReceiveFrames: 4,
+		EventQueueFrames: 1, LaneWriteQueueFrames: 2, LaneInteractiveReserve: 1,
+		FrameReadBufferBytes: maxFrameReadBuffer, MaxUDPPacketBytes: 2048, MaxBulkConnections: 1,
+	}
+	limits, _, _, err := resolveMemoryLimits(configured, 16*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.frameReadBuffer != maxFrameReadBuffer {
+		t.Fatalf("frame reader limit = %d, want %d", limits.frameReadBuffer, maxFrameReadBuffer)
+	}
+	configured.FrameReadBufferBytes++
+	if _, _, _, err := resolveMemoryLimits(configured, 16*1024); err == nil {
+		t.Fatal("frame reader above the explicit maximum was accepted")
 	}
 }
 

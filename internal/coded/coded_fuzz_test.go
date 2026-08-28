@@ -5,16 +5,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/4fuu/niulang/internal/fec"
 	"github.com/4fuu/niulang/internal/lossmodel"
 )
 
 // receiveOnly builds the half of a Path that arriving datagrams touch, without
-// the two goroutines New starts. onDatagram reads only these three fields, so
-// a fuzz iteration costs a decoder and an estimator rather than a scheduler.
+// the two goroutines New starts. The decoder is created by the first valid
+// source or repair, just as it is on a production Path.
 func receiveOnly() *Path {
 	return &Path{
-		decoder:   fec.NewWindowDecoder(),
 		estimator: lossmodel.New(lossmodel.Config{ReorderTolerance: 32}),
 	}
 }

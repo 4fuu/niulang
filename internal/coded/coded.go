@@ -225,8 +225,6 @@ func New(carrier Carrier, cfg Config) *Path {
 		cfg: cfg, carrier: carrier,
 		pending:   make([]outboundFrame, cfg.Pending),
 		received:  make(chan []byte, cfg.Pending),
-		encoder:   fec.NewWindowEncoder(initialWindow),
-		decoder:   fec.NewWindowDecoder(),
 		estimator: lossmodel.New(lossmodel.Config{ReorderTolerance: 32}),
 		done:      make(chan struct{}),
 	}
@@ -474,6 +472,9 @@ func (p *Path) emit(payload []byte, index, count int) error {
 	copy(vector[symbolHeader:], payload)
 
 	code := p.coding()
+	if p.encoder == nil {
+		p.encoder = fec.NewWindowEncoder(initialWindow)
+	}
 	p.encoder.SetCapacity(code.capacity)
 	esi := p.encoder.AddOwned(vector)
 	if err := p.sendSource(d, esi); err != nil {
@@ -645,6 +646,12 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		// The assembler must finish reading the vector before ownership moves
 		// to the decoder. SourceOwned permits no caller access after transfer.
 		frames = p.assembler.arrived(esi, vector, frames)
+		if _, _, _, ok := parseSymbol(vector); !ok {
+			return frames
+		}
+		if p.decoder == nil {
+			p.decoder = fec.NewWindowDecoder()
+		}
 		delivered = p.decoder.SourceOwned(esi, vector)
 	case kindRepair:
 		if len(d) < repairHeader {
@@ -660,6 +667,9 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		if count <= 0 || count > fec.MaxRepairWindow {
 			p.malformed.Add(1)
 			return nil
+		}
+		if p.decoder == nil {
+			p.decoder = fec.NewWindowDecoder()
 		}
 		delivered = p.decoder.RepairOwned(fec.RepairSymbol{
 			RID:    binary.BigEndian.Uint32(d[5:]),
@@ -979,7 +989,11 @@ type Stats struct {
 func (p *Path) Stats() Stats {
 	p.mu.Lock()
 	snapshot := p.estimator.Snapshot()
-	recovered, lost := p.decoder.Recovered(), p.assembler.lostN
+	var recovered uint64
+	if p.decoder != nil {
+		recovered = p.decoder.Recovered()
+	}
+	lost := p.assembler.lostN
 	p.mu.Unlock()
 	current := coding{}
 	if stored := p.code.Load(); stored != nil {

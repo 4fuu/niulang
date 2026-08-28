@@ -98,9 +98,13 @@ func (c *frameConn) setOpenSafetyPolicy(unconfirmed func() bool) {
 // every application that chose UDP, whatever it measures.
 func (c *frameConn) setPacketsOnStream(onStream bool) { c.packetsForcedToStream = onStream }
 
-// frameReadBuffer is sized above one default chunk so a data frame's header
-// and payload are normally satisfied from one underlying stream read.
-const frameReadBuffer = 64 * 1024
+const (
+	// defaultFrameReadBuffer holds one ordinary DATA frame so its header and
+	// payload are normally satisfied from one underlying stream read.
+	defaultFrameReadBuffer = protocol.HeaderSize + defaultChunkSize
+	// maxFrameReadBuffer is the largest explicitly configured per-lane reader.
+	maxFrameReadBuffer = 64 * 1024
+)
 
 // writeBufferRetain bounds the per-lane write buffer that survives a frame.
 // It sits above the largest ordinary DATA chunk and below protocol.MaxPayload,
@@ -117,7 +121,7 @@ type bulkProvider interface {
 }
 
 func newFrameConn(conn io.ReadWriteCloser) *frameConn {
-	return newFrameConnSized(conn, frameReadBuffer)
+	return newFrameConnSized(conn, defaultFrameReadBuffer)
 }
 
 func newFrameConnSized(conn io.ReadWriteCloser, readBuffer int) *frameConn {
@@ -135,7 +139,7 @@ func newFrameConnLimited(conn io.ReadWriteCloser, readBuffer, bulkQueueFrames in
 // newSplitFrameConn gives a lane a coded substrate for its bulk payload in
 // addition to its control stream.
 func newSplitFrameConn(control io.ReadWriteCloser, bulk *coded.Path) *frameConn {
-	return newSplitFrameConnSized(control, bulk, frameReadBuffer)
+	return newSplitFrameConnSized(control, bulk, defaultFrameReadBuffer)
 }
 
 func newSplitFrameConnSized(control io.ReadWriteCloser, bulk *coded.Path, readBuffer int) *frameConn {
@@ -143,8 +147,8 @@ func newSplitFrameConnSized(control io.ReadWriteCloser, bulk *coded.Path, readBu
 }
 
 func newSplitFrameConnLimited(control io.ReadWriteCloser, bulk *coded.Path, readBuffer, bulkQueueFrames int) *frameConn {
-	if readBuffer < 512 || readBuffer > frameReadBuffer {
-		readBuffer = frameReadBuffer
+	if readBuffer < 512 || readBuffer > maxFrameReadBuffer {
+		readBuffer = defaultFrameReadBuffer
 	}
 	if bulkQueueFrames < 1 || bulkQueueFrames > 256 {
 		bulkQueueFrames = 256
