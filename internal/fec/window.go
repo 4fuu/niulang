@@ -197,9 +197,15 @@ func (e *WindowEncoder) Held() int { return e.held }
 // Add takes a source symbol into the window and returns its identifier. The
 // symbol is copied, because the window outlives the caller's buffer.
 func (e *WindowEncoder) Add(vector []byte) uint32 {
+	return e.AddOwned(append([]byte(nil), vector...))
+}
+
+// AddOwned takes ownership of an exclusively owned source symbol and returns
+// its identifier. The caller must not access vector after calling AddOwned.
+func (e *WindowEncoder) AddOwned(vector []byte) uint32 {
 	esi := e.next
 	e.next++
-	e.ring[esi&e.mask] = append([]byte(nil), vector...)
+	e.ring[esi&e.mask] = vector
 	if e.held < len(e.ring) {
 		e.held++
 	} else {
@@ -223,8 +229,38 @@ func (e *WindowEncoder) Add(vector []byte) uint32 {
 // Shorter symbols are zero-extended, which is exactly what the receiver does
 // with them, so the two agree without saying so.
 func (e *WindowEncoder) Repair(rid uint32, count int) (RepairSymbol, bool) {
+	_, repair, ok := e.AppendRepair(nil, rid, count)
+	return repair, ok
+}
+
+// RepairVectorSize reports the vector bytes a repair over the newest count
+// symbols needs. It returns false when the encoder holds no source symbols.
+func (e *WindowEncoder) RepairVectorSize(count int) (int, bool) {
+	_, _, size, ok := e.repairBounds(count)
+	return size, ok
+}
+
+// AppendRepair appends a repair vector to dst and returns both the extended
+// destination and a symbol whose Vector names the appended region. Existing
+// bytes in dst are preserved. dst must not overlap a source vector previously
+// passed to AddOwned.
+func (e *WindowEncoder) AppendRepair(dst []byte, rid uint32, count int) ([]byte, RepairSymbol, bool) {
+	first, count, vlen, ok := e.repairBounds(count)
+	if !ok {
+		return dst, RepairSymbol{}, false
+	}
+	start := len(dst)
+	dst = append(dst, make([]byte, vlen)...)
+	vector := dst[start:]
+	for i := 0; i < count; i++ {
+		addScaled(windowCoefficient(rid, i), e.ring[(first+uint32(i))&e.mask], vector)
+	}
+	return dst, RepairSymbol{RID: rid, First: first, Count: count, Vector: vector}, true
+}
+
+func (e *WindowEncoder) repairBounds(count int) (first uint32, symbols, vectorBytes int, ok bool) {
 	if e.held == 0 {
-		return RepairSymbol{}, false
+		return 0, 0, 0, false
 	}
 	if count <= 0 || count > e.held {
 		count = e.held
@@ -232,18 +268,13 @@ func (e *WindowEncoder) Repair(rid uint32, count int) (RepairSymbol, bool) {
 	if count > MaxRepairWindow {
 		count = MaxRepairWindow
 	}
-	first := e.next - uint32(count)
-	vlen := 0
+	first = e.next - uint32(count)
 	for i := 0; i < count; i++ {
-		if n := len(e.ring[(first+uint32(i))&e.mask]); n > vlen {
-			vlen = n
+		if n := len(e.ring[(first+uint32(i))&e.mask]); n > vectorBytes {
+			vectorBytes = n
 		}
 	}
-	vector := make([]byte, vlen)
-	for i := 0; i < count; i++ {
-		addScaled(windowCoefficient(rid, i), e.ring[(first+uint32(i))&e.mask], vector)
-	}
-	return RepairSymbol{RID: rid, First: first, Count: count, Vector: vector}, true
+	return first, count, vectorBytes, true
 }
 
 // WindowDecoder reconstructs source symbols from the repairs that cover them.
@@ -330,6 +361,16 @@ const (
 
 // Source records a source symbol that arrived intact.
 func (d *WindowDecoder) Source(esi uint32, vector []byte) Delivery {
+	return d.source(esi, vector, false)
+}
+
+// SourceOwned records an intact source symbol by taking ownership of vector.
+// The caller must not access vector after calling SourceOwned.
+func (d *WindowDecoder) SourceOwned(esi uint32, vector []byte) Delivery {
+	return d.source(esi, vector, true)
+}
+
+func (d *WindowDecoder) source(esi uint32, vector []byte, owned bool) Delivery {
 	var out Delivery
 	if !d.admit(esi, &out) {
 		return out
@@ -338,9 +379,12 @@ func (d *WindowDecoder) Source(esi uint32, vector []byte) Delivery {
 	if s := &d.slots[esi&d.mask]; s.live && s.known && s.esi == esi {
 		return out
 	}
-	// The caller's buffer is its own; the window keeps this until it slides
-	// past, and every equation covering it reads it in the meantime.
-	d.substitute(esi, append([]byte(nil), vector...), &out, false)
+	if !owned {
+		// The caller's buffer is its own; the window keeps this until it slides
+		// past, and every equation covering it reads it in the meantime.
+		vector = append([]byte(nil), vector...)
+	}
+	d.substitute(esi, vector, &out, false)
 	d.harvest(&out)
 	return out
 }
@@ -348,6 +392,17 @@ func (d *WindowDecoder) Source(esi uint32, vector []byte) Delivery {
 // Repair records a repair symbol, which may complete any number of the
 // symbols its window covers -- including ones missing since long before it.
 func (d *WindowDecoder) Repair(r RepairSymbol) Delivery {
+	return d.repair(r, false)
+}
+
+// RepairOwned records a repair symbol by taking ownership of r.Vector. The
+// decoder may modify the vector while reducing its linear system, so the
+// caller must not access it after calling RepairOwned.
+func (d *WindowDecoder) RepairOwned(r RepairSymbol) Delivery {
+	return d.repair(r, true)
+}
+
+func (d *WindowDecoder) repair(r RepairSymbol, owned bool) Delivery {
 	var out Delivery
 	if r.Count <= 0 || len(r.Vector) == 0 {
 		return out
@@ -382,7 +437,10 @@ func (d *WindowDecoder) Repair(r RepairSymbol) Delivery {
 		}
 		coef[esi&d.mask] = windowCoefficient(r.RID, i)
 	}
-	d.insert(coef, append([]byte(nil), r.Vector...), &out)
+	if !owned {
+		r.Vector = append([]byte(nil), r.Vector...)
+	}
+	d.insert(coef, r.Vector, &out)
 	return out
 }
 

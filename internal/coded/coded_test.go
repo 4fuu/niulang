@@ -475,6 +475,37 @@ func TestALargeFrameIsCarriedInFragments(t *testing.T) {
 	}
 }
 
+func BenchmarkLargeFrameBufferAllocations(b *testing.B) {
+	pa, pb := newPipes(20, 0)
+	cfg := Config{SymbolBytes: 1100, RoundTrip: 60 * time.Millisecond, Path: measuredPath(0.42)}
+	sender, receiver := New(pa, cfg), New(pb, cfg)
+	b.Cleanup(func() {
+		sender.Close()
+		receiver.Close()
+	})
+	payload := make([]byte, 32*1024)
+	rand.New(rand.NewSource(21)).Read(payload)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// This is the final frame serialization buffer supplied by frameConn in
+		// production. The coded path owns it after SendOwnedTracked returns.
+		frame := append([]byte(nil), payload...)
+		if err := sender.SendOwnedTracked(frame, nil); err != nil {
+			b.Fatal(err)
+		}
+		got, err := receiver.Receive()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if !bytes.Equal(got, payload) {
+			b.Fatalf("a %d-byte frame came back as %d bytes", len(payload), len(got))
+		}
+	}
+}
+
 // A symbol lost for good costs the frames it carried and nothing behind them.
 //
 // This is the whole reason for using datagrams. A stream would have held every
@@ -584,6 +615,43 @@ func TestAnOversizedFrameIsRefused(t *testing.T) {
 	huge := make([]byte, 8<<20)
 	if err := a.Send(huge); !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("sending an 8 MiB frame returned %v, want ErrFrameTooLarge", err)
+	}
+}
+
+type failingSendCarrier struct {
+	err       error
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *failingSendCarrier) Send([]byte) error { return c.err }
+func (c *failingSendCarrier) Receive() ([]byte, error) {
+	<-c.closed
+	return nil, io.EOF
+}
+func (c *failingSendCarrier) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestCarrierSendErrorStillFailsAndReleasesAnOwnedFrame(t *testing.T) {
+	want := errors.New("send failed")
+	carrier := &failingSendCarrier{err: want, closed: make(chan struct{})}
+	path := New(carrier, Config{})
+	done := make(chan struct{})
+	if err := path.SendOwnedTracked(make([]byte, 32*1024), func() { close(done) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := path.Receive(); !errors.Is(err, want) {
+		t.Fatalf("Receive after carrier send failure = %v, want %v", err, want)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("carrier send failure did not release the owned frame")
+	}
+	if err := path.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

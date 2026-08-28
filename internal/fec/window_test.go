@@ -120,6 +120,127 @@ func TestWindowRecoversTheSymbolThatWasSent(t *testing.T) {
 	}
 }
 
+func TestWindowOwnershipAPIsRetainTransferredBuffers(t *testing.T) {
+	encoder := NewWindowEncoder(4)
+	copiedSource := []byte("copied source")
+	encoder.Add(copiedSource)
+	if &encoder.ring[0][0] == &copiedSource[0] {
+		t.Fatal("Add retained the caller's source buffer")
+	}
+	copy(copiedSource, "XXXXXXXXXXXXX")
+	if got := string(encoder.ring[0]); got != "copied source" {
+		t.Fatalf("Add's retained source changed with its caller: %q", got)
+	}
+
+	ownedSource := []byte("owned source")
+	encoder.AddOwned(ownedSource)
+	if &encoder.ring[1][0] != &ownedSource[0] {
+		t.Fatal("AddOwned copied its source buffer")
+	}
+
+	copiedDecoder := NewWindowDecoder()
+	copiedVector := []byte("copied decoder")
+	copiedDecoder.Source(0, copiedVector)
+	if &copiedDecoder.slots[0].vector[0] == &copiedVector[0] {
+		t.Fatal("Source retained the caller's vector")
+	}
+	copy(copiedVector, "XXXXXXXXXXXXXX")
+	if got := string(copiedDecoder.slots[0].vector); got != "copied decoder" {
+		t.Fatalf("Source's retained vector changed with its caller: %q", got)
+	}
+
+	ownedDecoder := NewWindowDecoder()
+	ownedVector := []byte("owned decoder")
+	ownedDecoder.SourceOwned(0, ownedVector)
+	if &ownedDecoder.slots[0].vector[0] != &ownedVector[0] {
+		t.Fatal("SourceOwned copied its vector")
+	}
+}
+
+func TestRepairOwnershipAPIsCopyOrConsumeTheirVector(t *testing.T) {
+	repair := RepairSymbol{RID: 7, First: 0, Count: 2, Vector: []byte("copied repair")}
+	copied := NewWindowDecoder()
+	copied.Repair(repair)
+	if len(copied.rows) != 1 {
+		t.Fatalf("Repair retained %d equations, want 1", len(copied.rows))
+	}
+	if &copied.rows[0].data[0] == &repair.Vector[0] {
+		t.Fatal("Repair retained the caller's vector")
+	}
+	retained := append([]byte(nil), copied.rows[0].data...)
+	clear(repair.Vector)
+	if !bytes.Equal(copied.rows[0].data, retained) {
+		t.Fatal("Repair's equation changed with the caller's vector")
+	}
+
+	owned := NewWindowDecoder()
+	ownedVector := []byte("owned repair")
+	owned.RepairOwned(RepairSymbol{RID: 7, First: 0, Count: 2, Vector: ownedVector})
+	if len(owned.rows) != 1 {
+		t.Fatalf("RepairOwned retained %d equations, want 1", len(owned.rows))
+	}
+	if &owned.rows[0].data[0] != &ownedVector[0] {
+		t.Fatal("RepairOwned copied its vector")
+	}
+}
+
+func TestAppendRepairReusesItsDestination(t *testing.T) {
+	encoder := NewWindowEncoder(4)
+	for i := uint32(0); i < 4; i++ {
+		encoder.Add(symbol(i, 100))
+	}
+	want, ok := encoder.Repair(11, 0)
+	if !ok {
+		t.Fatal("encoder produced no reference repair")
+	}
+
+	const prefix = 15
+	storage := make([]byte, prefix, prefix+len(want.Vector))
+	copy(storage, "repair header!!")
+	dst, got, ok := encoder.AppendRepair(storage, 11, 0)
+	if !ok {
+		t.Fatal("AppendRepair produced no repair")
+	}
+	if &dst[0] != &storage[0] || &got.Vector[0] != &dst[prefix] {
+		t.Fatal("AppendRepair did not reuse the destination backing array")
+	}
+	if string(dst[:prefix]) != "repair header!!" {
+		t.Fatalf("AppendRepair changed destination prefix to %q", dst[:prefix])
+	}
+	if !bytes.Equal(got.Vector, want.Vector) {
+		t.Fatal("AppendRepair produced different repair bytes")
+	}
+}
+
+func TestOwnedWindowsPreserveWrapAndDuplicateSemantics(t *testing.T) {
+	encoder := NewWindowEncoder(4)
+	encoder.next = ^uint32(0) - 1
+	vectors := [][]byte{{1}, {2}, {3}}
+	for _, vector := range vectors {
+		encoder.AddOwned(vector)
+	}
+	repair, ok := encoder.Repair(19, 0)
+	if !ok || repair.First != ^uint32(0)-1 || repair.Count != len(vectors) {
+		t.Fatalf("repair across ESI wrap = %+v, ok %v", repair, ok)
+	}
+
+	decoder := NewWindowDecoder()
+	decoder.SourceOwned(^uint32(0)-1, vectors[0])
+	decoder.SourceOwned(0, vectors[2])
+	duplicate := []byte{9}
+	decoder.SourceOwned(0, duplicate)
+	if got := decoder.slots[0].vector[0]; got != vectors[2][0] {
+		t.Fatalf("duplicate replaced source 0 with %d", got)
+	}
+	out := decoder.RepairOwned(repair)
+	if len(out.Recovered) != 1 || out.Recovered[0].ESI != ^uint32(0) {
+		t.Fatalf("repair across ESI wrap recovered %+v", out.Recovered)
+	}
+	if !bytes.Equal(out.Recovered[0].Vector, vectors[1]) {
+		t.Fatalf("wrapped symbol recovered as %x, want %x", out.Recovered[0].Vector, vectors[1])
+	}
+}
+
 // At the rate the path is measured to need, almost everything arrives.
 //
 // The rate is the erasure rate's own: to deliver one symbol where a fraction p

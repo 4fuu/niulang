@@ -52,7 +52,9 @@ import (
 // with datagrams enabled is one; so is a UDP socket.
 //
 // Close must make a blocked Receive return, because the path waits for its
-// receive loop to stop before reporting that it has.
+// receive loop to stop before reporting that it has. Send must treat its
+// argument as read-only. Receive transfers ownership of its returned datagram
+// to the path.
 type Carrier interface {
 	Send([]byte) error
 	Receive() ([]byte, error)
@@ -472,7 +474,8 @@ func callDone(done func()) {
 // emit codes one symbol, sends it, and sends whatever repairs the running rate
 // has earned by it.
 func (p *Path) emit(payload []byte, index, count int) error {
-	vector := make([]byte, symbolHeader+len(payload))
+	d := make([]byte, sourceHeader+symbolHeader+len(payload))
+	vector := d[sourceHeader:]
 	binary.BigEndian.PutUint16(vector, uint16(len(payload)))
 	binary.BigEndian.PutUint16(vector[2:], uint16(index))
 	binary.BigEndian.PutUint16(vector[4:], uint16(count))
@@ -480,8 +483,8 @@ func (p *Path) emit(payload []byte, index, count int) error {
 
 	code := p.coding()
 	p.encoder.SetCapacity(code.capacity)
-	esi := p.encoder.Add(vector)
-	if err := p.sendSource(esi, vector); err != nil {
+	esi := p.encoder.AddOwned(vector)
+	if err := p.sendSource(d, esi); err != nil {
 		return err
 	}
 	p.burstSymbols++
@@ -536,12 +539,10 @@ func (p *Path) tailRepairs(symbols int) int {
 	return want
 }
 
-func (p *Path) sendSource(esi uint32, vector []byte) error {
-	d := make([]byte, sourceHeader+len(vector))
+func (p *Path) sendSource(d []byte, esi uint32) error {
 	binary.BigEndian.PutUint32(d, p.take())
 	d[4] = kindSource
 	binary.BigEndian.PutUint32(d[5:], esi)
-	copy(d[sourceHeader:], vector)
 	_, err := p.put(d)
 	return err
 }
@@ -549,18 +550,18 @@ func (p *Path) sendSource(esi uint32, vector []byte) error {
 // sendRepair emits one repair over the newest count symbols, or over the whole
 // window when count is zero.
 func (p *Path) sendRepair(count int) error {
-	repair, ok := p.encoder.Repair(p.nextRID, count)
+	rid := p.nextRID
 	p.nextRID++
+	vectorBytes, ok := p.encoder.RepairVectorSize(count)
 	if !ok {
 		return nil
 	}
-	d := make([]byte, repairHeader+len(repair.Vector))
+	d, repair, _ := p.encoder.AppendRepair(make([]byte, repairHeader, repairHeader+vectorBytes), rid, count)
 	binary.BigEndian.PutUint32(d, p.take())
 	d[4] = kindRepair
 	binary.BigEndian.PutUint32(d[5:], repair.RID)
 	binary.BigEndian.PutUint32(d[9:], repair.First)
 	binary.BigEndian.PutUint16(d[13:], uint16(repair.Count))
-	copy(d[repairHeader:], repair.Vector)
 	sent, err := p.put(d)
 	if sent {
 		p.repairs.Add(1)
@@ -649,7 +650,7 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		esi := binary.BigEndian.Uint32(d[5:])
 		vector := d[sourceHeader:]
 		p.sources.Add(1)
-		delivered = p.decoder.Source(esi, vector)
+		delivered = p.decoder.SourceOwned(esi, vector)
 		frames = p.assembler.arrived(esi, vector, frames)
 	case kindRepair:
 		if len(d) < repairHeader {
@@ -666,7 +667,7 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 			p.malformed.Add(1)
 			return nil
 		}
-		delivered = p.decoder.Repair(fec.RepairSymbol{
+		delivered = p.decoder.RepairOwned(fec.RepairSymbol{
 			RID:    binary.BigEndian.Uint32(d[5:]),
 			First:  binary.BigEndian.Uint32(d[9:]),
 			Count:  count,
