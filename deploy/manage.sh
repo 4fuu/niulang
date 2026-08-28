@@ -1791,7 +1791,7 @@ EOF
 	done
 }
 
-legacy_system_unit_path() {
+system_unit_path() {
 	printf '%s/etc/systemd/system/%s.service\n' "$test_root" "$1"
 }
 
@@ -1814,7 +1814,7 @@ legacy_units_for_role() {
 legacy_service_role_found() {
 	legacy_service_role=$1
 	for legacy_service_unit in $(legacy_units_for_role "$legacy_service_role"); do
-		[ -f "$(legacy_system_unit_path "$legacy_service_unit")" ] && return 0
+		[ -f "$(system_unit_path "$legacy_service_unit")" ] && return 0
 		[ -f "$(legacy_user_unit_path "$legacy_service_unit")" ] && return 0
 		[ -f "$(legacy_native_unit_path "$legacy_service_unit")" ] && return 0
 	done
@@ -1852,7 +1852,7 @@ show_legacy_status() {
 		legacy_role_found "$legacy_role" || continue
 		printf '  角色: %s\n' "$legacy_role"
 		for legacy_unit in $(legacy_units_for_role "$legacy_role"); do
-			legacy_system_path=$(legacy_system_unit_path "$legacy_unit")
+			legacy_system_path=$(system_unit_path "$legacy_unit")
 			legacy_user_path=$(legacy_user_unit_path "$legacy_unit")
 			legacy_native_path=$(legacy_native_unit_path "$legacy_unit")
 			[ -f "$legacy_system_path" ] && printf '    system service: %s\n' "$legacy_system_path"
@@ -1902,7 +1902,7 @@ record_legacy_state() {
 	record_file=$2
 	: >"$record_file"
 	for record_unit in $(legacy_units_for_role "$record_role"); do
-		record_system_path=$(legacy_system_unit_path "$record_unit")
+		record_system_path=$(system_unit_path "$record_unit")
 		if [ -f "$record_system_path" ]; then
 			record_enabled=false
 			record_active=false
@@ -1932,7 +1932,7 @@ record_legacy_state() {
 stop_legacy_role() {
 	stop_role=$1
 	for stop_unit in $(legacy_units_for_role "$stop_role"); do
-		if [ -f "$(legacy_system_unit_path "$stop_unit")" ]; then
+		if [ -f "$(system_unit_path "$stop_unit")" ]; then
 			run_root systemctl disable --now "$stop_unit.service" >/dev/null 2>&1 || true
 		fi
 		if [ -f "$(legacy_user_unit_path "$stop_unit")" ]; then
@@ -1994,7 +1994,7 @@ remove_legacy_role() {
 	remove_role=$1
 	stop_legacy_role "$remove_role"
 	for remove_unit in $(legacy_units_for_role "$remove_role"); do
-		remove_system_path=$(legacy_system_unit_path "$remove_unit")
+		remove_system_path=$(system_unit_path "$remove_unit")
 		remove_user_path=$(legacy_user_unit_path "$remove_unit")
 		remove_native_path=$(legacy_native_unit_path "$remove_unit")
 		if [ -f "$remove_system_path" ]; then

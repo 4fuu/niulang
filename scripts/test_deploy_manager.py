@@ -119,7 +119,7 @@ class DeployManagerTests(unittest.TestCase):
                 "stop_legacy_role server\n"
                 f'restore_legacy_state "{snapshot}"\n'
                 "remove_legacy_role server\n"
-                'test ! -f "$(legacy_system_unit_path queqiao-server)"\n'
+                'test ! -f "$(system_unit_path queqiao-server)"\n'
                 'test -d "$(root_path /var/lib/queqiao/provider)"',
                 root,
                 {
@@ -449,6 +449,81 @@ class DeployManagerTests(unittest.TestCase):
             self.assertIn('"--local-address" "if:eth1"', updated)
             self.assertIn('"--metrics-listen" "127.0.0.1:12999"', updated)
             self.assertIn('"--log-level" "warn"', updated)
+
+    def test_systemd_server_binary_update_recognizes_installed_unit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            unit = root / "etc" / "systemd" / "system" / "niulangd.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\n", encoding="utf-8")
+            installed = root / "usr" / "local" / "bin" / "niulangd"
+            installed.parent.mkdir(parents=True)
+            installed.write_text("#!/bin/sh\necho 'niulangd old wire=2'\n", encoding="utf-8")
+            installed.chmod(0o755)
+            supplied = root / "new-niulangd"
+            supplied.write_text("#!/bin/sh\necho 'niulangd new wire=2'\n", encoding="utf-8")
+            supplied.chmod(0o755)
+
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            systemctl_log = root / "systemctl.log"
+            systemctl = fake_bin / "systemctl"
+            systemctl.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$*" >>"$SYSTEMCTL_LOG"\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+
+            result = self.run_shell(
+                'run_root() { "$@"; }\nscript_dir="$PWD/deploy"\nupdate_binary_only',
+                root,
+                {
+                    "NIULANG_BINARY": str(supplied),
+                    "NIULANG_INSTALLED_BINARY": str(installed),
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "SYSTEMCTL_LOG": str(systemctl_log),
+                    "TMPDIR": str(root),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(installed.read_text(encoding="utf-8"), supplied.read_text(encoding="utf-8"))
+            self.assertEqual(systemctl_log.read_text(encoding="utf-8"), "restart niulangd.service\n")
+            self.assertIn("已原子更新二进制并重启本机 Niulang 服务", result.stderr)
+            self.assertNotIn("not found", result.stderr)
+
+    def test_systemd_server_status_recognizes_installed_unit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            unit = root / "etc" / "systemd" / "system" / "niulangd.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\n", encoding="utf-8")
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            systemctl = fake_bin / "systemctl"
+            systemctl.write_text(
+                "#!/bin/sh\n"
+                'test "$*" = "is-active --quiet niulangd.service" || exit 1\n'
+                'exit "${SYSTEMCTL_RESULT:-0}"\n',
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+            environment = {"PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+            active = self.run_shell("print_service_status server", root, environment)
+            inactive = self.run_shell(
+                "print_service_status server",
+                root,
+                {**environment, "SYSTEMCTL_RESULT": "3"},
+            )
+
+            self.assertEqual(active.returncode, 0, active.stderr)
+            self.assertIn("server   active", active.stdout)
+            self.assertEqual(inactive.returncode, 0, inactive.stderr)
+            self.assertIn("server   inactive", inactive.stdout)
+            self.assertNotIn("not found", active.stderr + inactive.stderr)
 
     def test_native_binary_install_and_service_definition_roll_back(self):
         with tempfile.TemporaryDirectory() as directory:
