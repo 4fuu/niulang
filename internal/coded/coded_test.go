@@ -2,6 +2,7 @@ package coded
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/rand"
@@ -450,6 +451,33 @@ func TestWaitingFramesShareASymbol(t *testing.T) {
 	// with no packing at all.
 	if sent >= frames*3 {
 		t.Fatalf("%d datagrams for %d frames: frames are not sharing symbols", sent, frames)
+	}
+}
+
+func TestSingleSymbolFrameDoesNotAliasDecoderStorage(t *testing.T) {
+	path := receiveOnly()
+	want := []byte("exclusively owned frame")
+	d := make([]byte, sourceHeader+symbolHeader+frameHeader+len(want))
+	d[4] = kindSource
+	vector := d[sourceHeader:]
+	binary.BigEndian.PutUint16(vector, uint16(frameHeader+len(want)))
+	binary.BigEndian.PutUint16(vector[4:], 1)
+	binary.BigEndian.PutUint32(vector[symbolHeader:], uint32(len(want)))
+	copy(vector[symbolHeader+frameHeader:], want)
+
+	frames := path.onDatagram(d)
+	if len(frames) != 1 || !bytes.Equal(frames[0], want) {
+		t.Fatalf("single source delivered %q, want %q", frames, want)
+	}
+	retained := vector[symbolHeader+frameHeader:]
+	if &frames[0][0] == &retained[0] {
+		t.Fatal("delivered frame aliases decoder-retained source storage")
+	}
+	// d's vector is now decoder-owned. Deliberately corrupt that retained
+	// storage to prove the frame already handed upward remains independent.
+	clear(retained)
+	if !bytes.Equal(frames[0], want) {
+		t.Fatalf("delivered frame changed with decoder storage: %q", frames[0])
 	}
 }
 

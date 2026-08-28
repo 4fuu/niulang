@@ -650,8 +650,10 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		esi := binary.BigEndian.Uint32(d[5:])
 		vector := d[sourceHeader:]
 		p.sources.Add(1)
-		delivered = p.decoder.SourceOwned(esi, vector)
+		// The assembler must finish reading the vector before ownership moves
+		// to the decoder. SourceOwned permits no caller access after transfer.
 		frames = p.assembler.arrived(esi, vector, frames)
+		delivered = p.decoder.SourceOwned(esi, vector)
 	case kindRepair:
 		if len(d) < repairHeader {
 			return nil
@@ -797,6 +799,8 @@ func parseFrames(payload []byte, out [][]byte) [][]byte {
 		if uint64(size) > uint64(len(payload)) {
 			break
 		}
+		// The decoder retains the source vector that backs payload. Copy only
+		// the frame bytes so each frame handed upward has exclusive ownership.
 		out = append(out, append([]byte(nil), payload[:size]...))
 		payload = payload[size:]
 	}
