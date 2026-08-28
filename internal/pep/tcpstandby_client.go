@@ -2,6 +2,7 @@ package pep
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -13,9 +14,51 @@ import (
 
 const (
 	standbyHeartbeatInterval = time.Second
+	standbyHeartbeatPhaseMax = 100 * time.Millisecond
 	standbyHealthyFor        = 4 * time.Second
 	standbyRetryMax          = 30 * time.Second
 )
+
+type standbyHeartbeatSchedule struct {
+	origin   time.Time
+	interval time.Duration
+	phaseMax time.Duration
+	slot     uint64
+	random   uint64
+}
+
+func newStandbyHeartbeatSchedule(origin time.Time, generation [16]byte) standbyHeartbeatSchedule {
+	return standbyHeartbeatSchedule{
+		origin:   origin,
+		interval: standbyHeartbeatInterval,
+		phaseMax: standbyHeartbeatPhaseMax,
+		random: binary.LittleEndian.Uint64(generation[:8]) ^
+			binary.LittleEndian.Uint64(generation[8:]),
+	}
+}
+
+func (s *standbyHeartbeatSchedule) nextSlot() time.Time {
+	s.slot++
+	s.random += 0x9e3779b97f4a7c15
+	random := s.random
+	random = (random ^ (random >> 30)) * 0xbf58476d1ce4e5b9
+	random = (random ^ (random >> 27)) * 0x94d049bb133111eb
+	random ^= random >> 31
+	phase := time.Duration(0)
+	if s.phaseMax > 0 {
+		phase = time.Duration(random % uint64(s.phaseMax+1))
+	}
+	return s.origin.Add(time.Duration(s.slot)*s.interval + phase)
+}
+
+func (s *standbyHeartbeatSchedule) nextAfter(now time.Time) time.Time {
+	for {
+		next := s.nextSlot()
+		if next.After(now) {
+			return next
+		}
+	}
+}
 
 type tcpStandby struct {
 	mu         sync.Mutex
@@ -124,6 +167,30 @@ func (s *tcpStandby) close() {
 	_ = s.fc.Close()
 }
 
+func (s *tcpStandby) maintainHeartbeats(ctx context.Context, schedule standbyHeartbeatSchedule) (bool, error) {
+	timer := time.NewTimer(time.Until(schedule.nextAfter(time.Now())))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false, nil
+		case <-s.claimedCh:
+			return true, nil
+		case <-timer.C:
+			// Arm the next absolute slot before the heartbeat. If the exchange is
+			// slow, the timer retains at most one pending event just like a ticker;
+			// nextAfter then drops any additional elapsed slots.
+			timer.Reset(time.Until(schedule.nextAfter(time.Now())))
+			if err := s.heartbeat(); err != nil {
+				if errors.Is(err, errStandbyClaimed) {
+					return true, nil
+				}
+				return false, err
+			}
+		}
+	}
+}
+
 func (c *Client) publishTCPStandby(standby *tcpStandby) bool {
 	c.standbyMu.Lock()
 	defer c.standbyMu.Unlock()
@@ -214,26 +281,11 @@ func (c *Client) maintainTCPStandby(ctx context.Context) {
 		}
 		backoff = time.Second
 		c.cfg.Logger.Debug("TCP standby ready")
-		ticker := time.NewTicker(standbyHeartbeatInterval)
-		claimed := false
-	readyLoop:
-		for {
-			select {
-			case <-ctx.Done():
-				break readyLoop
-			case <-standby.claimedCh:
-				claimed = true
-				break readyLoop
-			case <-ticker.C:
-				if err := standby.heartbeat(); err != nil {
-					if !errors.Is(err, errStandbyClaimed) {
-						c.metrics.TCPStandbyFailure()
-					}
-					break readyLoop
-				}
-			}
+		schedule := newStandbyHeartbeatSchedule(time.Now(), standby.generation)
+		claimed, err := standby.maintainHeartbeats(ctx, schedule)
+		if err != nil {
+			c.metrics.TCPStandbyFailure()
 		}
-		ticker.Stop()
 		c.removeTCPStandby(standby)
 		if claimed {
 			select {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -13,6 +14,164 @@ import (
 	"github.com/4fuu/niulang/internal/identity"
 	"github.com/4fuu/niulang/internal/protocol"
 )
+
+func TestStandbyHeartbeatScheduleUsesOneBoundedPhasePerSlot(t *testing.T) {
+	origin := time.Unix(1_700_000_000, 0)
+	generation := [16]byte{0x42, 0x17, 0xa9, 0x31, 0x55, 0xc3, 0x08, 0xfe, 0x91, 0x26, 0x73, 0xdd, 0x04, 0xb8, 0x6a, 0x5c}
+	schedule := newStandbyHeartbeatSchedule(origin, generation)
+	const slots = 10_000
+	intervals := make(map[time.Duration]struct{}, slots-1)
+	var previous time.Time
+	var sum, sumSquares float64
+	for slot := 1; slot <= slots; slot++ {
+		deadline := schedule.nextSlot()
+		slotStart := origin.Add(time.Duration(slot) * standbyHeartbeatInterval)
+		phase := deadline.Sub(slotStart)
+		if phase < 0 || phase > standbyHeartbeatPhaseMax {
+			t.Fatalf("slot %d phase = %v, want 0..%v", slot, phase, standbyHeartbeatPhaseMax)
+		}
+		if slot > 1 {
+			interval := deadline.Sub(previous)
+			if interval < standbyHeartbeatInterval-standbyHeartbeatPhaseMax || interval > standbyHeartbeatInterval+standbyHeartbeatPhaseMax {
+				t.Fatalf("slot %d interval = %v, want %v..%v", slot, interval, standbyHeartbeatInterval-standbyHeartbeatPhaseMax, standbyHeartbeatInterval+standbyHeartbeatPhaseMax)
+			}
+			intervals[interval] = struct{}{}
+			seconds := interval.Seconds()
+			sum += seconds
+			sumSquares += seconds * seconds
+		}
+		previous = deadline
+	}
+	if schedule.slot != slots {
+		t.Fatalf("scheduled slots = %d, want %d", schedule.slot, slots)
+	}
+	if len(intervals) < slots*9/10 {
+		t.Fatalf("unique intervals = %d, want at least %d", len(intervals), slots*9/10)
+	}
+	count := float64(slots - 1)
+	mean := sum / count
+	standardDeviation := math.Sqrt(sumSquares/count - mean*mean)
+	if standardDeviation < 35*time.Millisecond.Seconds() || standardDeviation > 45*time.Millisecond.Seconds() {
+		t.Fatalf("interval standard deviation = %.6fs, want 0.035s..0.045s", standardDeviation)
+	}
+	t.Logf("fixed schedule: unique_intervals=1 standard_deviation=0s")
+	t.Logf("phased schedule: samples=%d unique_intervals=%d mean=%.9fs standard_deviation=%.9fs", slots-1, len(intervals), mean, standardDeviation)
+
+	otherGeneration := generation
+	otherGeneration[0]++
+	other := newStandbyHeartbeatSchedule(origin, otherGeneration)
+	independent := false
+	schedule = newStandbyHeartbeatSchedule(origin, generation)
+	for range 32 {
+		if !schedule.nextSlot().Equal(other.nextSlot()) {
+			independent = true
+			break
+		}
+	}
+	if !independent {
+		t.Fatal("different standby generations produced the same phase sequence")
+	}
+}
+
+func TestStandbyHeartbeatScheduleRetainsOnePendingTickAndSkipsOlderSlots(t *testing.T) {
+	origin := time.Unix(1_700_000_000, 0)
+	schedule := newStandbyHeartbeatSchedule(origin, [16]byte{1})
+	first := schedule.nextAfter(origin)
+	pending := schedule.nextAfter(first)
+	if schedule.slot != 2 || pending.Before(origin.Add(2*standbyHeartbeatInterval)) {
+		t.Fatalf("pending deadline = %v in slot %d, want slot 2", pending, schedule.slot)
+	}
+	next := schedule.nextAfter(origin.Add(3500 * time.Millisecond))
+	if schedule.slot != 4 {
+		t.Fatalf("next slot = %d, want slot 4 after retaining slot 2 and dropping slot 3", schedule.slot)
+	}
+	slotStart := origin.Add(4 * standbyHeartbeatInterval)
+	if next.Before(slotStart) || next.After(slotStart.Add(standbyHeartbeatPhaseMax)) {
+		t.Fatalf("next deadline = %v, want fourth slot %v..%v", next, slotStart, slotStart.Add(standbyHeartbeatPhaseMax))
+	}
+}
+
+func TestStandbyHeartbeatPhaseWaitStopsImmediately(t *testing.T) {
+	newWaitingStandby := func() (*tcpStandby, net.Conn) {
+		local, peer := net.Pipe()
+		return &tcpStandby{
+			outer: local, fc: newFrameConn(local), generation: [16]byte{1},
+			lastAck: time.Now(), claimedCh: make(chan struct{}), finishedCh: make(chan struct{}),
+		}, peer
+	}
+	newSchedule := func() standbyHeartbeatSchedule {
+		schedule := newStandbyHeartbeatSchedule(time.Now(), [16]byte{1})
+		schedule.interval = 250 * time.Millisecond
+		schedule.phaseMax = 25 * time.Millisecond
+		return schedule
+	}
+
+	t.Run("claim", func(t *testing.T) {
+		standby, peer := newWaitingStandby()
+		defer peer.Close()
+		result := make(chan bool, 1)
+		go func() {
+			claimed, err := standby.maintainHeartbeats(context.Background(), newSchedule())
+			result <- claimed && err == nil
+		}()
+		time.Sleep(10 * time.Millisecond)
+		started := time.Now()
+		if !standby.claim(started) {
+			t.Fatal("standby claim failed")
+		}
+		select {
+		case ok := <-result:
+			if !ok {
+				t.Fatal("heartbeat wait did not report the claim")
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("claim waited for the heartbeat phase timer")
+		}
+		if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+			t.Fatalf("claim interruption took %v", elapsed)
+		}
+		standby.close()
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		standby, peer := newWaitingStandby()
+		defer peer.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			claimed, err := standby.maintainHeartbeats(ctx, newSchedule())
+			if claimed {
+				result <- errors.New("heartbeat wait reported a claim")
+				return
+			}
+			result <- err
+		}()
+		time.Sleep(10 * time.Millisecond)
+		started := time.Now()
+		cancel()
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("cancellation waited for the heartbeat phase timer")
+		}
+		if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+			t.Fatalf("cancellation interruption took %v", elapsed)
+		}
+		standby.close()
+	})
+}
+
+func BenchmarkStandbyHeartbeatSchedule(b *testing.B) {
+	schedule := newStandbyHeartbeatSchedule(time.Unix(1_700_000_000, 0), [16]byte{1, 2, 3, 4})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = schedule.nextSlot()
+	}
+}
 
 func TestTCPStandbyRegistersHeartbeatsAndClaims(t *testing.T) {
 	certificate, roots := testCertificate(t)
