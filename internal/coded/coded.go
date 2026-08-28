@@ -142,11 +142,14 @@ type Path struct {
 	cfg     Config
 	carrier Carrier
 
-	pending  []outboundFrame
-	sendMu   sync.Mutex
-	sendWake chan struct{}
-	closed   bool
-	received chan []byte
+	pending     []outboundFrame
+	pendingHead int
+	pendingLen  int
+	sendMu      sync.Mutex
+	sendReady   *sync.Cond
+	sendSpace   *sync.Cond
+	closed      bool
+	received    chan []byte
 
 	// The sending side belongs to one goroutine, and nothing else touches it.
 	encoder *fec.WindowEncoder
@@ -220,14 +223,15 @@ func New(carrier Carrier, cfg Config) *Path {
 	cfg = cfg.withDefaults()
 	p := &Path{
 		cfg: cfg, carrier: carrier,
-		pending:   make([]outboundFrame, 0, cfg.Pending),
-		sendWake:  make(chan struct{}),
+		pending:   make([]outboundFrame, cfg.Pending),
 		received:  make(chan []byte, cfg.Pending),
 		encoder:   fec.NewWindowEncoder(initialWindow),
 		decoder:   fec.NewWindowDecoder(),
 		estimator: lossmodel.New(lossmodel.Config{ReorderTolerance: 32}),
 		done:      make(chan struct{}),
 	}
+	p.sendReady = sync.NewCond(&p.sendMu)
+	p.sendSpace = sync.NewCond(&p.sendMu)
 	p.wg.Add(2)
 	go p.sendLoop()
 	go p.receiveLoop()
@@ -264,26 +268,17 @@ func (p *Path) SendOwnedTracked(frame []byte, done func()) error {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(frame))
 	}
 	queued := outboundFrame{frame: frame, done: done}
-	for {
-		p.sendMu.Lock()
-		if p.closed {
-			p.sendMu.Unlock()
-			return p.failure()
-		}
-		if len(p.pending) < cap(p.pending) {
-			p.pending = append(p.pending, queued)
-			p.signalSendSpaceLocked()
-			p.sendMu.Unlock()
-			return nil
-		}
-		wake := p.sendWake
-		p.sendMu.Unlock()
-		select {
-		case <-wake:
-		case <-p.done:
-			return p.failure()
-		}
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
+	for !p.closed && p.pendingLen == len(p.pending) {
+		p.sendSpace.Wait()
 	}
+	if p.closed {
+		return p.failure()
+	}
+	p.pushPendingLocked(queued)
+	p.sendReady.Signal()
+	return nil
 }
 
 // Receive returns the next frame to arrive, repaired if it had to be.
@@ -344,42 +339,35 @@ func (p *Path) sendLoop() {
 	}
 }
 
-// takePending removes one queued frame. A blocking caller sleeps on a channel
-// generation that every queue or close transition replaces, waking all
-// waiters without accepting a frame after close.
+// takePending removes one queued frame. A blocking caller waits on the same
+// mutex that makes close and queue insertion mutually exclusive, so no frame
+// can be accepted after close.
 func (p *Path) takePending(block bool) (outboundFrame, bool) {
-	for {
-		p.sendMu.Lock()
-		if p.closed {
-			p.sendMu.Unlock()
-			return outboundFrame{}, false
-		}
-		if len(p.pending) > 0 {
-			frame := p.pending[0]
-			copy(p.pending, p.pending[1:])
-			p.pending[len(p.pending)-1] = outboundFrame{}
-			p.pending = p.pending[:len(p.pending)-1]
-			p.signalSendSpaceLocked()
-			p.sendMu.Unlock()
-			return frame, true
-		}
-		if !block {
-			p.sendMu.Unlock()
-			return outboundFrame{}, false
-		}
-		wake := p.sendWake
-		p.sendMu.Unlock()
-		select {
-		case <-wake:
-		case <-p.done:
-			return outboundFrame{}, false
-		}
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
+	for !p.closed && block && p.pendingLen == 0 {
+		p.sendReady.Wait()
 	}
+	if p.closed || p.pendingLen == 0 {
+		return outboundFrame{}, false
+	}
+	frame := p.popPendingLocked()
+	p.sendSpace.Signal()
+	return frame, true
 }
 
-func (p *Path) signalSendSpaceLocked() {
-	close(p.sendWake)
-	p.sendWake = make(chan struct{})
+func (p *Path) pushPendingLocked(frame outboundFrame) {
+	tail := (p.pendingHead + p.pendingLen) % len(p.pending)
+	p.pending[tail] = frame
+	p.pendingLen++
+}
+
+func (p *Path) popPendingLocked() outboundFrame {
+	frame := p.pending[p.pendingHead]
+	p.pending[p.pendingHead] = outboundFrame{}
+	p.pendingHead = (p.pendingHead + 1) % len(p.pending)
+	p.pendingLen--
+	return frame
 }
 
 // abandonPending releases scheduling credit for frames the path did not hand
@@ -388,10 +376,14 @@ func (p *Path) signalSendSpaceLocked() {
 func (p *Path) abandonPending() {
 	p.sendMu.Lock()
 	pending := p.pending
-	p.pending = p.pending[:0]
-	p.signalSendSpaceLocked()
+	head, count := p.pendingHead, p.pendingLen
+	p.pendingHead, p.pendingLen = 0, 0
+	p.sendSpace.Broadcast()
 	p.sendMu.Unlock()
-	for _, frame := range pending {
+	for i := 0; i < count; i++ {
+		index := (head + i) % len(pending)
+		frame := pending[index]
+		pending[index] = outboundFrame{}
 		callDone(frame.done)
 	}
 	for _, done := range p.packedDone {
@@ -1045,7 +1037,8 @@ func (p *Path) closePath() {
 	}
 	p.closed = true
 	p.closeOnce.Do(func() { close(p.done) })
-	p.signalSendSpaceLocked()
+	p.sendReady.Broadcast()
+	p.sendSpace.Broadcast()
 }
 
 func (p *Path) failure() error {

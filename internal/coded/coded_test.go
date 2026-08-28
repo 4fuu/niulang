@@ -181,9 +181,11 @@ func TestSendAPIsCopyCallerBuffer(t *testing.T) {
 			}
 			copy(frame, "XXXXXXXXXXXX")
 
-			path.sendMu.Lock()
-			got := string(path.pending[0].frame)
-			path.sendMu.Unlock()
+			queued, ok := path.takePending(false)
+			if !ok {
+				t.Fatal("copied frame was not queued")
+			}
+			got := string(queued.frame)
 			if got != "caller bytes" {
 				t.Fatalf("queued frame changed with caller buffer: got %q", got)
 			}
@@ -209,9 +211,11 @@ func TestSendOwnedTrackedTakesCallerBuffer(t *testing.T) {
 	if err := path.SendOwnedTracked(frame, nil); err != nil {
 		t.Fatal(err)
 	}
-	path.sendMu.Lock()
-	queued := path.pending[0].frame
-	path.sendMu.Unlock()
+	queuedFrame, ok := path.takePending(false)
+	if !ok {
+		t.Fatal("owned frame was not queued")
+	}
+	queued := queuedFrame.frame
 	if &queued[0] != &frame[0] {
 		t.Fatal("owned send copied the caller's buffer")
 	}
@@ -250,12 +254,11 @@ func BenchmarkSendTrackedAllocations(b *testing.B) {
 				b.Fatal(err)
 			}
 			if (i+1)%batch == 0 {
-				path.sendMu.Lock()
-				for j := range path.pending {
-					path.pending[j] = outboundFrame{}
+				for j := 0; j < batch; j++ {
+					if _, ok := path.takePending(false); !ok {
+						b.Fatal("queued frame was not available")
+					}
 				}
-				path.pending = path.pending[:0]
-				path.sendMu.Unlock()
 			}
 		}
 		b.StopTimer()
