@@ -326,14 +326,19 @@ type multipathFlow struct {
 	remoteFinSequence atomic.Uint64
 	finSent           atomic.Bool
 	remoteFinSeen     atomic.Bool
-	localClosed       atomic.Bool
-	localClosedOnce   sync.Once
-	localClosedCh     chan struct{}
-	remoteAbort       atomic.Bool
-	remoteAbortOnce   sync.Once
-	remoteAbortCh     chan struct{}
-	localAbortSent    atomic.Bool
-	laneFailures      atomic.Uint64
+	// completionWake coalesces notifications for the two monotonic FIN
+	// states. Their atomic flags remain the source of truth, so a notification
+	// arriving before the watchdog starts, or two arriving together, cannot
+	// be lost.
+	completionWake  chan struct{}
+	localClosed     atomic.Bool
+	localClosedOnce sync.Once
+	localClosedCh   chan struct{}
+	remoteAbort     atomic.Bool
+	remoteAbortOnce sync.Once
+	remoteAbortCh   chan struct{}
+	localAbortSent  atomic.Bool
+	laneFailures    atomic.Uint64
 	// openAckPending is set only when the caller waited for nothing. The
 	// application may begin sending immediately, but the eventual OPEN_OK is
 	// still required on the authenticated stream and is consumed by the flow
@@ -421,7 +426,7 @@ func newMultipathFlowWithMemory(ctx context.Context, inner net.Conn, sessionID [
 		lanes: make(map[uint64]*mpLane), events: make(chan inboundEvent, memoryLimits.eventQueue), laneErr: make(chan laneFailure, memoryLimits.eventQueue),
 		finalAck: make(chan struct{}, 1), sendDone: make(chan struct{}),
 		done: make(chan struct{}), localClosedCh: make(chan struct{}), remoteAbortCh: make(chan struct{}),
-		ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1),
+		ackWake: make(chan struct{}, 1), ackErr: make(chan error, 1), completionWake: make(chan struct{}, 1),
 		classifier: classifier.New(classifier.DefaultConfig()), started: time.Now(), completionGrace: flowCompletionGrace,
 	}
 	f.idleTimeout = defaultFlowIdleTimeout
@@ -1612,42 +1617,58 @@ func (f *multipathFlow) waitForRemoteFIN(ctx context.Context, timeout time.Durat
 	}
 }
 
+func (f *multipathFlow) notifyCompletionState() {
+	if f.completionWake == nil {
+		return
+	}
+	select {
+	case f.completionWake <- struct{}{}:
+	default:
+	}
+}
+
+func (f *multipathFlow) noteLocalFINSent() {
+	f.finSent.Store(true)
+	f.notifyCompletionState()
+}
+
+func (f *multipathFlow) noteRemoteFINSeen() {
+	f.remoteFinSeen.Store(true)
+	f.notifyCompletionState()
+}
+
 // completionWatchdog handles the one remaining shutdown race that transport
 // recovery cannot solve: both application FINs are known, but the final ACK
 // is lost while the last physical lane is closing. The FIN pair is the
-// correctness boundary; after a small grace period it is safe to release all
-// workers and lanes. Normal completion stops run before this timer fires.
+// correctness boundary; only after observing that pair does the watchdog own
+// a timer. Normal completion stops run before this timer fires.
 func (f *multipathFlow) completionWatchdog(stop <-chan struct{}) {
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
 	grace := f.completionGrace
 	if grace <= 0 {
 		grace = flowCompletionGrace
 	}
-	var bothSince time.Time
-	for {
+	for !f.finSent.Load() || !f.remoteFinSeen.Load() {
 		select {
-		case <-ticker.C:
-			if f.finSent.Load() && f.remoteFinSeen.Load() {
-				if bothSince.IsZero() {
-					bothSince = time.Now()
-					continue
-				}
-				if time.Since(bothSince) >= grace {
-					if f.metrics != nil {
-						f.metrics.CompletionTimeout()
-					}
-					f.closeAll()
-					return
-				}
-			} else {
-				bothSince = time.Time{}
-			}
+		case <-f.completionWake:
 		case <-stop:
 			return
 		case <-f.ctx.Done():
 			return
+		case <-f.done:
+			return
 		}
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		if f.metrics != nil {
+			f.metrics.CompletionTimeout()
+		}
+		f.closeAll()
+	case <-stop:
+	case <-f.ctx.Done():
+	case <-f.done:
 	}
 }
 
@@ -2282,7 +2303,7 @@ func (f *multipathFlow) ackLoop(ctx context.Context) {
 
 func (f *multipathFlow) acknowledgeRemoteFIN(ctx context.Context, sequence uint64, abort bool) error {
 	f.remoteFinSequence.Store(sequence)
-	f.remoteFinSeen.Store(true)
+	f.noteRemoteFINSeen()
 	f.ackClosing.Store(true)
 	if abort {
 		// Publish cancellation before any best-effort close or ACK. The send

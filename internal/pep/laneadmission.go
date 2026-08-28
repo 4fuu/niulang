@@ -95,3 +95,13 @@ func (f *multipathFlow) sampleLaneCongestion(ctx context.Context) {
 		}
 	}
 }
+
+// startLaneCongestionSampler avoids giving every flow a goroutine and ticker
+// for telemetry that has no consumer unless lane tracing is enabled.
+func (f *multipathFlow) startLaneCongestionSampler(ctx context.Context) bool {
+	if !laneTrace.Load() {
+		return false
+	}
+	go f.sampleLaneCongestion(ctx)
+	return true
+}

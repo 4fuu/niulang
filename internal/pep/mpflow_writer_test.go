@@ -178,11 +178,12 @@ func TestCompletionWatchdogReleasesProvenCompleteFlow(t *testing.T) {
 	flow := &multipathFlow{
 		ctx: context.Background(), inner: inner, done: make(chan struct{}),
 		lanes: make(map[uint64]*mpLane), metrics: registry, completionGrace: 10 * time.Millisecond,
+		completionWake: make(chan struct{}, 1),
 	}
 	stop := make(chan struct{})
 	go flow.completionWatchdog(stop)
-	flow.finSent.Store(true)
-	flow.remoteFinSeen.Store(true)
+	flow.noteLocalFINSent()
+	flow.noteRemoteFINSeen()
 	select {
 	case <-flow.done:
 	case <-time.After(time.Second):
@@ -1114,7 +1115,7 @@ func TestProvenCompleteFlowDoesNotWaitForLaneReplacementForFinalACK(t *testing.T
 		ctx: context.Background(), done: make(chan struct{}),
 		lanes: make(map[uint64]*mpLane),
 	}
-	flow.finSent.Store(true)
+	flow.noteLocalFINSent()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()

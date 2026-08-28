@@ -283,7 +283,7 @@ func (f *multipathFlow) sendInnerStriped(ctx context.Context) (err error) {
 	}
 	go f.superviseChunks(sendCtx, sched)
 	go f.watchChunkCompletion(sendCtx, sched)
-	go f.sampleLaneCongestion(sendCtx)
+	f.startLaneCongestionSampler(sendCtx)
 
 	select {
 	case <-sched.Done():
@@ -368,14 +368,30 @@ func (f *multipathFlow) startLanePuller(ctx context.Context, lane *mpLane, sched
 func (f *multipathFlow) runLanePuller(ctx context.Context, lane *mpLane, sched *stripe.Scheduler) {
 	defer lane.pulling.Store(false)
 	defer sched.RetireLane(lane.id)
+	poll := time.NewTimer(laneEligibilityPoll)
+	if !poll.Stop() {
+		select {
+		case <-poll.C:
+		default:
+		}
+	}
+	defer func() {
+		if !poll.Stop() {
+			select {
+			case <-poll.C:
+			default:
+			}
+		}
+	}()
 	for {
 		if lane.closed.Load() || f.doneChanClosed() {
 			return
 		}
 		bulk := protocol.Class(f.class.Load()) == protocol.ClassBulk
 		if !f.laneCarriesData(lane, bulk) {
+			poll.Reset(laneEligibilityPoll)
 			select {
-			case <-time.After(laneEligibilityPoll):
+			case <-poll.C:
 				continue
 			case <-ctx.Done():
 				return
@@ -551,7 +567,7 @@ func (f *multipathFlow) sendFinal(ctx context.Context, sequence uint64) error {
 	// Publish the logical FIN before enqueueing it: a lane writer can fail
 	// immediately, and recovery must know the FIN is pending so it replays it
 	// rather than treating the flow as one-sided.
-	f.finSent.Store(true)
+	f.noteLocalFINSent()
 	if err := f.enqueueOnHealthyLane(ctx, fin, false); err != nil {
 		return err
 	}
