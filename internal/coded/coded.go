@@ -645,8 +645,9 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		p.sources.Add(1)
 		// The assembler must finish reading the vector before ownership moves
 		// to the decoder. SourceOwned permits no caller access after transfer.
-		frames = p.assembler.arrived(esi, vector, frames)
-		if _, _, _, ok := parseSymbol(vector); !ok {
+		var valid bool
+		frames, valid = p.assembler.arrived(esi, vector, frames)
+		if !valid {
 			return frames
 		}
 		if p.decoder == nil {
@@ -681,7 +682,7 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		return nil
 	}
 	for _, r := range delivered.Recovered {
-		frames = p.assembler.arrived(r.ESI, r.Vector, frames)
+		frames, _ = p.assembler.arrived(r.ESI, r.Vector, frames)
 	}
 	for _, esi := range delivered.Lost {
 		p.assembler.lost(esi)
@@ -720,14 +721,14 @@ func (a *assembler) note(esi uint32) {
 	}
 }
 
-func (a *assembler) arrived(esi uint32, vector []byte, out [][]byte) [][]byte {
+func (a *assembler) arrived(esi uint32, vector []byte, out [][]byte) ([][]byte, bool) {
 	a.note(esi)
 	payload, index, count, ok := parseSymbol(vector)
 	if !ok {
-		return out
+		return out, false
 	}
 	if count == 1 {
-		return parseFrames(payload, out)
+		return parseFrames(payload, out), true
 	}
 	first := esi - uint32(index)
 	group := a.groups[first]
@@ -739,20 +740,20 @@ func (a *assembler) arrived(esi uint32, vector []byte, out [][]byte) [][]byte {
 		a.groups[first] = group
 	}
 	if index >= len(group.parts) || group.parts[index] != nil {
-		return out
+		return out, true
 	}
 	group.parts[index] = append([]byte(nil), payload...)
 	group.held++
 	group.bytes += len(payload)
 	if group.held < len(group.parts) {
-		return out
+		return out, true
 	}
 	delete(a.groups, first)
 	frame := make([]byte, 0, group.bytes)
 	for _, part := range group.parts {
 		frame = append(frame, part...)
 	}
-	return append(out, frame)
+	return append(out, frame), true
 }
 
 // lost drops the frames that depended on a symbol nothing can still repair.
