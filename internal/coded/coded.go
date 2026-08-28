@@ -251,7 +251,17 @@ func (p *Path) SendTracked(frame []byte, done func()) error {
 	if len(frame) > maxFrameBytes {
 		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(frame))
 	}
-	queued := outboundFrame{frame: append([]byte(nil), frame...), done: done}
+	return p.SendOwnedTracked(append([]byte(nil), frame...), done)
+}
+
+// SendOwnedTracked is SendTracked for a newly allocated, exclusively owned
+// frame. It takes ownership of frame, so the caller must not access frame after
+// calling it. Callers that cannot transfer ownership must use SendTracked.
+func (p *Path) SendOwnedTracked(frame []byte, done func()) error {
+	if len(frame) > maxFrameBytes {
+		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(frame))
+	}
+	queued := outboundFrame{frame: frame, done: done}
 	for {
 		p.sendMu.Lock()
 		if p.closed {

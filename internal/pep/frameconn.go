@@ -347,7 +347,7 @@ func (c *frameConn) writeCodedTracked(f protocol.Frame, done func()) error {
 	if err != nil {
 		return err
 	}
-	if err := c.bulk.SendTracked(buf, done); err != nil {
+	if err := c.bulk.SendOwnedTracked(buf, done); err != nil {
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
 		if err := c.writeLocked(f); err != nil {

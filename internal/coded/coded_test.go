@@ -149,6 +149,123 @@ func TestTrackedSendCloseReclaimsQueuedCallbacks(t *testing.T) {
 	}
 }
 
+func TestSendAPIsCopyCallerBuffer(t *testing.T) {
+	tests := []struct {
+		name string
+		send func(*Path, []byte) error
+	}{
+		{name: "Send", send: func(p *Path, frame []byte) error { return p.Send(frame) }},
+		{name: "SendTracked", send: func(p *Path, frame []byte) error {
+			return p.SendTracked(frame, nil)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			carrier := newTrackedCarrier()
+			path := New(carrier, Config{Pending: 2})
+			defer path.Close()
+
+			if err := path.SendOwnedTracked([]byte("block sender"), nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-carrier.started:
+			case <-time.After(time.Second):
+				t.Fatal("coded sender did not reach the carrier")
+			}
+
+			frame := []byte("caller bytes")
+			if err := tt.send(path, frame); err != nil {
+				t.Fatal(err)
+			}
+			copy(frame, "XXXXXXXXXXXX")
+
+			path.sendMu.Lock()
+			got := string(path.pending[0].frame)
+			path.sendMu.Unlock()
+			if got != "caller bytes" {
+				t.Fatalf("queued frame changed with caller buffer: got %q", got)
+			}
+		})
+	}
+}
+
+func TestSendOwnedTrackedTakesCallerBuffer(t *testing.T) {
+	carrier := newTrackedCarrier()
+	path := New(carrier, Config{Pending: 2})
+	defer path.Close()
+
+	if err := path.SendOwnedTracked([]byte("block sender"), nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-carrier.started:
+	case <-time.After(time.Second):
+		t.Fatal("coded sender did not reach the carrier")
+	}
+
+	frame := []byte("owned bytes")
+	if err := path.SendOwnedTracked(frame, nil); err != nil {
+		t.Fatal(err)
+	}
+	path.sendMu.Lock()
+	queued := path.pending[0].frame
+	path.sendMu.Unlock()
+	if &queued[0] != &frame[0] {
+		t.Fatal("owned send copied the caller's buffer")
+	}
+}
+
+func BenchmarkSendTrackedAllocations(b *testing.B) {
+	const batch = 128
+	payload := make([]byte, 32*1024)
+	bench := func(b *testing.B, owned bool) {
+		carrier := newTrackedCarrier()
+		path := New(carrier, Config{Pending: batch})
+		if err := path.SendOwnedTracked([]byte("block sender"), nil); err != nil {
+			b.Fatal(err)
+		}
+		select {
+		case <-carrier.started:
+		case <-time.After(time.Second):
+			b.Fatal("coded sender did not reach the carrier")
+		}
+
+		b.ReportAllocs()
+		b.SetBytes(int64(len(payload)))
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			// This allocation represents the serialization buffer supplied by
+			// frameConn in production. The copying API allocates once more;
+			// the owned API transfers this allocation directly to the queue.
+			frame := append([]byte(nil), payload...)
+			var err error
+			if owned {
+				err = path.SendOwnedTracked(frame, nil)
+			} else {
+				err = path.SendTracked(frame, nil)
+			}
+			if err != nil {
+				b.Fatal(err)
+			}
+			if (i+1)%batch == 0 {
+				path.sendMu.Lock()
+				for j := range path.pending {
+					path.pending[j] = outboundFrame{}
+				}
+				path.pending = path.pending[:0]
+				path.sendMu.Unlock()
+			}
+		}
+		b.StopTimer()
+		if err := path.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.Run("copying_API", func(b *testing.B) { bench(b, false) })
+	b.Run("owned_buffer", func(b *testing.B) { bench(b, true) })
+}
+
 func (p *lossyPipe) Send(d []byte) error {
 	p.mu.Lock()
 	if p.closed {
