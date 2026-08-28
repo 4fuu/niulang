@@ -45,6 +45,116 @@ func TestReassemblerReordersAndDrains(t *testing.T) {
 	}
 }
 
+func TestReassemblerInsertPreservesCopySafety(t *testing.T) {
+	r := NewReassembler(DefaultConfig())
+	buffered := []byte("world")
+	if _, _, err := r.Insert(Segment{Sequence: 5, Payload: buffered}); err != nil {
+		t.Fatal(err)
+	}
+	buffered[0] = 'X'
+	first := []byte("hello")
+	out, _, err := r.Insert(Segment{Sequence: 0, Payload: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first[0] = 'X'
+	if got := string(out); got != "helloworld" {
+		t.Fatalf("output changed through caller payload: %q", got)
+	}
+}
+
+func TestReassemblerInsertOwnedReturnsSinglePayloadDirectly(t *testing.T) {
+	r := NewReassembler(DefaultConfig())
+	payload := []byte("direct")
+	out, closed, err := r.InsertOwned(Segment{Sequence: 0, Payload: payload})
+	if err != nil || closed {
+		t.Fatalf("insert: closed=%v err=%v", closed, err)
+	}
+	if &out[0] != &payload[0] {
+		t.Fatal("single contiguous owned payload was copied")
+	}
+}
+
+func TestReassemblerInsertOwnedHoldsAndDrainsExactChain(t *testing.T) {
+	budget := memlimit.New(16)
+	r := NewReassembler(Config{MaxBufferedBytes: 16, MaxBufferedFrames: 4, Memory: budget})
+	second := []byte("world")
+	if _, _, err := r.InsertOwned(Segment{Sequence: 5, Payload: second}); err != nil {
+		t.Fatal(err)
+	}
+	if got := budget.Snapshot().Used; got != int64(len(second)) {
+		t.Fatalf("charged bytes = %d, want %d", got, len(second))
+	}
+	if _, closed, err := r.InsertOwned(Segment{Sequence: 10, Final: true}); err != nil || closed {
+		t.Fatalf("buffered FIN: closed=%v err=%v", closed, err)
+	}
+	// Ownership was transferred, so observing this alias is only a test that
+	// the reassembler retained the supplied backing buffer without a copy.
+	second[0] = 'W'
+	first := []byte("hello")
+	out, closed, err := r.InsertOwned(Segment{Sequence: 0, Payload: first})
+	if err != nil || !closed {
+		t.Fatalf("drain: closed=%v err=%v", closed, err)
+	}
+	if got := string(out); got != "helloWorld" {
+		t.Fatalf("output = %q", got)
+	}
+	if len(out) != cap(out) {
+		t.Fatalf("chain allocation len/cap = %d/%d, want exact", len(out), cap(out))
+	}
+	if &out[0] == &first[0] || &out[5] == &second[0] {
+		t.Fatal("multi-segment chain unexpectedly aliases an input segment")
+	}
+	if got := budget.Snapshot().Used; got != 0 {
+		t.Fatalf("charged bytes after drain = %d", got)
+	}
+}
+
+func TestReassemblerInsertOwnedDuplicateOverlapFINAndClose(t *testing.T) {
+	budget := memlimit.New(8)
+	r := NewReassembler(Config{MaxBufferedBytes: 8, MaxBufferedFrames: 3, Memory: budget})
+	segment := Segment{Sequence: 4, Payload: []byte("data")}
+	if _, _, err := r.InsertOwned(segment); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.InsertOwned(Segment{Sequence: 4, Payload: []byte("data")}); err != nil {
+		t.Fatalf("identical duplicate: %v", err)
+	}
+	if got := budget.Snapshot().Used; got != 4 {
+		t.Fatalf("duplicate changed charge to %d", got)
+	}
+	if _, _, err := r.InsertOwned(Segment{Sequence: 4, Payload: []byte("diff")}); err == nil {
+		t.Fatal("conflicting duplicate was accepted")
+	}
+	if _, _, err := r.InsertOwned(Segment{Sequence: 6, Payload: []byte("xx")}); err == nil {
+		t.Fatal("overlap was accepted")
+	}
+	if _, closed, err := r.InsertOwned(Segment{Sequence: 8, Final: true}); err != nil || closed {
+		t.Fatalf("buffered FIN: closed=%v err=%v", closed, err)
+	}
+	if got := budget.Snapshot().Used; got != 4 {
+		t.Fatalf("FIN changed payload charge to %d", got)
+	}
+	r.Close()
+	if got := budget.Snapshot().Used; got != 0 {
+		t.Fatalf("close left %d bytes charged", got)
+	}
+	r.Close()
+}
+
+func TestReassemblerInsertOwnedHonorsMemoryBudget(t *testing.T) {
+	budget := memlimit.New(3)
+	r := NewReassembler(Config{MaxBufferedBytes: 8, MaxBufferedFrames: 2, Memory: budget})
+	payload := []byte("four")
+	if _, _, err := r.InsertOwned(Segment{Sequence: 4, Payload: payload}); !errors.Is(err, ErrMemoryBudget) {
+		t.Fatalf("insert error = %v", err)
+	}
+	payload[0] = 'F'
+	if r.BufferedFrames() != 0 || r.BufferedBytes() != 0 || budget.Snapshot().Used != 0 {
+		t.Fatalf("rejected payload was retained: frames=%d bytes=%d budget=%d", r.BufferedFrames(), r.BufferedBytes(), budget.Snapshot().Used)
+	}
+}
+
 func TestReassemblerFinMayArriveBeforeMissingData(t *testing.T) {
 	r := NewReassembler(Config{MaxBufferedBytes: 64, MaxBufferedFrames: 8})
 	if _, closed, err := r.Insert(Segment{Sequence: 5, Payload: []byte(" world")}); err != nil || closed {

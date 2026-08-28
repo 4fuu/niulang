@@ -193,7 +193,9 @@ type laneFrame struct {
 }
 
 type inboundEvent struct {
-	lane  *mpLane
+	lane *mpLane
+	// frame owns its payload. Reliable ReadFrame allocates it, while the coded
+	// demultiplexer transfers the complete receive buffer through unchanged.
 	frame protocol.Frame
 }
 
@@ -1043,6 +1045,7 @@ func (f *multipathFlow) deliverInbound(lane *mpLane, frame protocol.Frame) bool 
 		lane.recv.Add(uint64(len(frame.Payload)))
 	}
 	select {
+	// Ownership of frame and its payload transfers to receiveInner on send.
 	case f.events <- inboundEvent{lane: lane, frame: frame}:
 		return true
 	case <-f.done:
@@ -2410,7 +2413,7 @@ func (f *multipathFlow) receiveInner(ctx context.Context) error {
 				if remoteFin {
 					return errors.New("data received after flow FIN")
 				}
-				out, closed, err := reassembler.Insert(multipath.Segment{Sequence: frame.Header.Sequence, Payload: frame.Payload})
+				out, closed, err := reassembler.InsertOwned(multipath.Segment{Sequence: frame.Header.Sequence, Payload: frame.Payload})
 				if err != nil {
 					return err
 				}

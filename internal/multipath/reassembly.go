@@ -69,10 +69,24 @@ func (r *Reassembler) BufferedBytes() uint64 { return r.bytes }
 func (r *Reassembler) BufferedFrames() int   { return len(r.buffer) }
 func (r *Reassembler) Closed() bool          { return r.finalAt != nil && r.next >= *r.finalAt }
 
-// Insert adds one non-empty data segment or a zero-length FIN. It returns all
-// newly contiguous bytes. The caller owns the returned byte slice. Overlapping
-// segments are rejected rather than silently merging untrusted input.
+// Insert adds one non-empty data segment or a zero-length FIN. It copies any
+// payload it retains or returns, so the caller may reuse segment.Payload after
+// Insert returns. The caller owns the returned byte slice. Overlapping segments
+// are rejected rather than silently merging untrusted input.
 func (r *Reassembler) Insert(segment Segment) ([]byte, bool, error) {
+	return r.insert(segment, false)
+}
+
+// InsertOwned adds a segment by transferring ownership of segment.Payload to
+// the reassembler. The caller must not reuse or modify the payload after the
+// call. An out-of-order segment is retained directly, and a lone contiguous
+// segment is returned directly. Draining multiple segments allocates their
+// exact combined size and copies each payload once.
+func (r *Reassembler) InsertOwned(segment Segment) ([]byte, bool, error) {
+	return r.insert(segment, true)
+}
+
+func (r *Reassembler) insert(segment Segment, owned bool) ([]byte, bool, error) {
 	if segment.Final && len(segment.Payload) != 0 {
 		return nil, false, errors.New("FIN segment must not carry payload")
 	}
@@ -110,7 +124,9 @@ func (r *Reassembler) Insert(segment Segment) ([]byte, bool, error) {
 		if !r.memory.TryAcquire(len(segment.Payload)) {
 			return nil, false, ErrMemoryBudget
 		}
-		segment.Payload = append([]byte(nil), segment.Payload...)
+		if !owned {
+			segment.Payload = append([]byte(nil), segment.Payload...)
+		}
 		segment.charged = true
 		r.buffer[segment.Sequence] = segment
 		r.insertOrder(segment.Sequence)
@@ -121,38 +137,74 @@ func (r *Reassembler) Insert(segment Segment) ([]byte, bool, error) {
 		}
 		return nil, r.Closed(), nil
 	}
+	if !owned {
+		segment.Payload = append([]byte(nil), segment.Payload...)
+	}
 	return r.consumeContiguous(segment)
 }
 
 func (r *Reassembler) consumeContiguous(first Segment) ([]byte, bool, error) {
-	var output []byte
+	if first.Sequence != r.next {
+		return nil, false, fmt.Errorf("internal reassembly cursor mismatch")
+	}
+	// Determine the whole chain before changing state. A single segment can be
+	// returned as-is; a longer chain gets one exact allocation rather than an
+	// append-grown buffer that repeatedly recopies its prefix.
+	dataSegments := 0
+	total := 0
+	cursor := first.Sequence
 	current := first
 	for {
-		if current.Sequence != r.next {
+		if current.Sequence != cursor {
 			return nil, false, fmt.Errorf("internal reassembly cursor mismatch")
 		}
+		if current.Final {
+			break
+		}
+		dataSegments++
+		total += len(current.Payload)
+		cursor += uint64(len(current.Payload))
+		next, ok := r.buffer[cursor]
+		if !ok {
+			break
+		}
+		current = next
+	}
+
+	var output []byte
+	if dataSegments == 1 {
+		output = first.Payload
+	} else if dataSegments > 1 {
+		output = make([]byte, total)
+		copy(output, first.Payload)
+	}
+
+	current = first
+	written := len(first.Payload)
+	for {
 		if current.Final {
 			at := current.Sequence
 			r.finalAt = &at
 			return output, true, nil
 		}
-		output = append(output, current.Payload...)
+		if current.Sequence != first.Sequence && dataSegments > 1 {
+			written += copy(output[written:], current.Payload)
+		}
 		if current.charged {
 			r.memory.Release(len(current.Payload))
-			current.charged = false
 		}
 		r.next += uint64(len(current.Payload))
-		if next, ok := r.buffer[r.next]; ok {
-			delete(r.buffer, r.next)
-			r.removeOrder(r.next)
-			r.bytes -= uint64(len(next.Payload))
-			current = next
-			continue
+		next, ok := r.buffer[r.next]
+		if !ok {
+			if r.finalAt != nil && r.next >= *r.finalAt {
+				return output, true, nil
+			}
+			return output, false, nil
 		}
-		if r.finalAt != nil && r.next >= *r.finalAt {
-			return output, true, nil
-		}
-		return output, false, nil
+		delete(r.buffer, r.next)
+		r.removeOrder(r.next)
+		r.bytes -= uint64(len(next.Payload))
+		current = next
 	}
 }
 

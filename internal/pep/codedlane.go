@@ -81,7 +81,10 @@ func (d *bulkDemux) run() {
 			d.mu.Unlock()
 			return
 		}
-		frame, err := protocol.ParseFrame(payload)
+		// Receive transfers an independently owned complete-frame buffer. Keep
+		// its payload in that allocation through demux and DATA reassembly
+		// instead of copying it at the framing boundary.
+		frame, err := protocol.ParseFrameOwned(payload)
 		if err != nil {
 			// The coded path hands up whole frames or none, so this is a peer
 			// sending something this one cannot parse rather than loss.

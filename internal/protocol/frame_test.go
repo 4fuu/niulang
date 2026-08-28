@@ -75,6 +75,67 @@ func TestWriteFrameRejectsZeroProgressWriter(t *testing.T) {
 	}
 }
 
+func TestParseFrameCopiesPayloadAndParseFrameOwnedAliasesIt(t *testing.T) {
+	f := Frame{Header: Header{Version: Version, Type: TypeData, FlowID: 7, Sequence: 3, Class: ClassBulk}, Payload: []byte("payload")}
+	encoded, err := AppendFrame(nil, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	copyingInput := append([]byte(nil), encoded...)
+	copying, err := ParseFrame(copyingInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyingInput[HeaderSize] = 'X'
+	if got := string(copying.Payload); got != "payload" {
+		t.Fatalf("ParseFrame payload changed with input: %q", got)
+	}
+
+	ownedInput := append([]byte(nil), encoded...)
+	owned, err := ParseFrameOwned(ownedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &owned.Payload[0] != &ownedInput[HeaderSize] {
+		t.Fatal("ParseFrameOwned copied the payload")
+	}
+	ownedInput[HeaderSize] = 'X'
+	if got := string(owned.Payload); got != "Xayload" {
+		t.Fatalf("owned payload does not alias input: %q", got)
+	}
+}
+
+func TestParseFrameAPIsRejectTheSameMalformedFrames(t *testing.T) {
+	valid, err := AppendFrame(nil, Frame{Header: Header{Version: Version, Type: TypeData, FlowID: 1, Class: ClassBulk}, Payload: []byte("x")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string][]byte{
+		"short header":     valid[:HeaderSize-1],
+		"bad magic":        append([]byte(nil), valid...),
+		"bad version":      append([]byte(nil), valid...),
+		"reserved bits":    append([]byte(nil), valid...),
+		"short payload":    valid[:len(valid)-1],
+		"trailing payload": append(append([]byte(nil), valid...), 0),
+	}
+	tests["bad magic"][0] = 0
+	tests["bad version"][2] = Version + 1
+	tests["reserved bits"][43] = 1
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, copyingErr := ParseFrame(input)
+			_, ownedErr := ParseFrameOwned(input)
+			if copyingErr == nil || ownedErr == nil {
+				t.Fatalf("errors = %v / %v, want both APIs to reject input", copyingErr, ownedErr)
+			}
+			if copyingErr.Error() != ownedErr.Error() {
+				t.Fatalf("errors differ: %q / %q", copyingErr, ownedErr)
+			}
+		})
+	}
+}
+
 func TestDecodeRejectsOversizedPayloadBeforeAllocation(t *testing.T) {
 	var raw [HeaderSize]byte
 	raw[0], raw[1], raw[2], raw[3] = Magic0, Magic1, Version, byte(TypeData)

@@ -291,7 +291,8 @@ func ReadFrame(r io.Reader) (Frame, error) {
 	return Frame{Header: h, Payload: payload}, nil
 }
 
-// ParseFrame decodes one frame that already sits whole in memory.
+// ParseFrame decodes one frame that already sits whole in memory. It copies the
+// payload, so the caller may reuse or modify b after ParseFrame returns.
 //
 // A datagram substrate delivers a frame complete or not at all, so there is
 // nothing to read incrementally and no reader to hold. Requiring one would
@@ -301,6 +302,20 @@ func ReadFrame(r io.Reader) (Frame, error) {
 // It is an error for the slice to hold anything after the frame: the caller
 // framed it, so a trailing byte means the framing disagrees with the parse.
 func ParseFrame(b []byte) (Frame, error) {
+	frame, err := ParseFrameOwned(b)
+	if err != nil {
+		return Frame{}, err
+	}
+	payload := make([]byte, len(frame.Payload))
+	copy(payload, frame.Payload)
+	frame.Payload = payload
+	return frame, nil
+}
+
+// ParseFrameOwned decodes one complete frame and transfers ownership of b to
+// the returned Frame. On success Payload aliases b's backing buffer; the caller
+// must not reuse or modify b while the frame is in use.
+func ParseFrameOwned(b []byte) (Frame, error) {
 	if len(b) < HeaderSize {
 		return Frame{}, io.ErrUnexpectedEOF
 	}
@@ -312,9 +327,7 @@ func ParseFrame(b []byte) (Frame, error) {
 	if uint64(len(rest)) != uint64(h.PayloadLen) {
 		return Frame{}, fmt.Errorf("frame payload is %d bytes, header declares %d", len(rest), h.PayloadLen)
 	}
-	payload := make([]byte, len(rest))
-	copy(payload, rest)
-	return Frame{Header: h, Payload: payload}, nil
+	return Frame{Header: h, Payload: rest}, nil
 }
 
 // AppendFrame serializes one frame into dst and returns the extended slice.
