@@ -35,7 +35,7 @@ func firstOutbound(t *testing.T, cfg map[string]any) map[string]any {
 // round produces a working measurement that never touches the emulated path,
 // which is worse than a failure because it looks like a result.
 func TestClientDialsTheEmulatorAndServerBindsItsOwnAddress(t *testing.T) {
-	for _, kind := range []Kind{TUIC, Hysteria2, VLESSTCP, VLESSWebSocket} {
+	for _, kind := range []Kind{TUIC, Hysteria2, AnyTLS, VLESSTCP, VLESSWebSocket} {
 		t.Run(string(kind), func(t *testing.T) {
 			server, client := configFor(t, kind)
 			inbound := firstInbound(t, server)
@@ -58,7 +58,7 @@ func TestClientDialsTheEmulatorAndServerBindsItsOwnAddress(t *testing.T) {
 // The client must trust exactly the server's certificate. A measurement that
 // disables verification would also accept a misdirected connection.
 func TestClientPinsTheServerCertificateWithoutDisablingVerification(t *testing.T) {
-	for _, kind := range []Kind{TUIC, Hysteria2, VLESSTCP, VLESSWebSocket} {
+	for _, kind := range []Kind{TUIC, Hysteria2, AnyTLS, VLESSTCP, VLESSWebSocket} {
 		t.Run(string(kind), func(t *testing.T) {
 			server, client := configFor(t, kind)
 			clientTLS := firstOutbound(t, client)["tls"].(map[string]any)
@@ -81,6 +81,36 @@ func TestClientPinsTheServerCertificateWithoutDisablingVerification(t *testing.T
 				t.Fatalf("client configuration references a private key: %s", encoded)
 			}
 		})
+	}
+}
+
+func TestAnyTLSUsesTheConfiguredPassword(t *testing.T) {
+	server, client := configFor(t, AnyTLS)
+	users := firstInbound(t, server)["users"].([]any)
+	if got := users[0].(map[string]any)["password"]; got != "niulang-benchmark-credential" {
+		t.Fatalf("server password = %v", got)
+	}
+	if got := firstOutbound(t, client)["password"]; got != "niulang-benchmark-credential" {
+		t.Fatalf("client password = %v", got)
+	}
+}
+
+func TestHysteria2UsesTheKnownPathBandwidth(t *testing.T) {
+	cfg := Config{
+		Kind: Hysteria2, Binary: "sing-box",
+		ServerListen: "127.0.0.1:11111", ClientRemote: "127.0.0.1:22222",
+		SOCKSListen: "127.0.0.1:33333", PathBandwidthMbits: 75,
+	}
+	serverAny, clientAny, err := buildConfigs(cfg.withDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := firstInbound(t, serverAny.(map[string]any))
+	client := firstOutbound(t, clientAny.(map[string]any))
+	for side, values := range map[string]map[string]any{"server": server, "client": client} {
+		if values["up_mbps"] != float64(75) || values["down_mbps"] != float64(75) {
+			t.Fatalf("%s bandwidth = %v/%v, want 75/75", side, values["up_mbps"], values["down_mbps"])
+		}
 	}
 }
 
@@ -110,7 +140,8 @@ func TestWebSocketTransportIsConfiguredOnBothEnds(t *testing.T) {
 // a wrong answer would route a TCP transport through the packet relay.
 func TestTransportClassification(t *testing.T) {
 	for kind, want := range map[Kind]string{
-		TUIC: "udp", Hysteria2: "udp", VLESSTCP: "tcp", VLESSWebSocket: "tcp",
+		TUIC: "udp", Hysteria2: "udp", Queqiao: "udp",
+		AnyTLS: "tcp", VLESSTCP: "tcp", VLESSWebSocket: "tcp",
 	} {
 		if got := kind.Transport(); got != want {
 			t.Fatalf("%s transport = %q, want %q", kind, got, want)
@@ -147,6 +178,9 @@ func planConfig(kind Kind) Config {
 	}
 	if kind == KCPTun {
 		cfg.Binary, cfg.ServerBinary = "/usr/local/bin/kcptun-client", "/usr/local/bin/kcptun-server"
+	}
+	if kind == Queqiao {
+		cfg.Binary = "/usr/local/bin/queqiaod"
 	}
 	if kind.NeedsSOCKSTarget() {
 		cfg.SOCKSTarget = "127.0.0.1:44444"
@@ -193,20 +227,49 @@ func TestEveryRegisteredStackPlansBothSides(t *testing.T) {
 			if len(launch.ServerArgs) == 0 || len(launch.ClientArgs) == 0 {
 				t.Fatalf("launch = %+v, want arguments for both sides", launch)
 			}
-			// Every file a side is told to read must be one the plan also
-			// writes, or the process starts against nothing.
-			for _, args := range [][]string{launch.ServerArgs, launch.ClientArgs} {
-				for _, arg := range args {
-					if !strings.HasPrefix(arg, "/tmp/bench/") {
-						continue
-					}
-					if _, ok := launch.Files[arg]; !ok {
-						t.Fatalf("%q is passed to a process but never written: %v", arg, launch.Files)
-					}
+			// Every static file the plan writes must be passed to one of the
+			// sides. Queqiao has no static file: its custom lifecycle creates
+			// provider state and an enrolled profile before the client starts.
+			allArgs := append(append([]string{}, launch.ServerArgs...), launch.ClientArgs...)
+			for path := range launch.Files {
+				if !contains(allArgs, path) {
+					t.Fatalf("%q is written but never passed to a process", path)
 				}
 			}
 		})
 	}
+}
+
+func TestQueqiaoPlansAutoServerAndQUICClient(t *testing.T) {
+	launch := planFor(t, Queqiao)
+	if !containsSequence(launch.ServerArgs, "--transport", "auto") {
+		t.Fatalf("server args = %v, want an enrollment-capable auto listener", launch.ServerArgs)
+	}
+	if !containsSequence(launch.ClientArgs, "--transport", "quic") {
+		t.Fatalf("client args = %v, want a forced QUIC data plane", launch.ClientArgs)
+	}
+	if !containsSequence(launch.ServerArgs, "--state", "/tmp/bench/provider") ||
+		!containsSequence(launch.ClientArgs, "--profile", "/tmp/bench/client.json") {
+		t.Fatalf("queqiao launch does not use workdir-contained identity: %+v", launch)
+	}
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSequence(values []string, first, second string) bool {
+	for i := 0; i+1 < len(values); i++ {
+		if values[i] == first && values[i+1] == second {
+			return true
+		}
+	}
+	return false
 }
 
 // The two errors a contributor meets first must say what is wrong.

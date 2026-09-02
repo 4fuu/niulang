@@ -54,14 +54,11 @@ settings() {
 # Niulang provider socket queues.
 #
 # quic-go requests an 8 MiB UDP buffer. Linux caps SO_RCVBUF and SO_SNDBUF at
-# rmem_max and wmem_max, so leave headroom above that request. The backlog
-# limits absorb a synchronized connection/retry wave before userspace accepts
-# it. Keep this file on provider hosts that listen on both QUIC and TLS/TCP.
+# rmem_max and wmem_max, so leave headroom above that request. The network
+# backlog absorbs a synchronized packet wave before userspace reads it.
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.core.netdev_max_backlog = 16384
-net.core.somaxconn = 8192
-net.ipv4.tcp_max_syn_backlog = 8192
 EOF
 }
 
@@ -112,8 +109,6 @@ verify_minimum() {
 verify_minimum net.core.rmem_max 16777216
 verify_minimum net.core.wmem_max 16777216
 verify_minimum net.core.netdev_max_backlog 16384
-verify_minimum net.core.somaxconn 8192
-verify_minimum net.ipv4.tcp_max_syn_backlog 8192
 
 if [ "$restart_service" = true ] && command -v systemctl >/dev/null 2>&1; then
 	if systemctl is-active --quiet "$service_name"; then

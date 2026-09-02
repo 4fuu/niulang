@@ -489,8 +489,8 @@ func runEnroll(args []string) error {
 }
 
 type runtimeOptions struct {
-	listen, localAddress, transport, tcpCongestion                  string
-	maxSessions, maxPendingOpens, tcpFallbackLanes                  int
+	listen, localAddress                                            string
+	maxSessions, maxPendingOpens                                    int
 	chunkSize                                                       int
 	dialTimeout, handshakeTimeout, flowIdleTimeout, flowMaxLifetime time.Duration
 	quicPool, waitForOpenAck, udpOnStream                           bool
@@ -498,8 +498,6 @@ type runtimeOptions struct {
 	brutalBytesPerSec, adaptiveMinBytesSec, adaptiveMaxBytesSec     uint64
 	aggregateBytesPerSec, interactiveReserveBytesPerSec             uint64
 	wireCapBytesPerSec, wireInteractiveReserveBytesPerSec           uint64
-	fallbackDelay, fallbackGrace, udpCooldown                       time.Duration
-	udpFailureThreshold                                             int
 	allowPrivate                                                    bool
 	logLevel, logFile, logFormat                                    string
 	jsonLogs                                                        bool
@@ -527,8 +525,6 @@ func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
 	fs.DurationVar(&opts.handshakeTimeout, "handshake-timeout", 10*time.Second, "TLS, protocol, and SOCKS handshake timeout")
 	fs.DurationVar(&opts.flowIdleTimeout, "flow-idle-timeout", 30*time.Minute, "flow idle timeout")
 	fs.DurationVar(&opts.flowMaxLifetime, "flow-max-lifetime", 24*time.Hour, "maximum flow lifetime")
-	fs.StringVar(&opts.transport, "transport", string(pep.TransportAuto), "transport: auto, quic, or tcp")
-	fs.IntVar(&opts.tcpFallbackLanes, "tcp-fallback-lanes", 0, "TCP lanes per bulk flow (0 uses role default)")
 	fs.BoolVar(&opts.udpOnStream, "udp-on-stream", false, "carry UDP packets on streams instead of QUIC datagrams")
 	fs.StringVar(&opts.congestion, "congestion", string(pep.CongestionErasure), "QUIC congestion controller")
 	fs.Uint64Var(&opts.brutalBytesPerSec, "brutal-bytes-per-sec", 0, "Brutal fixed per-lane byte rate")
@@ -552,12 +548,7 @@ func bindRuntimeFlags(fs *flag.FlagSet, opts *runtimeOptions, client bool) {
 		fs.IntVar(&opts.maxPendingOpens, "max-pending-opens", 256, "concurrent remote flow opens")
 		fs.BoolVar(&opts.quicPool, "quic-pool", true, "reuse a persistent QUIC connection")
 		fs.BoolVar(&opts.waitForOpenAck, "wait-for-open-ack", false, "wait for destination confirmation before answering SOCKS")
-		fs.DurationVar(&opts.fallbackDelay, "fallback-delay", 300*time.Millisecond, "delay before preparing TCP fallback")
-		fs.DurationVar(&opts.fallbackGrace, "fallback-grace", 2*time.Second, "time a ready TCP fallback waits for QUIC")
-		fs.IntVar(&opts.udpFailureThreshold, "udp-failure-threshold", 3, "UDP failures before cooldown")
-		fs.DurationVar(&opts.udpCooldown, "udp-cooldown", 30*time.Second, "UDP cooldown after repeated failure")
 	} else {
-		fs.StringVar(&opts.tcpCongestion, "tcp-congestion", "system", "server TCP congestion controller")
 		fs.BoolVar(&opts.allowPrivate, "allow-private-destinations", false, "allow private and link-local destinations")
 	}
 }
@@ -579,12 +570,6 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	// and it must stay inside what the wire allows.
 	if opts.chunkSize <= 0 || opts.chunkSize > protocol.MaxPayload {
 		return fmt.Errorf("--chunk-size must be between 1 and %d bytes", protocol.MaxPayload)
-	}
-	if opts.transport != string(pep.TransportAuto) && opts.transport != string(pep.TransportQUIC) && opts.transport != string(pep.TransportTCP) {
-		return errors.New("--transport must be auto, quic, or tcp")
-	}
-	if opts.tcpFallbackLanes < 0 || opts.tcpFallbackLanes > 16 {
-		return errors.New("--tcp-fallback-lanes must be between 0 and 16")
 	}
 	if opts.flowIdleTimeout <= 0 || opts.flowMaxLifetime <= 0 || opts.flowIdleTimeout > opts.flowMaxLifetime {
 		return errors.New("flow idle timeout must be positive and no longer than flow lifetime")
@@ -634,9 +619,6 @@ func validateRuntime(opts runtimeOptions, client bool) error {
 	}
 	if client && (opts.maxPendingOpens < 1 || opts.maxPendingOpens > 1<<16) {
 		return errors.New("--max-pending-opens must be between 1 and 65536")
-	}
-	if client && (opts.fallbackDelay < 0 || opts.fallbackGrace <= 0 || opts.udpFailureThreshold < 1 || opts.udpCooldown <= 0) {
-		return errors.New("invalid fallback settings")
 	}
 	if client {
 		if err := netbind.Validate(opts.localAddress); err != nil {
@@ -752,10 +734,7 @@ func runServer(args []string) (returnErr error) {
 		HandshakeTimeout: opts.handshakeTimeout, FlowIdleTimeout: opts.flowIdleTimeout,
 		FlowMaxLifetime: opts.flowMaxLifetime, MaxSessions: opts.maxSessions,
 		DestinationPolicy: pep.DestinationPolicy{AllowPrivate: opts.allowPrivate, DialTimeout: opts.dialTimeout},
-		EnableTCP:         opts.transport == string(pep.TransportTCP) || opts.transport == string(pep.TransportAuto),
-		EnableQUIC:        opts.transport == string(pep.TransportQUIC) || opts.transport == string(pep.TransportAuto),
-		TCPFallbackLanes:  opts.tcpFallbackLanes, TCPCongestion: opts.tcpCongestion,
-		Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
+		Congestion:        pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: opts.brutalBytesPerSec,
 		AdaptiveMinBytesSec: opts.adaptiveMinBytesSec, AdaptiveMaxBytesSec: opts.adaptiveMaxBytesSec,
 		AggregateBytesPerSec: opts.aggregateBytesPerSec, InteractiveReserveBytesPerSec: opts.interactiveReserveBytesPerSec,
 		WireCapBytesPerSec: opts.wireCapBytesPerSec, WireInteractiveReserveBytesPerSec: opts.wireInteractiveReserveBytesPerSec,
@@ -862,18 +841,15 @@ func openRuntimeLogger(opts runtimeOptions, role string) (*slog.Logger, *operlog
 }
 
 // logRuntimeConfiguration records the non-secret controls needed to reproduce
-// a performance result. Identity files and provider state paths are excluded;
-// the role-specific listener and transport behavior are not.
+// a performance result. Identity files and provider state paths are excluded.
 func logRuntimeConfiguration(logger *slog.Logger, opts runtimeOptions, client bool) {
 	attrs := []slog.Attr{
 		slog.Int("config_schema", 1),
 		slog.String("listen", opts.listen),
-		slog.String("transport", opts.transport),
 		slog.String("congestion", opts.congestion),
 		slog.Int("max_sessions", opts.maxSessions),
 		slog.Uint64("max_payload_bytes", uint64(protocol.MaxPayload)),
 		slog.Int("chunk_size_bytes", opts.chunkSize),
-		slog.Int("tcp_fallback_lanes", opts.tcpFallbackLanes),
 		slog.Bool("udp_on_stream", opts.udpOnStream),
 		slog.Duration("dial_timeout", opts.dialTimeout),
 		slog.Duration("handshake_timeout", opts.handshakeTimeout),
@@ -891,12 +867,9 @@ func logRuntimeConfiguration(logger *slog.Logger, opts runtimeOptions, client bo
 			slog.Int("max_pending_opens", opts.maxPendingOpens),
 			slog.Bool("quic_pool", opts.quicPool),
 			slog.Bool("wait_for_open_ack", opts.waitForOpenAck),
-			slog.Duration("fallback_delay", opts.fallbackDelay),
-			slog.Duration("fallback_grace", opts.fallbackGrace),
 		)
 	} else {
 		attrs = append(attrs,
-			slog.String("tcp_congestion", opts.tcpCongestion),
 			slog.Bool("allow_private_destinations", opts.allowPrivate),
 		)
 	}
@@ -971,14 +944,6 @@ func logPerformanceSnapshot(logger *slog.Logger, s metrics.Snapshot, interval ti
 		slog.Uint64("niulang_bytes_down_total", s.BytesDown),
 		slog.Uint64("niulang_lane_failures_total", s.LaneFailures),
 		slog.Uint64("niulang_lane_replacements_total", s.LaneReplacements),
-		slog.Uint64("niulang_fallbacks_total", s.Fallbacks),
-		slog.Int64("niulang_tcp_standbys_ready", s.TCPStandbysReady),
-		slog.Uint64("niulang_tcp_standby_registrations_total", s.TCPStandbyRegistrations),
-		slog.Uint64("niulang_tcp_standby_failures_total", s.TCPStandbyFailures),
-		slog.Uint64("niulang_tcp_standby_claims_total", s.TCPStandbyClaims),
-		slog.Uint64("niulang_quic_degradation_failovers_total", s.QUICDegradationFailovers),
-		slog.Uint64("niulang_udp_path_unavailable_total", s.UDPPathUnavailable),
-		slog.Uint64("niulang_endpoint_transport_races_failed_total", s.EndpointTransportRaceFailures),
 		slog.Uint64("niulang_udp_transient_send_errors_total", s.TransientUDPSendErrors),
 		slog.Uint64("niulang_udp_association_reconnects_total", s.UDPAssociationReconnects),
 		slog.Uint64("niulang_udp_association_rescue_failures_total", s.UDPAssociationRescueFailures),

@@ -16,15 +16,6 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	r.ClassTransition(2)
 	r.LaneFailure()
 	r.LaneReplacement()
-	r.Fallback()
-	r.TCPStandbyRegistration()
-	r.TCPStandbyReady()
-	r.TCPStandbyClaim()
-	r.QUICDegradationFailover()
-	r.TCPStandbyClosed()
-	r.TCPStandbyFailure()
-	r.UDPPathUnavailable()
-	r.EndpointTransportRaceFailure()
 	r.TransientUDPSendError()
 	r.UDPAssociationReconnect()
 	r.UDPAssociationRescueFailure()
@@ -53,18 +44,15 @@ func TestRegistryCountersAndHandler(t *testing.T) {
 	if s.ActiveFlows != 0 || s.FlowsStarted != 2 || s.FlowsCompleted != 1 || s.FlowsFailed != 1 || s.BytesUp != 11 || s.BytesDown != 22 {
 		t.Fatalf("unexpected snapshot: %+v", s)
 	}
-	if s.UDPPathUnavailable != 1 || s.EndpointTransportRaceFailures != 1 || s.TransientUDPSendErrors != 1 {
+	if s.TransientUDPSendErrors != 1 {
 		t.Fatalf("unexpected endpoint transport snapshot: %+v", s)
-	}
-	if s.TCPStandbysReady != 0 || s.TCPStandbyRegistrations != 1 || s.TCPStandbyClaims != 1 || s.TCPStandbyFailures != 1 || s.QUICDegradationFailovers != 1 {
-		t.Fatalf("unexpected standby snapshot: %+v", s)
 	}
 	if s.QUICPacketsSent != 80 || s.QUICPacketsReceived != 75 || s.QUICLossObservedPackets != 4 {
 		t.Fatalf("unexpected loss telemetry snapshot: %+v", s)
 	}
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "niulang_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "niulang_tcp_standby_registrations_total 1") || !strings.Contains(rec.Body.String(), "niulang_tcp_standby_claims_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_degradation_failovers_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_path_unavailable_total 1") || !strings.Contains(rec.Body.String(), "niulang_endpoint_transport_races_failed_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_transient_send_errors_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "niulang_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_sent 80") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_received 75") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_sample_bytes_per_second 900000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_ack_rate_bytes_per_second 1100000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_non_app_limited_samples_total 10") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_state_misses_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_round 7") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_rate_bytes_per_second 1000000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_charged_bytes_total 90") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_overshoot_packets_total 2") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_debt_seconds 0.002000000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_in_recovery 1") {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "niulang_lane_replacements_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_transient_send_errors_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_reconnects_total 1") || !strings.Contains(rec.Body.String(), "niulang_udp_association_rescue_failures_total 1") || !strings.Contains(rec.Body.String(), "niulang_flow_timeouts_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_smoothed_rtt_seconds 0.200000000") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_sent 80") || !strings.Contains(rec.Body.String(), "niulang_quic_packets_received 75") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_kind{kind=\"bbr\"} 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_sample_bytes_per_second 900000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_latest_ack_rate_bytes_per_second 1100000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_non_app_limited_samples_total 10") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_state_misses_total 1") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_round 7") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_pacing_rate_bytes_per_second 1250000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_rate_bytes_per_second 1000000") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_charged_bytes_total 90") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_overshoot_packets_total 2") || !strings.Contains(rec.Body.String(), "niulang_quic_wire_cap_debt_seconds 0.002000000") || !strings.Contains(rec.Body.String(), "niulang_quic_controller_in_recovery 1") {
 		t.Fatalf("unexpected exposition: %s", rec.Body.String())
 	}
 }

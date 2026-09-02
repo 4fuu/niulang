@@ -12,31 +12,14 @@ import (
 )
 
 type Registry struct {
-	activeFlows              atomic.Int64
-	flowsStarted             atomic.Uint64
-	flowsCompleted           atomic.Uint64
-	flowsFailed              atomic.Uint64
-	bytesUp                  atomic.Uint64
-	bytesDown                atomic.Uint64
-	laneFailures             atomic.Uint64
-	laneReplacements         atomic.Uint64
-	fallbacks                atomic.Uint64
-	tcpStandbysReady         atomic.Int64
-	tcpStandbyRegistrations  atomic.Uint64
-	tcpStandbyFailures       atomic.Uint64
-	tcpStandbyClaims         atomic.Uint64
-	quicDegradationFailovers atomic.Uint64
-	// udpPathUnavailable counts conservative differential failures: QUIC
-	// explicitly failed while TLS/TCP reached the same configured endpoint.
-	// A pending QUIC handshake and a faster TCP handshake are not failures. It
-	// is deliberately separate from fallbacks, which also includes flows sent
-	// directly to TCP while UDP is in cooldown.
-	udpPathUnavailable atomic.Uint64
-	// endpointRaceFailures counts AUTO transport races in which neither QUIC
-	// nor TLS/TCP reached the configured endpoint. Keeping this separate from
-	// UDP failures tells an operator whether TCP was a usable (but degraded)
-	// escape path or whether the endpoint was unreachable on both transports.
-	endpointRaceFailures atomic.Uint64
+	activeFlows      atomic.Int64
+	flowsStarted     atomic.Uint64
+	flowsCompleted   atomic.Uint64
+	flowsFailed      atomic.Uint64
+	bytesUp          atomic.Uint64
+	bytesDown        atomic.Uint64
+	laneFailures     atomic.Uint64
+	laneReplacements atomic.Uint64
 	// transientUDPSendErrors counts local route/buffer failures which were
 	// deliberately presented to QUIC as packet loss. Without that translation
 	// a sub-second Wi-Fi reassociation would terminate every stream sharing the
@@ -72,8 +55,8 @@ type Registry struct {
 	// was holding up the receiver. A rising count means striping is costing
 	// duplicate capacity to keep the reorder span bounded.
 	reinjections atomic.Uint64
-	// peerProtocolViolations counts peers that completed mutual TLS on a
-	// protocol-2 ALPN and then behaved in a way protocol 2 forbids. It is
+	// peerProtocolViolations counts peers that completed mutual TLS on the
+	// protocol-3 carrier and then behaved in a way protocol 3 forbids. It is
 	// deliberately separate from lane failures: a lane that dies is a network
 	// event, while this is a peer whose build disagrees about the wire, and the
 	// two need different responses from whoever is on call.
@@ -281,11 +264,7 @@ func (t *quicCounterTotals) load() QUICConnectionCounters {
 
 type Snapshot struct {
 	ActiveFlows, FlowsStarted, FlowsCompleted, FlowsFailed        int64
-	BytesUp, BytesDown, LaneFailures, LaneReplacements, Fallbacks uint64
-	TCPStandbysReady                                              int64
-	TCPStandbyRegistrations, TCPStandbyFailures, TCPStandbyClaims uint64
-	QUICDegradationFailovers                                      uint64
-	UDPPathUnavailable, EndpointTransportRaceFailures             uint64
+	BytesUp, BytesDown, LaneFailures, LaneReplacements            uint64
 	TransientUDPSendErrors                                        uint64
 	UDPAssociationReconnects, UDPAssociationRescueFailures        uint64
 	CompletionTimeouts                                            uint64
@@ -526,49 +505,6 @@ func (r *Registry) FlowFinished(bytesUp, bytesDown uint64, failed bool) {
 
 func (r *Registry) LaneFailure()     { r.laneFailures.Add(1) }
 func (r *Registry) LaneReplacement() { r.laneReplacements.Add(1) }
-func (r *Registry) Fallback()        { r.fallbacks.Add(1) }
-func (r *Registry) TCPStandbyReady() {
-	if r != nil {
-		r.tcpStandbysReady.Add(1)
-	}
-}
-func (r *Registry) TCPStandbyRegistration() {
-	if r != nil {
-		r.tcpStandbyRegistrations.Add(1)
-	}
-}
-func (r *Registry) TCPStandbyClosed() {
-	if r == nil {
-		return
-	}
-	for {
-		ready := r.tcpStandbysReady.Load()
-		if ready <= 0 || r.tcpStandbysReady.CompareAndSwap(ready, ready-1) {
-			return
-		}
-	}
-}
-func (r *Registry) TCPStandbyFailure() {
-	if r != nil {
-		r.tcpStandbyFailures.Add(1)
-	}
-}
-func (r *Registry) TCPStandbyClaim() {
-	if r != nil {
-		r.tcpStandbyClaims.Add(1)
-	}
-}
-func (r *Registry) QUICDegradationFailover() {
-	if r != nil {
-		r.quicDegradationFailovers.Add(1)
-	}
-}
-func (r *Registry) UDPPathUnavailable() {
-	r.udpPathUnavailable.Add(1)
-}
-func (r *Registry) EndpointTransportRaceFailure() {
-	r.endpointRaceFailures.Add(1)
-}
 func (r *Registry) TransientUDPSendError() {
 	r.transientUDPSendErrors.Add(1)
 }
@@ -622,8 +558,8 @@ func (r *Registry) AccountAdmissionRefused(reason AccountRefusal) {
 	r.accountAdmissionRefusals[reason].Add(1)
 }
 
-// PeerProtocolViolation records a peer that authenticated as a protocol-2
-// endpoint and then did something protocol 2 forbids.
+// PeerProtocolViolation records a peer that authenticated as a protocol-3
+// endpoint and then did something protocol 3 forbids.
 func (r *Registry) PeerProtocolViolation() { r.peerProtocolViolations.Add(1) }
 
 func (r *Registry) CompletionTimeout() { r.completionTimeouts.Add(1) }
@@ -707,12 +643,7 @@ func (r *Registry) Snapshot() Snapshot {
 		ActiveFlows: r.activeFlows.Load(), FlowsStarted: int64(r.flowsStarted.Load()),
 		FlowsCompleted: int64(r.flowsCompleted.Load()), FlowsFailed: int64(r.flowsFailed.Load()),
 		BytesUp: r.bytesUp.Load(), BytesDown: r.bytesDown.Load(), LaneFailures: r.laneFailures.Load(),
-		LaneReplacements: r.laneReplacements.Load(), Fallbacks: r.fallbacks.Load(),
-		TCPStandbysReady: r.tcpStandbysReady.Load(), TCPStandbyRegistrations: r.tcpStandbyRegistrations.Load(),
-		TCPStandbyFailures: r.tcpStandbyFailures.Load(), TCPStandbyClaims: r.tcpStandbyClaims.Load(),
-		QUICDegradationFailovers:                r.quicDegradationFailovers.Load(),
-		UDPPathUnavailable:                      r.udpPathUnavailable.Load(),
-		EndpointTransportRaceFailures:           r.endpointRaceFailures.Load(),
+		LaneReplacements:                        r.laneReplacements.Load(),
 		TransientUDPSendErrors:                  r.transientUDPSendErrors.Load(),
 		UDPAssociationReconnects:                r.udpReconnects.Load(),
 		UDPAssociationRescueFailures:            r.udpRescueFailures.Load(),
@@ -916,14 +847,6 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "niulang_bytes_down_total %d\n", s.BytesDown)
 	fmt.Fprintf(w, "niulang_lane_failures_total %d\n", s.LaneFailures)
 	fmt.Fprintf(w, "niulang_lane_replacements_total %d\n", s.LaneReplacements)
-	fmt.Fprintf(w, "niulang_fallbacks_total %d\n", s.Fallbacks)
-	fmt.Fprintf(w, "niulang_tcp_standbys_ready %d\n", s.TCPStandbysReady)
-	fmt.Fprintf(w, "niulang_tcp_standby_registrations_total %d\n", s.TCPStandbyRegistrations)
-	fmt.Fprintf(w, "niulang_tcp_standby_failures_total %d\n", s.TCPStandbyFailures)
-	fmt.Fprintf(w, "niulang_tcp_standby_claims_total %d\n", s.TCPStandbyClaims)
-	fmt.Fprintf(w, "niulang_quic_degradation_failovers_total %d\n", s.QUICDegradationFailovers)
-	fmt.Fprintf(w, "niulang_udp_path_unavailable_total %d\n", s.UDPPathUnavailable)
-	fmt.Fprintf(w, "niulang_endpoint_transport_races_failed_total %d\n", s.EndpointTransportRaceFailures)
 	fmt.Fprintf(w, "niulang_udp_transient_send_errors_total %d\n", s.TransientUDPSendErrors)
 	fmt.Fprintf(w, "niulang_udp_association_reconnects_total %d\n", s.UDPAssociationReconnects)
 	fmt.Fprintf(w, "niulang_udp_association_rescue_failures_total %d\n", s.UDPAssociationRescueFailures)

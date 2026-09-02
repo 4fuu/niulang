@@ -55,14 +55,14 @@ func TestFlowLifecycleDoesNotLeakGoroutines(t *testing.T) {
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 		HandshakeTimeout: 2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, EnableQUICPool: true, Logger: logger,
 		HandshakeTimeout: 2 * time.Second,
 	})
 	if err != nil {

@@ -47,7 +47,7 @@ func TestLaneJoinRefusalsAreVisibleAndCountedByReason(t *testing.T) {
 				metrics:  registry,
 			}
 			if test.known {
-				server.sessions[flow.sessionID] = newServerFlow(flow, owner, TransportTCP, 1)
+				server.sessions[flow.sessionID] = newServerFlow(flow, owner)
 			}
 			local, remote := net.Pipe()
 			t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })

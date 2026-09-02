@@ -443,6 +443,40 @@ file from backup before relocating."
 
 find_previous_install
 
+profile_is_protocol3() {
+	profile_version=$(sed -n 's/^.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+		"$1" 2>/dev/null | sed -n '1p')
+	[ "$profile_version" = 3 ]
+}
+
+manifest_profiles_are_protocol3() {
+	checked_manifest=$1
+	[ -r "$checked_manifest" ] || return 1
+	tr -d '[:space:]' <"$checked_manifest" | grep -q '"version":1[,}]' || return 1
+	checked_profiles=$(grep -o '"profile"[[:space:]]*:[[:space:]]*"[^"]*"' "$checked_manifest" 2>/dev/null |
+		sed 's/^.*"\([^"]*\)"$/\1/')
+	[ -n "$checked_profiles" ] || return 1
+	checked_directory=$(dirname "$checked_manifest")
+	while IFS= read -r checked_profile; do
+		case $checked_profile in
+		/*) checked_full=$checked_profile ;;
+		*) checked_full=$checked_directory/$checked_profile ;;
+		esac
+		profile_is_protocol3 "$checked_full" || return 1
+	done <<EOF
+$checked_profiles
+EOF
+}
+
+installed_manifest=$previous_manifest
+[ -n "$installed_manifest" ] || installed_manifest=$manifest
+if [ -f "$installed_manifest" ] && ! manifest_profiles_are_protocol3 "$installed_manifest"; then
+	die "$installed_manifest contains a missing or pre-Protocol-3 profile.
+Protocol 3 requires a new invitation and a separate configuration directory.
+Run deploy/manage.sh client for the guided update; the old profiles will be
+kept for rollback."
+fi
+
 previous_argument() {
 	awk -v wanted="--$1" 'previous == wanted { print; exit } { previous = $0 }' \
 		"$work_dir/previous-args"
@@ -537,8 +571,8 @@ fi
 version_line=$("$staged_binary" version) ||
 	die "$staged_binary did not run on this host; check the build architecture"
 case $version_line in
-*wire=2*) ;;
-*) die "refusing to install a binary that does not speak protocol 2: $version_line" ;;
+*wire=3*) ;;
+*) die "refusing to install a binary that does not speak protocol 3: $version_line" ;;
 esac
 echo "Installing $version_line ($binary_origin)."
 

@@ -6,8 +6,9 @@
 // design from the language and library. That is a useful control and a weak
 // claim: it is not TUIC, and it says nothing about the other transports people
 // actually deploy. This package closes that gap by driving real
-// implementations - sing-box for TUIC and Hysteria2, and any binary that can be
-// configured to expose SOCKS5 and dial a given server address.
+// implementations - sing-box for TUIC, Hysteria2 and AnyTLS, queqiaod for the
+// released upstream Queqiao stack, and any binary that can be configured to
+// expose SOCKS5 and dial a given server address.
 //
 // Each transport is a pair of processes: a server bound to a local address that
 // the path emulator forwards to, and a client exposing SOCKS5 that dials the
@@ -36,6 +37,13 @@ const (
 	// kind of path, and its congestion control is deliberately not loss
 	// responsive.
 	Hysteria2 Kind = "hysteria2"
+	// AnyTLS multiplexes streams over TLS/TCP. The TCP relay can apply delay,
+	// rate and backpressure, but not packet loss.
+	AnyTLS Kind = "anytls"
+	// Queqiao is the latest released upstream product binary. Unlike the
+	// shared-secret stacks it has to initialize a provider and enroll a
+	// device before its client can start.
+	Queqiao Kind = "queqiao"
 	// VLESSWebSocket and VLESSTCP are TCP-based. They cannot be compared under
 	// emulated packet loss, because a userspace relay carries a byte stream
 	// and cannot drop a segment; see the TCP note in docs/BENCHMARKING.md.
@@ -88,7 +96,12 @@ type stack struct {
 	// to run a SOCKS5 server on the far side for it to forward to, and the
 	// tunnel's own local port becomes the endpoint the benchmark speaks to.
 	socksTarget bool
-	launch      func(Config) (Launch, error)
+	// tcpBootstrap says that a UDP data-plane stack also needs the same
+	// client and server addresses connected over TCP while it establishes
+	// identity. The benchmark owns that companion relay.
+	tcpBootstrap bool
+	launch       func(Config) (Launch, error)
+	start        func(context.Context, Config, Launch) (*Pair, error)
 }
 
 // stacks is the registry a new transport is added to. Everything else in this
@@ -96,6 +109,8 @@ type stack struct {
 var stacks = map[Kind]stack{
 	TUIC:           {transport: "udp", implementation: "sing-box", launch: singBoxLaunch},
 	Hysteria2:      {transport: "udp", implementation: "sing-box", launch: singBoxLaunch},
+	AnyTLS:         {transport: "tcp", implementation: "sing-box", launch: singBoxLaunch},
+	Queqiao:        {transport: "udp", implementation: "queqiaod", tcpBootstrap: true, launch: queqiaoLaunch, start: startQueqiao},
 	VLESSTCP:       {transport: "tcp", implementation: "sing-box", launch: singBoxLaunch},
 	VLESSWebSocket: {transport: "tcp", implementation: "sing-box", launch: singBoxLaunch},
 	KCPTun:         {transport: "udp", implementation: "kcptun", socksTarget: true, launch: kcpTunLaunch},
@@ -134,6 +149,10 @@ func (k Kind) Implementation() string {
 // endpoint itself.
 func (k Kind) NeedsSOCKSTarget() bool { return stacks[k].socksTarget }
 
+// NeedsTCPBootstrap reports whether a UDP stack also needs a temporary TCP
+// route between the same addresses before its data-plane client can start.
+func (k Kind) NeedsTCPBootstrap() bool { return stacks[k].tcpBootstrap }
+
 // Config describes one measured pair.
 type Config struct {
 	Kind Kind
@@ -155,6 +174,10 @@ type Config struct {
 	KeyPath         string
 	// Congestion selects the controller where the implementation exposes one.
 	Congestion string
+	// PathBandwidthMbits is the emulated aggregate wire bottleneck in each
+	// direction. Hysteria2 uses it as its advertised bandwidth and selects
+	// its rate-based controller; zero leaves its BBR fallback in place.
+	PathBandwidthMbits float64
 	// WorkDir holds generated configuration. The caller owns its lifetime.
 	WorkDir string
 	// Credential is the shared secret: a password for TUIC and Hysteria2.
@@ -281,6 +304,9 @@ func Start(ctx context.Context, cfg Config) (*Pair, error) {
 		if err := writeJSON(path, value); err != nil {
 			return nil, err
 		}
+	}
+	if registered := stacks[cfg.Kind]; registered.start != nil {
+		return registered.start(ctx, cfg, launch)
 	}
 
 	server, err := startProcess(ctx, launch.ServerBinary, launch.ServerEnv, launch.ServerArgs...)

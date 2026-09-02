@@ -39,7 +39,7 @@ class DeployManagerTests(unittest.TestCase):
             check=False,
         )
 
-    def test_release_and_invitation_inputs_are_protocol_two_only(self):
+    def test_release_and_invitation_inputs_are_protocol_three_only(self):
         result = self.run_shell(
             """
             test "$(map_arch x86_64)" = amd64
@@ -217,6 +217,9 @@ class DeployManagerTests(unittest.TestCase):
                 '{"version":1,"providers":[{"name":"primary","profile":"primary.json","listen":"127.0.0.1:12080"}]}\n',
                 encoding="utf-8",
             )
+            (config / "primary.json").write_text(
+                '{"version":3}\n', encoding="utf-8"
+            )
             service_dir = home / ".config" / "systemd" / "user"
             service_dir.mkdir(parents=True)
             unit = service_dir / "niulang-client.service"
@@ -242,11 +245,324 @@ class DeployManagerTests(unittest.TestCase):
             self.assertIn("metrics at 127.0.0.1:12999", result.stdout)
             self.assertIn("log level warn", result.stdout)
 
+    def test_client_installer_refuses_old_profile_before_relocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            config = home / ".config" / "niulang"
+            config.mkdir(parents=True)
+            profile = config / "primary.json"
+            profile.write_text('{"version":2}\n', encoding="utf-8")
+            manifest = config / "providers.json"
+            manifest.write_text(
+                '{"version":1,"providers":[{"name":"primary",'
+                '"profile":"primary.json","listen":"127.0.0.1:12080"}]}\n',
+                encoding="utf-8",
+            )
+            service_dir = home / ".config" / "systemd" / "user"
+            service_dir.mkdir(parents=True)
+            (service_dir / "niulang-client.service").write_text(
+                f'[Service]\nExecStart="{home}/.niulang/bin/niulangd" "client" '
+                f'"--providers" "{manifest}"\n',
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["sh", str(CLIENT_INSTALLER), "--dry-run"],
+                cwd=REPOSITORY,
+                env={**os.environ, "HOME": str(home)},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("deploy/manage.sh client", result.stderr)
+
     def test_manager_has_no_old_release_compatibility_branch(self):
         source = MANAGER.read_text(encoding="utf-8")
         self.assertNotIn("v0.2.0", source)
         self.assertNotIn("wire=1", source)
         self.assertNotIn("queqiao://", source)
+
+    def test_native_server_rejects_pre_protocol_three_provider_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state = root / "var" / "lib" / "niulang" / "provider"
+            state.mkdir(parents=True)
+            metadata = state / "provider.json"
+            metadata.write_text('{"version":2}\n', encoding="utf-8")
+            rejected = self.run_shell(
+                '! server_state_is_protocol3 "$(root_path /var/lib/niulang/provider)"',
+                root,
+            )
+            self.assertEqual(rejected.returncode, 0, rejected.stderr)
+
+            metadata.write_text('{"version":3}\n', encoding="utf-8")
+            accepted = self.run_shell(
+                'server_state_is_protocol3 "$(root_path /var/lib/niulang/provider)"',
+                root,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+    def test_protocol_three_profile_and_manifest_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = root / "etc" / "niulang"
+            config.mkdir(parents=True)
+            profile = config / "client.json"
+            manifest = config / "providers.json"
+            manifest.write_text(
+                '{"version":1,"providers":[{"name":"primary",'
+                '"profile":"client.json","listen":"127.0.0.1:12080"}]}\n',
+                encoding="utf-8",
+            )
+            profile.write_text('{"version":2}\n', encoding="utf-8")
+            rejected = self.run_shell(
+                '! profile_is_protocol3 /etc/niulang/client.json; '
+                '! manifest_profiles_are_protocol3 /etc/niulang/providers.json',
+                root,
+            )
+            self.assertEqual(rejected.returncode, 0, rejected.stderr)
+
+            profile.write_text('{"version":3}\n', encoding="utf-8")
+            accepted = self.run_shell(
+                'profile_is_protocol3 /etc/niulang/client.json; '
+                'manifest_profiles_are_protocol3 /etc/niulang/providers.json',
+                root,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+    def test_binary_only_update_refuses_old_server_state_before_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            unit = root / "etc" / "systemd" / "system" / "niulangd.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\n", encoding="utf-8")
+            environment = root / "etc" / "niulang" / "niulangd.env"
+            environment.parent.mkdir(parents=True)
+            environment.write_text(
+                "NIULANGD_ARGS=--state /var/lib/niulang/provider --listen :443\n",
+                encoding="utf-8",
+            )
+            provider = root / "var" / "lib" / "niulang" / "provider"
+            provider.mkdir(parents=True)
+            (provider / "provider.json").write_text(
+                '{"version":2}\n', encoding="utf-8"
+            )
+
+            result = self.run_shell(
+                "require_protocol3_state_for_binary_update", root
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("不能仅替换二进制", result.stderr)
+
+    def test_failed_systemd_protocol_upgrade_restores_client(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            home = root / "home" / "operator"
+            unit = home / ".config" / "systemd" / "user" / "niulang-client.service"
+            unit.parent.mkdir(parents=True)
+            binary = home / ".niulang" / "bin" / "niulangd"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("old binary\n", encoding="utf-8")
+            binary.chmod(0o755)
+            unit.write_text(
+                f'[Service]\nExecStart="{binary}" "client" '
+                '"--profile" "/old/client.json"\n',
+                encoding="utf-8",
+            )
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            (fake_bin / "systemctl").write_text(
+                "#!/bin/sh\nexit 0\n", encoding="utf-8"
+            )
+            (fake_bin / "systemctl").chmod(0o755)
+            replacement = root / "fail-upgrade.sh"
+            replacement.write_text(
+                "#!/bin/sh\n"
+                f"printf 'new binary\\n' >'{binary}'\n"
+                f"printf 'new unit\\n' >'{unit}'\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            replacement.chmod(0o755)
+
+            result = self.run_shell(
+                f'! replace_systemd_client_with_protocol3 "{replacement}"',
+                root,
+                {"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(binary.read_text(encoding="utf-8"), "old binary\n")
+            self.assertIn("--profile", unit.read_text(encoding="utf-8"))
+
+    def test_failed_systemd_protocol_upgrade_restores_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            unit = root / "etc" / "systemd" / "system" / "niulangd.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("old unit\n", encoding="utf-8")
+            environment = root / "etc" / "niulang" / "niulangd.env"
+            environment.parent.mkdir(parents=True)
+            environment.write_text("old environment\n", encoding="utf-8")
+            binary = root / "usr" / "local" / "bin" / "niulangd"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("old binary\n", encoding="utf-8")
+            binary.chmod(0o755)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            (fake_bin / "systemctl").write_text(
+                "#!/bin/sh\nexit 0\n", encoding="utf-8"
+            )
+            (fake_bin / "systemctl").chmod(0o755)
+            replacement = root / "fail-server-upgrade.sh"
+            replacement.write_text(
+                "#!/bin/sh\n"
+                f"printf 'new binary\\n' >'{binary}'\n"
+                f"printf 'new unit\\n' >'{unit}'\n"
+                f"printf 'new environment\\n' >'{environment}'\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            replacement.chmod(0o755)
+
+            result = self.run_shell(
+                "run_root() { \"$@\"; }\n"
+                f'! replace_systemd_server_with_protocol3 "{replacement}"',
+                root,
+                {"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(binary.read_text(encoding="utf-8"), "old binary\n")
+            self.assertEqual(unit.read_text(encoding="utf-8"), "old unit\n")
+            self.assertEqual(
+                environment.read_text(encoding="utf-8"), "old environment\n"
+            )
+
+    def test_systemd_client_upgrade_plans_fresh_protocol_three_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            home = root / "home" / "operator"
+            profile = home / ".config" / "niulang" / "client.json"
+            profile.parent.mkdir(parents=True)
+            profile.write_text('{"version":2}\n', encoding="utf-8")
+            binary = home / ".niulang" / "bin" / "niulangd"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            unit = home / ".config" / "systemd" / "user" / "niulang-client.service"
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text(
+                f'[Service]\nExecStart="{binary}" "client" '
+                f'"--profile" "{profile}" "--listen" "127.0.0.1:13080" '
+                '"--local-address" "if:eth1" "--max-sessions" "4096" '
+                '"--metrics-listen" "127.0.0.1:12999" "--log-level" "warn"\n',
+                encoding="utf-8",
+            )
+            captured = root / "upgrade-arguments.txt"
+            result = self.run_shell(
+                f"""
+                id() {{ printf '1000\\n'; }}
+                require_supported_init() {{ INIT_SYSTEM=systemd; }}
+                prepare_install_source() {{ INSTALL_BINARY=/tmp/niulangd-p3; INSTALL_DEPLOY="$PWD/deploy"; }}
+                confirm() {{ return 0; }}
+                prompt() {{ printf '%s\\n' "$2"; }}
+                prompt_invitation() {{ printf 'niulang://enroll/test\\n'; }}
+                replace_systemd_client_with_protocol3() {{ printf '%s\\n' "$@" >'{captured}'; }}
+                install_client_interactive
+                """,
+                root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = captured.read_text(encoding="utf-8").splitlines()
+            self.assertIn(str(home / ".config" / "niulang-p3"), arguments)
+            self.assertIn(str(home / ".niulang"), arguments)
+            self.assertIn("13080", arguments)
+            self.assertIn("4096", arguments)
+            self.assertIn("127.0.0.1:12999", arguments)
+            self.assertIn("if:eth1", arguments)
+            self.assertIn("niulang://enroll/test", arguments)
+
+    def test_systemd_server_upgrade_plans_side_by_side_protocol_three_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            provider = root / "srv" / "niulang" / "provider"
+            provider.mkdir(parents=True)
+            (provider / "provider.json").write_text(
+                '{"version":2,"name":"Existing Provider",'
+                '"endpoint":"gateway.example:8443"}\n',
+                encoding="utf-8",
+            )
+            unit = root / "etc" / "systemd" / "system" / "niulangd.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text(
+                "[Service]\n"
+                "User=gateway\n"
+                "EnvironmentFile=/etc/niulang-custom/niulangd.env\n"
+                "Environment=NIULANG_LOG_DIR=/srv/niulang-logs\n"
+                "ExecStart=/opt/niulang/bin/niulangd server $NIULANGD_ARGS\n",
+                encoding="utf-8",
+            )
+            environment = root / "etc" / "niulang-custom" / "niulangd.env"
+            environment.parent.mkdir(parents=True)
+            environment.write_text(
+                "NIULANGD_ARGS=--state /srv/niulang/provider --listen :8443 "
+                "--max-sessions 3072 --metrics-listen 127.0.0.1:19999 "
+                "--allow-private-destinations\n",
+                encoding="utf-8",
+            )
+            captured = root / "server-upgrade-arguments.txt"
+            installer_dir = root / "installer"
+            installer_dir.mkdir()
+            installer = installer_dir / "install-server.sh"
+            installer.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >\"$CAPTURED\"\n",
+                encoding="utf-8",
+            )
+            installer.chmod(0o755)
+            result = self.run_shell(
+                """
+                id() { printf '0\n'; }
+                require_supported_init() { INIT_SYSTEM=systemd; }
+                prepare_install_source() { INSTALL_BINARY=/tmp/niulangd-p3; INSTALL_DEPLOY="$INSTALLER_DIR"; }
+                confirm() { return 0; }
+                prompt() {
+                    case $1 in
+                    '首个用户名') printf 'alice\n' ;;
+                    *) printf '%s\n' "$2" ;;
+                    esac
+                }
+                ask_nonnegative_integer() { printf '%s\n' "$2"; }
+                run_root() { "$@"; }
+                install_server_interactive
+                """,
+                root,
+                {
+                    "CAPTURED": str(captured),
+                    "INSTALLER_DIR": str(installer_dir),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = captured.read_text(encoding="utf-8").splitlines()
+            self.assertIn("/srv/niulang/provider-p3", arguments)
+            self.assertIn("Existing Provider", arguments)
+            self.assertIn("gateway.example:8443", arguments)
+            self.assertIn(":8443", arguments)
+            self.assertIn("3072", arguments)
+            self.assertIn("127.0.0.1:19999", arguments)
+            self.assertIn("alice", arguments)
+            self.assertIn("/opt/niulang", arguments)
+            self.assertIn("/etc/niulang-custom", arguments)
+            self.assertIn("/srv/niulang-logs", arguments)
+            self.assertIn("gateway", arguments)
+            self.assertIn("--allow-private-destinations", arguments)
+            self.assertTrue(provider.is_dir())
 
     def test_openwrt_defaults_and_service_rendering(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -259,7 +575,6 @@ class DeployManagerTests(unittest.TestCase):
                 test "$DATA_DIR" = /etc/niulang
                 test "$RUNTIME_USER" = root
                 SERVER_PORT=8443
-                SERVER_TRANSPORT=auto
                 SERVER_MAX_SESSIONS=4096
                 SERVER_METRICS_PORT=19090
                 render_openwrt_service server >"$NIULANG_MANAGER_ROOT/server"
@@ -278,7 +593,7 @@ class DeployManagerTests(unittest.TestCase):
             client = (root / "client").read_text(encoding="utf-8")
             self.assertIn('procd_set_param command "$PROG" "server"', server)
             self.assertIn('command --listen ":8443"', server)
-            self.assertIn('command --transport "auto"', server)
+            self.assertNotIn('command --transport', server)
             self.assertIn('local local_address="openwrt:wan"', client)
             self.assertIn('network_get_ipaddr local_address "wan"', client)
             self.assertIn("procd_add_interface_trigger", client)
@@ -456,12 +771,17 @@ class DeployManagerTests(unittest.TestCase):
             unit = root / "etc" / "systemd" / "system" / "niulangd.service"
             unit.parent.mkdir(parents=True)
             unit.write_text("[Service]\n", encoding="utf-8")
+            provider = root / "var" / "lib" / "niulang" / "provider"
+            provider.mkdir(parents=True)
+            (provider / "provider.json").write_text(
+                '{"version":3}\n', encoding="utf-8"
+            )
             installed = root / "usr" / "local" / "bin" / "niulangd"
             installed.parent.mkdir(parents=True)
-            installed.write_text("#!/bin/sh\necho 'niulangd old wire=2'\n", encoding="utf-8")
+            installed.write_text("#!/bin/sh\necho 'niulangd old wire=3'\n", encoding="utf-8")
             installed.chmod(0o755)
             supplied = root / "new-niulangd"
-            supplied.write_text("#!/bin/sh\necho 'niulangd new wire=2'\n", encoding="utf-8")
+            supplied.write_text("#!/bin/sh\necho 'niulangd new wire=3'\n", encoding="utf-8")
             supplied.chmod(0o755)
 
             fake_bin = root / "fake-bin"
@@ -531,13 +851,13 @@ class DeployManagerTests(unittest.TestCase):
             installed = root / "usr" / "bin" / "niulangd"
             installed.parent.mkdir(parents=True)
             installed.write_text(
-                "#!/bin/sh\necho 'niulangd old wire=2'\n",
+                "#!/bin/sh\necho 'niulangd old wire=3'\n",
                 encoding="utf-8",
             )
             installed.chmod(0o755)
             supplied = root / "new-niulangd"
             supplied.write_text(
-                "#!/bin/sh\necho 'niulangd new wire=2'\n",
+                "#!/bin/sh\necho 'niulangd new wire=3'\n",
                 encoding="utf-8",
             )
             supplied.chmod(0o755)
@@ -551,9 +871,9 @@ class DeployManagerTests(unittest.TestCase):
                 script_dir="$PWD/deploy"
                 detect_init_system
                 install_native_binary
-                test "$("$(root_path /usr/bin/niulangd)" version)" = 'niulangd new wire=2'
+                test "$("$(root_path /usr/bin/niulangd)" version)" = 'niulangd new wire=3'
                 restore_native_binary
-                test "$("$(root_path /usr/bin/niulangd)" version)" = 'niulangd old wire=2'
+                test "$("$(root_path /usr/bin/niulangd)" version)" = 'niulangd old wire=3'
                 native_start_service() { return 1; }
                 native_stop_service() { return 0; }
                 ! write_native_service client '--profile /etc/niulang/client.json --max-sessions 2048'

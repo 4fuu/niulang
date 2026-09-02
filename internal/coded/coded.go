@@ -192,7 +192,7 @@ type Path struct {
 	// and can exceed one without anything being wrong with the path.
 	arrivals atomic.Uint64
 	sources  atomic.Uint64
-	// malformed counts datagrams a peer sent that protocol 2 does not permit.
+	// malformed counts datagrams a peer sent that protocol 3 does not permit.
 	// It is kept apart from the erasure estimate on purpose: a rejected
 	// datagram is a peer disagreeing about the wire, and folding it into loss
 	// would have this path answer a non-conforming sender by buying more
@@ -660,7 +660,7 @@ func (p *Path) onDatagram(d []byte) [][]byte {
 		}
 		count := int(binary.BigEndian.Uint16(d[13:]))
 		// The count is two bytes on the wire and so can name a span of 65535,
-		// which is far wider than protocol 2 permits and would ask this
+		// which is far wider than protocol 3 permits and would ask this
 		// receiver to solve over a system it has no obligation to hold. The
 		// bound belongs here, before the symbol reaches the decoder, because
 		// this is the last point that still knows the datagram came from a

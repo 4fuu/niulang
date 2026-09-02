@@ -733,76 +733,27 @@ func TestQUICDataRidesOneLaneEvenWhenTheFlowHoldsTwo(t *testing.T) {
 	}
 }
 
-func TestNegotiatedTCPFlowStripesOnlyAcrossPureTCPBundle(t *testing.T) {
-	flow := &multipathFlow{
-		done: make(chan struct{}),
-		lanes: map[uint64]*mpLane{
-			0: {id: 0, kind: TransportTCP},
-			1: {id: 1, kind: TransportTCP},
-			2: {id: 2, kind: TransportTCP},
-		},
-	}
-	flow.tcpStriping.Store(true)
-	candidates, err := flow.laneCandidates(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 3 {
-		t.Fatalf("negotiated TCP candidates = %d, want all three lanes", len(candidates))
-	}
-
-	flow.lanes[2].kind = TransportQUIC
-	candidates, err = flow.laneCandidates(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 1 {
-		t.Fatalf("mixed-transport candidates = %d, want one fail-safe lane", len(candidates))
-	}
-
-	flow.lanes[2].kind = TransportTCP
-	flow.tcpStriping.Store(false)
-	candidates, err = flow.laneCandidates(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 1 {
-		t.Fatalf("disabled TCP striping candidates = %d, want one lane", len(candidates))
-	}
-}
-
-func TestTCPStripingDoesNotUseTheUnknownRTTFloorForReinjection(t *testing.T) {
-	flow := &multipathFlow{}
-	flow.tcpStriping.Store(true)
-	if got := flow.reissueDelay(); got != tcpStripingReissueDelay {
-		t.Fatalf("TCP striping reissue delay = %v, want %v", got, tcpStripingReissueDelay)
-	}
-}
-
 func TestReliableReinjectionIsBoundedDuringQUICIsolation(t *testing.T) {
-	for _, tcpStriping := range []bool{false, true} {
-		flow := &multipathFlow{}
-		flow.tcpStriping.Store(tcpStriping)
-		now := time.Now()
-		scheduler := stripe.New(bytes.NewReader(make([]byte, 4*defaultChunkSize)), stripe.Config{
-			ChunkSize: defaultChunkSize, LaneWindow: 4,
-			RetransmitAfter:      func() time.Duration { return time.Second },
-			ReliableReissueBurst: flow.reliableReissueBurst(),
-			Now:                  func() time.Time { return now },
-		})
-		for range 4 {
-			chunk, err := scheduler.Next(context.Background(), 0, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			scheduler.Wrote(0, chunk)
+	flow := &multipathFlow{}
+	now := time.Now()
+	scheduler := stripe.New(bytes.NewReader(make([]byte, 4*defaultChunkSize)), stripe.Config{
+		ChunkSize: defaultChunkSize, LaneWindow: 4,
+		RetransmitAfter:      func() time.Duration { return time.Second },
+		ReliableReissueBurst: flow.reliableReissueBurst(),
+		Now:                  func() time.Time { return now },
+	})
+	for range 4 {
+		chunk, err := scheduler.Next(context.Background(), 0, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		now = now.Add(2 * time.Second)
-		if got := scheduler.ReissueExpired(); got != 1 {
-			t.Fatalf("tcp_striping=%v: reissued %d reliable chunks in one sweep, want 1", tcpStriping, got)
-		}
-		scheduler.Close()
+		scheduler.Wrote(0, chunk)
 	}
+	now = now.Add(2 * time.Second)
+	if got := scheduler.ReissueExpired(); got != 1 {
+		t.Fatalf("reissued %d reliable chunks in one sweep, want 1", got)
+	}
+	scheduler.Close()
 }
 
 // The two planes go to different places, which is the whole point of the

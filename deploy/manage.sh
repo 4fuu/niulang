@@ -1,5 +1,5 @@
 #!/bin/sh
-# Interactive Linux installer and service console for Niulang protocol 2.
+# Interactive Linux installer and service console for Niulang protocol 3.
 # POSIX sh is intentional: the same file works with dash and BusyBox ash.
 set -eu
 
@@ -36,7 +36,6 @@ RUNTIME_USER=$SERVER_USER
 OPENWRT_NETWORK=${NIULANG_OPENWRT_NETWORK:-wan}
 
 SERVER_PORT=443
-SERVER_TRANSPORT=auto
 SERVER_MAX_SESSIONS=4096
 SERVER_METRICS_PORT=19090
 SERVER_ALLOW_PRIVATE=false
@@ -57,6 +56,7 @@ fi
 TEMP_DIR=
 INSTALL_BINARY=
 INSTALL_DEPLOY=
+NATIVE_ROLLBACK_PENDING=false
 
 info() {
 	printf '\n[+] %s\n' "$*" >&2
@@ -72,6 +72,10 @@ die() {
 }
 
 cleanup() {
+	if [ "${NATIVE_ROLLBACK_PENDING:-false}" = true ]; then
+		NATIVE_ROLLBACK_PENDING=false
+		restore_native_binary || true
+	fi
 	if [ -n "${TEMP_DIR:-}" ] && [ -d "$TEMP_DIR" ]; then
 		rm -rf "$TEMP_DIR"
 	fi
@@ -467,8 +471,8 @@ validate_protocol_binary() {
 	[ -x "$protocol_binary" ] || die "找不到可执行文件 $protocol_binary"
 	protocol_version=$($protocol_binary version) || die "$protocol_binary 无法在本机运行"
 	case $protocol_version in
-	*wire=2*) ;;
-	*) die "拒绝安装非 Niulang protocol 2 二进制: $protocol_version" ;;
+	*wire=3*) ;;
+	*) die "拒绝安装非 Niulang protocol 3 二进制: $protocol_version" ;;
 	esac
 	printf '%s\n' "$protocol_version" >&2
 }
@@ -539,12 +543,38 @@ argument_value() {
 }
 
 existing_server_arguments() {
-	env_path=$(root_path /etc/niulang/niulangd.env)
+	env_path=$(root_path "$CONFIG_DIR/niulangd.env")
 	if [ -r "$env_path" ]; then
 		cat "$env_path"
 	else
 		run_root cat "$env_path" 2>/dev/null
 	fi | sed -n 's/^NIULANGD_ARGS=//p' | sed -n '1p'
+}
+
+load_systemd_server_configuration() {
+	systemd_server_unit=$(system_unit_path "$SERVER_SERVICE")
+	[ -r "$systemd_server_unit" ] || return 0
+	systemd_server_binary=$(sed -n 's/^ExecStart=\([^[:space:]]*\).*$/\1/p' \
+		"$systemd_server_unit" | sed -n '1p')
+	case $systemd_server_binary in
+	/*/bin/niulangd) SERVER_BINARY=$systemd_server_binary ;;
+	esac
+	systemd_server_environment=$(sed -n 's/^EnvironmentFile=-*\([^[:space:]]*\).*$/\1/p' \
+		"$systemd_server_unit" | sed -n '1p')
+	case $systemd_server_environment in
+	/*/niulangd.env) CONFIG_DIR=$(dirname "$systemd_server_environment") ;;
+	esac
+	systemd_server_user=$(sed -n 's/^User=\([^[:space:]]*\).*$/\1/p' \
+		"$systemd_server_unit" | sed -n '1p')
+	[ -z "$systemd_server_user" ] || SERVER_USER=$systemd_server_user
+	systemd_server_log=$(sed -n 's/^Environment=NIULANG_LOG_DIR=\([^[:space:]]*\).*$/\1/p' \
+		"$systemd_server_unit" | sed -n '1p')
+	case $systemd_server_log in
+	/*) LOG_DIR=$systemd_server_log ;;
+	esac
+	systemd_server_arguments=$(existing_server_arguments || true)
+	systemd_server_state=$(argument_value "$systemd_server_arguments" state)
+	[ -z "$systemd_server_state" ] || SERVER_STATE=$systemd_server_state
 }
 
 server_state_exists() {
@@ -554,6 +584,62 @@ server_state_exists() {
 	*) state_full=$(root_path "$state_path") ;;
 	esac
 	[ -d "$state_full" ] || run_root test -d "$state_full"
+}
+
+server_state_is_protocol3() {
+	state_path=$1
+	state_full=$(managed_path "$state_path")
+	json_file_is_protocol3 "$state_full/provider.json"
+}
+
+managed_path() {
+	managed_value=$1
+	if [ -n "$test_root" ]; then
+		case $managed_value in
+		"$test_root"/*) printf '%s\n' "$managed_value"; return ;;
+		esac
+	fi
+	case $managed_value in
+	/*) root_path "$managed_value" ;;
+	*) printf '%s\n' "$managed_value" ;;
+	esac
+}
+
+json_file_is_protocol3() {
+	json_version=$(sed -n 's/^.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+		"$1" 2>/dev/null | sed -n '1p')
+	[ "$json_version" = 3 ]
+}
+
+provider_state_field() {
+	provider_state_full=$(managed_path "$1")
+	provider_field_name=$2
+	sed -n "s/^.*\"$provider_field_name\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*$/\\1/p" \
+		"$provider_state_full/provider.json" 2>/dev/null | sed -n '1p'
+}
+
+profile_is_protocol3() {
+	profile_full=$(managed_path "$1")
+	[ -f "$profile_full" ] && json_file_is_protocol3 "$profile_full"
+}
+
+manifest_profiles_are_protocol3() {
+	profiles_manifest=$(managed_path "$1")
+	[ -r "$profiles_manifest" ] || return 1
+	tr -d '[:space:]' <"$profiles_manifest" | grep -q '"version":1[,}]' || return 1
+	profiles_list=$(grep -o '"profile"[[:space:]]*:[[:space:]]*"[^"]*"' "$profiles_manifest" 2>/dev/null |
+		sed 's/^.*"\([^"]*\)"$/\1/')
+	[ -n "$profiles_list" ] || return 1
+	profiles_directory=$(dirname "$profiles_manifest")
+	while IFS= read -r profiles_entry; do
+		case $profiles_entry in
+		/*) profiles_full=$(managed_path "$profiles_entry") ;;
+		*) profiles_full=$profiles_directory/$profiles_entry ;;
+		esac
+		json_file_is_protocol3 "$profiles_full" || return 1
+	done <<EOF
+$profiles_list
+EOF
 }
 
 native_service_name() {
@@ -664,6 +750,7 @@ install_native_binary() {
 }
 
 restore_native_binary() {
+	NATIVE_ROLLBACK_PENDING=false
 	[ "${NATIVE_BINARY_CHANGED:-false}" = true ] || return 0
 	native_binary_path=$(root_path "$NATIVE_BINARY")
 	if [ -n "${NATIVE_BINARY_BACKUP:-}" ] && [ -f "$NATIVE_BINARY_BACKUP" ]; then
@@ -762,7 +849,7 @@ verify_native_service() {
 native_server_arguments() {
 	native_server_log=$LOG_DIR/server.log
 	[ "$INIT_SYSTEM" != openwrt ] || native_server_log=none
-	SERVER_ARGS="--state $SERVER_STATE --listen :$SERVER_PORT --transport $SERVER_TRANSPORT --max-sessions $SERVER_MAX_SESSIONS --metrics-listen 127.0.0.1:$SERVER_METRICS_PORT --log-level info --log-format json --log-file $native_server_log --telemetry-log-interval 5s"
+	SERVER_ARGS="--state $SERVER_STATE --listen :$SERVER_PORT --max-sessions $SERVER_MAX_SESSIONS --metrics-listen 127.0.0.1:$SERVER_METRICS_PORT --log-level info --log-format json --log-file $native_server_log --telemetry-log-interval 5s"
 	if [ "$SERVER_ALLOW_PRIVATE" = true ]; then
 		SERVER_ARGS="$SERVER_ARGS --allow-private-destinations"
 	fi
@@ -834,7 +921,6 @@ EOF
 		cat <<EOF
 	procd_append_param command --state "$SERVER_STATE"
 	procd_append_param command --listen ":$SERVER_PORT"
-	procd_append_param command --transport "$SERVER_TRANSPORT"
 	procd_append_param command --max-sessions "$SERVER_MAX_SESSIONS"
 	procd_append_param command --metrics-listen "127.0.0.1:$SERVER_METRICS_PORT"
 EOF
@@ -990,16 +1076,16 @@ openrc_service_arguments() {
 
 load_native_server_configuration() {
 	if [ "$INIT_SYSTEM" = openwrt ]; then
+		native_server_state=$(openwrt_service_parameter server state || true)
 		native_server_listen=$(openwrt_service_parameter server listen || true)
-		native_server_transport=$(openwrt_service_parameter server transport || true)
 		native_server_max=$(openwrt_service_parameter server max-sessions || true)
 		native_server_metrics=$(openwrt_service_parameter server metrics-listen || true)
 		grep -q -- '--allow-private-destinations' "$(native_service_path server)" 2>/dev/null &&
 			SERVER_ALLOW_PRIVATE=true || SERVER_ALLOW_PRIVATE=false
 	else
 		native_server_current=$(openrc_service_arguments server || true)
+		native_server_state=$(argument_value "$native_server_current" state)
 		native_server_listen=$(argument_value "$native_server_current" listen)
-		native_server_transport=$(argument_value "$native_server_current" transport)
 		native_server_max=$(argument_value "$native_server_current" max-sessions)
 		native_server_metrics=$(argument_value "$native_server_current" metrics-listen)
 		case " $native_server_current " in
@@ -1007,13 +1093,11 @@ load_native_server_configuration() {
 		*) SERVER_ALLOW_PRIVATE=false ;;
 		esac
 	fi
+	[ -z "$native_server_state" ] || SERVER_STATE=$native_server_state
 	if [ -n "$native_server_listen" ]; then
 		native_server_port=${native_server_listen##*:}
 		valid_port "$native_server_port" && SERVER_PORT=$native_server_port
 	fi
-	case $native_server_transport in
-	auto | quic | tcp) SERVER_TRANSPORT=$native_server_transport ;;
-	esac
 	case $native_server_max in
 	'' | *[!0-9]*) ;;
 	*) SERVER_MAX_SESSIONS=$native_server_max ;;
@@ -1067,6 +1151,14 @@ load_native_client_configuration() {
 	fi
 }
 
+native_client_configuration_is_protocol3() {
+	case $CLIENT_MODE in
+	multi) manifest_profiles_are_protocol3 "$PROVIDERS_PATH" ;;
+	single) profile_is_protocol3 "$PROFILE_PATH" ;;
+	*) return 1 ;;
+	esac
+}
+
 tune_native_server() {
 	command -v sysctl >/dev/null 2>&1 || {
 		warn "未找到 sysctl，跳过服务器网络队列调优"
@@ -1080,8 +1172,6 @@ tune_native_server() {
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.core.netdev_max_backlog = 16384
-net.core.somaxconn = 8192
-net.ipv4.tcp_max_syn_backlog = 8192
 EOF
 	run_root mkdir -p "$(dirname "$native_sysctl")"
 	run_root cp "$native_sysctl_stage" "$native_sysctl.new.$$"
@@ -1098,35 +1188,60 @@ configure_native_firewall() {
 		uci set firewall.niulang=rule
 		uci set firewall.niulang.name='Allow-Niulang'
 		uci set firewall.niulang.src='wan'
-		uci set firewall.niulang.proto='tcp udp'
+		uci set firewall.niulang.proto='udp'
 		uci set firewall.niulang.dest_port="$SERVER_PORT"
 		uci set firewall.niulang.target='ACCEPT'
 		uci commit firewall
 		"$(root_path /etc/init.d/firewall)" reload
-		info "已通过 UCI 放行 WAN TCP/UDP $SERVER_PORT"
+		info "已通过 UCI 放行 WAN UDP $SERVER_PORT"
 	elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-		run_root ufw allow "$SERVER_PORT/tcp"
 		run_root ufw allow "$SERVER_PORT/udp"
-		info "已通过 UFW 放行 TCP/UDP $SERVER_PORT"
+		info "已通过 UFW 放行 UDP $SERVER_PORT"
 	elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-		run_root firewall-cmd --permanent --add-port="$SERVER_PORT/tcp"
 		run_root firewall-cmd --permanent --add-port="$SERVER_PORT/udp"
 		run_root firewall-cmd --reload
-		info "已通过 firewalld 放行 TCP/UDP $SERVER_PORT"
+		info "已通过 firewalld 放行 UDP $SERVER_PORT"
 	else
-		warn "未检测到可安全修改的防火墙；请手动同时放行 TCP/UDP $SERVER_PORT"
+		warn "未检测到可安全修改的防火墙；请手动放行 UDP $SERVER_PORT"
 	fi
 }
 
 install_native_server() {
 	[ "$(id -u)" -eq 0 ] || die "$INIT_SYSTEM 服务端安装必须以 root 运行"
+	native_name_default="My Niulang"
+	native_endpoint_default=
+	native_server_migration=false
+	if native_service_installed server; then
+		load_native_server_configuration
+	fi
+	if server_state_exists "$SERVER_STATE" && ! server_state_is_protocol3 "$SERVER_STATE"; then
+		warn "检测到旧协议 provider state：$SERVER_STATE"
+		warn "Protocol 3 会创建新的 trust domain；旧目录不会修改或删除。"
+		if ! confirm "现在创建 Protocol 3 状态并切换服务端？" yes; then
+			return 0
+		fi
+		native_old_state=$SERVER_STATE
+		native_name_default=$(provider_state_field "$native_old_state" name || true)
+		[ -n "$native_name_default" ] || native_name_default="My Niulang"
+		native_endpoint_default=$(provider_state_field "$native_old_state" endpoint || true)
+		SERVER_STATE=$(prompt "新的 Protocol 3 provider state 路径" "${SERVER_STATE%/}-p3")
+		case $SERVER_STATE in
+		/*) ;;
+		*) die "Provider state 必须是绝对路径" ;;
+		esac
+		server_state_exists "$SERVER_STATE" &&
+			die "新路径已经存在：$SERVER_STATE；请选择空目录"
+		native_server_migration=true
+		info "旧状态保留在 $native_old_state；新服务验证成功后将使用 $SERVER_STATE"
+	fi
 	install_native_binary
+	[ "$native_server_migration" = false ] || NATIVE_ROLLBACK_PENDING=true
 	create_native_runtime
 	native_new_provider=false
 	if server_state_exists "$(root_path "$SERVER_STATE")"; then
 		if native_service_installed server; then
 			load_native_server_configuration
-			if confirm "保留现有 protocol 2 provider 配置，仅更新二进制并重启？" yes; then
+			if confirm "保留现有 protocol 3 provider 配置，仅更新二进制并重启？" yes; then
 				if native_start_service server && verify_native_service server; then
 					info "服务端已更新"
 					return 0
@@ -1139,30 +1254,48 @@ install_native_server() {
 		SERVER_PORT=$(native_provider_endpoint_port) || die "无法从 provider.json 读取公网端口"
 		info "复用 provider trust root：$(native_provider_endpoint)"
 	else
-		native_provider_host=$(prompt "公网域名或 IP（不带端口）" "")
+		if [ -n "$native_endpoint_default" ]; then
+			native_endpoint_host=${native_endpoint_default%:*}
+			native_endpoint_port=${native_endpoint_default##*:}
+			valid_port "$native_endpoint_port" || native_endpoint_port=443
+			case $native_endpoint_host in
+		\[*\]) native_endpoint_host=${native_endpoint_host#\[}; native_endpoint_host=${native_endpoint_host%\]} ;;
+			esac
+		else
+			native_endpoint_host=
+			native_endpoint_port=443
+		fi
+		native_provider_host=$(prompt "公网域名或 IP（不带端口）" "$native_endpoint_host")
 		valid_token "$native_provider_host" || die "公网域名/IP 包含不支持的字符"
-		SERVER_PORT=$(ask_port "公网监听端口（TCP 和 UDP 共用）" 443)
-		native_provider_name=$(prompt "服务名称" "My Niulang")
+		SERVER_PORT=$(ask_port "公网 UDP 监听端口" "$native_endpoint_port")
+		native_provider_name=$(prompt "服务名称" "$native_name_default")
 		[ -n "$native_provider_name" ] || die "服务名称不能为空"
 		case $native_provider_host in
 		*:*) native_endpoint="[$native_provider_host]:$SERVER_PORT" ;;
 		*) native_endpoint="$native_provider_host:$SERVER_PORT" ;;
 		esac
-		native_provider_command init --name "$native_provider_name" --endpoint "$native_endpoint"
+		if ! native_provider_command init --name "$native_provider_name" --endpoint "$native_endpoint"; then
+			if [ "$native_server_migration" = true ]; then
+				restore_native_binary
+				die "Protocol 3 provider 初始化失败；旧服务二进制已恢复"
+			fi
+			die "Protocol 3 provider 初始化失败"
+		fi
 		native_new_provider=true
 		native_first_user=$(prompt "首个用户名" "")
 		[ -n "$native_first_user" ] || die "用户名不能为空"
 		native_first_clients=$(ask_nonnegative_integer "该用户最大活跃设备数（0 不限制）" 8 65536)
 		native_first_flows=$(ask_nonnegative_integer "该用户最大并发流（0 使用全局限制）" 1024 65536)
-		native_provider_command add-user --name "$native_first_user" \
-			--max-clients "$native_first_clients" --max-flows "$native_first_flows"
+		if ! native_provider_command add-user --name "$native_first_user" \
+			--max-clients "$native_first_clients" --max-flows "$native_first_flows"; then
+			if [ "$native_server_migration" = true ]; then
+				restore_native_binary
+				die "Protocol 3 首个用户创建失败；旧服务二进制已恢复，新状态保留用于诊断"
+			fi
+			die "Protocol 3 首个用户创建失败；新状态保留用于诊断"
+		fi
 		native_invite_ttl=$(prompt "首个邀请有效期（最长 7d）" 24h)
 	fi
-	while :; do
-		SERVER_TRANSPORT=$(prompt "传输模式（auto/quic/tcp）" "$SERVER_TRANSPORT")
-		case $SERVER_TRANSPORT in auto | quic | tcp) break ;; esac
-		warn "传输模式只能是 auto、quic 或 tcp"
-	done
 	SERVER_MAX_SESSIONS=$(ask_positive_integer "服务端全局最大并发流" "$SERVER_MAX_SESSIONS" 65536)
 	SERVER_METRICS_PORT=$(ask_port "本机 metrics 端口" "$SERVER_METRICS_PORT")
 	if confirm "允许代理访问服务端所在私网/本地地址？" no; then
@@ -1179,10 +1312,11 @@ install_native_server() {
 		native_start_service server >/dev/null 2>&1 || true
 		die "服务端安装失败"
 	fi
+	NATIVE_ROLLBACK_PENDING=false
 	if confirm "自动配置检测到的本机防火墙？" yes; then
 		configure_native_firewall
 	else
-		warn "请手动同时放行 TCP/UDP $SERVER_PORT"
+		warn "请手动放行 UDP $SERVER_PORT"
 	fi
 	if [ "$native_new_provider" = true ]; then
 		warn "下面是一次性 bearer 凭据，只能通过可信私密渠道发送"
@@ -1192,10 +1326,40 @@ install_native_server() {
 
 install_native_client() {
 	[ "$(id -u)" -eq 0 ] || die "$INIT_SYSTEM 客户端安装必须以 root 运行"
-	install_native_binary
-	create_native_runtime
+	native_client_migration=false
 	if native_service_installed client; then
 		load_native_client_configuration
+		if ! native_client_configuration_is_protocol3; then
+			warn "现有客户端 profile 不是 Protocol 3，不能由新二进制继续使用。"
+			warn "旧 profile/manifest 会保留；切换前需要服务端签发新的 niulang://enroll/... 邀请。"
+			if ! confirm "现在重新注册并切换客户端？" yes; then
+				return 0
+			fi
+			native_client_migration=true
+			if [ "$CLIENT_MODE" = single ]; then
+				case $PROFILE_PATH in
+				*.json) native_profile_default=${PROFILE_PATH%.json}-p3.json ;;
+				*) native_profile_default=$DATA_DIR/client-p3.json ;;
+				esac
+			else
+				native_profile_default=$DATA_DIR/client-p3.json
+			fi
+			PROFILE_PATH=$(prompt "新的 Protocol 3 client profile 路径" "$native_profile_default")
+			case $PROFILE_PATH in
+			/*) ;;
+			*) die "Client profile 必须是绝对路径" ;;
+			esac
+			if [ -e "$(managed_path "$PROFILE_PATH")" ] && ! profile_is_protocol3 "$PROFILE_PATH"; then
+				die "目标 profile 已存在但不是 Protocol 3：$PROFILE_PATH"
+			fi
+			CLIENT_MODE=single
+			info "旧客户端配置保持不变；新服务验证成功后将使用 $PROFILE_PATH"
+		fi
+	fi
+	install_native_binary
+	[ "$native_client_migration" = false ] || NATIVE_ROLLBACK_PENDING=true
+	create_native_runtime
+	if native_service_installed client; then
 		if [ "$CLIENT_MODE" = multi ]; then
 			[ -f "$(root_path "$PROVIDERS_PATH")" ] || die "客户端 manifest 不存在: $PROVIDERS_PATH"
 			if native_start_service client && verify_native_service client; then
@@ -1217,6 +1381,7 @@ install_native_client() {
 		native_device=$(prompt "设备名称" "$(hostname 2>/dev/null || printf device)")
 		if ! run_as_runtime "$(root_path "$NATIVE_BINARY")" enroll "$native_invitation" \
 			--profile "$PROFILE_PATH" --device-name "$native_device" --local-address "$enrollment_address"; then
+			[ "$native_client_migration" = false ] || restore_native_binary
 			warn "$PROFILE_PATH.enrolling 可能是可恢复草稿；请使用相同邀请、路径和设备名重试"
 			return 1
 		fi
@@ -1235,6 +1400,7 @@ install_native_client() {
 		native_start_service client >/dev/null 2>&1 || true
 		die "客户端安装失败"
 	fi
+	NATIVE_ROLLBACK_PENDING=false
 	printf 'SOCKS5: 127.0.0.1:%s\nMetrics: http://127.0.0.1:%s/metrics\n' \
 		"$CLIENT_PORT" "$CLIENT_METRICS_PORT" >&2
 }
@@ -1503,6 +1669,48 @@ systemd_user_service_argument() {
 		awk -v wanted="--$service_argument_name" 'previous == wanted { print; exit } { previous = $0 }'
 }
 
+systemd_user_service_binary() {
+	service_binary_path=${HOME:?HOME must be set}/.config/systemd/user/$CLIENT_SERVICE.service
+	[ -r "$service_binary_path" ] || return 1
+	sed -n 's/^ExecStart=//p' "$service_binary_path" |
+		grep -o '"[^"]*"' | sed -n '1{s/^"//;s/"$//;p;}'
+}
+
+systemd_client_configuration_is_protocol3() {
+	systemd_client_manifest=$(systemd_user_service_argument providers || true)
+	if [ -n "$systemd_client_manifest" ]; then
+		manifest_profiles_are_protocol3 "$systemd_client_manifest"
+		return
+	fi
+	systemd_client_profile=$(systemd_user_service_argument profile || true)
+	[ -n "$systemd_client_profile" ] && profile_is_protocol3 "$systemd_client_profile"
+}
+
+replace_systemd_client_with_protocol3() {
+	ensure_temp
+	replace_client_unit=${HOME:?HOME must be set}/.config/systemd/user/$CLIENT_SERVICE.service
+	replace_client_binary=$(systemd_user_service_binary || true)
+	[ -f "$replace_client_unit" ] || die "找不到已有 $CLIENT_SERVICE.service"
+	[ -x "$replace_client_binary" ] || die "无法从现有服务找到客户端二进制"
+	replace_client_unit_backup=$TEMP_DIR/$CLIENT_SERVICE.protocol-old.service
+	replace_client_binary_backup=$TEMP_DIR/niulangd.protocol-old
+	cp -p "$replace_client_unit" "$replace_client_unit_backup"
+	cp -p "$replace_client_binary" "$replace_client_binary_backup"
+	systemctl --user stop "$CLIENT_SERVICE.service" >/dev/null 2>&1 || true
+	rm -f "$replace_client_unit"
+	if "$@"; then
+		info "客户端已切换到 Protocol 3；旧 profile/manifest 仍保留在原路径"
+		return 0
+	fi
+	warn "Protocol 3 客户端验证失败，正在恢复旧二进制和服务定义"
+	cp -p "$replace_client_binary_backup" "$replace_client_binary"
+	cp -p "$replace_client_unit_backup" "$replace_client_unit"
+	systemctl --user daemon-reload >/dev/null 2>&1 || true
+	systemctl --user restart "$CLIENT_SERVICE.service" >/dev/null 2>&1 || true
+	warn "新的 Protocol 3 profile 保留用于诊断或重试；邀请如果已消费，不要换设备密钥重试"
+	return 1
+}
+
 install_systemd_client_max_sessions() {
 	client_new_max=$1
 	client_unit_path=${HOME:?HOME must be set}/.config/systemd/user/$CLIENT_SERVICE.service
@@ -1573,42 +1781,68 @@ configure_client_sessions() {
 
 install_server_interactive() {
 	require_supported_init
-	prepare_install_source
 	if [ "$INIT_SYSTEM" != systemd ]; then
+		prepare_install_source
 		install_native_server
 		return
 	fi
+	if [ -f "$(system_unit_path "$SERVER_SERVICE")" ]; then
+		load_systemd_server_configuration
+	fi
+	prepare_install_source
+	server_current=$(existing_server_arguments || true)
 	server_state=$(prompt "Provider state 路径" "$SERVER_STATE")
 	server_existing=false
+	server_migrating=false
+	server_name_default="My Niulang"
+	server_endpoint_default=
 	if server_state_exists "$server_state"; then
 		server_existing=true
 	fi
-	server_current=
-	if [ "$server_existing" = true ]; then
-		server_current=$(existing_server_arguments || true)
-	fi
 	server_listen=$(argument_value "$server_current" listen)
-	server_transport=$(argument_value "$server_current" transport)
 	server_max=$(argument_value "$server_current" max-sessions)
 	server_metrics=$(argument_value "$server_current" metrics-listen)
+	server_extra_args=
+	case " $server_current " in
+	*' --allow-private-destinations '*) server_extra_args=--allow-private-destinations ;;
+	esac
 	[ -n "$server_listen" ] || server_listen=:443
-	[ -n "$server_transport" ] || server_transport=auto
 	[ -n "$server_max" ] || server_max=4096
 	[ -n "$server_metrics" ] || server_metrics=127.0.0.1:19090
+	if [ "$server_existing" = true ] && ! server_state_is_protocol3 "$server_state"; then
+		warn "检测到旧协议 provider state：$server_state"
+		warn "Protocol 3 不能复用旧证书、账号、设备或邀请；旧目录会原样保留用于回滚。"
+		if ! confirm "现在创建新的 Protocol 3 trust domain 并切换服务端？" yes; then
+			return 0
+		fi
+		server_old_state=$server_state
+		server_name_default=$(provider_state_field "$server_old_state" name || true)
+		[ -n "$server_name_default" ] || server_name_default="My Niulang"
+		server_endpoint_default=$(provider_state_field "$server_old_state" endpoint || true)
+		server_state=$(prompt "新的 Protocol 3 provider state 路径" "${server_state%/}-p3")
+		case $server_state in
+		/*) ;;
+		*) die "Provider state 必须是绝对路径" ;;
+		esac
+		server_state_exists "$server_state" &&
+			die "新路径已经存在：$server_state；请选择空的新目录，旧状态不会被覆盖"
+		server_existing=false
+		server_migrating=true
+		info "旧状态保留在 $server_old_state；新服务验证成功后将使用 $server_state"
+	fi
 
 	if [ "$server_existing" = true ]; then
-		info "将保留现有 protocol 2 provider state；不会重新初始化或重新签发设备"
+		info "将保留现有 protocol 3 provider state；不会重新初始化或重新签发设备"
 		server_listen=$(prompt "监听地址" "$server_listen")
-		server_transport=$(prompt "传输模式（auto/quic/tcp）" "$server_transport")
 		server_max=$(prompt "服务端最大并发流" "$server_max")
 		server_metrics=$(prompt "Metrics 地址" "$server_metrics")
 		set -- "$INSTALL_DEPLOY/install-server.sh" --binary "$INSTALL_BINARY" \
 			--no-provider-init --state "$server_state" --listen "$server_listen" \
-			--transport "$server_transport" --max-sessions "$server_max" \
+			--max-sessions "$server_max" \
 			--metrics-listen "$server_metrics"
 	else
-		server_name=$(prompt "服务名称" "My Niulang")
-		server_endpoint=$(prompt "公网域名或 IP:端口" "")
+		server_name=$(prompt "服务名称" "$server_name_default")
+		server_endpoint=$(prompt "公网域名或 IP:端口" "$server_endpoint_default")
 		[ -n "$server_endpoint" ] || die "公网端点不能为空"
 		server_first_user=$(prompt "首个用户名" "")
 		[ -n "$server_first_user" ] || die "用户名不能为空"
@@ -1617,21 +1851,77 @@ install_server_interactive() {
 		server_invite_ttl=$(prompt "首个邀请有效期（最长 7d）" 24h)
 		server_port=${server_endpoint##*:}
 		valid_port "$server_port" || die "公网端点必须以有效数字端口结尾"
-		server_listen=$(prompt "监听地址" ":$server_port")
-		server_transport=$(prompt "传输模式（auto/quic/tcp）" auto)
-		server_max=$(prompt "服务端最大并发流" 4096)
-		server_metrics=$(prompt "Metrics 地址" 127.0.0.1:19090)
+		server_listen_default=:$server_port
+		[ "$server_migrating" = false ] || server_listen_default=$server_listen
+		server_listen=$(prompt "监听地址" "$server_listen_default")
+		server_max=$(prompt "服务端最大并发流" "$server_max")
+		server_metrics=$(prompt "Metrics 地址" "$server_metrics")
 		set -- "$INSTALL_DEPLOY/install-server.sh" --binary "$INSTALL_BINARY" \
 			--name "$server_name" --endpoint "$server_endpoint" --user "$server_first_user" \
 			--state "$server_state" --user-max-clients "$server_clients" \
 			--user-max-flows "$server_flows" --invite-expires-in "$server_invite_ttl" \
-			--listen "$server_listen" --transport "$server_transport" \
+			--listen "$server_listen" \
 			--max-sessions "$server_max" --metrics-listen "$server_metrics"
 	fi
+	server_prefix=$(dirname "$(dirname "$SERVER_BINARY")")
+	set -- "$@" --service-name "$SERVER_SERVICE" --run-user "$SERVER_USER" \
+		--prefix "$server_prefix" --config-dir "$CONFIG_DIR" --log-dir "$LOG_DIR"
+	[ -z "$server_extra_args" ] || set -- "$@" --extra-args "$server_extra_args"
 	if confirm "应用推荐的 Linux socket/backlog 参数？" yes; then
 		set -- "$@" --tune
 	fi
-	run_root "$@"
+	if [ "$server_migrating" = true ]; then
+		replace_systemd_server_with_protocol3 "$@" ||
+			die "Protocol 3 服务端验证失败；已恢复旧二进制和服务定义"
+	else
+		run_root "$@"
+	fi
+}
+
+replace_systemd_server_with_protocol3() {
+	ensure_temp
+	replace_server_unit=$(system_unit_path "$SERVER_SERVICE")
+	replace_server_environment=$(root_path "$CONFIG_DIR/niulangd.env")
+	replace_server_binary=$(root_path "$SERVER_BINARY")
+	replace_server_unit_existed=false
+	replace_server_environment_existed=false
+	replace_server_binary_existed=false
+	if run_root test -f "$replace_server_unit"; then
+		replace_server_unit_existed=true
+		run_root cp -p "$replace_server_unit" "$TEMP_DIR/server.protocol-old.service"
+	fi
+	if run_root test -f "$replace_server_environment"; then
+		replace_server_environment_existed=true
+		run_root cp -p "$replace_server_environment" "$TEMP_DIR/server.protocol-old.env"
+	fi
+	if run_root test -x "$replace_server_binary"; then
+		replace_server_binary_existed=true
+		run_root cp -p "$replace_server_binary" "$TEMP_DIR/niulangd.server.protocol-old"
+	fi
+	if run_root "$@"; then
+		info "服务端已切换到 Protocol 3；旧 provider state 保持不变"
+		return 0
+	fi
+	warn "Protocol 3 服务端验证失败，正在恢复旧二进制和服务定义"
+	if [ "$replace_server_binary_existed" = true ]; then
+		run_root cp -p "$TEMP_DIR/niulangd.server.protocol-old" "$replace_server_binary"
+	else
+		run_root rm -f "$replace_server_binary"
+	fi
+	if [ "$replace_server_unit_existed" = true ]; then
+		run_root cp -p "$TEMP_DIR/server.protocol-old.service" "$replace_server_unit"
+	else
+		run_root rm -f "$replace_server_unit"
+	fi
+	if [ "$replace_server_environment_existed" = true ]; then
+		run_root cp -p "$TEMP_DIR/server.protocol-old.env" "$replace_server_environment"
+	else
+		run_root rm -f "$replace_server_environment"
+	fi
+	run_root systemctl daemon-reload >/dev/null 2>&1 || true
+	run_root systemctl restart "$SERVER_SERVICE.service" >/dev/null 2>&1 || true
+	warn "新的 Protocol 3 provider state 已保留用于诊断或重试"
+	return 1
 }
 
 default_client_manifest() {
@@ -1646,16 +1936,78 @@ install_client_interactive() {
 		return
 	fi
 	[ "$(id -u)" -ne 0 ] || die "客户端必须由实际使用代理的登录用户安装，不能以 root 运行"
-	client_manifest=$(default_client_manifest)
-	set -- "$INSTALL_DEPLOY/install-client.sh" --binary "$INSTALL_BINARY"
-	if [ -f "$client_manifest" ]; then
-		info "检测到现有 Niulang provider manifest，将保留 profile 并更新程序和服务"
-		client_local=$(systemd_user_service_argument local-address || true)
-		valid_local_address "$client_local" || client_local=auto
+	client_manifest=$(systemd_user_service_argument providers || true)
+	client_profile=$(systemd_user_service_argument profile || true)
+	[ -n "$client_manifest" ] || client_manifest=$(default_client_manifest)
+	client_local=$(systemd_user_service_argument local-address || true)
+	valid_local_address "$client_local" || client_local=auto
+	client_unit=${HOME:?HOME must be set}/.config/systemd/user/$CLIENT_SERVICE.service
+
+	if [ -f "$client_unit" ] && ! systemd_client_configuration_is_protocol3; then
+		warn "检测到旧协议客户端配置；Protocol 3 不能复用原 profile。"
+		warn "脚本会保留旧配置，验证新客户端失败时自动恢复旧二进制和服务定义。"
+		if ! confirm "现在使用新邀请重新注册并切换客户端？" yes; then
+			return 0
+		fi
+		client_old_binary=$(systemd_user_service_binary || true)
+		[ -x "$client_old_binary" ] || die "无法从现有服务读取客户端二进制"
+		client_prefix=$(dirname "$(dirname "$client_old_binary")")
+		client_config_default=${XDG_CONFIG_HOME:-${HOME:?HOME must be set}/.config}/niulang-p3
+		client_config=$(prompt "新的 Protocol 3 客户端配置目录" "$client_config_default")
+		client_new_manifest=$client_config/providers.json
+		if [ -e "$client_new_manifest" ] && ! manifest_profiles_are_protocol3 "$client_new_manifest"; then
+			die "目标目录已有不兼容或不完整的 manifest：$client_new_manifest"
+		fi
+		client_max=$(systemd_user_service_argument max-sessions || true)
+		case $client_max in '' | *[!0-9]*) client_max=2048 ;; esac
+		client_metrics=$(systemd_user_service_argument metrics-listen || true)
+		[ -n "$client_metrics" ] || client_metrics=127.0.0.1:12090
+		client_log_level=$(systemd_user_service_argument log-level || true)
+		case $client_log_level in debug | info | warn | error) ;; *) client_log_level=info ;; esac
+		client_base_port=12080
+		if [ -n "$client_manifest" ] && [ -r "$client_manifest" ]; then
+			client_old_listen=$(grep -o '"listen"[[:space:]]*:[[:space:]]*"[^"]*"' "$client_manifest" 2>/dev/null |
+				sed -n '1{s/^.*"\([^"]*\)"$/\1/;p;}')
+			client_old_port=${client_old_listen##*:}
+			valid_port "$client_old_port" && client_base_port=$client_old_port
+		elif [ -n "$client_profile" ]; then
+			client_old_listen=$(systemd_user_service_argument listen || true)
+			client_old_port=${client_old_listen##*:}
+			valid_port "$client_old_port" && client_base_port=$client_old_port
+		fi
+		set -- "$INSTALL_DEPLOY/install-client.sh" --binary "$INSTALL_BINARY" \
+			--config-dir "$client_config" --prefix "$client_prefix" --service-name "$CLIENT_SERVICE" \
+			--base-port "$client_base_port" --max-sessions "$client_max" \
+			--metrics-listen "$client_metrics" --log-level "$client_log_level"
+		if [ ! -f "$client_new_manifest" ]; then
+			client_invite=$(prompt_invitation)
+			set -- "$@" --invite "$client_invite"
+		else
+			info "复用上次生成的 Protocol 3 profile；不会再次消费邀请"
+		fi
+		client_local=$(prompt "外层连接绑定（auto、if:接口名或 IP）" "$client_local")
+		valid_local_address "$client_local" || die "无效的外层连接绑定"
+		set -- "$@" --local-address "$client_local"
+		replace_systemd_client_with_protocol3 "$@"
+		return
+	fi
+
+	if [ -n "$client_profile" ] && profile_is_protocol3 "$client_profile"; then
+		client_binary=$(systemd_user_service_binary || true)
+		[ -x "$client_binary" ] || die "无法从现有服务读取客户端二进制"
+		systemd_replace_binary "$client_binary" user "$CLIENT_SERVICE" ||
+			die "客户端未能使用新二进制启动；已恢复旧二进制"
+		info "已保留现有 Protocol 3 profile 并更新客户端"
+		return
+	fi
+
+	set -- "$INSTALL_DEPLOY/install-client.sh" --binary "$INSTALL_BINARY" \
+		--config-dir "$(dirname "$client_manifest")"
+	if manifest_profiles_are_protocol3 "$client_manifest"; then
+		info "检测到现有 Protocol 3 provider manifest，将保留 profile 并更新程序和服务"
 	else
 		client_invite=$(prompt_invitation)
 		set -- "$@" --invite "$client_invite"
-		client_local=auto
 	fi
 	client_local=$(prompt "外层连接绑定（auto、if:接口名或 IP）" "$client_local")
 	valid_local_address "$client_local" || die "无效的外层连接绑定"
@@ -1719,8 +2071,10 @@ set_user_limits() {
 
 manage_provider() {
 	if [ "$INIT_SYSTEM" = systemd ]; then
+		load_systemd_server_configuration
 		manage_state=$SERVER_STATE
 	else
+		native_service_installed server && load_native_server_configuration
 		manage_state=$(root_path "$SERVER_STATE")
 		[ -x "$(root_path "$NATIVE_BINARY")" ] || die "找不到已安装的 $NATIVE_BINARY"
 	fi
@@ -2028,7 +2382,7 @@ remove_legacy_binaries() {
 }
 
 purge_legacy_data() {
-	warn "此操作永久删除旧 Queqiao provider keys、客户端 profile、配置和日志；它们不能转换成 protocol 2"
+	warn "此操作永久删除旧 Queqiao provider keys、客户端 profile、配置和日志；它们不能转换成 protocol 3"
 	printf '如已完成备份并确认删除，请输入 DELETE QUEQIAO: ' >&2
 	IFS= read -r purge_answer || die "输入已中断"
 	[ "$purge_answer" = "DELETE QUEQIAO" ] || {
@@ -2078,7 +2432,7 @@ migrate_legacy_role() {
 	stop_legacy_role "$migrate_role"
 
 	if [ "$migrate_role" = server ]; then
-		warn "旧 provider state、账号、设备和邀请不会迁移；现在会创建全新的 Niulang protocol 2 trust domain"
+		warn "旧 provider state、账号、设备和邀请不会迁移；现在会创建全新的 Niulang protocol 3 trust domain"
 		if (install_server_interactive); then
 			migrate_ok=true
 		else
@@ -2114,7 +2468,7 @@ migrate_legacy() {
 		return
 	}
 	show_legacy_status
-	warn "Niulang protocol 2 不读取旧 state/profile，也不提供 wire downgrade"
+	warn "Niulang protocol 3 不读取旧 state/profile，也不提供 wire downgrade"
 	if legacy_service_role_found server && confirm "迁移旧服务端？" yes; then
 		migrate_legacy_role server
 	fi
@@ -2190,8 +2544,37 @@ restore_systemd_binary_backup() {
 	fi
 }
 
+require_protocol3_state_for_binary_update() {
+	if [ "$INIT_SYSTEM" = systemd ]; then
+		if [ -f "$(system_unit_path "$SERVER_SERVICE")" ]; then
+			load_systemd_server_configuration
+			update_server_arguments=$(existing_server_arguments || true)
+			update_server_state=$(argument_value "$update_server_arguments" state)
+			[ -n "$update_server_state" ] || update_server_state=$SERVER_STATE
+			server_state_is_protocol3 "$update_server_state" ||
+				die "服务端仍使用旧协议状态 $update_server_state；请运行 '$0 server' 创建 Protocol 3 trust domain，不能仅替换二进制"
+		fi
+		update_client_unit=${HOME:?HOME must be set}/.config/systemd/user/$CLIENT_SERVICE.service
+		if [ -f "$update_client_unit" ] && ! systemd_client_configuration_is_protocol3; then
+			die "客户端仍使用旧协议 profile；请运行 '$0 client' 用新邀请重新注册，不能仅替换二进制"
+		fi
+		return
+	fi
+	if native_service_installed server; then
+		load_native_server_configuration
+		server_state_is_protocol3 "$SERVER_STATE" ||
+			die "服务端仍使用旧协议状态 $SERVER_STATE；请运行 '$0 server' 完成 Protocol 3 切换"
+	fi
+	if native_service_installed client; then
+		load_native_client_configuration
+		native_client_configuration_is_protocol3 ||
+			die "客户端仍使用旧协议 profile；请运行 '$0 client' 用新邀请重新注册"
+	fi
+}
+
 update_binary_only() {
 	require_supported_init
+	require_protocol3_state_for_binary_update
 	prepare_install_source
 	if [ "$INIT_SYSTEM" != systemd ]; then
 		[ "$(id -u)" -eq 0 ] || die "$INIT_SYSTEM 二进制更新必须以 root 运行"
@@ -2276,6 +2659,11 @@ print_service_status() {
 
 show_status() {
 	require_supported_init
+	if [ "$INIT_SYSTEM" = systemd ]; then
+		[ ! -f "$(system_unit_path "$SERVER_SERVICE")" ] || load_systemd_server_configuration
+	elif native_service_installed server; then
+		load_native_server_configuration
+	fi
 	printf '平台: Linux/%s，服务管理器: %s\n' "$(uname -m)" "$INIT_SYSTEM"
 	printf 'Release 来源: %s\n' "$(release_source_description)"
 	if [ "$INIT_SYSTEM" = systemd ]; then
@@ -2331,7 +2719,7 @@ Release 来源：$(release_source_description)
   3) 向已有客户端添加 provider
   4) 修改客户端共享最大并发流
   5) 管理服务端用户、邀请和设备
-  6) 仅更新二进制并重启已有服务
+  6) 更新已有 Protocol 3 二进制并重启服务
   7) 查看 Niulang 和旧 Queqiao 状态
   8) 切换并保存 Release 下载来源
   9) 迁移旧 Queqiao 服务
@@ -2365,14 +2753,14 @@ usage() {
 用法: deploy/manage.sh [server|client|add-provider|client-config|provider|manage|update|source|status|migrate|legacy-stop|legacy-remove|legacy-purge]
 
 不带参数时进入交互菜单。支持 systemd、OpenRC 和 OpenWrt procd。
-管理器下载所选 Niulang Release、校验 SHA256SUMS，并拒绝非 protocol 2 二进制。
+管理器下载所选 Niulang Release、校验 SHA256SUMS，并拒绝非 protocol 3 二进制。
 
   server         安装或更新服务端
   client         安装或更新客户端
   add-provider   为已有客户端添加 provider 和 SOCKS5 监听
   client-config  修改所有 provider 共享的最大并发流
   provider/manage 管理用户、邀请、设备和限制
-  update         原子更新二进制并重启已有服务；失败时回滚
+  update         原子更新已有 Protocol 3 服务；旧协议请先运行 server/client
   source         切换并保存官方/自定义 Release 来源及预发行策略
   status         查看 Niulang 与旧 Queqiao 状态
   migrate        停止旧服务并迁移角色；state/profile 不复制
@@ -2382,7 +2770,7 @@ usage() {
 
 环境变量：
   NIULANG_VERSION=latest          latest 或指定 vYYYY.MDD.N
-  NIULANG_BINARY=/path            使用本地 protocol 2 二进制
+  NIULANG_BINARY=/path            使用本地 protocol 3 二进制
   NIULANG_REPOSITORY=owner/repo   Release 仓库（默认 4fuu/niulang）
   NIULANG_INCLUDE_PRERELEASE=1    latest 可选择预发行版
   NIULANG_INIT_SYSTEM=openwrt     覆盖服务管理器自动检测

@@ -53,7 +53,7 @@ func TestQUICDataPlaneUsesRealHTTP3(t *testing.T) {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Credentials: serverCredentials, EnableQUIC: true,
+		ListenAddr: "127.0.0.1:0", Credentials: serverCredentials,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -97,26 +97,9 @@ func TestQUICDataPlaneUsesRealHTTP3(t *testing.T) {
 		cancel()
 		t.Fatalf("send RFC 9297 HTTP Datagram: %v", err)
 	}
-	fc := newFrameConn(stream)
-	probe := protocol.Frame{Header: protocol.Header{
-		Version: protocol.Version, Type: protocol.TypeProbe, SessionID: [16]byte{1}, Class: protocol.ClassNew,
-	}, Payload: []byte("h3-data")}
-	if err := fc.Write(probe); err != nil {
-		cancel()
-		t.Fatal(err)
-	}
 	if err := stream.Close(); err != nil {
 		cancel()
 		t.Fatal(err)
-	}
-	echo, err := fc.Read()
-	if err != nil {
-		cancel()
-		t.Fatalf("read HTTP/3 DATA-framed probe response: %v", err)
-	}
-	if echo.Header.Type != protocol.TypeProbe || string(echo.Payload) != "h3-data" {
-		cancel()
-		t.Fatalf("probe response = type %d payload %q", echo.Header.Type, echo.Payload)
 	}
 
 	cancel()
@@ -137,7 +120,7 @@ func TestHTTP3LaneRequiresPeerDatagramSetting(t *testing.T) {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Credentials: serverCredentials, EnableQUIC: true,
+		ListenAddr: "127.0.0.1:0", Credentials: serverCredentials,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -216,7 +199,7 @@ func TestHTTP3ShutdownDrainsExistingLane(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Credentials: serverCredentials, EnableQUIC: true,
+		ListenAddr: "127.0.0.1:0", Credentials: serverCredentials,
 		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 	})
 	if err != nil {
@@ -233,7 +216,7 @@ func TestHTTP3ShutdownDrainsExistingLane(t *testing.T) {
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: packet.LocalAddr().String(),
-		Credentials: clientCredentials, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger,
+		Credentials: clientCredentials, EnableQUICPool: true, Logger: logger,
 	})
 	if err != nil {
 		stopServer()

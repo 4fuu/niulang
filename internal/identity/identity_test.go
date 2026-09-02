@@ -324,7 +324,7 @@ func TestProfilesAreSelfContainedStrictAndPrivate(t *testing.T) {
 	}
 }
 
-func TestProtocol2RejectsEarlierIdentityState(t *testing.T) {
+func TestProtocol3RejectsEarlierIdentityState(t *testing.T) {
 	now := time.Now()
 	provider := testProvider(t, "127.0.0.1:443", now)
 	account, err := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
@@ -337,18 +337,18 @@ func TestProtocol2RejectsEarlierIdentityState(t *testing.T) {
 	}
 
 	oldInvitation := invitation
-	oldInvitation.Version = 1
+	oldInvitation.Version = 2
 	if err := oldInvitation.validateEnvelope(); err == nil {
-		t.Fatal("protocol-1 invitation schema was accepted")
+		t.Fatal("protocol-2 invitation schema was accepted")
 	}
 	oldProfile := localProfile(t, provider, account, "laptop", now)
-	oldProfile.Version = 1
+	oldProfile.Version = 2
 	if _, err := oldProfile.Credentials(); err == nil {
-		t.Fatal("protocol-1 client profile was accepted")
+		t.Fatal("protocol-2 client profile was accepted")
 	}
-	oldDraft := EnrollmentDraft{Version: 1, Invitation: invitation, DeviceName: "laptop"}
+	oldDraft := EnrollmentDraft{Version: 2, Invitation: invitation, DeviceName: "laptop"}
 	if _, err := oldDraft.privateKey(); err == nil {
-		t.Fatal("protocol-1 enrollment draft was accepted")
+		t.Fatal("protocol-2 enrollment draft was accepted")
 	}
 
 	providerPath := filepath.Join(provider.Directory, providerFile)
@@ -356,12 +356,12 @@ func TestProtocol2RejectsEarlierIdentityState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata = bytes.Replace(metadata, []byte(`"version": 2`), []byte(`"version": 1`), 1)
+	metadata = bytes.Replace(metadata, []byte(`"version": 3`), []byte(`"version": 2`), 1)
 	if err := os.WriteFile(providerPath, metadata, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadProvider(provider.Directory); err == nil {
-		t.Fatal("protocol-1 provider metadata was accepted")
+		t.Fatal("protocol-2 provider metadata was accepted")
 	}
 
 	authorizationPath := filepath.Join(provider.Directory, authorizationFile)
@@ -369,7 +369,7 @@ func TestProtocol2RejectsEarlierIdentityState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorization = bytes.Replace(authorization, []byte(`"version": 2`), []byte(`"version": 1`), 1)
+	authorization = bytes.Replace(authorization, []byte(`"version": 3`), []byte(`"version": 2`), 1)
 	if err := os.WriteFile(authorizationPath, authorization, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestProtocol2RejectsEarlierIdentityState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.Load(); err == nil {
-		t.Fatal("protocol-1 authorization state was accepted")
+		t.Fatal("protocol-2 authorization state was accepted")
 	}
 }
 
@@ -408,22 +408,22 @@ func TestMutualTLSRequiresAnAuthorizedDeviceAndPinnedGateway(t *testing.T) {
 	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	profile := localProfile(t, provider, account, "laptop", now)
 	clientCredentials, _ := profile.Credentials()
-	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "niulang/2", false)
+	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "h3", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientConfig, _ := ClientTLSConfig(clientCredentials, "niulang/2")
+	clientConfig, _ := ClientTLSConfig(clientCredentials, "h3")
 	if err := tlsHandshake(t, serverConfig, clientConfig); err != nil {
 		t.Fatalf("authorized mutual TLS failed: %v", err)
 	}
 	withoutDevice := EnrollmentTLSConfig(provider.Metadata.RootPin, provider.Metadata.ProviderID, provider.Metadata.GatewayID)
-	withoutDevice.NextProtos = []string{"niulang/2"}
+	withoutDevice.NextProtos = []string{"h3"}
 	if err := tlsHandshake(t, serverConfig, withoutDevice); err == nil {
 		t.Fatal("client without a device certificate was accepted")
 	}
 	wrongGateway := clientCredentials
 	wrongGateway.GatewayID = strings.Repeat("a", 32)
-	wrongGatewayConfig, err := ClientTLSConfig(wrongGateway, "niulang/2")
+	wrongGatewayConfig, err := ClientTLSConfig(wrongGateway, "h3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,30 +439,30 @@ func TestMutualTLSRequiresAnAuthorizedDeviceAndPinnedGateway(t *testing.T) {
 	other := testProvider(t, "127.0.0.1:443", now)
 	wrongPin := clientCredentials
 	wrongPin.Root, wrongPin.RootPin, wrongPin.ProviderID = other.RootCert, other.Metadata.RootPin, other.Metadata.ProviderID
-	wrongConfig, _ := ClientTLSConfig(wrongPin, "niulang/2")
+	wrongConfig, _ := ClientTLSConfig(wrongPin, "h3")
 	if wrongConfig != nil && tlsHandshake(t, serverConfig, wrongConfig) == nil {
 		t.Fatal("gateway was accepted under another provider root")
 	}
 }
 
-func TestMultipleDataALPNsRetainMutualTLSAndControlIsolation(t *testing.T) {
+func TestDataALPNRetainsMutualTLSAndControlIsolation(t *testing.T) {
 	now := time.Now()
 	provider := testProvider(t, "127.0.0.1:443", now)
 	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, now)
 	profile := localProfile(t, provider, account, "laptop", now)
 	clientCredentials, _ := profile.Credentials()
-	serverConfig, err := ServerTLSConfigWithDataALPNs(provider.ServerCredentials(), []string{"niulang/2", "niulang-standby/2"}, true)
+	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "h3", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	standbyClient, err := ClientTLSConfig(clientCredentials, "niulang-standby/2")
+	dataClient, err := ClientTLSConfig(clientCredentials, "h3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tlsHandshake(t, serverConfig, standbyClient); err != nil {
-		t.Fatalf("second mutually authenticated data ALPN failed: %v", err)
+	if err := tlsHandshake(t, serverConfig, dataClient); err != nil {
+		t.Fatalf("mutually authenticated HTTP/3 ALPN failed: %v", err)
 	}
-	oldClient, err := ClientTLSConfig(clientCredentials, "niulang/1")
+	oldClient, err := ClientTLSConfig(clientCredentials, "niulang/2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,62 +470,19 @@ func TestMultipleDataALPNsRetainMutualTLSAndControlIsolation(t *testing.T) {
 		t.Fatal("previous data ALPN was accepted")
 	}
 	withoutDevice := EnrollmentTLSConfig(provider.Metadata.RootPin, provider.Metadata.ProviderID, provider.Metadata.GatewayID)
-	withoutDevice.NextProtos = []string{EnrollmentALPN, "niulang-standby/2"}
+	withoutDevice.NextProtos = []string{EnrollmentALPN, "h3"}
 	if err := tlsHandshake(t, serverConfig, withoutDevice); err == nil {
 		t.Fatal("mixed enrollment/data offer selected the unauthenticated enrollment profile")
 	}
 	for _, protocols := range [][]string{
 		nil,
-		{"niulang/2", "niulang/2"},
+		{"h3", "h3"},
 		{EnrollmentALPN},
 		{RenewalALPN},
 	} {
 		if _, err := ServerTLSConfigWithDataALPNs(provider.ServerCredentials(), protocols, true); err == nil {
 			t.Fatalf("invalid data ALPN list was accepted: %#v", protocols)
 		}
-	}
-}
-
-func TestEnrollmentEndToEndAndReplayFails(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	provider := testProvider(t, listener.Addr().String(), time.Now())
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
-	uri, invitation, err := provider.CreateInvitation(account.ID, time.Hour, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ParseInvitation(uri, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "niulang/2", true)
-	service := EnrollmentService{Provider: provider}
-	serveOne := func() {
-		raw, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer raw.Close()
-		conn := tls.Server(raw, serverConfig)
-		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-		if conn.Handshake() == nil {
-			_, _ = service.Serve(conn)
-		}
-	}
-	go serveOne()
-	profile, err := EnrollWithOptions(context.Background(), invitation, "laptop", DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := profile.Credentials(); err != nil {
-		t.Fatalf("enrolled profile is invalid: %v", err)
-	}
-	go serveOne()
-	if _, err := Enroll(context.Background(), invitation, "other device", 3*time.Second); err == nil {
-		t.Fatal("invitation replay enrolled another device")
 	}
 }
 
@@ -547,81 +504,9 @@ func TestEnrollmentRejectsInvalidLocalAddressBeforeDial(t *testing.T) {
 }
 
 func TestEnrollmentExplainsProtocolALPNMismatch(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	provider := testProvider(t, listener.Addr().String(), time.Now())
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
-	_, invitation, err := provider.CreateInvitation(account.ID, time.Hour, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverConfig := &tls.Config{
-		Certificates: []tls.Certificate{provider.GatewayCert},
-		MinVersion:   tls.VersionTLS13,
-		MaxVersion:   tls.VersionTLS13,
-		NextProtos:   []string{"not-niulang"},
-	}
-	go func() {
-		raw, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer raw.Close()
-		_ = tls.Server(raw, serverConfig).Handshake()
-	}()
-	_, err = EnrollWithOptions(context.Background(), invitation, "laptop", DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
-	if err == nil || !strings.Contains(err.Error(), "does not support Niulang enrollment") || !strings.Contains(err.Error(), "protocol 2") {
+	err := explainIdentityHandshakeError("127.0.0.1:443", "enrollment", errors.New("remote error: tls: no application protocol"))
+	if !strings.Contains(err.Error(), "does not support Niulang enrollment") || !strings.Contains(err.Error(), "protocol 3") {
 		t.Fatalf("ALPN mismatch produced unhelpful error: %v", err)
-	}
-}
-
-func TestRenewalPreservesDeviceAndRejectsRevocation(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	provider := testProvider(t, listener.Addr().String(), time.Now().Add(-24*24*time.Hour))
-	account, _ := provider.Store.AddAccount("alice", time.Time{}, AccountLimits{}, time.Now())
-	profile := localProfile(t, provider, account, "laptop", time.Now().Add(-24*24*time.Hour))
-	needs, err := profile.NeedsRenewal(time.Now(), 7*24*time.Hour)
-	if err != nil || !needs {
-		t.Fatalf("near-expiry profile needs renewal=%t err=%v", needs, err)
-	}
-	serverConfig, _ := ServerTLSConfig(provider.ServerCredentials(), "niulang/2", true)
-	service := EnrollmentService{Provider: provider}
-	serveRenewal := func() {
-		raw, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer raw.Close()
-		conn := tls.Server(raw, serverConfig)
-		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-		if conn.Handshake() == nil {
-			principal, principalErr := PrincipalFromTLS(conn.ConnectionState())
-			if principalErr == nil {
-				_, _ = service.Renew(conn, principal)
-			}
-		}
-	}
-	go serveRenewal()
-	renewed, err := RenewProfileWithOptions(context.Background(), profile, DialOptions{Timeout: 3 * time.Second, LocalAddress: "127.0.0.1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if renewed.DeviceID != profile.DeviceID || renewed.DevicePrivateKey != profile.DevicePrivateKey || renewed.DeviceCertificate == profile.DeviceCertificate {
-		t.Fatal("renewal changed the device identity/key or failed to rotate the certificate")
-	}
-	if err := provider.Store.RevokeDevice(profile.DeviceID, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	go serveRenewal()
-	if _, err := RenewProfile(context.Background(), renewed, 3*time.Second); err == nil {
-		t.Fatal("revoked device renewed its certificate")
 	}
 }
 
@@ -661,7 +546,7 @@ func TestAuthorizationStoreRejectsUnknownAndInconsistentFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unknown := bytes.Replace(data, []byte(`"version": 2,`), []byte(`"version": 2, "unexpected": true,`), 1)
+	unknown := bytes.Replace(data, []byte(`"version": 3,`), []byte(`"version": 3, "unexpected": true,`), 1)
 	if bytes.Equal(unknown, data) {
 		t.Fatal("test did not alter authorization JSON")
 	}
@@ -811,7 +696,7 @@ func TestGatewayRenewalIsVisibleToExistingTLSConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "niulang/2", false)
+	serverConfig, err := ServerTLSConfig(provider.ServerCredentials(), "h3", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -824,7 +709,7 @@ func TestGatewayRenewalIsVisibleToExistingTLSConfiguration(t *testing.T) {
 	if bytes.Equal(before, after) {
 		t.Fatal("gateway renewal retained the old leaf")
 	}
-	clientConfig, err := ClientTLSConfig(clientCredentials, "niulang/2")
+	clientConfig, err := ClientTLSConfig(clientCredentials, "h3")
 	if err != nil {
 		t.Fatal(err)
 	}

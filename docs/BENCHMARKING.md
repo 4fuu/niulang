@@ -1,8 +1,8 @@
 # Measuring this transport
 
 > [!NOTE]
-> **Status:** Current benchmark methodology for Niulang protocol 2
-> **Last reviewed:** 2026-08-27
+> **Status:** Current benchmark methodology for Niulang protocol 3
+> **Last reviewed:** 2026-09-02
 
 This is the reproducibility guide for the measurement rig. It exists because the motivating
 link moved between roughly 0% and 50% packet loss within minutes, so
@@ -59,13 +59,13 @@ fairness, not application-layer resource discovery.
 Niulang therefore schedules only what this layer can know honestly. DATA
 carrier handoffs on QUIC connections with the same stable provider-path
 identity share one default scheduling window; control frames, UDP packets, and
-TCP fallback bypass it. Each flow receives at most 512 KiB of preferred startup
-service. The path admits at most eight carrier handoffs at once and two per
-flow, serves preferred startup or interactive work against sustained bulk at a
-3:1 ratio, and ages bulk into service after 250 ms. Coded DATA releases its
-grant only after its source symbols reach the datagram carrier, not when they
-enter the coded path's own queue. Flow close wakes pending grants and reclaims
-granted ones.
+bypass it. Each flow receives at most 512 KiB of preferred startup service. The
+path admits at most eight carrier handoffs at once and two per flow, serves
+preferred startup or interactive work against sustained bulk at a 3:1 ratio,
+and ages bulk into service after 250 ms. Coded DATA releases its grant only
+after its source symbols reach the datagram carrier, not when they enter the
+coded path's own queue. Flow close wakes pending grants and reclaims granted
+ones.
 
 This is cross-flow fairness, not TLS content inference. The proxy does not know
 whether an encrypted flow is HTML, an image, or video; bounded startup service
@@ -267,6 +267,7 @@ so a transport is added by registering it rather than by editing the launcher:
 // internal/extproxy/extproxy.go
 var stacks = map[Kind]stack{
     TUIC: {transport: "udp", implementation: "sing-box", launch: singBoxLaunch},
+    AnyTLS: {transport: "tcp", implementation: "sing-box", launch: singBoxLaunch},
     ...
 }
 
@@ -279,6 +280,12 @@ under `Config.WorkDir`), `ServerArgs` and `ClientArgs`, and optionally
 `ServerBinary`/`ClientBinary` for an implementation that ships one program per
 side. `Plan` resolves it without running anything, which is how a stack's
 wiring is tested with nothing installed.
+
+A release whose real identity setup needs a running gateway can own a custom
+start lifecycle. The Queqiao adapter uses that path to initialize provider
+state, issue a one-time invitation, enroll a device over a companion TCP relay,
+and then force the measured client data plane to QUIC. Enrollment completes
+before request timing begins and all state remains inside `WorkDir`.
 
 What the running pair must satisfy:
 
@@ -499,14 +506,14 @@ for wrapping. Zero remains the default and preserves existing behavior.
 This is a burst-bounded aggregate **QUIC packet-byte pacing cap**, not a strict
 NIC wire cap. It charges the packet size reported synchronously to congestion
 control, including QUIC overhead and repairs, but not UDP/IP headers. The
-handshake occurs before the wrapper is installed; path probes bypass the
-controller; ACK-only and PTO packets can bypass pacing eligibility and are
-charged afterward; and concurrent connection send loops can each pass one
-eligibility check before either charge is visible. The bounded debt is repaid
-by later packets and exported as telemetry. A strict all-packet cap needs a
-pre-registration pacing hook in the QUIC implementation rather than blocking
-`PacketConn.Write`: blocking there would register send/PTO state before the
-packet actually left and corrupt RTT, PTO, and erasure sampling.
+handshake occurs before the wrapper is installed; ACK-only and PTO packets can
+bypass pacing eligibility and are charged afterward; and concurrent connection
+send loops can each pass one eligibility check before either charge is visible.
+The bounded debt is repaid by later packets and exported as telemetry. A strict
+all-packet cap needs a pre-registration pacing hook in the QUIC implementation
+rather than blocking `PacketConn.Write`: blocking there would register send/PTO
+state before the packet actually left and corrupt RTT, PTO, and erasure
+sampling.
 
 The JSON `wire_cap` object records each endpoint's configured total and bulk
 rates, charged QUIC bytes, overshoot packets, and sampled scheduler debt. The
@@ -520,16 +527,15 @@ bottleneck drops at 8 and 16 ms refill intervals, but still dropped 6.996% at
 host timer granularity. It is evidence to keep the prototype opt-in, not a
 reason to relabel it as a hard cap.
 
-The default erasure controller also remains unable to infer a queue-less
-policer's sustained rate. Separating total loss from the retained erasure floor
-removed one positive-feedback loop, but did not turn that controller into a
-wire cap. On the seeded 300 ms, 250000 B/s, 8 ms-refill characterization path,
-one full-suite run and eight isolated repetitions produced 1.4--2.5x peak
-pacing and 23.3--31.2% sender-induced loss. The peak depends on which BBR probe
-cycle fits in the observation window; the consistently high policer loss is
-the direct unresolved signal. `internal/pep/case4_test.go` therefore gates both
-residual overdrive and at least 20% loss instead of treating a single transient
-peak as a stable product metric.
+The default erasure controller now infers a queue-less policer's sustained rate,
+but that estimate is not a wire cap. On the seeded 300 ms, 250000 B/s, 8
+ms-refill characterization path, three full-suite runs and six isolated
+Protocol 3 repetitions put the peak bandwidth estimate at 1.00--1.04x the path
+while peak pacing still reached 4.1--4.2x and sender-induced loss remained
+17.4--23.7%. The queue stayed at 1--2 ms, so the delay brake had no signal. The
+accurate estimate is a resolved component of the old falsification; residual
+overdrive remains unresolved and is gated by both a 3.5x pacing floor and a
+15% loss floor in `internal/pep/case4_test.go`.
 
 The connection-reuse script borrows the useful latency property of AnyTLS's
 idle-session pool -- keep a path warm so a request does not pay another outer
@@ -621,6 +627,12 @@ go run ./cmd/niulangbench --rtt 200 --loss 1 --rate 100 \
 go run ./cmd/niulangbench --stacks baseline,niulang,tuic,hysteria2 \
     --sing-box /path/to/sing-box --rtt 200 --loss 1 --rate 100 --trials 5
 
+# Current product against the latest released upstream binary. Niulang's
+# credentials are prepared before timing; Queqiao enrolls over its companion
+# TCP listener, then its measured data plane is forced to QUIC.
+go run ./cmd/niulangbench --stacks niulang,queqiao \
+    --queqiao /path/to/queqiaod --rtt 200 --loss 1 --rate 100 --trials 5
+
 # Against a fixed-rate erasure code, which is the comparison niulang's own
 # coding most needs. Sweep the parity; see the fixed-parity section.
 go run ./cmd/niulangbench --stacks niulang,kcptun \
@@ -628,8 +640,8 @@ go run ./cmd/niulangbench --stacks niulang,kcptun \
     --kcptun-mode fast3 --kcptun-parityshard 3 \
     --rtt 200 --loss 20 --rate 50 --bytes $((16*1024*1024)) --trials 5
 
-# The TCP family, which cannot be measured under loss.
-go run ./cmd/niulangbench --stacks vless-tcp,vless-ws \
+# The TCP family, including AnyTLS, which cannot be measured under loss.
+go run ./cmd/niulangbench --stacks anytls,vless-tcp,vless-ws \
     --sing-box /path/to/sing-box --rtt 200 --loss 0 --rate 100 --trials 4
 
 # The standard matrix, five trials per cell.
@@ -771,30 +783,5 @@ only appears with a real NIC or a real scheduler.
 
 The throughput matrix says nothing about correctness under lane failure, UDP
 blocking, or restart; those require separate correctness and failure-mode
-tests. The opt-in QoS recovery tests keep seeded QUIC and TCP paths matched,
-then raise loss only on the outer UDP path while TCP remains clean:
-
-```sh
-# Sustained QoS: a handoff is required. Vary RTT, burst, payload, and seed.
-NIULANG_UDP_QOS_EXPERIMENT=1 \
-NIULANG_QOS_LOSS=0.95 NIULANG_QOS_RTT_MS=226 \
-NIULANG_QOS_UDP_PAYLOAD=1200 NIULANG_QOS_SEED=771 \
-go test ./internal/pep -run '^TestUDPQoSDifferentialRecoveryExperiment$' \
-    -count=1 -v -timeout=30s
-
-# One-second transient: retain QUIC and report the result without requiring a
-# switch. Repeat across seeds; one non-switch is not a false-positive bound.
-NIULANG_UDP_QOS_EXPERIMENT=1 NIULANG_QOS_LOSS=0.95 \
-NIULANG_QOS_RECOVER_AFTER_MS=1000 NIULANG_QOS_REQUIRE_FAILOVER=0 \
-go test ./internal/pep -run '^TestUDPQoSDifferentialRecoveryExperiment$' \
-    -count=1 -v -timeout=30s
-```
-
-Retain each JSON record and the environment matrix. Interpret delivery over the
-whole post-step interval together with `failover_ms`: packets emitted before
-the decision are expected to preserve UDP loss semantics and are not replayed
-on TCP. `latency_p95_ms` and `latency_max_ms` expose the ordered-stream HOL cost
-after activation. The controller and transport packet-loss fields are
-diagnostics, not application delivery: a DATAGRAM-only QUIC workload may lose
-nearly every application packet while both remain low because those datagrams
-are not acknowledged or retransmitted by the transport.
+tests. Protocol 3 has no alternate carrier: UDP blocking is an endpoint
+failure for Niulang, and any path or protocol switch belongs outside it.

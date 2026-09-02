@@ -80,124 +80,11 @@ func discardDestination(listener net.Listener) {
 	}
 }
 
-func TestTLSOneLaneSOCKSEndToEnd(t *testing.T) {
-	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer destinationListener.Close()
-	go func() {
-		for {
-			conn, acceptErr := destinationListener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			go func() {
-				defer conn.Close()
-				_, _ = io.Copy(conn, conn)
-			}()
-		}
-	}()
-
-	certificate, roots := testCertificate(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: serverListener.Addr().String(), Credentials: roots, Logger: logger,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
-	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
-
-	conn, err := net.DialTimeout("tcp", clientListener.Addr().String(), 2*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Write([]byte{5, 1, 0}); err != nil {
-		t.Fatal(err)
-	}
-	var method [2]byte
-	if _, err := io.ReadFull(conn, method[:]); err != nil {
-		t.Fatal(err)
-	}
-	if method != [2]byte{5, 0} {
-		t.Fatalf("method response %v", method)
-	}
-	host, portText, _ := net.SplitHostPort(destinationListener.Addr().String())
-	ip := net.ParseIP(host).To4()
-	port, _ := net.LookupPort("tcp", portText)
-	request := []byte{5, 1, 0, 1}
-	request = append(request, ip...)
-	var portBytes [2]byte
-	binary.BigEndian.PutUint16(portBytes[:], uint16(port))
-	request = append(request, portBytes[:]...)
-	if _, err := conn.Write(request); err != nil {
-		t.Fatal(err)
-	}
-	var reply [10]byte
-	if _, err := io.ReadFull(conn, reply[:]); err != nil {
-		t.Fatal(err)
-	}
-	if reply[1] != 0 {
-		t.Fatalf("SOCKS connect failed: %v", reply)
-	}
-
-	payload := bytes.Repeat([]byte("niulang-one-lane-"), 8192)
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		if err := tcp.CloseWrite(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := io.ReadAll(conn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("echo mismatch: got %d bytes, want %d", len(got), len(payload))
-	}
-
-	cancel()
-	for range 2 {
-		if err := <-errorsCh; err != nil {
-			t.Fatalf("service shutdown: %v", err)
-		}
-	}
-}
-
 func TestUDPAssociateSOCKSEndToEnd(t *testing.T) {
-	runUDPAssociateSOCKSEndToEnd(t, TransportTCP)
+	runUDPAssociateSOCKSEndToEnd(t)
 }
 
-func TestUDPAssociateQUICSOCKSEndToEnd(t *testing.T) {
-	runUDPAssociateSOCKSEndToEnd(t, TransportQUIC)
-}
-
-func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
+func runUDPAssociateSOCKSEndToEnd(t *testing.T) {
 	destination, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
 		t.Fatal(err)
@@ -216,20 +103,14 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 
 	certificate, roots := testCertificate(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	var serverListener net.Listener
-	var serverPacketConn net.PacketConn
-	if transport == TransportQUIC {
-		serverPacketConn, err = net.ListenPacket("udp", "127.0.0.1:0")
-	} else {
-		serverListener, err = net.Listen("tcp", "127.0.0.1:0")
-	}
+	serverPacketConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverAddr := serverListenerAddr(serverListener, serverPacketConn)
+	serverAddr := serverPacketConn.LocalAddr().String()
 	server, err := NewServer(ServerConfig{
 		ListenAddr: serverAddr, Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: transport != TransportQUIC, EnableQUIC: transport != TransportTCP, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +120,7 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, Credentials: roots, Transport: transport, EnableQUICPool: transport == TransportQUIC, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, Credentials: roots, EnableQUICPool: true, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -247,11 +128,7 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errorsCh := make(chan error, 2)
-	if transport == TransportQUIC {
-		go func() { errorsCh <- server.ServePacketConn(ctx, serverPacketConn) }()
-	} else {
-		go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
-	}
+	go func() { errorsCh <- server.ServePacketConn(ctx, serverPacketConn) }()
 	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
 
 	control, err := net.DialTimeout("tcp", clientListener.Addr().String(), 2*time.Second)
@@ -318,13 +195,6 @@ func runUDPAssociateSOCKSEndToEnd(t *testing.T, transport TransportKind) {
 	}
 }
 
-func serverListenerAddr(listener net.Listener, packetConn net.PacketConn) string {
-	if listener != nil {
-		return listener.Addr().String()
-	}
-	return packetConn.LocalAddr().String()
-}
-
 func mustUDPAddr(t *testing.T, address string) *net.UDPAddr {
 	t.Helper()
 	addr, err := net.ResolveUDPAddr("udp", address)
@@ -332,80 +202,6 @@ func mustUDPAddr(t *testing.T, address string) *net.UDPAddr {
 		t.Fatal(err)
 	}
 	return addr
-}
-
-// listenTCPAndUDPOnOnePort reserves one port number for both TCP and UDP.
-//
-// The port is chosen by the UDP allocator, and TCP is bound onto it -- not the
-// other way around. Windows reserves contiguous excluded port ranges at boot,
-// Hyper-V and WinNAT among them, and a bind inside one fails with WSAEACCES
-// even though nothing holds the port. Asking TCP for an ephemeral port and then
-// forcing UDP onto that number walked into them: the ephemeral allocator hands
-// out ports close to sequentially, so all twenty retries landed in the same
-// excluded band and every one of them failed.
-//
-// Letting UDP choose the port only moved which side fails. The exclusions are
-// per protocol, so a kernel-chosen UDP port can still be excluded for TCP, and
-// then the retry walks the same band for the same reason: 49737, 49757, 49777
-// and 49827 on one Windows runner, four attempts marching through one
-// reservation. The port has to be free in both protocols, and retrying next to
-// the last failure will not find one while the reservation is wider than the
-// walk.
-//
-// So the retry escapes the band rather than walking it. Sockets that failed are
-// held open until the loop finishes, which stops the allocator from offering
-// the same number twice; and once the kernel's own range has disappointed us
-// several times, the remaining attempts pick a port at random from below that
-// range, where the dynamic reservations are not. Random rather than sequential,
-// because the thing being avoided is contiguous.
-func listenTCPAndUDPOnOnePort(t *testing.T) (net.Listener, net.PacketConn) {
-	t.Helper()
-	var lastErr error
-	var held []net.PacketConn
-	defer func() {
-		for _, conn := range held {
-			_ = conn.Close()
-		}
-	}()
-	const kernelChosenAttempts = 8
-	for attempt := range 40 {
-		address := "127.0.0.1:0"
-		if attempt >= kernelChosenAttempts {
-			address = "127.0.0.1:" + strconv.Itoa(portBelowTheDynamicRange(t))
-		}
-		packetConn, err := net.ListenPacket("udp", address)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		listener, err := net.Listen("tcp", packetConn.LocalAddr().String())
-		if err == nil {
-			t.Cleanup(func() {
-				_ = packetConn.Close()
-				_ = listener.Close()
-			})
-			return listener, packetConn
-		}
-		lastErr = err
-		held = append(held, packetConn)
-	}
-	t.Fatalf("could not reserve one TCP/UDP test port: %v", lastErr)
-	return nil, nil
-}
-
-// portBelowTheDynamicRange returns a port under 49152, which is where the
-// Windows dynamic range begins and therefore where the reservations inside it
-// begin. A port down here may well be in use by something else on the machine,
-// which is what the caller's retry is for; what it is not is administratively
-// excluded before anything binds it.
-func portBelowTheDynamicRange(t *testing.T) int {
-	t.Helper()
-	const low, span = 20000, 25000
-	var pick [2]byte
-	if _, err := rand.Read(pick[:]); err != nil {
-		t.Fatal(err)
-	}
-	return low + int(binary.BigEndian.Uint16(pick[:]))%span
 }
 
 func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
@@ -424,7 +220,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 		Metrics: metrics.New(), HandshakeTimeout: 300 * time.Millisecond,
 	})
 	if err != nil {
@@ -435,7 +231,7 @@ func TestQUICOneLaneSOCKSEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, EnableQUICPool: true, Logger: logger,
 		Metrics: metrics.New(),
 	})
 	if err != nil {
@@ -567,7 +363,7 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: 4 * 1024, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -577,7 +373,7 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC, ChunkSize: 4 * 1024, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, ChunkSize: 4 * 1024, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -648,172 +444,6 @@ func TestQUICFlowSurvivesOneLaneFailure(t *testing.T) {
 	}
 }
 
-func TestAutoTransportFallsBackToTCPWhenUDPUnavailable(t *testing.T) {
-	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer destinationListener.Close()
-	go echoDestination(destinationListener)
-
-	certificate, roots := testCertificate(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false, Logger: logger,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportAuto, FallbackDelay: 10 * time.Millisecond, Logger: logger,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
-	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
-
-	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
-	defer conn.Close()
-	payload := []byte("auto-fallback")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		if err := tcp.CloseWrite(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := io.ReadAll(conn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("fallback echo mismatch: got %q, want %q", got, payload)
-	}
-
-	cancel()
-	for range 2 {
-		if err := <-errorsCh; err != nil {
-			t.Fatalf("service shutdown: %v", err)
-		}
-	}
-}
-
-func TestAutoFlowInstallsTCPRescueAfterAllQUICLanesFail(t *testing.T) {
-	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer destinationListener.Close()
-	go slowEchoDestination(destinationListener)
-
-	certificate, roots := testCertificate(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	serverListener, packetConn := listenTCPAndUDPOnOnePort(t)
-	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true, ChunkSize: 4 * 1024, Logger: logger,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportAuto, FallbackDelay: 300 * time.Millisecond, ChunkSize: 4 * 1024, Logger: logger,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errorsCh := make(chan error, 3)
-	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
-	go func() { errorsCh <- server.ServePacketConn(ctx, packetConn) }()
-	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
-
-	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	payload := bytes.Repeat([]byte("niulang-auto-rescue-"), 32*1024)
-	writeErr := make(chan error, 1)
-	go func() {
-		_, writeErrValue := conn.Write(payload)
-		if tcp, ok := conn.(*net.TCPConn); ok && writeErrValue == nil {
-			writeErrValue = tcp.CloseWrite()
-		}
-		writeErr <- writeErrValue
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
-	closedQUIC := false
-	rescuedTCP := false
-	for time.Now().Before(deadline) {
-		server.sessionsMu.RLock()
-		var sessionFlow *serverFlow
-		for _, candidate := range server.sessions {
-			sessionFlow = candidate
-			break
-		}
-		var lane *mpLane
-		if sessionFlow != nil {
-			lanes := sessionFlow.flow.healthyLanes()
-			if len(lanes) > 0 {
-				lane = lanes[0]
-			}
-		}
-		server.sessionsMu.RUnlock()
-		if lane != nil && lane.kind == TransportQUIC && !closedQUIC {
-			_ = lane.fc.Close()
-			closedQUIC = true
-		}
-		if closedQUIC && lane != nil && lane.kind == TransportTCP {
-			rescuedTCP = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !closedQUIC {
-		t.Fatal("initial QUIC lane was not established")
-	}
-	if !rescuedTCP {
-		t.Fatal("TCP rescue lane was not established")
-	}
-
-	if err := <-writeErr; err != nil {
-		t.Fatal(err)
-	}
-	got, err := io.ReadAll(conn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("TCP rescue echo mismatch: got %d bytes, want %d", len(got), len(payload))
-	}
-
-	cancel()
-	for i := 0; i < 3; i++ {
-		if err := <-errorsCh; err != nil {
-			t.Fatalf("service shutdown: %v", err)
-		}
-	}
-}
-
 func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -824,14 +454,14 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 
 	certificate, roots := testCertificate(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
-		Logger: logger, Metrics: metrics.New(),
+		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
+		Logger:            logger, Metrics: metrics.New(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -841,7 +471,7 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportTCP, Logger: logger, Metrics: metrics.New(),
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Logger: logger, Metrics: metrics.New(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -849,7 +479,7 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
+	go func() { errorsCh <- server.ServePacketConn(ctx, packetConn) }()
 	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
 
 	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
@@ -903,7 +533,7 @@ func TestCompletedFlowTombstoneReplaysFinalAck(t *testing.T) {
 
 	joinCtx, joinCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer joinCancel()
-	lane, err := client.openJoinLane(joinCtx, TransportTCP, sessionID, flowID, 99)
+	lane, err := client.openJoinLane(joinCtx, TransportQUIC, sessionID, flowID, 99)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -969,7 +599,7 @@ func TestLostFinalFINUsesOneTombstoneRescueWithoutStorm(t *testing.T) {
 	serverMetrics := metrics.New()
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger, Metrics: serverMetrics,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger, Metrics: serverMetrics,
 		testLaneWriteHook: func(frame protocol.Frame) error {
 			if frame.Header.Type == protocol.TypeClose && frame.Header.Flags&protocol.FlagFin != 0 && dropFirstServerFIN.CompareAndSwap(true, false) {
 				return errors.New("injected final FIN loss")
@@ -986,7 +616,7 @@ func TestLostFinalFINUsesOneTombstoneRescueWithoutStorm(t *testing.T) {
 	}
 	clientMetrics := metrics.New()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots,
 		Logger: logger, Metrics: clientMetrics,
 	})
 	if err != nil {
@@ -1070,15 +700,15 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 			t.Logf("full-close trace:\n%s", logBuf.String())
 		}
 	})
-	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	serverMetrics := metrics.New()
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
-		Logger: logger, Metrics: serverMetrics,
+		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
+		Logger:            logger, Metrics: serverMetrics,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1089,7 +719,7 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	}
 	clientMetrics := metrics.New()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportTCP, Logger: logger, Metrics: clientMetrics,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Logger: logger, Metrics: clientMetrics,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1097,7 +727,7 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
+	go func() { errorsCh <- server.ServePacketConn(ctx, packetConn) }()
 	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
 
 	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
@@ -1128,101 +758,6 @@ func TestFullApplicationCloseAbortsKeepAliveDestination(t *testing.T) {
 	if got := clientMetrics.Snapshot(); got.ActiveFlows != 0 || got.FlowsCompleted != 1 || got.FlowsFailed != 0 {
 		t.Fatalf("client did not close full application flow cleanly: active=%d completed=%d failed=%d", got.ActiveFlows, got.FlowsCompleted, got.FlowsFailed)
 	}
-
-	cancel()
-	for range 2 {
-		if err := <-errorsCh; err != nil {
-			t.Fatalf("service shutdown: %v", err)
-		}
-	}
-}
-
-func TestTCPFallbackStripesOneFlowAcrossFourLanes(t *testing.T) {
-	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer destinationListener.Close()
-	prefix := bytes.Repeat([]byte("tcp-prefix-"), 8192)
-	tail := bytes.Repeat([]byte("striped-tcp-payload-"), 256*1024)
-	response := append(append([]byte(nil), prefix...), tail...)
-	go func() {
-		conn, acceptErr := destinationListener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close()
-		request := make([]byte, len("request"))
-		if _, readErr := io.ReadFull(conn, request); readErr != nil {
-			return
-		}
-		if writeErr := writeFull(conn, prefix); writeErr != nil {
-			return
-		}
-		// Hold a body above the prewarm threshold long enough for the client to
-		// classify the one-way transfer and finish all three TLS lane joins.
-		time.Sleep(750 * time.Millisecond)
-		_ = writeFull(conn, tail)
-	}()
-
-	certificate, roots := testCertificate(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var server *Server
-	var injectLaneFailure atomic.Bool
-	injectLaneFailure.Store(true)
-	server, err = NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: false,
-		TCPFallbackLanes: 4, Logger: logger,
-		testLaneWriteHook: func(frame protocol.Frame) error {
-			if frame.Header.Type == protocol.TypeData && server != nil && server.maxObservedLanes.Load() == 4 && injectLaneFailure.CompareAndSwap(true, false) {
-				return errors.New("injected striped TCP lane failure")
-			}
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(), Credentials: roots, Transport: TransportTCP, TCPFallbackLanes: 4, Logger: logger,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
-	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
-
-	conn := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	if _, err := conn.Write([]byte("request")); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(response))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("read striped response: %v", err)
-	}
-	if !bytes.Equal(got, response) {
-		t.Fatalf("striped response mismatch: got %d bytes, want %d", len(got), len(response))
-	}
-	if lanes := server.maxObservedLanes.Load(); lanes != 4 {
-		t.Fatalf("server observed %d lanes, want exactly four", lanes)
-	}
-	if injectLaneFailure.Load() {
-		t.Fatal("the four-lane transfer completed without exercising lane re-injection")
-	}
-	_ = conn.Close()
 
 	cancel()
 	for range 2 {

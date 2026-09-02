@@ -52,7 +52,7 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 		Metrics: metrics.New(),
 		// The first connection to an erasing path spends about five seconds
 		// on the QUIC handshake alone, so a bound of five is a coin flip.
@@ -80,7 +80,7 @@ func codedPairWith(t *testing.T, pooled bool, path *pathsim.Config, serve func(n
 	clientMetrics := metrics.New()
 	lastClientMetrics = clientMetrics
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: remote, Credentials: roots, Transport: TransportQUIC,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: remote, Credentials: roots,
 		EnableQUICPool: pooled, Logger: logger, Metrics: clientMetrics,
 	})
 	if err != nil {

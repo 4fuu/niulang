@@ -15,24 +15,24 @@ import (
 	"github.com/4fuu/niulang/internal/session"
 )
 
-var update = flag.Bool("update", false, "rewrite the committed protocol-2 vectors from this build")
+var update = flag.Bool("update", false, "rewrite the committed protocol-3 vectors from this build")
 
 // vectorPath is deliberately outside this package. The vectors describe the
 // protocol, not this package's tests, and a second implementation should be
 // able to find them without reading Go.
 func vectorPath() string {
-	return filepath.Join("..", "..", "testdata", "protocol2", "vectors.json")
+	return filepath.Join("..", "..", "testdata", "protocol3", "vectors.json")
 }
 
 func loadVectors(t *testing.T) File {
 	t.Helper()
 	raw, err := os.ReadFile(vectorPath())
 	if err != nil {
-		t.Fatalf("read protocol-2 vectors: %v", err)
+		t.Fatalf("read protocol-3 vectors: %v", err)
 	}
 	var f File
 	if err := json.Unmarshal(raw, &f); err != nil {
-		t.Fatalf("parse protocol-2 vectors: %v", err)
+		t.Fatalf("parse protocol-3 vectors: %v", err)
 	}
 	return f
 }
@@ -54,15 +54,15 @@ func TestVectorsAreCurrent(t *testing.T) {
 		if err := os.WriteFile(vectorPath(), encoded, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Log("protocol-2 vectors rewritten")
+		t.Log("protocol-3 vectors rewritten")
 		return
 	}
 	committed, err := os.ReadFile(vectorPath())
 	if err != nil {
-		t.Fatalf("read protocol-2 vectors: %v", err)
+		t.Fatalf("read protocol-3 vectors: %v", err)
 	}
 	if string(committed) != string(encoded) {
-		t.Fatalf("this build no longer produces the committed protocol-2 vectors.\n"+
+		t.Fatalf("this build no longer produces the committed protocol-3 vectors.\n"+
 			"A data-wire change requires matching protocol and carrier identifiers; an\n"+
 			"identity-bootstrap change requires an explicit compatibility decision. If\n"+
 			"neither changed deliberately, this is a regression. After review, run:\n"+
@@ -75,7 +75,7 @@ func generate(t *testing.T) File {
 	t.Helper()
 	return File{
 		Protocol: int(protocol.Version),
-		Note: "Frozen conformance vectors for Niulang protocol 2. Every credential-shaped " +
+		Note: "Frozen conformance vectors for Niulang protocol 3. Every credential-shaped " +
 			"value here is synthetic. Regenerating this file is a compatibility change; data-plane " +
 			"changes require protocol.Version and the carrier identifiers to move with them.",
 		FrameHeaders:    frameHeaderVectors(t),
@@ -129,7 +129,6 @@ func frameHeaderVectors(t *testing.T) FrameHeaderVectors {
 		{"reset", protocol.Header{Version: protocol.Version, Type: protocol.TypeReset, SessionID: sid, FlowID: 1, PayloadLen: 20, Class: protocol.ClassNew}},
 		{"packet", protocol.Header{Version: protocol.Version, Type: protocol.TypePacket, SessionID: sid, FlowID: 1, Sequence: 7, PayloadLen: 64, Class: protocol.ClassInteractive}},
 		{"packet at the largest legal size", protocol.Header{Version: protocol.Version, Type: protocol.TypePacket, SessionID: sid, FlowID: 1, Sequence: 8, PayloadLen: session.MaxPacketPayload, Class: protocol.ClassInteractive}},
-		{"probe", protocol.Header{Version: protocol.Version, Type: protocol.TypeProbe, SessionID: sid, FlowID: 0, Sequence: 99, PayloadLen: protocol.MaxProbePayload, Class: protocol.ClassNew}},
 	}
 	out := FrameHeaderVectors{}
 	for _, a := range accepted {
@@ -157,9 +156,10 @@ func frameHeaderVectors(t *testing.T) FrameHeaderVectors {
 		{"wrong magic", mutate(func(raw []byte) { raw[0] = 'X' }), "the first two bytes are not WO"},
 		{"version 0", mutate(func(raw []byte) { raw[2] = 0 }), "a receiver speaks exactly one wire version and refuses every other"},
 		{"version 1", mutate(func(raw []byte) { raw[2] = 1 }), "the previous wire version has no compatibility path"},
-		{"version 3", mutate(func(raw []byte) { raw[2] = 3 }), "a future version is refused rather than partially understood"},
-		{"frame type 0", mutate(func(raw []byte) { raw[3] = 0 }), "types are 1..9; there is no zero type"},
-		{"frame type 10", mutate(func(raw []byte) { raw[3] = 10 }), "an unknown type is refused, never ignored"},
+		{"version 2", mutate(func(raw []byte) { raw[2] = 2 }), "the previous wire version has no compatibility path"},
+		{"version 4", mutate(func(raw []byte) { raw[2] = 4 }), "a future version is refused rather than partially understood"},
+		{"frame type 0", mutate(func(raw []byte) { raw[3] = 0 }), "types are 1..8; there is no zero type"},
+		{"frame type 9", mutate(func(raw []byte) { raw[3] = 9 }), "types are 1..8; there is no type 9"},
 		{"class 3", mutate(func(raw []byte) { raw[42] = 3 }), "classes are 0..2"},
 		{"reserved flag bit 6", mutate(func(raw []byte) { raw[5] |= 1 << 6 }), "bit 6 is reserved and must be zero"},
 		{"reserved flag bit 8", mutate(func(raw []byte) { raw[4] |= 1 << 0 }), "bits 8..15 are reserved and must be zero"},
@@ -536,11 +536,7 @@ func limitVector() LimitVector {
 		UDPResumeTokenSize:   session.UDPResumeTokenSize,
 		MaxRepairWindow:      fec.MaxRepairWindow,
 		MinDecoderWidth:      fec.MinDecoderWidth,
-		MaxProbePayload:      protocol.MaxProbePayload,
-		MaxProbeFrames:       protocol.MaxProbeFrames,
-		MaxProbeBytes:        protocol.MaxProbeBytes,
 		QUICDataALPN:         protocol.QUICDataALPN,
-		TCPDataALPN:          protocol.TCPDataALPN,
 		H3TunnelProtocol:     protocol.H3TunnelProtocol,
 		H3TunnelPath:         protocol.H3TunnelPath,
 		EnrollALPN:           identity.EnrollmentALPN,

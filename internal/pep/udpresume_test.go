@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -180,21 +179,15 @@ func TestARescuedUDPAssociationKeepsItsRemoteSourceAddress(t *testing.T) {
 
 	tlsCert, roots := testCertificate(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	quicPacketConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tcpListener.Close()
-	tcpPort := tcpListener.Addr().(*net.TCPAddr).Port
-	quicPacketConn, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpPort)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverAddr := tcpListener.Addr().String()
+	serverAddr := quicPacketConn.LocalAddr().String()
 	server, err := NewServer(ServerConfig{
 		ListenAddr: serverAddr, Credentials: tlsCert,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableTCP: true, EnableQUIC: true,
-		Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
+		Logger:            logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -205,18 +198,16 @@ func TestARescuedUDPAssociationKeepsItsRemoteSourceAddress(t *testing.T) {
 	}
 	defer clientListener.Close()
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, Credentials: roots, Transport: TransportAuto, FallbackDelay: 5 * time.Second,
-		UDPFailureThreshold: 1, UDPCooldown: time.Minute, Logger: logger,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr, Credentials: roots,
+		EnableQUICPool: true, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 	defer serviceCancel()
-	quicCtx, quicCancel := context.WithCancel(serviceCtx)
-	errorsCh := make(chan error, 3)
-	go func() { errorsCh <- server.ServeListener(serviceCtx, tcpListener) }()
-	go func() { errorsCh <- server.ServePacketConn(quicCtx, quicPacketConn) }()
+	errorsCh := make(chan error, 2)
+	go func() { errorsCh <- server.ServePacketConn(serviceCtx, quicPacketConn) }()
 	go func() { errorsCh <- client.ServeListener(serviceCtx, clientListener) }()
 
 	control, err := net.DialTimeout("tcp", clientListener.Addr().String(), 5*time.Second)
@@ -262,11 +253,10 @@ func TestARescuedUDPAssociationKeepsItsRemoteSourceAddress(t *testing.T) {
 		t.Fatalf("the destination saw %d packets before the rescue, want 1", len(before))
 	}
 
-	// Kill the QUIC listener under the association. The client rescues onto
-	// TLS/TCP, which is a different transport to the same server -- so the
-	// relay it reclaims is genuinely the retained one and not an artefact of
-	// the connection surviving.
-	quicCancel()
+	// Retire the QUIC generation under the association. Its replacement must
+	// reclaim the retained server relay rather than changing the source address
+	// seen by the destination.
+	client.closeControlQUICPool("injected generation failure")
 	deadline := time.Now().Add(10 * time.Second)
 	for client.Metrics().Snapshot().UDPAssociationReconnects == 0 && time.Now().Before(deadline) {
 		time.Sleep(25 * time.Millisecond)
@@ -287,11 +277,35 @@ func TestARescuedUDPAssociationKeepsItsRemoteSourceAddress(t *testing.T) {
 	}
 
 	serviceCancel()
-	for range 3 {
+	for range 2 {
 		select {
 		case <-errorsCh:
 		case <-time.After(5 * time.Second):
 			t.Fatal("service shutdown timeout")
 		}
 	}
+}
+
+func openTestUDPAssociation(t *testing.T, control net.Conn) *net.UDPAddr {
+	t.Helper()
+	_ = control.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := control.Write([]byte{5, 1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	var method [2]byte
+	if _, err := io.ReadFull(control, method[:]); err != nil || method != [2]byte{5, 0} {
+		t.Fatalf("method response %v err=%v", method, err)
+	}
+	if _, err := control.Write([]byte{5, socks5.CommandUDPAssociate, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	var reply [10]byte
+	if _, err := io.ReadFull(control, reply[:]); err != nil {
+		t.Fatal(err)
+	}
+	if reply[1] != socks5.ReplySucceeded {
+		t.Fatalf("UDP associate failed: %d", reply[1])
+	}
+	_ = control.SetDeadline(time.Time{})
+	return &net.UDPAddr{IP: net.IPv4(reply[4], reply[5], reply[6], reply[7]), Port: int(binary.BigEndian.Uint16(reply[8:10]))}
 }

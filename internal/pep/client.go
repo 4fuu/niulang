@@ -31,7 +31,6 @@ import (
 // FIN. Recovery is deliberately finite; the logical flow then fails closed
 // and the caller can retry.
 const (
-	maxTCPFallbackLanes      = 16
 	defaultClientMaxSessions = 2048
 	defaultMaxPendingOpens   = 256
 	flowOpenRetryBaseDelay   = 500 * time.Millisecond
@@ -67,7 +66,7 @@ type ClientConfig struct {
 	LocalAddress string
 	// SocketControl is invoked after an outer socket is created and before it
 	// is bound or connected. Route-integrating clients use it to exempt
-	// Niulang's own TCP and UDP sockets from a virtual interface. A failure
+	// Niulang's own UDP sockets from a virtual interface. A failure
 	// aborts the dial; silently continuing would route the tunnel through itself.
 	SocketControl func(network, address string, conn syscall.RawConn) error
 	// SOCKSAuth optionally requires RFC 1929 username/password on the local
@@ -96,10 +95,6 @@ type ClientConfig struct {
 	// transport. Keeping this separate from MaxSessions prevents a failed
 	// endpoint and its retries from occupying every healthy-flow slot.
 	MaxPendingOpens int
-	Transport       TransportKind
-	// TCPFallbackLanes is the number of independent TLS/TCP connections used
-	// for a classified bulk flow. Values above one never affect QUIC.
-	TCPFallbackLanes int
 	// EnableQUICPool keeps one persistent QUIC connection for initial and
 	// control streams, and is what makes opening a flow cost nothing.
 	//
@@ -170,23 +165,11 @@ type ClientConfig struct {
 	// the throughput-oriented defaults used by servers and desktop clients.
 	MemoryLimits *MemoryLimits
 	Metrics      *metrics.Registry
-	// FallbackDelay is when AUTO starts connecting its warm-standby TCP
-	// candidate. It is not a deadline for QUIC and not a transport-selection
-	// race.
-	FallbackDelay time.Duration
-	// FallbackGrace is how long a ready TCP standby waits for QUIC. Expiry may
-	// serve the current flow over TCP, but it is neutral UDP evidence. With a
-	// pool, the QUIC attempt continues in the background so later flows can
-	// return to the preferred transport.
-	FallbackGrace       time.Duration
-	UDPFailureThreshold int
-	UDPCooldown         time.Duration
-	Logger              *slog.Logger
+	Logger       *slog.Logger
 }
 
 type Client struct {
 	cfg            ClientConfig
-	udpHealth      *udpHealth
 	budget         *limiter.Budget
 	sessionLimit   *SessionLimit
 	sendMemory     *memlimit.Budget
@@ -198,18 +181,6 @@ type Client struct {
 
 	credentialsMu sync.RWMutex
 	credentials   identity.ClientCredentials
-
-	// AUTO keeps one explicitly registered TLS/TCP connection ready for the
-	// provider path. It carries only authenticated heartbeat probes until one
-	// degraded QUIC flow atomically claims it for JOIN.
-	standbyMu  sync.Mutex
-	tcpStandby *tcpStandby
-	// Active UDP associations share one low-rate reliable path probe per QUIC
-	// connection. DATAGRAM-only traffic has no transport loss accounting, so
-	// the probe supplies the missing liveness evidence without acknowledging
-	// every application packet or multiplying probes across pooled flows.
-	udpProbeMu sync.Mutex
-	udpProbes  map[*quic.Conn]*udpPathProbeState
 
 	// One QUIC generation can carry many independent PEP streams. A generation
 	// is replaced as a unit: all callers wait on the same in-flight dial, so a
@@ -229,12 +200,10 @@ type Client struct {
 	// flowOpenRetryDelayForTest makes retry timing deterministic without
 	// weakening the production jitter shared by concurrent callers.
 	flowOpenRetryDelayForTest func(failedAttempt int) time.Duration
-	// dialPipelinedFlowForTest isolates the cold-flow transport race from the
+	// dialPipelinedFlowForTest isolates a dedicated cold-flow dial from the
 	// network in state-machine tests.
 	dialPipelinedFlowForTest func(context.Context, TransportKind, []byte) (*openedFlow, error)
-	// dialAuthenticatedLaneForTest isolates the pooled transport race. The
-	// production path still goes through dialAuthenticatedLane; tests can make
-	// TCP ready before QUIC without relying on scheduler timing or live loss.
+	// dialAuthenticatedLaneForTest isolates pooled QUIC authentication.
 	dialAuthenticatedLaneForTest func(context.Context, TransportKind) (*authenticatedLane, error)
 
 	// quicPoolActive counts flows currently sharing the pooled control
@@ -426,7 +395,6 @@ func (b *bulkConn) close(reason string) {
 }
 
 const bulkPoolIdleTimeout = 30 * time.Second
-const defaultFallbackGrace = 2 * time.Second
 
 func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.ListenAddr == "" || cfg.RemoteAddr == "" {
@@ -497,18 +465,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = metrics.New()
 	}
-	if cfg.Transport == "" {
-		cfg.Transport = TransportAuto
-	}
-	if cfg.Transport != TransportAuto && cfg.Transport != TransportQUIC && cfg.Transport != TransportTCP {
-		return nil, fmt.Errorf("unsupported client transport %q", cfg.Transport)
-	}
-	if cfg.TCPFallbackLanes == 0 {
-		cfg.TCPFallbackLanes = 1
-	}
-	if cfg.TCPFallbackLanes < 1 || cfg.TCPFallbackLanes > maxTCPFallbackLanes {
-		return nil, fmt.Errorf("TCP fallback lanes must be between 1 and %d", maxTCPFallbackLanes)
-	}
 	if cfg.Congestion == "" {
 		cfg.Congestion = defaultCongestion()
 	}
@@ -553,12 +509,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	// Before resolveMemoryLimits: the per-flow send budget is checked against
 	// the chunk size, and the chunk that has to fit there is the corrected one.
 	cfg.ChunkSize = chunkSizeForBudget(cfg.ChunkSize, budget)
-	if cfg.FallbackDelay <= 0 {
-		cfg.FallbackDelay = 300 * time.Millisecond
-	}
-	if cfg.FallbackGrace <= 0 {
-		cfg.FallbackGrace = defaultFallbackGrace
-	}
 	if err := (flowWindows{
 		stream: cfg.StreamReceiveWindow, connection: cfg.ConnectionReceiveWindow,
 		maxStream: cfg.MaxStreamReceiveWindow, maxConnection: cfg.MaxConnectionReceiveWindow,
@@ -571,7 +521,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, err
 	}
 	client := &Client{
-		cfg: cfg, udpHealth: newUDPHealth(cfg.UDPFailureThreshold, cfg.UDPCooldown),
+		cfg:         cfg,
 		credentials: cfg.Credentials, budget: budget,
 		metrics: cfg.Metrics, sessionLimit: cfg.SessionLimit, pendingOpens: make(chan struct{}, cfg.MaxPendingOpens),
 		sendMemory: sendMemory, receiveMemory: receiveMemory, memoryLimits: memoryLimits,
@@ -635,18 +585,7 @@ func (c *Client) UpdateCredentials(updated identity.ClientCredentials) error {
 	}
 	c.credentials = updated
 	c.credentialsMu.Unlock()
-	// Closing a standby can wait for one bounded heartbeat read. Do not hold
-	// the credential lock across that network operation: replacement dials
-	// need to read the newly installed identity.
-	c.invalidateTCPStandby()
 	return nil
-}
-
-func (c *Client) fallbackGrace() time.Duration {
-	if c.cfg.FallbackGrace <= 0 {
-		return defaultFallbackGrace
-	}
-	return c.cfg.FallbackGrace
 }
 
 func (c *Client) windows() flowWindows {
@@ -708,29 +647,12 @@ func (c *Client) releasePendingOpen() {
 func (c *Client) ServeListener(ctx context.Context, listener net.Listener) error {
 	defer listener.Close()
 	defer c.closeQUICPool()
-	defer c.invalidateTCPStandby()
-	if c.cfg.Transport == TransportAuto {
-		go c.maintainTCPStandby(ctx)
-	}
 
-	// Readiness includes the first bounded path measurement. Starting it in a
-	// background watcher made the first accepted flow race the prewarm and
-	// usually become the traffic which discovered the path after all. Capture
-	// the route first so the watcher can still detect a change which happens
-	// during this measurement.
+	// Bind and accept immediately. The background prewarm and the first SOCKS
+	// flow join the same singleflight QUIC dial, so startup work is never an
+	// extra gate and never duplicates a handshake.
 	uplink := c.currentUplink()
-	c.prewarmPath(ctx)
-	// A route can change during a long lossy handshake. Reconcile once before
-	// publishing readiness; otherwise the listener accepts flows for up to one
-	// polling interval using the pool and path model the prewarm just measured
-	// on an uplink which is already gone.
-	if current := c.currentUplink(); current != "" {
-		if uplink != "" && current != uplink {
-			c.cfg.Logger.Info("uplink changed during path prewarm", "from", uplink, "to", current)
-			c.onUplinkChanged(ctx)
-		}
-		uplink = current
-	}
+	go c.prewarmPath(ctx)
 	// A later change of uplink is a change of path, and nothing else will say so.
 	go c.watchUplink(ctx, uplink)
 
@@ -851,7 +773,6 @@ func (c *Client) handleLocal(ctx context.Context, inner net.Conn) {
 	if flow.openPending {
 		flowSession.requireOpenConfirmation()
 	}
-	flowSession.tcpStriping.Store(flow.kind == TransportTCP && c.cfg.TCPFallbackLanes > 1)
 	flowSession.reserveControlLane = flow.reserveControl
 	flowSession.controlLaneShared = func() bool { return c.quicPoolActive.Load() > 1 }
 	if err := flowSession.addLane(&mpLane{
@@ -906,7 +827,6 @@ type openedFlow struct {
 	kind           TransportKind
 	openPending    bool
 	reserveControl bool
-	tcpStriping    bool
 }
 
 type authenticatedLane struct {
@@ -916,7 +836,6 @@ type authenticatedLane struct {
 	kind           TransportKind
 	laneID         uint64
 	reserveControl bool
-	tcpStriping    bool
 }
 
 func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow, error) {
@@ -928,28 +847,14 @@ func (c *Client) openFlow(ctx context.Context, destination string) (*openedFlow,
 	return c.openFlowMode(ctx, destination, false)
 }
 
-// openInitialFlow establishes a dedicated mutually authenticated connection
-// and sends OPEN as its first application frame. AUTO preserves the normal UDP
-// preference and prepares a delayed TCP standby behind the QUIC candidate.
+// openInitialFlow establishes a dedicated mutually authenticated QUIC
+// connection and sends OPEN as its first application frame.
 func (c *Client) openInitialFlow(ctx context.Context, destination string) (*openedFlow, error) {
 	payload, err := session.EncodeDestination(destination)
 	if err != nil {
 		return nil, err
 	}
-	if c.cfg.Transport == TransportTCP {
-		return c.dialPipelinedCandidate(ctx, TransportTCP, payload)
-	}
-	if c.cfg.Transport == TransportQUIC {
-		return c.dialPipelinedCandidate(ctx, TransportQUIC, payload)
-	}
-	if c.cfg.Transport != TransportAuto {
-		return nil, fmt.Errorf("unsupported transport %q", c.cfg.Transport)
-	}
-	if !c.udpHealth.allow(time.Now()) {
-		c.metrics.Fallback()
-		return c.dialPipelinedCandidate(ctx, TransportTCP, payload)
-	}
-	return c.racePipelinedFlow(ctx, payload)
+	return c.dialPipelinedCandidate(ctx, TransportQUIC, payload)
 }
 
 func (c *Client) dialPipelinedCandidate(ctx context.Context, kind TransportKind, payload []byte) (*openedFlow, error) {
@@ -988,7 +893,6 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 		return &openedFlow{
 			fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID,
 			laneID: lane.laneID, kind: lane.kind, openPending: true,
-			tcpStriping: kind == TransportTCP && c.cfg.TCPFallbackLanes > 1,
 		}, nil
 	}
 	openAck, err := lane.fc.Read()
@@ -1008,157 +912,7 @@ func (c *Client) dialPipelinedFlow(ctx context.Context, kind TransportKind, payl
 	return &openedFlow{
 		fc: lane.fc, outer: lane.outer, sessionID: sessionID, flowID: flowID,
 		laneID: lane.laneID, kind: lane.kind,
-		tcpStriping: kind == TransportTCP && c.cfg.TCPFallbackLanes > 1,
 	}, nil
-}
-
-func (c *Client) racePipelinedFlow(ctx context.Context, payload []byte) (*openedFlow, error) {
-	raceCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	quicResult := make(chan openedFlowResult, 1)
-	go func() {
-		flow, err := c.dialPipelinedCandidate(raceCtx, TransportQUIC, payload)
-		quicResult <- openedFlowResult{flow: flow, err: err}
-	}()
-	timer := time.NewTimer(c.cfg.FallbackDelay)
-	defer timer.Stop()
-	select {
-	case result := <-quicResult:
-		quicEvidence := classifyQUICPathEvidence(result.err)
-		if quicEvidence == quicPathAvailable {
-			// A peer response proves the QUIC path worked even when the
-			// destination or protocol operation itself was refused.
-			c.udpHealth.observe(quicEvidence, time.Now())
-			return result.flow, result.err
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		tcpFlow, tcpErr := c.dialPipelinedCandidate(ctx, TransportTCP, payload)
-		tcpEvidence := classifyQUICPathEvidence(tcpErr)
-		c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, tcpEvidence), result.err)
-		c.metrics.Fallback()
-		if tcpEvidence != quicPathAvailable {
-			c.reportEndpointTransportRaceFailure(result.err, tcpErr)
-		}
-		return tcpFlow, tcpErr
-	case <-timer.C:
-	case <-ctx.Done():
-		closeLateFlow(quicResult)
-		return nil, ctx.Err()
-	}
-	tcpResult := make(chan openedFlowResult, 1)
-	go func() {
-		flow, err := c.dialPipelinedCandidate(raceCtx, TransportTCP, payload)
-		tcpResult <- openedFlowResult{flow: flow, err: err}
-	}()
-	var quicErr, tcpErr error
-	var tcpReady *openedFlow
-	var standbyTimer *time.Timer
-	var standbyC <-chan time.Time
-	defer func() {
-		if standbyTimer != nil {
-			standbyTimer.Stop()
-		}
-	}()
-	quicEvidence := quicPathNeutral
-	for quicResult != nil || tcpResult != nil {
-		select {
-		case result := <-quicResult:
-			quicResult = nil
-			quicEvidence = classifyQUICPathEvidence(result.err)
-			if quicEvidence == quicPathAvailable {
-				c.udpHealth.observe(quicEvidence, time.Now())
-				cancel()
-				closeOpenedFlow(tcpReady)
-				closeLateFlow(tcpResult)
-				return result.flow, result.err
-			}
-			quicErr = result.err
-			if tcpReady != nil {
-				c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, quicPathAvailable), quicErr)
-				c.metrics.Fallback()
-				cancel()
-				return tcpReady, nil
-			}
-		case result := <-tcpResult:
-			tcpResult = nil
-			tcpEvidence := classifyQUICPathEvidence(result.err)
-			if tcpEvidence == quicPathAvailable {
-				// TCP is a warm standby, not an equal race winner. A
-				// still-pending QUIC handshake has said nothing about UDP
-				// reachability, and on the target path TCP can authenticate
-				// first yet carry bulk data a thousand times more slowly.
-				// Keep the ready TCP flow bounded by the QUIC dial's own
-				// timeout and commit it only after QUIC explicitly fails.
-				if result.err == nil && quicResult != nil {
-					tcpReady = result.flow
-					standbyTimer = time.NewTimer(c.fallbackGrace())
-					standbyC = standbyTimer.C
-					continue
-				}
-				c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, tcpEvidence), quicErr)
-				c.metrics.Fallback()
-				cancel()
-				closeLateFlow(quicResult)
-				return result.flow, result.err
-			}
-			tcpErr = result.err
-		case <-standbyC:
-			// The preference window is an application-latency bound, not
-			// evidence that UDP is blocked. This cold, unpooled flow cannot
-			// reuse a late connection, so retire its QUIC candidate without
-			// changing endpoint health.
-			standbyC = nil
-			c.metrics.Fallback()
-			c.cfg.Logger.Debug("QUIC preference window elapsed; using TCP without penalizing UDP health",
-				"endpoint", c.cfg.RemoteAddr, "grace", c.fallbackGrace())
-			cancel()
-			closeLateFlow(quicResult)
-			return tcpReady, nil
-		case <-ctx.Done():
-			closeOpenedFlow(tcpReady)
-			closeLateFlow(quicResult)
-			closeLateFlow(tcpResult)
-			return nil, ctx.Err()
-		}
-	}
-	c.reportEndpointTransportRaceFailure(quicErr, tcpErr)
-	return nil, fmt.Errorf("QUIC failed (%v); TCP fallback failed (%v)", quicErr, tcpErr)
-}
-
-type openedFlowResult struct {
-	flow *openedFlow
-	err  error
-}
-
-// observeUDPPath keeps the existing health state and makes its operational
-// meaning explicit. A negative observation is only produced in AUTO after
-// QUIC explicitly fails and TCP reaches the same endpoint. A merely pending
-// QUIC handshake is neutral: transport setup latency is not a throughput or
-// reachability verdict. TCP preserves correctness, but it is a degraded path
-// on the high-RTT links this transport targets and must not be silent.
-func (c *Client) observeUDPPath(evidence quicPathEvidence, quicErr error) {
-	if c.udpHealth != nil {
-		c.udpHealth.observe(evidence, time.Now())
-	}
-	if evidence != quicPathUnavailable {
-		return
-	}
-	if c.metrics != nil {
-		c.metrics.UDPPathUnavailable()
-	}
-	if c.cfg.Logger == nil {
-		return
-	}
-	fields := []any{
-		"endpoint", c.cfg.RemoteAddr,
-		"fallback", TransportTCP,
-	}
-	if quicErr != nil {
-		fields = append(fields, "quic_error", quicErr)
-	}
-	c.cfg.Logger.Warn("UDP path explicitly failed; TCP fallback is degraded", fields...)
 }
 
 const transientUDPSendLogInterval = 5 * time.Second
@@ -1180,38 +934,6 @@ func (c *Client) observeTransientUDPSendFailure(err error) {
 	}
 	c.cfg.Logger.Warn("transient UDP send failure treated as packet loss",
 		"endpoint", c.cfg.RemoteAddr, "error", err)
-}
-
-// reportEndpointTransportRaceFailure is the complement of observeUDPPath: TCP
-// did not establish a usable control path either, so this is an endpoint-wide
-// failure rather than evidence against UDP alone.
-func (c *Client) reportEndpointTransportRaceFailure(quicErr, tcpErr error) {
-	if c.metrics != nil {
-		c.metrics.EndpointTransportRaceFailure()
-	}
-	if c.cfg.Logger != nil {
-		c.cfg.Logger.Warn("configured endpoint failed on both transports",
-			"endpoint", c.cfg.RemoteAddr,
-			"quic_error", quicErr,
-			"tcp_error", tcpErr,
-		)
-	}
-}
-
-func closeLateFlow(ch <-chan openedFlowResult) {
-	if ch == nil {
-		return
-	}
-	go func() {
-		result := <-ch
-		closeOpenedFlow(result.flow)
-	}()
-}
-
-func closeOpenedFlow(flow *openedFlow) {
-	if flow != nil && flow.fc != nil {
-		_ = flow.fc.Close()
-	}
 }
 
 // errDestinationUnavailable is the peer saying it could not reach the
@@ -1330,7 +1052,6 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, _ bool) (
 		return &openedFlow{
 			fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID,
 			laneID: lane.laneID, kind: lane.kind, openPending: true, reserveControl: lane.reserveControl,
-			tcpStriping: lane.tcpStriping,
 		}, nil
 	}
 	response, err := lane.fc.Read()
@@ -1350,7 +1071,6 @@ func (c *Client) openFlowMode(ctx context.Context, destination string, _ bool) (
 	return &openedFlow{
 		fc: lane.fc, outer: lane.outer, sessionID: lane.sessionID, flowID: flowID,
 		laneID: lane.laneID, kind: lane.kind, reserveControl: lane.reserveControl,
-		tcpStriping: lane.tcpStriping,
 	}, nil
 }
 
@@ -1393,8 +1113,6 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	var err error
 	reserveControl := false
 	switch kind {
-	case TransportTCP:
-		outer, err = dialTCP(ctx, c.cfg.RemoteAddr, c.currentCredentials(), c.cfg.DialTimeout, c.cfg.LocalAddress, c.cfg.SocketControl)
 	case TransportQUIC:
 		ccfg := congestionConfig{
 			kind: c.cfg.Congestion, brutalBytesPerSecond: c.cfg.BrutalBytesPerSec,
@@ -1422,7 +1140,6 @@ func (c *Client) dialLaneMode(ctx context.Context, kind TransportKind, sessionID
 	return &authenticatedLane{
 		fc: fc, outer: outer, sessionID: sessionID, kind: kind, laneID: laneID,
 		reserveControl: reserveControl,
-		tcpStriping:    kind == TransportTCP && c.cfg.TCPFallbackLanes > 1,
 	}, nil
 }
 
@@ -1567,21 +1284,14 @@ type laneJoinResult struct {
 	lane *mpLane
 	id   uint64
 	err  error
-	// replacement distinguishes a join opened because the flow has no lane
-	// left from one opened to widen a healthy bundle. Only the first is a
-	// replacement attempt, and the result arrives too late to tell by looking
-	// at the flow: by then it may have recovered or died.
-	replacement bool
 }
 
 // errLaneJoinRejected reports that the peer answered a lane join and refused
 // it, as opposed to the join failing to complete. The distinction decides two
-// things: a refusal is not evidence that UDP is unhealthy -- the handshake
-// completed and the peer replied, so marking the transport down here would
-// eventually push unrelated flows onto the TCP fallback -- and it is a policy
-// answer that will not change during this flow, so the search should stop
-// rather than back off and retry. A peer pinned to a lower lane ceiling than
-// this endpoint is the ordinary way to reach it.
+// things: the QUIC handshake completed, so it is not a path failure, and it is
+// a policy answer that will not change during this flow, so the search should
+// stop rather than back off and retry. A peer pinned to a lower lane ceiling
+// than this endpoint is the ordinary way to reach it.
 var errLaneJoinRejected = errors.New("lane join rejected")
 
 // errBulkConnectionLimit is a scheduling answer, not a transport failure.
@@ -1616,10 +1326,10 @@ func (c *Client) openIsolationJoinLane(ctx context.Context, kind TransportKind, 
 }
 
 func (c *Client) openJoinLaneMode(ctx context.Context, kind TransportKind, sessionID [16]byte, flowID, laneID uint64, ramp bool) (*mpLane, error) {
-	if kind != TransportQUIC && kind != TransportTCP {
+	if kind != TransportQUIC {
 		return nil, fmt.Errorf("unsupported join transport %q", kind)
 	}
-	if kind == TransportQUIC && c.cfg.EnableQUICPool {
+	if c.cfg.EnableQUICPool {
 		if lane, poolErr := c.openPooledJoinLane(ctx, sessionID, flowID, laneID, ramp); poolErr == nil {
 			return lane, nil
 		} else if !dedicatedBulkFallbackAllowed(poolErr) {
@@ -1676,8 +1386,7 @@ func (c *Client) completeLaneJoin(lane *authenticatedLane, flowID uint64, flags 
 	_ = lane.outer.SetDeadline(time.Time{})
 	return &mpLane{
 		id: lane.laneID, kind: lane.kind, fc: lane.fc,
-		tcpStriping: lane.tcpStriping,
-		control:     flags&protocol.FlagReserveControl != 0,
+		control: flags&protocol.FlagReserveControl != 0,
 	}, nil
 }
 
@@ -1981,16 +1690,7 @@ func bulkLaneBudget(reserveControl bool) (bulk, controlReserve int) {
 	return 1, 0
 }
 
-func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, initialKind TransportKind) {
-	if initialKind == TransportTCP {
-		if c.cfg.TCPFallbackLanes > 1 {
-			c.manageTCPBundle(ctx, flow, sessionID, flowID)
-		}
-		return
-	}
-	if initialKind != TransportQUIC {
-		return
-	}
+func (c *Client) manageLanes(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64, _ TransportKind) {
 	c.manageQUICLanes(ctx, flow, sessionID, flowID)
 }
 
@@ -1999,10 +1699,9 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 	manageCtx, manageCancel := context.WithCancel(ctx)
 	defer manageCancel()
 	// This goroutine is the only thing that opens a replacement lane for this
-	// flow. When it returns -- budget spent, context gone, or handed off to the
-	// bundle manager below, which marks the flow again when it returns in turn
-	// -- the flow's replacement grace is waiting for something nobody will
-	// send, and it should stop rather than leave the application in silence.
+	// flow. When it returns -- budget spent or context gone -- the flow's
+	// replacement grace is waiting for something nobody will send, and it
+	// should stop rather than leave the application in silence.
 	defer flow.noteReplacementAbandoned()
 	go func() {
 		select {
@@ -2017,7 +1716,6 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 	joinPending := false
 	isolated := false
 	var lastDecision time.Time
-	var degradation degradationDetector
 	var recoveryBackoff time.Duration
 	var nextRecovery time.Time
 	recoveryAttempts := 0
@@ -2035,7 +1733,7 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 			// The remote completion watcher can close its lanes just before
 			// this scheduler tick. Both FIN directions are already known at
 			// that point, so joining a tombstoned/unknown session would only
-			// create noisy warnings and transient UDP-health penalties.
+			// create noisy warnings.
 			if flow.finSent.Load() && flow.remoteFinSeen.Load() {
 				flow.closeAll()
 				return
@@ -2101,25 +1799,6 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 			}
 			snapshot := flow.snapshot()
 			now := time.Now()
-			if !hasTCPLane(flow) {
-				if decision, degraded := degradation.observe(now, snapshot, c.standbyReady(now)); degraded {
-					c.cfg.Logger.Warn("sustained differential QUIC degradation detected",
-						"flow_id", flowID, "reason", decision.reason,
-						"observed_for", decision.observedFor, "erasure", decision.erasure,
-						"current_bytes_per_second", decision.currentRate,
-						"healthy_bytes_per_second", decision.baselineRate, "rtt", decision.rtt)
-					flow.noteReplacementAttempt()
-					if err := c.openStandbyRecoveryLane(flow, sessionID, flowID, now); err != nil {
-						flow.noteReplacementFailure()
-						c.cfg.Logger.Warn("differential TCP recovery unavailable", "flow_id", flowID, "error", err)
-					} else {
-						c.metrics.Fallback()
-						c.metrics.QUICDegradationFailover()
-						c.udpHealth.degraded(now)
-						isolated = true
-					}
-				}
-			}
 			if snapshot.HealthyLanes == 0 {
 				if flow.doneChanClosed() {
 					return
@@ -2137,20 +1816,7 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 				recoveryAttempts++
 				lastRecoveryAttempt = now
 				flow.noteReplacementAttempt()
-				var recoveryErr error
-				if c.cfg.Transport == TransportAuto && c.standbyReady(now) &&
-					!(flow.reserveControlLane && c.cfg.EnableQUICPool) {
-					recoveryErr = c.openStandbyRecoveryLane(flow, sessionID, flowID, now)
-					if recoveryErr == nil {
-						c.metrics.Fallback()
-					} else {
-						c.cfg.Logger.Debug("hot TCP recovery unavailable; using ordinary recovery",
-							"flow_id", flowID, "error", recoveryErr)
-					}
-				}
-				if recoveryErr != nil || c.cfg.Transport != TransportAuto || !hasTCPLane(flow) {
-					recoveryErr = c.openRecoveryLane(manageCtx, flow, sessionID, flowID)
-				}
+				recoveryErr := c.openRecoveryLane(manageCtx, flow, sessionID, flowID)
 				if recoveryErr != nil {
 					flow.noteReplacementFailure()
 					if errors.Is(recoveryErr, errLaneJoinRejected) {
@@ -2207,15 +1873,6 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 				recoveryBackoff = 0
 				nextRecovery = time.Time{}
 				lastRecoveryAttempt = time.Time{}
-			}
-			// Once a TCP rescue lane is installed, keep the session on it.
-			if hasTCPLane(flow) {
-				retired := flow.retireLanesExcept(TransportTCP)
-				c.cfg.Logger.Info("flow handed off to TCP fallback", "retired_quic_lanes", retired, "tcp_lanes", flow.laneCount())
-				if c.cfg.TCPFallbackLanes > 1 {
-					c.manageTCPBundle(manageCtx, flow, sessionID, flowID)
-				}
-				return
 			}
 			// Everything below is isolation, and it is over once it has
 			// happened: a QUIC flow's data lives on one lane, so there is never
@@ -2277,245 +1934,6 @@ func (c *Client) manageQUICLanes(ctx context.Context, flow *multipathFlow, sessi
 	}
 }
 
-func (c *Client) openStandbyRecoveryLane(flow *multipathFlow, sessionID [16]byte, flowID uint64, now time.Time) error {
-	laneID, err := flow.allocateJoinID()
-	if err != nil {
-		return err
-	}
-	return c.openStandbyRecoveryLaneID(flow, sessionID, flowID, laneID, now)
-}
-
-func (c *Client) openStandbyRecoveryLaneID(flow *multipathFlow, sessionID [16]byte, flowID, laneID uint64, now time.Time) error {
-	standby := c.claimTCPStandby(now)
-	if standby == nil {
-		return errors.New("no recently healthy TCP standby")
-	}
-	lane, err := c.activateTCPStandby(standby, sessionID, flowID, laneID)
-	if err != nil {
-		c.metrics.TCPStandbyFailure()
-		return err
-	}
-	if err := c.installRecoveryLane(flow, lane); err != nil {
-		return err
-	}
-	flow.retireLanesExcept(TransportTCP)
-	flow.tcpStriping.Store(c.cfg.TCPFallbackLanes > 1)
-	return nil
-}
-
-// manageTCPBundle maintains a bounded group of independent reliable paths for
-// a TCP-only flow. Extra lanes are opened only after bulk classification (or
-// its asymmetric-download prewarm), but one lane is always recoverable. The
-// expansion failure budget is deliberately separate from zero-lane recovery:
-// an endpoint refusing lane 16 must not prevent a later replacement of the
-// one connection the flow still needs to remain alive.
-func (c *Client) manageTCPBundle(ctx context.Context, flow *multipathFlow, sessionID [16]byte, flowID uint64) {
-	manageCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	// As in manageQUICLanes: once this returns, nothing will open another lane
-	// for the flow, and its replacement grace has nothing left to wait for.
-	defer flow.noteReplacementAbandoned()
-	go func() {
-		select {
-		case <-flow.doneChan():
-			cancel()
-		case <-manageCtx.Done():
-		}
-	}()
-
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	joins := make(chan laneJoinResult, maxTCPFallbackLanes)
-	pending := 0
-	bundleFailures := 0
-	recoveryAttempts := 0
-	var lastRecoveryAttempt time.Time
-	bundleDisabled := false
-	activated := false
-	var nextAttempt time.Time
-	var retryBackoff time.Duration
-	var lastFailure time.Time
-	observedLaneFailures := flow.laneFailureCount()
-
-	launch := func(replacement bool) bool {
-		laneID, err := flow.allocateJoinID()
-		if err != nil {
-			return false
-		}
-		if replacement {
-			flow.noteReplacementAttempt()
-		}
-		pending++
-		go func() {
-			lane, joinErr := c.openJoinLane(manageCtx, TransportTCP, sessionID, flowID, laneID)
-			select {
-			case joins <- laneJoinResult{lane: lane, id: laneID, err: joinErr, replacement: replacement}:
-			case <-manageCtx.Done():
-				if lane != nil {
-					_ = lane.fc.Close()
-				}
-			}
-		}()
-		return true
-	}
-
-	for {
-		select {
-		case <-flow.doneChan():
-			return
-		case <-manageCtx.Done():
-			return
-		case result := <-joins:
-			if pending > 0 {
-				pending--
-			}
-			if result.err != nil {
-				if result.replacement {
-					flow.noteReplacementFailure()
-				}
-				if manageCtx.Err() != nil || flow.doneChanClosed() {
-					return
-				}
-				if errors.Is(result.err, errLaneJoinRejected) {
-					bundleDisabled = true
-					if flow.laneCount() == 0 {
-						flow.resumeRefused.Store(true)
-						return
-					}
-					c.cfg.Logger.Debug("peer refused TCP bundle lane", "lane", result.id, "error", result.err)
-					continue
-				}
-				bundleFailures++
-				lastFailure = time.Now()
-				if retryBackoff == 0 {
-					retryBackoff = time.Second
-				} else if retryBackoff < 15*time.Second {
-					retryBackoff *= 2
-					if retryBackoff > 15*time.Second {
-						retryBackoff = 15 * time.Second
-					}
-				}
-				nextAttempt = time.Now().Add(retryBackoff)
-				if bundleFailures >= maxLaneRecoveryAttempts {
-					bundleDisabled = true
-				}
-				c.cfg.Logger.Warn("TCP bundle lane unavailable", "lane", result.id, "error", result.err, "failures", bundleFailures)
-				continue
-			}
-			if err := flow.addLane(result.lane); err != nil {
-				_ = result.lane.fc.Close()
-				continue
-			}
-			if flow.remoteFinSeen.Load() && flow.laneCount() > 1 {
-				// The peer has no more bytes to send. This join was launched before
-				// its FIN arrived and is no longer useful; keep one reliable lane
-				// for a possible upload half-close, but do not resurrect the bundle.
-				flow.closeFailedLane(result.lane)
-				continue
-			}
-			c.cfg.Logger.Debug("TCP bundle lane joined", "lane", result.id, "lanes", flow.laneCount())
-		case <-ticker.C:
-		}
-
-		if flow.finSent.Load() && flow.remoteFinSeen.Load() {
-			flow.closeAll()
-			return
-		}
-		// A fully closed local application has sent CLOSE_ABORT and explicitly
-		// declared that it will neither read nor write more bytes. Replacing the
-		// lane after the server acts on that marker can only resurrect a flow
-		// which is already complete.
-		if flow.localAbortSent.Load() || (flow.localClosed.Load() && flow.remoteFinSeen.Load()) {
-			return
-		}
-		flow.refreshClass()
-		now := time.Now()
-		failures := flow.laneFailureCount()
-		if failures > observedLaneFailures {
-			bundleFailures += int(failures - observedLaneFailures)
-			observedLaneFailures = failures
-			lastFailure = now
-			if bundleFailures >= maxLaneRecoveryAttempts {
-				bundleDisabled = true
-			}
-		}
-		if bundleFailures > 0 && !lastFailure.IsZero() && now.Sub(lastFailure) >= laneRecoveryResetAfter {
-			bundleFailures = 0
-			bundleDisabled = false
-			retryBackoff = 0
-			nextAttempt = time.Time{}
-			lastFailure = time.Time{}
-		}
-
-		snapshot := flow.snapshot()
-		healthy := tcpLaneCount(flow)
-		if healthy == 0 {
-			if pending != 0 || recoveryAttempts >= maxLaneRecoveryAttempts || now.Before(nextAttempt) {
-				continue
-			}
-			recoveryAttempts++
-			lastRecoveryAttempt = now
-			launch(true)
-			continue
-		}
-		// An accept-then-close peer must not reset the replacement budget on
-		// every successful handshake. Only a lane that remains healthy for a
-		// sustained dwell proves recovery, matching the QUIC rescue policy.
-		if recoveryAttempts > 0 && !lastRecoveryAttempt.IsZero() && now.Sub(lastRecoveryAttempt) >= laneRecoveryResetAfter {
-			recoveryAttempts = 0
-			lastRecoveryAttempt = time.Time{}
-		}
-		if flow.remoteFinSeen.Load() {
-			continue
-		}
-		if c.cfg.TCPFallbackLanes <= 1 || !flow.tcpStriping.Load() || bundleDisabled {
-			continue
-		}
-		if snapshot.Class != classifier.ClassBulk && !shouldPrewarmBulkLane(snapshot) {
-			continue
-		}
-		if !activated {
-			activated = true
-			flow.tcpStriping.Store(true)
-			c.cfg.Logger.Info("TCP fallback striping activated", "target_lanes", c.cfg.TCPFallbackLanes)
-		}
-		if now.Before(nextAttempt) {
-			continue
-		}
-		missing := c.cfg.TCPFallbackLanes - healthy - pending
-		for range missing {
-			// Widening a bundle that already has a healthy lane is not a
-			// replacement, and counting it as one would bury the flows that
-			// have nothing left in the ordinary run of bulk transfers.
-			if !launch(false) {
-				break
-			}
-		}
-	}
-}
-
-func tcpLaneCount(flow *multipathFlow) int {
-	count := 0
-	for _, lane := range flow.healthyLanes() {
-		if lane.kind == TransportTCP {
-			count++
-		}
-	}
-	return count
-}
-
-// hasTCPLane reports whether the flow has been rescued onto TLS/TCP. Once it
-// has, the session stays there: mixing a reliable stream lane with a QUIC one
-// compounds head-of-line blocking and makes the fallback less predictable.
-func hasTCPLane(flow *multipathFlow) bool {
-	for _, lane := range flow.healthyLanes() {
-		if lane.kind == TransportTCP {
-			return true
-		}
-	}
-	return false
-}
-
 func shouldPrewarmBulkLane(snapshot flowSnapshot) bool {
 	if snapshot.Elapsed < bulkLanePrewarmAge || snapshot.Bytes < bulkLanePrewarmBytes {
 		return false
@@ -2556,52 +1974,18 @@ func (c *Client) openRecoveryLane(ctx context.Context, flow *multipathFlow, sess
 	// then sends an independent authenticated JOIN stream; the logical flow and
 	// its destination socket remain intact.
 	if flow.reserveControlLane && c.cfg.EnableQUICPool {
-		quicCtx := recoveryCtx
-		var quicCancel context.CancelFunc
-		if c.cfg.Transport == TransportAuto {
-			// Recovery is sequential rather than a transport race. A TCP JOIN is
-			// an irreversible server-side handoff which retires QUIC, so racing
-			// both JOINs could let the nominal loser change the flow underneath
-			// the winner. Give the coalesced QUIC generation a bounded window,
-			// then commit exactly once to TCP.
-			quicCtx, quicCancel = context.WithTimeout(recoveryCtx, c.fallbackGrace())
-		}
-		lane, err = c.openControlPoolJoinLane(quicCtx, sessionID, flowID, laneID)
-		if quicCancel != nil {
-			quicCancel()
-		}
+		lane, err = c.openControlPoolJoinLane(recoveryCtx, sessionID, flowID, laneID)
 		if err == nil {
 			return c.installRecoveryLane(flow, lane)
 		}
 		if recoveryCtx.Err() != nil || flow.doneChanClosed() {
 			return context.Canceled
 		}
-		if c.cfg.Transport == TransportQUIC {
-			// A QUIC-only client cannot commit to the TCP standby. Give it one
-			// ordinary dedicated QUIC join after the shared pool generation is
-			// unavailable; a gateway that lost the logical session rejects it.
-			lane, err = c.openJoinLane(recoveryCtx, TransportQUIC, sessionID, flowID, laneID)
-		} else {
-			if standbyErr := c.openStandbyRecoveryLaneID(flow, sessionID, flowID, laneID, time.Now()); standbyErr == nil {
-				c.metrics.Fallback()
-				return nil
-			} else {
-				c.cfg.Logger.Debug("shared QUIC generation and hot TCP recovery unavailable; dialing TCP",
-					"flow", flowID, "quic_error", err, "standby_error", standbyErr)
-			}
-			c.metrics.Fallback()
-			c.cfg.Logger.Debug("shared QUIC generation recovery unavailable; committing flow to TCP",
-				"flow", flowID, "error", err)
-			lane, err = c.openJoinLane(recoveryCtx, TransportTCP, sessionID, flowID, laneID)
-		}
+		// Give the logical flow one dedicated QUIC join after the shared pool
+		// generation is unavailable; a gateway that lost the session rejects it.
+		lane, err = c.openJoinLane(recoveryCtx, TransportQUIC, sessionID, flowID, laneID)
 	} else {
-		kind := TransportQUIC
-		if c.cfg.Transport == TransportAuto {
-			// An unpooled flow has no shared generation to reuse. Its one safe
-			// recovery is the existing authenticated TCP handoff.
-			kind = TransportTCP
-		}
-		lane, err = c.openJoinLane(recoveryCtx, kind, sessionID, flowID, laneID)
+		lane, err = c.openJoinLane(recoveryCtx, TransportQUIC, sessionID, flowID, laneID)
 	}
 	if err != nil {
 		if recoveryCtx.Err() != nil || flow.doneChanClosed() {
@@ -2617,28 +2001,12 @@ func (c *Client) installRecoveryLane(flow *multipathFlow, lane *mpLane) error {
 		_ = lane.fc.Close()
 		return err
 	}
-	if lane.kind == TransportTCP && c.cfg.TCPFallbackLanes > 1 {
-		flow.tcpStriping.Store(lane.tcpStriping)
-	}
 	c.metrics.LaneReplacement()
 	return nil
 }
 
 func (c *Client) chooseAuthenticatedLane(ctx context.Context) (*authenticatedLane, error) {
-	switch c.cfg.Transport {
-	case TransportTCP:
-		return c.dialAuthenticatedCandidate(ctx, TransportTCP)
-	case TransportQUIC:
-		return c.dialAuthenticatedCandidate(ctx, TransportQUIC)
-	case TransportAuto:
-		if !c.udpHealth.allow(time.Now()) {
-			c.metrics.Fallback()
-			return c.dialAuthenticatedCandidate(ctx, TransportTCP)
-		}
-		return c.raceUDPAndTCP(ctx)
-	default:
-		return nil, fmt.Errorf("unsupported transport %q", c.cfg.Transport)
-	}
+	return c.dialAuthenticatedCandidate(ctx, TransportQUIC)
 }
 
 func (c *Client) dialAuthenticatedCandidate(ctx context.Context, kind TransportKind) (*authenticatedLane, error) {
@@ -2646,155 +2014,6 @@ func (c *Client) dialAuthenticatedCandidate(ctx context.Context, kind TransportK
 		return c.dialAuthenticatedLaneForTest(ctx, kind)
 	}
 	return c.dialAuthenticatedLane(ctx, kind)
-}
-
-type laneResult struct {
-	lane *authenticatedLane
-	err  error
-}
-
-func (c *Client) raceUDPAndTCP(ctx context.Context) (*authenticatedLane, error) {
-	raceCtx, cancel := context.WithCancel(ctx)
-	keepQUICAttempt := false
-	defer func() {
-		if !keepQUICAttempt {
-			cancel()
-		}
-	}()
-	quicResult := make(chan laneResult, 1)
-	go func() {
-		lane, err := c.dialAuthenticatedCandidate(raceCtx, TransportQUIC)
-		quicResult <- laneResult{lane: lane, err: err}
-	}()
-	timer := time.NewTimer(c.cfg.FallbackDelay)
-	defer timer.Stop()
-	select {
-	case result := <-quicResult:
-		if result.err == nil {
-			c.udpHealth.observe(quicPathAvailable, time.Now())
-			return result.lane, nil
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		tcpLane, tcpErr := c.dialAuthenticatedCandidate(ctx, TransportTCP)
-		tcpEvidence := quicPathNeutral
-		if tcpErr == nil {
-			tcpEvidence = quicPathAvailable
-		}
-		c.observeUDPPath(differentialQUICPathEvidence(classifyQUICPathEvidence(result.err), tcpEvidence), result.err)
-		c.metrics.Fallback()
-		if tcpErr != nil {
-			c.reportEndpointTransportRaceFailure(result.err, tcpErr)
-		}
-		return tcpLane, tcpErr
-	case <-timer.C:
-	case <-ctx.Done():
-		closeLateLane(quicResult)
-		return nil, ctx.Err()
-	}
-
-	tcpResult := make(chan laneResult, 1)
-	go func() {
-		lane, err := c.dialAuthenticatedCandidate(raceCtx, TransportTCP)
-		tcpResult <- laneResult{lane: lane, err: err}
-	}()
-	var quicErr, tcpErr error
-	var tcpReady *authenticatedLane
-	var standbyTimer *time.Timer
-	var standbyC <-chan time.Time
-	defer func() {
-		if standbyTimer != nil {
-			standbyTimer.Stop()
-		}
-	}()
-	quicEvidence := quicPathNeutral
-	for quicResult != nil || tcpResult != nil {
-		select {
-		case result := <-quicResult:
-			quicResult = nil
-			if result.err == nil {
-				c.udpHealth.observe(quicPathAvailable, time.Now())
-				cancel()
-				closeAuthenticatedLane(tcpReady)
-				closeLateLane(tcpResult)
-				return result.lane, nil
-			}
-			quicErr = result.err
-			quicEvidence = classifyQUICPathEvidence(result.err)
-			if tcpReady != nil {
-				c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, quicPathAvailable), quicErr)
-				c.metrics.Fallback()
-				cancel()
-				return tcpReady, nil
-			}
-		case result := <-tcpResult:
-			tcpResult = nil
-			if result.err == nil {
-				if quicResult != nil {
-					tcpReady = result.lane
-					standbyTimer = time.NewTimer(c.fallbackGrace())
-					standbyC = standbyTimer.C
-					continue
-				}
-				c.observeUDPPath(differentialQUICPathEvidence(quicEvidence, quicPathAvailable), quicErr)
-				c.metrics.Fallback()
-				cancel()
-				return result.lane, nil
-			}
-			tcpErr = result.err
-		case <-standbyC:
-			standbyC = nil
-			c.metrics.Fallback()
-			c.cfg.Logger.Debug("QUIC preference window elapsed; using TCP without penalizing UDP health",
-				"endpoint", c.cfg.RemoteAddr, "grace", c.fallbackGrace())
-			if c.cfg.EnableQUICPool {
-				// The current request has its bounded answer, while the one
-				// coalesced pool dial keeps running. Its eventual success
-				// restores QUIC for later flows; an explicit failure is the
-				// conservative evidence the cooldown requires.
-				keepQUICAttempt = true
-				c.finishLatePooledQUIC(quicResult, cancel)
-			} else {
-				cancel()
-				closeLateLane(quicResult)
-			}
-			return tcpReady, nil
-		case <-ctx.Done():
-			closeAuthenticatedLane(tcpReady)
-			closeLateLane(quicResult)
-			closeLateLane(tcpResult)
-			return nil, ctx.Err()
-		}
-	}
-	c.reportEndpointTransportRaceFailure(quicErr, tcpErr)
-	return nil, fmt.Errorf("QUIC failed (%v); TCP fallback failed (%v)", quicErr, tcpErr)
-}
-
-func (c *Client) finishLatePooledQUIC(ch <-chan laneResult, cancel context.CancelFunc) {
-	go func() {
-		defer cancel()
-		result := <-ch
-		if result.err == nil {
-			c.udpHealth.observe(quicPathAvailable, time.Now())
-		} else {
-			c.observeUDPPath(
-				differentialQUICPathEvidence(classifyQUICPathEvidence(result.err), quicPathAvailable),
-				result.err,
-			)
-		}
-		closeAuthenticatedLane(result.lane)
-	}()
-}
-
-func closeLateLane(ch <-chan laneResult) {
-	if ch == nil {
-		return
-	}
-	go func() {
-		result := <-ch
-		closeAuthenticatedLane(result.lane)
-	}()
 }
 
 func closeAuthenticatedLane(lane *authenticatedLane) {

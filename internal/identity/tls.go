@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	EnrollmentALPN = "niulang-enroll/2"
-	RenewalALPN    = "niulang-renew/2"
+	EnrollmentALPN = "niulang-enroll/3"
+	RenewalALPN    = "niulang-renew/3"
 )
 
 type ServerCredentials struct {

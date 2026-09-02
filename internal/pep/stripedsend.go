@@ -72,12 +72,6 @@ const (
 	// chunkReissueInterval is how often the supervisor looks for chunks to
 	// re-offer.
 	chunkReissueInterval = 250 * time.Millisecond
-	// TCP already retransmits loss and does not expose QUIC's RTT telemetry to
-	// this layer. Treating its unknown RTT as the 200 ms floor re-injected every
-	// healthy chunk on the measured 200-250 ms path just before its protocol ACK
-	// arrived, nearly doubling physical bytes. A hard lane close still retires
-	// and reissues immediately; this delay covers only a live-but-stalled socket.
-	tcpStripingReissueDelay = 2 * time.Second
 	// laneEligibilityPoll is how long a lane waits before rechecking whether
 	// the flow's class now lets it carry data. Classification changes at most
 	// once or twice in a flow's life, so polling is cheaper than a broadcast.
@@ -113,8 +107,8 @@ const (
 func (l *mpLane) windowBytes() int {
 	cwnd, _ := l.congestionState()
 	if cwnd <= 0 {
-		// No transport telemetry: a TCP rescue lane, or a QUIC connection
-		// before its first acknowledgement.
+		// A QUIC connection has no transport telemetry before its first
+		// acknowledgement.
 		if rate, rtt := l.sendRate(); rate > 0 && rtt > 0 {
 			cwnd = int(rate * rtt.Seconds())
 		}
@@ -156,9 +150,6 @@ func (f *multipathFlow) retentionBytes() int {
 // and a half was six of them on the path this targets: measured live, one
 // small flow in five cost 1.79 s instead of 0.29 waiting out that constant.
 func (f *multipathFlow) reissueDelay() time.Duration {
-	if f.tcpStriping.Load() {
-		return tcpStripingReissueDelay
-	}
 	longest := time.Duration(0)
 	for _, lane := range f.healthyLanes() {
 		if _, rtt := lane.sendRate(); rtt > longest {
@@ -321,9 +312,9 @@ func (f *multipathFlow) reliableReissueBurst() int {
 	// copy is only a hedge against a live-but-stalled lane, so copy the oldest
 	// missing chunk and wait for the next sweep before copying another.
 	//
-	// This applies to QUIC as well as TCP. When a bulk QUIC flow moved from the
-	// pooled control connection to its isolated data connection, the old
-	// unbounded behavior copied every chunk whose two-RTT timer had expired.
+	// When a bulk QUIC flow moved from the pooled control connection to its
+	// isolated data connection, the old unbounded behavior copied every chunk
+	// whose two-RTT timer had expired.
 	// The original stream remained live, so the handover sent several MiB
 	// twice, overflowed the bottleneck, and reduced useful throughput.
 	return 1

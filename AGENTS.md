@@ -15,17 +15,17 @@ this file as a substitute for the detailed contracts.
 - The supported release targets are Linux, macOS, and Windows on amd64 and
   arm64. Do not add mobile platform code or packaging.
 - Public invitations use only `niulang://enroll/...`.
-- Protocol 2 is the only supported contract. QUIC uses real HTTP/3 (`h3`) with
-  a `niulang` Extended CONNECT tunnel; TCP uses the `niulang/2`,
-  `niulang-standby/2`, `niulang-enroll/2`, and `niulang-renew/2` ALPNs. Identity
-  URIs use `niulang://...`. There is no inherited wire, credential, or state
-  compatibility and no downgrade path.
+- Protocol 3 is the only supported contract. Data uses real HTTP/3 (`h3`) over
+  QUIC/UDP with a `niulang` Extended CONNECT tunnel. Enrollment and renewal use
+  `niulang-enroll/3` and `niulang-renew/3` over QUIC on the same UDP endpoint.
+  There is no outer TCP carrier. Identity URIs use `niulang://...`. There is no
+  inherited wire, credential, or state compatibility and no downgrade path.
 - Niulang is experiment-led. Every experimental transport behavior that shows
   a reproducible benefit in a supported path or workload should graduate into
   the automatic default policy instead of remaining behind a manual flag. Scope
-  it to the conditions where it helps, retain a safe fallback where conditions
-  change, and document measured tradeoffs; a universal win is not required.
-  Protocol correctness and security remain hard gates.
+  it to the conditions where it helps, retain a safe in-carrier response where
+  conditions change, and document measured tradeoffs; a universal win is not
+  required. Protocol correctness and security remain hard gates.
 
 ## Read before changing
 
@@ -69,8 +69,8 @@ history before deciding which is wrong. Do not silently preserve both stories.
 - **`scripts/`** contains benchmark campaigns, result summarizers, release
   validation, and their Python tests. Campaign output is generated evidence,
   not source.
-- **`testdata/`** contains checked-in deterministic fixtures. Protocol 2
-  conformance vectors live in `testdata/protocol2/vectors.json`.
+- **`testdata/`** contains checked-in deterministic fixtures. Protocol 3
+  conformance vectors live in `testdata/protocol3/vectors.json`.
 - **`.github/workflows/`** contains the supported-platform test and cross-build
   matrix.
 
@@ -79,7 +79,7 @@ history before deciding which is wrong. Do not silently preserve both stories.
 - Use Go 1.25.13 and keep the module path `github.com/4fuu/niulang`.
 - Make the smallest change that fully owns the behavior. Prefer an existing
   package boundary over a one-use wrapper or parallel source of truth.
-- Preserve protocol 2 unless the task explicitly changes the wire contract. A
+- Preserve protocol 3 unless the task explicitly changes the wire contract. A
   wire change requires a versioning and migration decision, conformance
   coverage, and a matching protocol-document update; never add an implicit
   legacy parser or downgrade.

@@ -88,6 +88,23 @@ func buildConfigs(cfg Config) (server, client any, err error) {
 			"password": cfg.Credential,
 			"tls":      clientTLS,
 		}
+		if cfg.PathBandwidthMbits > 0 {
+			inbound["up_mbps"] = cfg.PathBandwidthMbits
+			inbound["down_mbps"] = cfg.PathBandwidthMbits
+			outbound["up_mbps"] = cfg.PathBandwidthMbits
+			outbound["down_mbps"] = cfg.PathBandwidthMbits
+		}
+	case AnyTLS:
+		inbound = map[string]any{
+			"type": "anytls", "tag": "in", "listen": serverHost, "listen_port": serverPort,
+			"users": []any{map[string]any{"name": "bench", "password": cfg.Credential}},
+			"tls":   serverTLS,
+		}
+		outbound = map[string]any{
+			"type": "anytls", "tag": "out", "server": remoteHost, "server_port": remotePort,
+			"password": cfg.Credential,
+			"tls":      clientTLS,
+		}
 	case VLESSTCP, VLESSWebSocket:
 		inbound = map[string]any{
 			"type": "vless", "tag": "in", "listen": serverHost, "listen_port": serverPort,

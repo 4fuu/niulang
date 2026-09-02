@@ -210,7 +210,6 @@ func (c *frameConn) bulkFrame(f protocol.Frame) bool {
 // its own: both endpoints build their coded path from the same connection
 // state, so a sender never routes a packet to a substrate its peer is not
 // reading.
-// A TLS/TCP lane has no such path and keeps the stream framing unchanged.
 func (c *frameConn) packetsOnDatagrams() bool {
 	return c.bulk != nil && !c.packetsForcedToStream
 }

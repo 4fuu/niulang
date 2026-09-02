@@ -27,16 +27,9 @@ import (
 
 type TransportKind string
 
-const (
-	TransportTCP  TransportKind = "tcp"
-	TransportQUIC TransportKind = "quic"
-	TransportAuto TransportKind = "auto"
-)
+const TransportQUIC TransportKind = "quic"
 
-const (
-	quicDataALPN = protocol.QUICDataALPN
-	tcpDataALPN  = protocol.TCPDataALPN
-)
+const quicDataALPN = protocol.QUICDataALPN
 
 const (
 	defaultAdaptiveMinBytesPerSec = 64 * 1024
@@ -126,26 +119,6 @@ func validateWireCap(total, reserve uint64, kind CongestionControlKind) error {
 	return nil
 }
 
-type udpHealth struct {
-	mu        sync.Mutex
-	failures  int
-	threshold int
-	cooldown  time.Duration
-	blockedTo time.Time
-}
-
-// quicPathEvidence is deliberately narrower than "a QUIC operation ended".
-// Only observations about network reachability belong in the global cooldown;
-// peer shutdown, stream cancellation, authentication, protocol, destination,
-// and caller-lifecycle outcomes are endpoint state and remain neutral.
-type quicPathEvidence uint8
-
-const (
-	quicPathNeutral quicPathEvidence = iota
-	quicPathAvailable
-	quicPathUnavailable
-)
-
 // peerResponseError marks an error decided from a syntactically complete peer
 // frame. The application operation failed, but the QUIC path demonstrably
 // carried a round trip.
@@ -169,118 +142,6 @@ func peerResponded(err error) bool {
 	return errors.As(err, &response)
 }
 
-// classifyQUICPathEvidence converts typed transport outcomes into path
-// evidence. Unknown errors stay neutral: a false negative costs one future
-// race, while a false positive forces every new flow onto TCP for a cooldown.
-func classifyQUICPathEvidence(err error) quicPathEvidence {
-	if err == nil || peerResponded(err) {
-		return quicPathAvailable
-	}
-	if errors.Is(err, context.Canceled) {
-		return quicPathNeutral
-	}
-
-	// Explicit peer/implementation outcomes are not reachability evidence.
-	var applicationError *quic.ApplicationError
-	var streamError *quic.StreamError
-	var statelessReset *quic.StatelessResetError
-	var versionError *quic.VersionNegotiationError
-	if errors.As(err, &applicationError) || errors.As(err, &streamError) ||
-		errors.As(err, &statelessReset) || errors.As(err, &versionError) {
-		return quicPathNeutral
-	}
-	var transportError *quic.TransportError
-	if errors.As(err, &transportError) {
-		if !transportError.Remote && transportError.ErrorCode == quic.NoViablePathError {
-			return quicPathUnavailable
-		}
-		return quicPathNeutral
-	}
-
-	var handshakeTimeout *quic.HandshakeTimeoutError
-	var idleTimeout *quic.IdleTimeoutError
-	if errors.As(err, &handshakeTimeout) || errors.As(err, &idleTimeout) ||
-		errors.Is(err, context.DeadlineExceeded) {
-		return quicPathUnavailable
-	}
-	if unreachableRouteErrno(err) {
-		return quicPathUnavailable
-	}
-	var networkError net.Error
-	if errors.As(err, &networkError) && networkError.Timeout() {
-		return quicPathUnavailable
-	}
-	return quicPathNeutral
-}
-
-// differentialQUICPathEvidence requires the TCP control to reach the same
-// endpoint before a negative QUIC observation becomes global. A pending QUIC
-// attempt is not evidence at all: TCP can authenticate sooner on a lossy path
-// and still be orders of magnitude worse once it carries data. If TCP also
-// failed, the endpoint or whole uplink may be down and QUIC is not singled out.
-func differentialQUICPathEvidence(quicEvidence, tcpEvidence quicPathEvidence) quicPathEvidence {
-	if tcpEvidence != quicPathAvailable {
-		return quicPathNeutral
-	}
-	if quicEvidence == quicPathUnavailable {
-		return quicPathUnavailable
-	}
-	return quicPathNeutral
-}
-
-func newUDPHealth(threshold int, cooldown time.Duration) *udpHealth {
-	if threshold <= 0 {
-		threshold = 3
-	}
-	if cooldown <= 0 {
-		cooldown = 30 * time.Second
-	}
-	return &udpHealth{threshold: threshold, cooldown: cooldown}
-}
-
-func (h *udpHealth) allow(now time.Time) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return !now.Before(h.blockedTo)
-}
-
-func (h *udpHealth) reset() {
-	h.mu.Lock()
-	h.failures = 0
-	h.blockedTo = time.Time{}
-	h.mu.Unlock()
-}
-
-func (h *udpHealth) failure(now time.Time) {
-	h.mu.Lock()
-	h.failures++
-	if h.failures >= h.threshold {
-		h.blockedTo = now.Add(h.cooldown)
-		h.failures = 0
-	}
-	h.mu.Unlock()
-}
-
-// degraded records a sustained differential path observation rather than one
-// failed operation. It enters cooldown immediately: opening several new QUIC
-// flows merely to repeat the same multi-second evidence would extend the
-// outage, while the existing TCP standby has already proven the alternative.
-func (h *udpHealth) degraded(now time.Time) {
-	h.mu.Lock()
-	h.failures = 0
-	h.blockedTo = now.Add(h.cooldown)
-	h.mu.Unlock()
-}
-
-func (h *udpHealth) observe(evidence quicPathEvidence, now time.Time) {
-	switch evidence {
-	case quicPathAvailable:
-		h.reset()
-	case quicPathUnavailable:
-		h.failure(now)
-	}
-}
-
 type streamConn interface {
 	io.ReadWriteCloser
 	SetDeadline(time.Time) error
@@ -296,8 +157,7 @@ type quicBidiStream interface {
 }
 
 // laneTransportStats is intentionally a small internal projection of QUIC's
-// connection counters.  Keeping the QUIC type out of the flow and metrics
-// packages lets TCP rescue lanes remain dependency-independent.
+// connection counters.
 type laneTransportStats struct {
 	latestRTT, smoothedRTT   time.Duration
 	bytesSent, bytesReceived uint64
@@ -480,38 +340,6 @@ func tlsClientConfig(credentials identity.ClientCredentials) (*tls.Config, error
 	return identity.ClientTLSConfig(credentials, quicDataALPN)
 }
 
-func dialTCP(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error) (streamConn, error) {
-	return dialTCPALPN(ctx, remote, credentials, dialTimeout, localAddress, control, tcpDataALPN)
-}
-
-func dialTCPALPN(ctx context.Context, remote string, credentials identity.ClientCredentials, dialTimeout time.Duration, localAddress string, control func(string, string, syscall.RawConn) error, alpn string) (streamConn, error) {
-	var localAddr net.Addr
-	if localAddress != "" {
-		ip, err := resolveLocalAddress(localAddress)
-		if err != nil {
-			return nil, err
-		}
-		localAddr = &net.TCPAddr{IP: ip.AsSlice()}
-	}
-	tlsConfig, err := identity.ClientTLSConfig(credentials, alpn)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := (&tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second, LocalAddr: localAddr, Control: control},
-		Config:    tlsConfig,
-	}).DialContext(ctx, "tcp", remote)
-	if err != nil {
-		return nil, explainDataHandshakeError(remote, "TCP", err)
-	}
-	tlsConn := conn.(*tls.Conn)
-	if tlsConn.ConnectionState().NegotiatedProtocol != alpn {
-		_ = tlsConn.Close()
-		return nil, fmt.Errorf("gateway %q did not negotiate %q over TCP; check that the endpoint and server version match", remote, alpn)
-	}
-	return tlsConn, nil
-}
-
 // Flow-control windows are the single largest measured determinant of
 // long-haul goodput for this transport, so they are named constants rather
 // than inline literals.
@@ -638,7 +466,7 @@ func quicConfig(windows flowWindows) *quic.Config {
 		// constant is right, because there is no measurement of the path yet
 		// to scale anything by.
 		HandshakeIdleTimeout: 30 * time.Second,
-		// Existing-flow TCP rescue cannot begin until QUIC declares the
+		// Existing-flow recovery cannot begin until QUIC declares the
 		// black-holed lane dead. Keep this bound well below application-level
 		// request timeouts while allowing several PTOs on a 200 ms WAN.
 		//
@@ -833,7 +661,7 @@ func dialQUICConnection(ctx context.Context, remote string, credentials identity
 
 func explainDataHandshakeError(remote, transport string, err error) error {
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q rejected Niulang protocol 2 over %s; the endpoint may run an incompatible server or another TLS service: %w", remote, transport, err)
+		return fmt.Errorf("gateway %q rejected Niulang protocol 3 over %s; the endpoint may run an incompatible server or another TLS service: %w", remote, transport, err)
 	}
 	return err
 }

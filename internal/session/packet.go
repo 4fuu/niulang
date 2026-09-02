@@ -19,7 +19,7 @@ const (
 	maxUDPPayload           = 65507
 )
 
-// These numbers together fix the largest frame protocol 2 can require a
+// These numbers together fix the largest frame protocol 3 can require a
 // receiver to accept, which is why protocol.MaxPayload is the size it is. They
 // are exported so the conformance vectors can state that relationship rather
 // than leave it a coincidence between two packages.

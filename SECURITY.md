@@ -2,12 +2,12 @@
 
 ## Supported security design
 
-Niulang protocol version 2 has one data-plane security mode: TLS 1.3 with
+Niulang protocol version 3 has one data-plane security mode: TLS 1.3 with
 provider-pinned gateway authentication and provider-issued per-device mutual
 authentication. Plaintext transport and application-level shared secrets do
 not exist.
 
-Protocol 2 defines a separate Niulang trust domain. Provider state, profiles,
+Protocol 3 defines a separate Niulang trust domain. Provider state, profiles,
 and certificates from another protocol version are rejected rather than
 migrated; replacing either endpoint requires creating new provider state and
 re-enrolling every device.
@@ -42,8 +42,8 @@ the provider reissues only for the exact already-registered device name and
 public key. A changed key remains a replay failure, including after the
 invitation's original expiry.
 
-Enrollment, renewal, and normal client connections can bind their outer TCP or
-UDP socket to `auto`, `if:NAME`, or a literal local IP. The CLI defaults to
+Enrollment, renewal, and normal client connections can bind their outer UDP
+socket to `auto`, `if:NAME`, or a literal local IP. The CLI defaults to
 `auto`, which excludes loopback and point-to-point TUN interfaces. This is a
 route-isolation property rather than an authentication exception: the same
 provider pin and TLS policy apply regardless of the selected source address.
@@ -98,8 +98,8 @@ IANA special-purpose ranges are rejected as well. Operators can explicitly
 allow private destinations for controlled deployments.
 
 TLS/enrollment deadlines, maximum frame and enrollment sizes, global and
-per-user sessions, lane counts, retained UDP relays, acknowledgement ranges,
-and path probes are bounded. Authorization updates use atomic file replacement;
+per-user sessions, lane counts, retained UDP relays, and acknowledgement ranges
+are bounded. Authorization updates use atomic file replacement;
 a malformed, structurally inconsistent, or unexpectedly extended update leaves
 the last known-good in-memory state active.
 

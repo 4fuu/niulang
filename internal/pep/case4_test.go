@@ -9,20 +9,20 @@ import (
 	"github.com/4fuu/niulang/internal/pathsim"
 )
 
-// A known falsification case for the controller, which remains only partly
-// resolved.
+// A known falsification case for the controller, which remains partly
+// unresolved.
 //
 // A policer drops what it cannot pass and holds nothing, so overload produces
-// loss and no delay. Loss is no longer a congestion signal and there is no
-// queue for the delay bound to measure. Compensating only for the retained
-// erasure floor removes one positive-feedback loop, but it still does not tell
-// the sender the policer's sustained rate.
+// loss and no delay. The bandwidth estimator now tracks the policer's
+// sustained rate, but an estimate is not a wire cap: probing still sends above
+// it, loss is not a congestion response, and there is no queue for the delay
+// bound to measure.
 //
-// This is a characterization test. It asserts the defect rather than the fix,
-// so that the behaviour cannot change silently in either direction. If it
-// starts failing because the sender no longer overdrives and loses packets,
-// that is the case being resolved: update this characterization and its
-// rationale together.
+// This is a characterization test. It retains the resolved estimator bound and
+// asserts the remaining defect so behavior cannot change silently in either
+// direction. If it starts failing because the sender no longer overdrives and
+// loses packets, that is the case being resolved: update this characterization
+// and its rationale together.
 //
 // It matters more than a hypothetical, because internal/pathsim records that
 // the live path this project targets is a policer -- "at twice the bottleneck
@@ -105,32 +105,25 @@ func TestCase4APolicedPathIsStillUnbraked(t *testing.T) {
 	if peakPacing == 0 {
 		t.Skip("the flow never got going, so this run measured nothing")
 	}
-	// The two amplifiers, recorded separately because they need separate fixes.
-	//
-	// The bandwidth estimate reads well above the path's sustained rate: a
-	// token bucket passes a burst at line rate, and a max filter reports that
-	// burst as the path's bandwidth. Bounding the filter's memory in time did
-	// not help here, because the bursts recur every refill period, so there is
-	// always a recent high sample. The statistic is the problem, not its age.
-	if float64(peakBandwidth) < shaped*1.4 {
-		t.Errorf("the bandwidth estimate is no longer reporting the burst rate (%d against a "+
-			"%d path); falsification case 4 may be resolved -- update the design document",
-			peakBandwidth, shaped)
+	// The estimator component of this falsification is resolved: repeated
+	// full-stack runs now track the sustained policer rate rather than a burst.
+	// Keep that improvement as an assertion while the independent pacing and
+	// loss defect below remains open.
+	if float64(peakBandwidth) < shaped*0.8 || float64(peakBandwidth) > shaped*1.2 {
+		t.Errorf("the bandwidth estimate no longer tracks the %d B/s policer: %d B/s", shaped, peakBandwidth)
 	}
-	// And nothing brakes what that estimate then paces.
+	// Nothing brakes probing above that accurate estimate.
 	if maxQueue > 50*time.Millisecond || maxBrake > 0 {
 		t.Errorf("a policer produced %v of queue and a brake of %.4f; if it now queues, this "+
 			"is no longer the unbraked case and the design document should say so",
 			maxQueue, maxBrake)
 	}
-	// The overdrive this case records, after compensation was bounded, a stale
-	// peak stopped being re-seeded, and compensation was separated from total
-	// loss: 42x became 7.3x became 2.4x and now varies from 1.4x to 2.5x on the
-	// same seeded path. An instantaneous pacing peak is sensitive to which BBR
-	// probe cycle fits in this 24-second observation, so it is not a stable
-	// defect metric by itself. Sender-induced loss is direct and remained
-	// 23.3--31.2% across the full-suite run and eight isolated repetitions.
-	if float64(peakPacing) < shaped*1.25 || lastLoss < 20 {
+	// Nine Protocol 3 runs put peak pacing at 4.1--4.2x and sender-induced loss
+	// at 17.4--23.7%. Gate both signals: the pacing floor is now materially
+	// stronger than the former 1.25x check, while the loss floor leaves enough
+	// room for full-suite host-scheduler variation without hiding the residual
+	// policer overdrive.
+	if float64(peakPacing) < shaped*3.5 || lastLoss < 15 {
 		t.Errorf("policed path no longer reproduces the residual overdrive: peak pacing %d "+
 			"(%.1fx %d) with %.1f%% loss; re-measure and update the design document",
 			peakPacing, float64(peakPacing)/shaped, shaped, lastLoss)

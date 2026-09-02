@@ -98,23 +98,23 @@ func TestTwoProviderClientsReachIndependentGateways(t *testing.T) {
 	}()
 	profiles := make([]string, 2)
 	for i := range servers {
-		gatewayListener, err := net.Listen("tcp", "127.0.0.1:0")
+		gatewayListener, err := net.ListenPacket("udp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		provider, profile := providerTestProfile(t, directory, i, gatewayListener.Addr().String())
+		provider, profile := providerTestProfile(t, directory, i, gatewayListener.LocalAddr().String())
 		profiles[i] = profile
 		servers[i], err = pep.NewServer(pep.ServerConfig{
-			ListenAddr: gatewayListener.Addr().String(), Credentials: provider.ServerCredentials(),
-			EnableTCP: true, DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, Logger: logger,
+			ListenAddr: gatewayListener.LocalAddr().String(), Credentials: provider.ServerCredentials(),
+			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, Logger: logger,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		serverCtx, stopServer := context.WithCancel(context.Background())
 		stopServers[i] = stopServer
-		go func(server *pep.Server, listener net.Listener) {
-			_ = server.ServeListener(serverCtx, listener)
+		go func(server *pep.Server, listener net.PacketConn) {
+			_ = server.ServePacketConn(serverCtx, listener)
 		}(servers[i], gatewayListener)
 	}
 
@@ -123,7 +123,7 @@ func TestTwoProviderClientsReachIndependentGateways(t *testing.T) {
 		{Name: "one", Profile: filepath.Base(profiles[0]), Listen: clientAddresses[0]},
 		{Name: "two", Profile: filepath.Base(profiles[1]), Listen: clientAddresses[1]},
 	}})
-	opts := parseRuntimeForTest(t, true, "--transport", "tcp", "--local-address", "127.0.0.1", "--telemetry-log-interval", "0")
+	opts := parseRuntimeForTest(t, true, "--local-address", "127.0.0.1", "--telemetry-log-interval", "0")
 	clientCtx, stopClients := context.WithCancel(context.Background())
 	// Deferred as well as called below: a t.Fatalf between here and the
 	// explicit stop would otherwise leave both SOCKS listeners bound for the
@@ -173,7 +173,7 @@ func TestProviderStartupClosesPreviouslyBoundListenersOnFailure(t *testing.T) {
 		{Name: "one", Profile: filepath.Base(firstProfile), Listen: firstAddress},
 		{Name: "two", Profile: filepath.Base(secondProfile), Listen: occupied.Addr().String()},
 	}})
-	opts := parseRuntimeForTest(t, true, "--transport", "tcp", "--telemetry-log-interval", "0")
+	opts := parseRuntimeForTest(t, true, "--telemetry-log-interval", "0")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := runProviderClientsContext(context.Background(), manifestPath, true, opts, logger); err == nil || !strings.Contains(err.Error(), "bind provider") {
 		t.Fatalf("occupied provider listener did not fail startup: %v", err)
@@ -410,7 +410,7 @@ func TestProviderClientsShareOneAggregateBudgetAndSessionBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := parseRuntimeForTest(t, true, "--transport", "tcp", "--aggregate-bytes-per-sec", "1000000", "--max-sessions", "8")
+	opts := parseRuntimeForTest(t, true, "--aggregate-bytes-per-sec", "1000000", "--max-sessions", "8")
 	limits, err := pep.NewSharedSessionLimits(opts.maxSessions, len(configs))
 	if err != nil {
 		t.Fatal(err)

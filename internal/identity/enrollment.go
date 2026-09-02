@@ -21,13 +21,14 @@ import (
 	"time"
 
 	"github.com/4fuu/niulang/internal/netbind"
+	"github.com/apernet/quic-go"
 )
 
 const maxEnrollmentMessage = 64 * 1024
 
-const EnrollmentDraftVersion = 2
+const EnrollmentDraftVersion = 3
 
-// DialOptions controls the outer TCP connection used for enrollment and
+// DialOptions controls the outer QUIC connection used for enrollment and
 // renewal. LocalAddress accepts "auto", "if:NAME", or a literal IP. An empty
 // value preserves the operating system's normal route for API callers; the
 // CLI deliberately defaults it to "auto" so a host TUN cannot capture the
@@ -335,19 +336,12 @@ func RenewProfileWithOptions(ctx context.Context, profile ClientProfile, options
 	if err != nil {
 		return ClientProfile{}, err
 	}
-	raw, err := dialIdentityEndpoint(ctx, profile.Endpoint, "renewal", options)
+	conn, closeConn, err := dialIdentityEndpoint(ctx, profile.Endpoint, "renewal", options, tlsConfig)
 	if err != nil {
 		return ClientProfile{}, err
 	}
-	defer raw.Close()
-	conn := tls.Client(raw, tlsConfig)
+	defer closeConn()
 	_ = conn.SetDeadline(time.Now().Add(options.Timeout))
-	if err := conn.HandshakeContext(ctx); err != nil {
-		return ClientProfile{}, explainIdentityHandshakeError(profile.Endpoint, "renewal", err)
-	}
-	if conn.ConnectionState().NegotiatedProtocol != RenewalALPN {
-		return ClientProfile{}, errors.New("server did not negotiate Niulang renewal")
-	}
 	if err := writeEnrollmentJSON(conn, renewalRequest{Version: ProfileVersion}); err != nil {
 		return ClientProfile{}, err
 	}
@@ -355,6 +349,11 @@ func RenewProfileWithOptions(ctx context.Context, profile ClientProfile, options
 	if err != nil {
 		return ClientProfile{}, fmt.Errorf("read renewal response: %w", err)
 	}
+	// Closing the sending direction after the complete response is the
+	// control-exchange acknowledgement. The gateway waits for this FIN before
+	// closing the QUIC connection, so CONNECTION_CLOSE cannot overtake the
+	// response bytes.
+	_ = conn.Close()
 	var response enrollmentResponse
 	if err := decodeStrictJSON(responseBytes, &response); err != nil || response.Error != "" {
 		if response.Error != "" {
@@ -429,31 +428,28 @@ func (d EnrollmentDraft) EnrollWithOptions(ctx context.Context, options DialOpti
 	invitation, deviceName := d.Invitation, d.DeviceName
 	options = resolvedDialOptions(options)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
-	raw, err := dialIdentityEndpoint(ctx, invitation.Endpoint, "enrollment", options)
+	conn, closeConn, err := dialIdentityEndpoint(ctx, invitation.Endpoint, "enrollment", options,
+		EnrollmentTLSConfig(invitation.RootPin, invitation.ProviderID, invitation.GatewayID))
 	if err != nil {
 		return ClientProfile{}, err
 	}
-	defer raw.Close()
-	tlsConn := tls.Client(raw, EnrollmentTLSConfig(invitation.RootPin, invitation.ProviderID, invitation.GatewayID))
+	defer closeConn()
 	deadline := time.Now().Add(options.Timeout)
-	_ = tlsConn.SetDeadline(deadline)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		return ClientProfile{}, explainIdentityHandshakeError(invitation.Endpoint, "enrollment", err)
-	}
-	if tlsConn.ConnectionState().NegotiatedProtocol != EnrollmentALPN {
-		return ClientProfile{}, errors.New("server did not negotiate Niulang enrollment")
-	}
+	_ = conn.SetDeadline(deadline)
 	request := enrollmentRequest{
 		Version: InvitationVersion, Token: invitation.Token, DeviceName: deviceName,
 		PublicKey: base64.RawURLEncoding.EncodeToString(publicKey),
 	}
-	if err := writeEnrollmentJSON(tlsConn, request); err != nil {
+	if err := writeEnrollmentJSON(conn, request); err != nil {
 		return ClientProfile{}, fmt.Errorf("send enrollment request: %w", err)
 	}
-	responseBytes, err := readEnrollmentMessage(tlsConn)
+	responseBytes, err := readEnrollmentMessage(conn)
 	if err != nil {
 		return ClientProfile{}, fmt.Errorf("read enrollment response: %w", err)
 	}
+	// See RenewProfileWithOptions: this half-close acknowledges that the full
+	// response is locally available before either endpoint closes the carrier.
+	_ = conn.Close()
 	var response enrollmentResponse
 	if err := decodeStrictJSON(responseBytes, &response); err != nil {
 		return ClientProfile{}, errors.New("server returned an invalid enrollment response")
@@ -487,7 +483,7 @@ func (d EnrollmentDraft) EnrollWithOptions(ctx context.Context, options DialOpti
 	if !ok || !got.Equal(publicKey) {
 		return ClientProfile{}, errors.New("issued certificate does not contain generated device key")
 	}
-	_ = tlsConn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 	return profile, nil
 }
 
@@ -498,28 +494,57 @@ func resolvedDialOptions(options DialOptions) DialOptions {
 	return options
 }
 
-func dialIdentityEndpoint(ctx context.Context, endpoint, purpose string, options DialOptions) (net.Conn, error) {
-	var localAddress net.Addr
+func dialIdentityEndpoint(ctx context.Context, endpoint, purpose string, options DialOptions, tlsConfig *tls.Config) (*quic.Stream, func(), error) {
+	listenAddress := ":0"
 	if options.LocalAddress != "" {
 		ip, err := netbind.Resolve(options.LocalAddress)
 		if err != nil {
-			return nil, fmt.Errorf("select --local-address %q for %s: %w", options.LocalAddress, purpose, err)
+			return nil, nil, fmt.Errorf("select --local-address %q for %s: %w", options.LocalAddress, purpose, err)
 		}
-		localAddress = &net.TCPAddr{IP: ip.AsSlice()}
+		listenAddress = net.JoinHostPort(ip.String(), "0")
 	}
-	raw, err := (&net.Dialer{Timeout: options.Timeout, LocalAddr: localAddress}).DialContext(ctx, "tcp", endpoint)
+	dialCtx, cancel := context.WithTimeout(ctx, options.Timeout)
+	packet, err := net.ListenPacket("udp", listenAddress)
 	if err != nil {
-		if options.LocalAddress == "" {
-			return nil, fmt.Errorf("connect to gateway %q for %s: %w", endpoint, purpose, err)
-		}
-		return nil, fmt.Errorf("connect to gateway %q for %s using --local-address %q: %w", endpoint, purpose, options.LocalAddress, err)
+		cancel()
+		return nil, nil, fmt.Errorf("bind UDP socket for %s: %w", purpose, err)
 	}
-	return raw, nil
+	remote, err := net.ResolveUDPAddr("udp", endpoint)
+	if err != nil {
+		cancel()
+		_ = packet.Close()
+		return nil, nil, fmt.Errorf("resolve gateway %q for %s: %w", endpoint, purpose, err)
+	}
+	connection, err := quic.Dial(dialCtx, packet, remote, tlsConfig, &quic.Config{
+		HandshakeIdleTimeout:  options.Timeout,
+		MaxIdleTimeout:        options.Timeout,
+		MaxIncomingStreams:    -1,
+		MaxIncomingUniStreams: -1,
+	})
+	if err != nil {
+		cancel()
+		_ = packet.Close()
+		return nil, nil, explainIdentityHandshakeError(endpoint, purpose, err)
+	}
+	stream, err := connection.OpenStreamSync(dialCtx)
+	if err != nil {
+		cancel()
+		_ = connection.CloseWithError(0, "control stream unavailable")
+		_ = packet.Close()
+		return nil, nil, fmt.Errorf("open Niulang %s stream: %w", purpose, err)
+	}
+	closeConn := func() {
+		cancel()
+		_ = stream.Close()
+		_ = connection.CloseWithError(0, "control exchange complete")
+		_ = packet.Close()
+	}
+	return stream, closeConn, nil
 }
 
 func explainIdentityHandshakeError(endpoint, purpose string, err error) error {
 	if strings.Contains(strings.ToLower(err.Error()), "no application protocol") {
-		return fmt.Errorf("gateway %q does not support Niulang %s; confirm that this endpoint runs protocol 2 with %s enabled: %w", endpoint, purpose, purpose, err)
+		return fmt.Errorf("gateway %q does not support Niulang %s; confirm that this endpoint runs protocol 3 with %s enabled: %w", endpoint, purpose, purpose, err)
 	}
 	return fmt.Errorf("verify the pinned provider identity at gateway %q for %s: %w", endpoint, purpose, err)
 }

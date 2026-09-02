@@ -5,10 +5,9 @@ package pep
 // boundaries survive whichever substrate carries them.
 //
 // Where the lane's HTTP/3 connection negotiated datagrams in both directions,
-// those frames go over request-stream-scoped HTTP Datagrams; a TLS/TCP lane or
-// a datagram the transport refuses uses the reliable control substrate. A
-// protocol-2 HTTP/3 peer that does not advertise datagrams is rejected during
-// tunnel setup.
+// those frames go over request-stream-scoped HTTP Datagrams; a datagram the
+// transport refuses uses the reliable control substrate. A protocol-3 peer
+// that does not advertise datagrams is rejected during tunnel setup.
 //
 // The substrate is chosen for its semantics rather than its speed. An
 // application that chose UDP has already decided a late packet is worse than
@@ -34,8 +33,6 @@ import (
 	"github.com/4fuu/niulang/internal/session"
 	"github.com/4fuu/niulang/internal/socks5"
 	"github.com/4fuu/niulang/internal/udperr"
-	"github.com/apernet/quic-go"
-	"github.com/apernet/quic-go/http3"
 )
 
 const (
@@ -54,135 +51,6 @@ var errUDPControlClosed = errors.New("SOCKS UDP control connection closed")
 type udpCounters struct {
 	up   atomic.Uint64
 	down atomic.Uint64
-}
-
-// udpPathProbeState is shared by every UDP association on one QUIC
-// connection. HTTP Datagrams are neither acknowledged nor retransmitted
-// and therefore don't contribute usable loss events to ConnectionStats. A
-// bounded protocol-2 path PROBE supplies that missing evidence without adding
-// an acknowledgement to every application datagram.
-type udpPathProbeState struct {
-	mu           sync.Mutex
-	inFlight     bool
-	lastAttempt  time.Time
-	pendingSince time.Time
-}
-
-func (s *udpPathProbeState) start(now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.inFlight || (!s.lastAttempt.IsZero() && now.Sub(s.lastAttempt) < laneDecisionInterval) {
-		return false
-	}
-	s.inFlight = true
-	s.lastAttempt = now
-	if s.pendingSince.IsZero() {
-		s.pendingSince = now
-	}
-	return true
-}
-
-func (s *udpPathProbeState) finish(acknowledged bool, elapsed, healthyLatency time.Duration) {
-	s.mu.Lock()
-	s.inFlight = false
-	if acknowledged && elapsed <= healthyLatency {
-		s.pendingSince = time.Time{}
-	}
-	s.mu.Unlock()
-}
-
-func (s *udpPathProbeState) stalled(now time.Time, window time.Duration) (time.Duration, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.pendingSince.IsZero() {
-		return 0, false
-	}
-	age := now.Sub(s.pendingSince)
-	return age, age >= window
-}
-
-type quicConnectionSource interface {
-	quicConnection() *quic.Conn
-	h3ClientConnection() *http3.ClientConn
-}
-
-// observeUDPPathProbe starts at most one reliable echo per decision interval
-// on the association's QUIC connection. It uses the existing destination-free
-// path PROBE state machine on a separate stream, so this health check doesn't
-// extend the protocol-2 UDP-association wire grammar.
-func (c *Client) observeUDPPathProbe(lane *authenticatedLane, now time.Time, window time.Duration, tcpHealthy bool) (time.Duration, bool) {
-	if !tcpHealthy || lane == nil || lane.kind != TransportQUIC || lane.outer == nil {
-		return 0, false
-	}
-	source, ok := lane.outer.(quicConnectionSource)
-	if !ok || source.quicConnection() == nil || source.h3ClientConnection() == nil {
-		return 0, false
-	}
-	conn := source.quicConnection()
-	c.udpProbeMu.Lock()
-	if c.udpProbes == nil {
-		c.udpProbes = make(map[*quic.Conn]*udpPathProbeState)
-	}
-	state := c.udpProbes[conn]
-	if state == nil {
-		state = &udpPathProbeState{}
-		c.udpProbes[conn] = state
-		go func() {
-			<-conn.Context().Done()
-			c.udpProbeMu.Lock()
-			if c.udpProbes[conn] == state {
-				delete(c.udpProbes, conn)
-			}
-			c.udpProbeMu.Unlock()
-		}()
-	}
-	c.udpProbeMu.Unlock()
-	if state.start(now) {
-		stats := conn.ConnectionStats()
-		rtt := stats.SmoothedRTT
-		if rtt <= 0 {
-			rtt = stats.LatestRTT
-		}
-		healthyLatency := 2 * rtt
-		if healthyLatency < laneDecisionInterval {
-			healthyLatency = laneDecisionInterval
-		}
-		go c.runUDPPathProbe(conn, source.h3ClientConnection(), state, lane.sessionID, window, healthyLatency)
-	}
-	return state.stalled(now, window)
-}
-
-func (c *Client) runUDPPathProbe(conn *quic.Conn, h3 *http3.ClientConn, state *udpPathProbeState, sessionID [16]byte, timeout, healthyLatency time.Duration) {
-	started := time.Now()
-	acknowledged := false
-	defer func() { state.finish(acknowledged, time.Since(started), healthyLatency) }()
-	ctx, cancel := context.WithTimeout(conn.Context(), timeout)
-	defer cancel()
-	stream, err := openH3Lane(ctx, h3, c.cfg.RemoteAddr)
-	if err != nil {
-		return
-	}
-	outer := &quicStreamConn{stream: stream, conn: conn, h3: h3, closeConn: false, cancelReadCode: h3RequestCanceledCode}
-	fc := newFrameConn(outer)
-	defer fc.Close()
-	probe := protocol.Frame{Header: protocol.Header{
-		Version: protocol.Version, Type: protocol.TypeProbe,
-		SessionID: sessionID, FlowID: 0, Sequence: 0, Class: protocol.ClassNew,
-	}, Payload: []byte{0}}
-	_ = outer.SetDeadline(time.Now().Add(timeout))
-	if err := fc.WriteContext(ctx, probe); err != nil {
-		return
-	}
-	if err := outer.CloseWrite(); err != nil {
-		return
-	}
-	echo, err := fc.Read()
-	if err != nil || echo.Header.Type != protocol.TypeProbe || echo.Header.Flags != 0 ||
-		echo.Header.SessionID != sessionID || echo.Header.FlowID != 0 || echo.Header.Sequence != 0 ||
-		echo.Header.Class != protocol.ClassNew || len(echo.Payload) != len(probe.Payload) || echo.Payload[0] != probe.Payload[0] {
-		return
-	}
-	acknowledged = true
 }
 
 // packetWindowWidth is how far out of order a UDP packet may arrive and still
@@ -284,8 +152,6 @@ func (c *Client) handleUDPAssociate(ctx context.Context, control net.Conn) {
 	var peerMu sync.RWMutex
 	var peer *net.UDPAddr
 	var counters udpCounters
-	degradationTicker := time.NewTicker(laneDecisionInterval)
-	defer degradationTicker.Stop()
 
 	c.metrics.FlowStarted()
 	started := time.Now()
@@ -299,7 +165,6 @@ func (c *Client) handleUDPAssociate(ctx context.Context, control net.Conn) {
 
 laneLoop:
 	for {
-		degradation := degradationDetector{}
 		// A lane has its own cancellation context. The association context and
 		// the local UDP socket survive a transport rescue, preserving the SOCKS
 		// port and the pinned application peer.
@@ -348,48 +213,6 @@ laneLoop:
 				}
 				lane, flowID, resumeToken = replacement.lane, replacement.flowID, replacement.token
 				c.metrics.LaneReplacement()
-				continue laneLoop
-			case now := <-degradationTicker.C:
-				snapshot, observable := udpAssociationSnapshot(lane, &counters)
-				if !observable {
-					continue
-				}
-				tcpHealthy := c.standbyReady(now)
-				decision, degraded := degradation.observe(now, snapshot, tcpHealthy)
-				probeWindow := degradationMinWindow
-				if rttWindow := 4 * snapshot.CurrentRTT; rttWindow > probeWindow {
-					probeWindow = rttWindow
-				}
-				if age, stalled := c.observeUDPPathProbe(lane, now, probeWindow, tcpHealthy); stalled {
-					decision = degradationDecision{
-						reason: "reliable_quic_probe_stalled", observedFor: age,
-						erasure: snapshot.Erasure, rtt: snapshot.CurrentRTT,
-					}
-					degraded = true
-				}
-				if !degraded {
-					continue
-				}
-				c.cfg.Logger.Warn("sustained differential QUIC degradation detected for UDP association",
-					"reason", decision.reason, "observed_for", decision.observedFor,
-					"erasure", decision.erasure, "current_bytes_per_second", decision.currentRate,
-					"healthy_bytes_per_second", decision.baselineRate, "rtt", decision.rtt)
-				stopUDPAssociationLane(laneCancel, lane, resultCh, 0)
-				replacement, reconnectErr := c.rescueUDPAssociation(assocCtx, controlClosed, resumeToken)
-				if errors.Is(reconnectErr, errUDPControlClosed) {
-					gracefulClose = true
-					endErr = nil
-					goto done
-				}
-				if reconnectErr != nil {
-					failed = true
-					endErr = reconnectErr
-					goto done
-				}
-				lane, flowID, resumeToken = replacement.lane, replacement.flowID, replacement.token
-				c.metrics.LaneReplacement()
-				c.metrics.QUICDegradationFailover()
-				c.udpHealth.degraded(now)
 				continue laneLoop
 			case <-controlClosed:
 				gracefulClose = true
@@ -451,10 +274,8 @@ done:
 // the relay the failed one was using. Every attempt offers the same token: the
 // server consumes it on the first attempt that reaches it, so a later attempt
 // simply gets a fresh relay, which is the outcome that existed before resume.
-// The failed established lane is not global path evidence: a peer restart or
-// application close looks identical there. AUTO nevertheless rescues this flow
-// directly over TCP instead of waiting for a fresh QUIC dial to time out. New
-// flows keep probing QUIC and make the endpoint-level path observation.
+// A failed established lane is retried over a fresh authenticated QUIC path;
+// a peer restart or application close looks identical at this boundary.
 func (c *Client) rescueUDPAssociation(ctx context.Context, controlClosed <-chan struct{}, resume []byte) (*udpAssociation, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxUDPReconnectAttempts; attempt++ {
@@ -463,7 +284,7 @@ func (c *Client) rescueUDPAssociation(ctx context.Context, controlClosed <-chan 
 		}
 		c.metrics.UDPAssociationReconnect()
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, c.cfg.DialTimeout+c.cfg.HandshakeTimeout)
-		association, err := c.openUDPAssociationMode(attemptCtx, resume, false, true)
+		association, err := c.openUDPAssociationMode(attemptCtx, resume)
 		attemptCancel()
 		if err == nil {
 			return association, nil
@@ -476,27 +297,6 @@ func (c *Client) rescueUDPAssociation(ctx context.Context, controlClosed <-chan 
 		lastErr = errors.New("UDP association rescue exhausted")
 	}
 	return nil, fmt.Errorf("UDP association rescue exhausted after %d attempts: %w", maxUDPReconnectAttempts, lastErr)
-}
-
-func udpAssociationSnapshot(lane *authenticatedLane, counters *udpCounters) (flowSnapshot, bool) {
-	if lane == nil || lane.kind != TransportQUIC || lane.fc == nil || counters == nil {
-		return flowSnapshot{}, false
-	}
-	provider, ok := lane.fc.transport().(laneStatsProvider)
-	if !ok {
-		return flowSnapshot{}, false
-	}
-	stats := provider.transportStats()
-	rtt := stats.smoothedRTT
-	if rtt <= 0 {
-		rtt = stats.latestRTT
-	}
-	return flowSnapshot{
-		Bytes: counters.up.Load() + counters.down.Load(), CurrentRTT: rtt,
-		Erasure: stats.controller.Erasure, AckRate: stats.controller.LatestAckRate,
-		PacingRate: stats.controller.PacingRate, BytesInFlight: stats.controller.BytesInFlight,
-		PacketsSent: stats.packetsSent, PacketsLost: stats.packetsLost,
-	}, true
 }
 
 func udpReconnectBackoff(attempt int) time.Duration {
@@ -609,56 +409,11 @@ func (e *udpAssociationOpenTransportError) Error() string {
 func (e *udpAssociationOpenTransportError) Unwrap() error { return e.err }
 
 func (c *Client) openUDPAssociation(ctx context.Context, resume []byte) (*udpAssociation, error) {
-	association, err := c.openUDPAssociationMode(ctx, resume, false, false)
-	if err == nil || ctx.Err() != nil {
-		return association, err
-	}
-	var transportErr *udpAssociationOpenTransportError
-	if !errors.As(err, &transportErr) {
-		return nil, err
-	}
-	// The first failure has already retired a timed-out pooled QUIC
-	// generation. AUTO uses its authenticated TCP path for this one bounded
-	// retry, while later associations are free to establish a fresh QUIC pool.
-	retry, retryErr := c.openUDPAssociationMode(ctx, resume, true, false)
-	if retryErr != nil {
-		return nil, fmt.Errorf("UDP association open failed (%v); fast retry failed: %w", err, retryErr)
-	}
-	return retry, nil
+	return c.openUDPAssociationMode(ctx, resume)
 }
 
-func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte, fastRetry, rescue bool) (*udpAssociation, error) {
-	var lane *authenticatedLane
-	var claimed *tcpStandby
-	var err error
-	if (fastRetry || rescue) && c.cfg.Transport == TransportAuto {
-		// An established association already failed. Waiting for another QUIC
-		// dial -- or retrying a just-failed association on the same path -- can
-		// exceed the preserved SOCKS datagram's useful lifetime, so recover this
-		// flow over the warm standby transport without changing global UDP health.
-		c.metrics.Fallback()
-		if rescue {
-			claimed = c.claimTCPStandby(time.Now())
-		}
-		if claimed != nil {
-			sessionID, sessionErr := session.NewSessionID()
-			if sessionErr != nil {
-				claimed.close()
-				claimed.finishClaim()
-				return nil, sessionErr
-			}
-			lane = &authenticatedLane{
-				fc: claimed.fc, outer: claimed.outer, sessionID: sessionID, kind: TransportTCP,
-			}
-		} else {
-			lane, err = c.dialAuthenticatedCandidate(ctx, TransportTCP)
-		}
-	} else {
-		lane, err = c.chooseAuthenticatedLane(ctx)
-	}
-	if claimed != nil {
-		defer claimed.finishClaim()
-	}
+func (c *Client) openUDPAssociationMode(ctx context.Context, resume []byte) (*udpAssociation, error) {
+	lane, err := c.chooseAuthenticatedLane(ctx)
 	if err != nil {
 		return nil, err
 	}

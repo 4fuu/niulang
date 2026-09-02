@@ -19,160 +19,8 @@ import (
 // A pooled connection is a failure domain, but it must not be a recovery
 // stampede. Retiring one generation with several live logical flows should
 // create exactly one new UDP socket, rejoin every flow as a stream on it, and
-// preserve every destination connection. AUTO must not commit any of those
-// flows to TCP when that shared QUIC recovery succeeds inside its grace.
+// preserve every destination connection.
 func TestPooledFlowsRecoverThroughOneReplacementGeneration(t *testing.T) {
-	for _, transport := range []TransportKind{TransportQUIC, TransportAuto} {
-		t.Run(string(transport), func(t *testing.T) {
-			destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer destinationListener.Close()
-			go echoDestination(destinationListener)
-
-			certificate, roots := testCertificate(t)
-			logWriter := io.Writer(io.Discard)
-			if testing.Verbose() {
-				logWriter = os.Stderr
-			}
-			logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			serverListener, packetConn := listenTCPAndUDPOnOnePort(t)
-			defer serverListener.Close()
-			defer packetConn.Close()
-			server, err := NewServer(ServerConfig{
-				ListenAddr: serverListener.Addr().String(), Credentials: certificate,
-				DestinationPolicy: DestinationPolicy{AllowPrivate: true},
-				EnableTCP:         true, EnableQUIC: true, Logger: logger,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			clientListener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer clientListener.Close()
-			var udpSockets atomic.Int64
-			client, err := NewClient(ClientConfig{
-				ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(),
-				LocalAddress: "127.0.0.1", Credentials: roots, Transport: transport,
-				EnableQUICPool: true, FallbackDelay: 100 * time.Millisecond,
-				FallbackGrace: 2 * time.Second, HandshakeTimeout: 3 * time.Second,
-				Logger: logger,
-				SocketControl: func(network, _ string, _ syscall.RawConn) error {
-					if strings.HasPrefix(network, "udp") {
-						udpSockets.Add(1)
-					}
-					return nil
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			errorsCh := make(chan error, 3)
-			go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
-			go func() { errorsCh <- server.ServePacketConn(ctx, packetConn) }()
-			go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
-
-			const flowCount = 8
-			flows := make([]net.Conn, 0, flowCount)
-			defer func() {
-				for _, flow := range flows {
-					_ = flow.Close()
-				}
-			}()
-			for i := range flowCount {
-				flow := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
-				_ = flow.SetDeadline(time.Now().Add(15 * time.Second))
-				assertEchoRoundTrip(t, flow, fmt.Sprintf("before-reset-%02d", i))
-				flows = append(flows, flow)
-			}
-			baselineSockets := udpSockets.Load()
-			if baselineSockets != 1 {
-				t.Fatalf("initial pooled flows opened %d UDP sockets, want one", baselineSockets)
-			}
-
-			client.closeControlQUICPool("injected generation failure")
-			type result struct {
-				index int
-				err   error
-			}
-			results := make(chan result, flowCount)
-			var workers sync.WaitGroup
-			for i, flow := range flows {
-				workers.Add(1)
-				go func() {
-					defer workers.Done()
-					payload := []byte(fmt.Sprintf("after-reset-%02d", i))
-					if _, err := flow.Write(payload); err != nil {
-						results <- result{index: i, err: fmt.Errorf("write: %w", err)}
-						return
-					}
-					got := make([]byte, len(payload))
-					if _, err := io.ReadFull(flow, got); err != nil {
-						results <- result{index: i, err: fmt.Errorf("read: %w", err)}
-						return
-					}
-					if string(got) != string(payload) {
-						results <- result{index: i, err: fmt.Errorf("echo %q, want %q", got, payload)}
-						return
-					}
-					results <- result{index: i}
-				}()
-			}
-			workers.Wait()
-			close(results)
-			for result := range results {
-				if result.err != nil {
-					t.Errorf("flow %d did not survive generation replacement: %v", result.index, result.err)
-				}
-			}
-			if t.Failed() {
-				return
-			}
-			if got := udpSockets.Load(); got != baselineSockets+1 {
-				t.Fatalf("generation recovery opened %d new UDP sockets, want one", got-baselineSockets)
-			}
-			snapshot := client.Metrics().Snapshot()
-			if snapshot.LaneReplacements != flowCount {
-				t.Fatalf("lane replacements = %d, want %d", snapshot.LaneReplacements, flowCount)
-			}
-			if transport == TransportAuto && snapshot.Fallbacks != 0 {
-				t.Fatalf("successful shared QUIC recovery recorded %d TCP fallbacks", snapshot.Fallbacks)
-			}
-			server.sessionsMu.RLock()
-			for id, session := range server.sessions {
-				if session.tcpMode {
-					server.sessionsMu.RUnlock()
-					t.Fatalf("session %x committed to TCP despite successful QUIC generation recovery", id)
-				}
-			}
-			server.sessionsMu.RUnlock()
-
-			for _, flow := range flows {
-				_ = flow.Close()
-			}
-			cancel()
-			for range 3 {
-				select {
-				case err := <-errorsCh:
-					if err != nil {
-						t.Fatalf("service shutdown: %v", err)
-					}
-				case <-time.After(3 * time.Second):
-					t.Fatal("service shutdown timeout")
-				}
-			}
-		})
-	}
-}
-
-func TestPooledAutoFlowCommitsToTCPWhenQUICGenerationCannotRecover(t *testing.T) {
 	destinationListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -181,28 +29,41 @@ func TestPooledAutoFlowCommitsToTCPWhenQUICGenerationCannotRecover(t *testing.T)
 	go echoDestination(destinationListener)
 
 	certificate, roots := testCertificate(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	serverListener, packetConn := listenTCPAndUDPOnOnePort(t)
-	defer serverListener.Close()
+	logWriter := io.Writer(io.Discard)
+	if testing.Verbose() {
+		logWriter = os.Stderr
+	}
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packetConn.Close()
 	server, err := NewServer(ServerConfig{
-		ListenAddr: serverListener.Addr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
-		EnableTCP:         true, EnableQUIC: true, Logger: logger,
+		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer clientListener.Close()
+	var udpSockets atomic.Int64
 	client, err := NewClient(ClientConfig{
-		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverListener.Addr().String(),
-		Credentials: roots, Transport: TransportAuto, EnableQUICPool: true,
-		FallbackDelay: 100 * time.Millisecond, FallbackGrace: 200 * time.Millisecond,
-		DialTimeout: 400 * time.Millisecond, HandshakeTimeout: 3 * time.Second,
+		ListenAddr: clientListener.Addr().String(), RemoteAddr: packetConn.LocalAddr().String(),
+		LocalAddress: "127.0.0.1", Credentials: roots,
+		EnableQUICPool: true, HandshakeTimeout: 3 * time.Second,
 		Logger: logger,
+		SocketControl: func(network, _ string, _ syscall.RawConn) error {
+			if strings.HasPrefix(network, "udp") {
+				udpSockets.Add(1)
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -210,46 +71,82 @@ func TestPooledAutoFlowCommitsToTCPWhenQUICGenerationCannotRecover(t *testing.T)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	errorsCh := make(chan error, 3)
-	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
+	errorsCh := make(chan error, 2)
 	go func() { errorsCh <- server.ServePacketConn(ctx, packetConn) }()
 	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
 
-	flow := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
-	defer flow.Close()
-	_ = flow.SetDeadline(time.Now().Add(10 * time.Second))
-	assertEchoRoundTrip(t, flow, "before-quic-outage")
-
-	// Remove UDP at the endpoint before retiring the client generation. The
-	// server keeps the logical flow and destination socket alive, but no new
-	// QUIC generation can authenticate; recovery must commit once to TCP.
-	if err := packetConn.Close(); err != nil {
-		t.Fatal(err)
+	const flowCount = 8
+	flows := make([]net.Conn, 0, flowCount)
+	defer func() {
+		for _, flow := range flows {
+			_ = flow.Close()
+		}
+	}()
+	for i := range flowCount {
+		flow := dialTestSOCKS(t, clientListener.Addr().String(), destinationListener.Addr().String())
+		_ = flow.SetDeadline(time.Now().Add(15 * time.Second))
+		assertEchoRoundTrip(t, flow, fmt.Sprintf("before-reset-%02d", i))
+		flows = append(flows, flow)
 	}
-	client.closeControlQUICPool("injected persistent QUIC outage")
-	assertEchoRoundTrip(t, flow, "after-tcp-handoff")
+	baselineSockets := udpSockets.Load()
+	if baselineSockets != 1 {
+		t.Fatalf("initial pooled flows opened %d UDP sockets, want one", baselineSockets)
+	}
 
+	client.closeControlQUICPool("injected generation failure")
+	type result struct {
+		index int
+		err   error
+	}
+	results := make(chan result, flowCount)
+	var workers sync.WaitGroup
+	for i, flow := range flows {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			payload := []byte(fmt.Sprintf("after-reset-%02d", i))
+			if _, err := flow.Write(payload); err != nil {
+				results <- result{index: i, err: fmt.Errorf("write: %w", err)}
+				return
+			}
+			got := make([]byte, len(payload))
+			if _, err := io.ReadFull(flow, got); err != nil {
+				results <- result{index: i, err: fmt.Errorf("read: %w", err)}
+				return
+			}
+			if string(got) != string(payload) {
+				results <- result{index: i, err: fmt.Errorf("echo %q, want %q", got, payload)}
+				return
+			}
+			results <- result{index: i}
+		}()
+	}
+	workers.Wait()
+	close(results)
+	for result := range results {
+		if result.err != nil {
+			t.Errorf("flow %d did not survive generation replacement: %v", result.index, result.err)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	if got := udpSockets.Load(); got != baselineSockets+1 {
+		t.Fatalf("generation recovery opened %d new UDP sockets, want one", got-baselineSockets)
+	}
 	snapshot := client.Metrics().Snapshot()
-	if snapshot.LaneReplacements != 1 || snapshot.Fallbacks != 1 {
-		t.Fatalf("replacement/fallback counters = %d/%d, want 1/1", snapshot.LaneReplacements, snapshot.Fallbacks)
+	if snapshot.LaneReplacements != flowCount {
+		t.Fatalf("lane replacements = %d, want %d", snapshot.LaneReplacements, flowCount)
 	}
-	server.sessionsMu.RLock()
-	tcpMode := false
-	for _, session := range server.sessions {
-		tcpMode = tcpMode || session.tcpMode
+	for _, flow := range flows {
+		_ = flow.Close()
 	}
-	server.sessionsMu.RUnlock()
-	if !tcpMode {
-		t.Fatal("server did not commit the recovered flow to TCP")
-	}
-
-	_ = flow.Close()
 	cancel()
-	for range 3 {
+	for range 2 {
 		select {
-		case serveErr := <-errorsCh:
-			if serveErr != nil && !errors.Is(serveErr, net.ErrClosed) {
-				t.Fatalf("service shutdown: %v", serveErr)
+		case err := <-errorsCh:
+			if err != nil {
+				t.Fatalf("service shutdown: %v", err)
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatal("service shutdown timeout")
@@ -276,8 +173,7 @@ func TestControlPoolDialOwnershipAndGenerationGuards(t *testing.T) {
 			defer packetConn.Close()
 			server, err := NewServer(ServerConfig{
 				ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
-				DestinationPolicy: DestinationPolicy{AllowPrivate: true},
-				EnableQUIC:        true, Logger: logger,
+				DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -293,8 +189,8 @@ func TestControlPoolDialOwnershipAndGenerationGuards(t *testing.T) {
 			client, err := NewClient(ClientConfig{
 				ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(),
 				LocalAddress: "127.0.0.1", Credentials: roots,
-				Transport: TransportQUIC, EnableQUICPool: true,
-				DialTimeout: 2 * time.Second, HandshakeTimeout: 2 * time.Second,
+				EnableQUICPool: true,
+				DialTimeout:    2 * time.Second, HandshakeTimeout: 2 * time.Second,
 				Logger: logger,
 				SocketControl: func(_, _ string, _ syscall.RawConn) error {
 					sockets.Add(1)
@@ -385,8 +281,7 @@ func TestTimedOutControlStreamRetiresItsQUICGeneration(t *testing.T) {
 	defer packetConn.Close()
 	server, err := NewServer(ServerConfig{
 		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
-		EnableQUIC:        true, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -400,8 +295,8 @@ func TestTimedOutControlStreamRetiresItsQUICGeneration(t *testing.T) {
 	client, err := NewClient(ClientConfig{
 		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(),
 		LocalAddress: "127.0.0.1", Credentials: roots,
-		Transport: TransportQUIC, EnableQUICPool: true,
-		DialTimeout: 2 * time.Second, HandshakeTimeout: 2 * time.Second,
+		EnableQUICPool: true,
+		DialTimeout:    2 * time.Second, HandshakeTimeout: 2 * time.Second,
 		Logger: logger,
 		SocketControl: func(network, _ string, _ syscall.RawConn) error {
 			if strings.HasPrefix(network, "udp") {
@@ -474,7 +369,7 @@ func TestCancelledWaiterDoesNotStartAControlPoolDial(t *testing.T) {
 	client, err := NewClient(ClientConfig{
 		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:9",
 		LocalAddress: "127.0.0.1", Credentials: roots,
-		Transport: TransportQUIC, EnableQUICPool: true,
+		EnableQUICPool: true,
 		SocketControl: func(_, _ string, _ syscall.RawConn) error {
 			sockets.Add(1)
 			return nil

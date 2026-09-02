@@ -2,10 +2,10 @@ package pep
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -29,24 +29,15 @@ import (
 const completedSessionLinger = 90 * time.Second
 
 type ServerConfig struct {
-	ListenAddr        string
-	Credentials       identity.ServerCredentials
-	Enrollment        *identity.EnrollmentService
-	ChunkSize         int
-	HandshakeTimeout  time.Duration
-	FlowIdleTimeout   time.Duration
-	FlowMaxLifetime   time.Duration
-	MaxSessions       int
-	DestinationPolicy DestinationPolicy
-	EnableTCP         bool
-	EnableQUIC        bool
-	// TCPFallbackLanes is the admission ceiling for one negotiated TCP-only
-	// flow. The client chooses the active target; keeping the server ceiling at
-	// 16 lets operators compare 8 and 16 without changing the gateway.
-	TCPFallbackLanes int
-	// TCPCongestion selects the Linux kernel congestion controller inherited by
-	// accepted fallback sockets. "system" leaves the host default untouched.
-	TCPCongestion                     string
+	ListenAddr                        string
+	Credentials                       identity.ServerCredentials
+	Enrollment                        *identity.EnrollmentService
+	ChunkSize                         int
+	HandshakeTimeout                  time.Duration
+	FlowIdleTimeout                   time.Duration
+	FlowMaxLifetime                   time.Duration
+	MaxSessions                       int
+	DestinationPolicy                 DestinationPolicy
 	Congestion                        CongestionControlKind
 	BrutalBytesPerSec                 uint64
 	AdaptiveMinBytesSec               uint64
@@ -79,16 +70,12 @@ type ServerConfig struct {
 type Server struct {
 	cfg              ServerConfig
 	semaphore        chan struct{}
-	probeOverflow    chan struct{}
 	connections      chan struct{}
 	enrollments      chan struct{}
 	sessionsMu       sync.RWMutex
 	sessions         map[[16]byte]*serverFlow
 	accountMu        sync.Mutex
 	accountUsage     map[string]*accountUsage
-	standbyMu        sync.Mutex
-	standbys         map[standbyPrincipalKey]*serverStandby
-	standbyLimit     int
 	maxObservedLanes atomic.Int64
 	// These keep three kinds of record readable during a storm: lane-join
 	// refusals, account admission refusals, and enrollment or renewal
@@ -112,14 +99,12 @@ type Server struct {
 }
 
 type serverFlow struct {
-	flow        *multipathFlow
-	principal   identity.Principal
-	maxLanes    int
-	tcpMaxLanes int
-	tcpMode     bool
-	completed   atomic.Bool
-	tombstone   sync.Once
-	mu          sync.Mutex
+	flow      *multipathFlow
+	principal identity.Principal
+	maxLanes  int
+	completed atomic.Bool
+	tombstone sync.Once
+	mu        sync.Mutex
 }
 
 // quicAuthState carries the immutable device principal established by the
@@ -150,17 +135,6 @@ func serverLaneBudget(reserveControl bool) int {
 func (s *serverFlow) addLane(lane *mpLane) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.tcpMode && lane.kind != TransportTCP {
-		return errors.New("flow has switched to TCP fallback")
-	}
-	if lane.kind == TransportTCP && !s.tcpMode {
-		// The first authenticated TCP rescue is a transport handoff, not another
-		// path in a mixed bundle. Retiring QUIC immediately re-offers its chunks
-		// to the reliable scheduler before admitting the TCP lane.
-		s.flow.retireLanesExcept(TransportTCP)
-		s.tcpMode = true
-		s.maxLanes = s.tcpMaxLanes
-	}
 	if s.flow.laneCount() >= s.maxLanes {
 		// The peer can detect a dead QUIC socket before this endpoint does
 		// (for example, when the return path is black-holed). Retire the
@@ -174,26 +148,18 @@ func (s *serverFlow) addLane(lane *mpLane) error {
 	if err := s.flow.addLane(lane); err != nil {
 		return err
 	}
-	if s.tcpMode && s.maxLanes > 1 {
-		s.flow.tcpStriping.Store(true)
-	}
 	return nil
 }
 
-// commitJoinedLane stages admission, writes the peer's acknowledgement, and
-// only then changes carrier policy. In particular, a TCP JOIN that cannot be
-// acknowledged must never retire the working QUIC lanes it was meant to
-// rescue. The server-flow lock serializes the whole short commit so two
+// commitJoinedLane stages admission and writes the peer's acknowledgement
+// before activating the lane. The server-flow lock serializes the whole short
+// commit so two
 // concurrent replacements cannot both make their admission decision against
 // the same lane count.
 func (s *serverFlow) commitJoinedLane(lane *mpLane, acknowledge func() error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.tcpMode && lane.kind != TransportTCP {
-		return errors.New("flow has switched to TCP fallback")
-	}
-	handoff := lane.kind == TransportTCP && !s.tcpMode
-	if !handoff && s.flow.laneCount() >= s.maxLanes {
+	if s.flow.laneCount() >= s.maxLanes {
 		// Admission may exceed the ceiling only when an existing lane with the
 		// same role is available to retire after the acknowledgement.
 		canReplace := false
@@ -214,11 +180,7 @@ func (s *serverFlow) commitJoinedLane(lane *mpLane, acknowledge func() error) er
 		s.flow.retireLane(lane)
 		return err
 	}
-	if handoff {
-		s.flow.retireLanesExcept(TransportTCP)
-		s.tcpMode = true
-		s.maxLanes = s.tcpMaxLanes
-	} else if s.flow.laneCount() > s.maxLanes {
+	if s.flow.laneCount() > s.maxLanes {
 		// The preflight above found a same-role victim while this server-flow
 		// lock excluded another admission. If a lane fails concurrently, the
 		// count has already fallen and no retirement is needed. OPEN_OK has
@@ -230,23 +192,11 @@ func (s *serverFlow) commitJoinedLane(lane *mpLane, acknowledge func() error) er
 		s.flow.retireLane(lane)
 		return err
 	}
-	if s.tcpMode && s.maxLanes > 1 {
-		s.flow.tcpStriping.Store(true)
-	}
 	return nil
 }
 
-func newServerFlow(flow *multipathFlow, principal identity.Principal, initialKind TransportKind, tcpMaxLanes int) *serverFlow {
-	serverSession := &serverFlow{
-		flow: flow, principal: principal, maxLanes: serverLaneBudget(flow.reserveControlLane),
-		tcpMaxLanes: tcpMaxLanes,
-	}
-	if initialKind == TransportTCP {
-		serverSession.tcpMode = true
-		serverSession.maxLanes = tcpMaxLanes
-		flow.tcpStriping.Store(tcpMaxLanes > 1)
-	}
-	return serverSession
+func newServerFlow(flow *multipathFlow, principal identity.Principal) *serverFlow {
+	return &serverFlow{flow: flow, principal: principal, maxLanes: serverLaneBudget(flow.reserveControlLane)}
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -280,17 +230,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.MaxSessions > maxConfiguredSessions {
 		return nil, fmt.Errorf("maximum sessions must not exceed %d", maxConfiguredSessions)
-	}
-	if cfg.TCPFallbackLanes == 0 {
-		cfg.TCPFallbackLanes = maxTCPFallbackLanes
-	}
-	if cfg.TCPFallbackLanes < 1 || cfg.TCPFallbackLanes > maxTCPFallbackLanes {
-		return nil, fmt.Errorf("TCP fallback lanes must be between 1 and %d", maxTCPFallbackLanes)
-	}
-	var err error
-	cfg.TCPCongestion, err = normalizeTCPCongestion(cfg.TCPCongestion)
-	if err != nil {
-		return nil, err
 	}
 	if cfg.Congestion == "" {
 		cfg.Congestion = defaultCongestion()
@@ -329,30 +268,20 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = metrics.New()
 	}
-	if !cfg.EnableTCP && !cfg.EnableQUIC {
-		cfg.EnableTCP = true
-	}
-	// Hot standbys are physical authenticated connections, not active flows.
-	// Bound them separately and reserve the original MaxSessions connection
-	// capacity for active work. One quarter is enough to cover many providers
-	// without allowing idle readiness sockets to dominate a gateway.
-	standbyLimit := max(1, min(cfg.MaxSessions/4, 256))
+	controlLimit := min(cfg.MaxSessions, 64)
 	budget := limiter.New(limiter.Config{TotalBytesPerSec: cfg.AggregateBytesPerSec, ReserveBytesPerSec: cfg.InteractiveReserveBytesPerSec})
 	cfg.ChunkSize = chunkSizeForBudget(cfg.ChunkSize, budget)
 	server := &Server{
-		cfg:           cfg,
-		semaphore:     make(chan struct{}, cfg.MaxSessions),
-		probeOverflow: make(chan struct{}, standbyLimit),
-		connections:   make(chan struct{}, cfg.MaxSessions+standbyLimit),
-		enrollments:   make(chan struct{}, min(cfg.MaxSessions, 64)),
-		sessions:      make(map[[16]byte]*serverFlow),
-		accountUsage:  make(map[string]*accountUsage),
-		standbys:      make(map[standbyPrincipalKey]*serverStandby),
-		standbyLimit:  standbyLimit,
-		budget:        budget,
-		metrics:       cfg.Metrics,
-		wireCaps:      newWireCapSet(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec),
-		udpRelays:     newUDPRelayStore(),
+		cfg:          cfg,
+		semaphore:    make(chan struct{}, cfg.MaxSessions),
+		connections:  make(chan struct{}, cfg.MaxSessions+controlLimit),
+		enrollments:  make(chan struct{}, controlLimit),
+		sessions:     make(map[[16]byte]*serverFlow),
+		accountUsage: make(map[string]*accountUsage),
+		budget:       budget,
+		metrics:      cfg.Metrics,
+		wireCaps:     newWireCapSet(cfg.WireCapBytesPerSec, cfg.WireInteractiveReserveBytesPerSec),
+		udpRelays:    newUDPRelayStore(),
 	}
 	if !cfg.DisableFlowScheduling {
 		server.flowSchedulers = newFlowSchedulerSet(cfg.FlowStartupBytes)
@@ -364,28 +293,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 func (s *Server) Metrics() *metrics.Registry { return s.metrics }
 
 func (s *Server) Serve(ctx context.Context) error {
-	serveCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go s.watchAuthorizationStore(serveCtx)
-	errCh := make(chan error, 2)
-	count := 0
-	if s.cfg.EnableTCP {
-		count++
-		go func() { errCh <- s.serveTCP(serveCtx) }()
-	}
-	if s.cfg.EnableQUIC {
-		count++
-		go func() { errCh <- s.serveQUIC(serveCtx) }()
-	}
-	var firstErr error
-	for range count {
-		err := <-errCh
-		if err != nil && firstErr == nil {
-			firstErr = err
-			cancel()
-		}
-	}
-	return firstErr
+	go s.watchAuthorizationStore(ctx)
+	return s.serveQUIC(ctx)
 }
 
 // watchAuthorizationStore adopts authorization changes written by provider CLI
@@ -456,120 +365,6 @@ func (s *Server) authorizationSnapshotAge(now time.Time) int64 {
 	return int64(now.Sub(lastGood) / time.Second)
 }
 
-func (s *Server) serveTCP(ctx context.Context) error {
-	lc := net.ListenConfig{KeepAlive: 30 * time.Second}
-	listener, err := lc.Listen(ctx, "tcp", s.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("listen on remote TLS/TCP address: %w", err)
-	}
-	if err := setTCPListenerCongestion(listener, s.cfg.TCPCongestion); err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("configure remote TLS/TCP congestion control: %w", err)
-	}
-	return s.ServeListener(ctx, listener)
-}
-
-// ServeListener runs the authenticated server on an already-bound listener.
-// This also supports socket activation and deterministic integration tests.
-func (s *Server) ServeListener(ctx context.Context, listener net.Listener) error {
-	defer listener.Close()
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-	}()
-
-	tlsConfig, err := identity.ServerTLSConfigWithDataALPNs(s.cfg.Credentials, []string{tcpDataALPN, protocol.StandbyALPN}, s.cfg.Enrollment != nil)
-	if err != nil {
-		return fmt.Errorf("configure server TLS identity: %w", err)
-	}
-	var wg sync.WaitGroup
-	s.cfg.Logger.Info("remote TLS/TCP listener ready", "address", listener.Addr().String())
-	for {
-		raw, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			if ctx.Err() != nil || errors.Is(acceptErr, net.ErrClosed) {
-				wg.Wait()
-				return nil
-			}
-			return fmt.Errorf("accept remote lane: %w", acceptErr)
-		}
-		if err := setTCPConnCongestion(raw, s.cfg.TCPCongestion); err != nil {
-			_ = raw.Close()
-			return fmt.Errorf("configure accepted TLS/TCP congestion control: %w", err)
-		}
-		select {
-		case s.connections <- struct{}{}:
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer s.releaseConnection()
-				s.handleTCP(ctx, tls.Server(raw, tlsConfig))
-			}()
-		default:
-			_ = raw.Close()
-			s.cfg.Logger.Warn("remote physical connection limit reached")
-		}
-	}
-}
-
-func (s *Server) handleTCP(ctx context.Context, conn *tls.Conn) {
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(handshakeBound(conn, s.cfg.HandshakeTimeout)))
-	if err := conn.HandshakeContext(ctx); err != nil {
-		s.cfg.Logger.Debug("remote TLS handshake failed", "error", err)
-		return
-	}
-	state := conn.ConnectionState()
-	if state.NegotiatedProtocol == identity.EnrollmentALPN {
-		if s.cfg.Enrollment != nil {
-			if !s.admitEnrollment() {
-				s.recordEnrollmentAdmission("enrollment")
-				return
-			}
-			defer s.releaseEnrollment()
-			result, err := s.cfg.Enrollment.Serve(conn)
-			s.recordEnrollment("enrollment", result, err)
-		}
-		return
-	}
-	if state.NegotiatedProtocol == identity.RenewalALPN {
-		if s.cfg.Enrollment != nil {
-			if !s.admitEnrollment() {
-				s.recordEnrollmentAdmission("renewal")
-				return
-			}
-			defer s.releaseEnrollment()
-			if principal, err := identity.PrincipalFromTLS(state); err == nil {
-				result, err := s.cfg.Enrollment.Renew(conn, principal)
-				s.recordEnrollment("renewal", result, err)
-			}
-		}
-		return
-	}
-	if state.NegotiatedProtocol == protocol.StandbyALPN {
-		principal, err := identity.PrincipalFromTLS(state)
-		if err == nil {
-			s.handleTCPStandby(ctx, conn, principal)
-		}
-		return
-	}
-	if state.NegotiatedProtocol != tcpDataALPN {
-		return
-	}
-	principal, err := identity.PrincipalFromTLS(state)
-	if err != nil {
-		return
-	}
-	select {
-	case s.semaphore <- struct{}{}:
-		defer func() { <-s.semaphore }()
-	default:
-		s.cfg.Logger.Warn("remote session limit reached")
-		return
-	}
-	s.handleSession(ctx, conn, principal, nil)
-}
-
 func (s *Server) serveQUIC(ctx context.Context) error {
 	packetConn, err := net.ListenPacket("udp", s.cfg.ListenAddr)
 	if err != nil {
@@ -580,13 +375,18 @@ func (s *Server) serveQUIC(ctx context.Context) error {
 
 // ServePacketConn runs the QUIC listener on an already-bound UDP socket.
 func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn) error {
-	tlsConfig, err := identity.ServerTLSConfig(s.cfg.Credentials, quicDataALPN, false)
+	tlsConfig, err := identity.ServerTLSConfig(s.cfg.Credentials, quicDataALPN, s.cfg.Enrollment != nil)
 	if err != nil {
 		_ = packetConn.Close()
 		return fmt.Errorf("configure server TLS identity: %w", err)
 	}
 	qcfg := quicServerConfig(flowWindows{stream: s.cfg.StreamReceiveWindow, connection: s.cfg.ConnectionReceiveWindow})
-	tlsConfig = http3.ConfigureTLSConfig(tlsConfig)
+	h3TLSConfig, err := identity.ServerTLSConfig(s.cfg.Credentials, quicDataALPN, false)
+	if err != nil {
+		_ = packetConn.Close()
+		return fmt.Errorf("configure HTTP/3 server TLS identity: %w", err)
+	}
+	h3TLSConfig = http3.ConfigureTLSConfig(h3TLSConfig)
 	// Start HTTP/3 as soon as QUIC has forward-secure keys so its static
 	// SETTINGS can cross the path while mutual TLS is still completing. A
 	// regular listener publishes the connection only after the handshake and
@@ -602,7 +402,7 @@ func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn)
 	defer packetConn.Close()
 	laneCtx, cancelLanes := context.WithCancel(context.Background())
 	laneCtx = context.WithValue(laneCtx, h3ShutdownContextKey{}, ctx)
-	h3Server := s.newH3Server(laneCtx, tlsConfig, qcfg)
+	h3Server := s.newH3Server(laneCtx, h3TLSConfig, qcfg)
 	go func() {
 		<-ctx.Done()
 		drainCtx, cancel := context.WithTimeout(context.Background(), h3DrainTimeout)
@@ -663,11 +463,92 @@ func (s *Server) ServePacketConn(ctx context.Context, packetConn net.PacketConn)
 				case <-done:
 				}
 			}()
-			if serveErr := h3Server.ServeQUICConn(conn); serveErr != nil && ctx.Err() == nil {
-				s.cfg.Logger.Debug("serve HTTP/3 connection failed", "error", serveErr)
-			}
+			s.handleQUICConnection(ctx, conn, h3Server)
 			close(done)
 		}()
+	}
+}
+
+func (s *Server) handleQUICConnection(ctx context.Context, conn *quic.Conn, h3Server *http3.Server) {
+	protocolName := conn.ConnectionState().TLS.NegotiatedProtocol
+	if protocolName == "" {
+		select {
+		case <-ctx.Done():
+			return
+		case <-conn.HandshakeComplete():
+			protocolName = conn.ConnectionState().TLS.NegotiatedProtocol
+		}
+	}
+	switch protocolName {
+	case quicDataALPN:
+		if err := h3Server.ServeQUICConn(conn); err != nil && ctx.Err() == nil {
+			s.cfg.Logger.Debug("serve HTTP/3 connection failed", "error", err)
+		}
+	case identity.EnrollmentALPN, identity.RenewalALPN:
+		s.handleIdentityQUIC(ctx, conn, protocolName)
+	default:
+		_ = conn.CloseWithError(0, "unsupported Niulang protocol")
+	}
+}
+
+func (s *Server) handleIdentityQUIC(ctx context.Context, conn *quic.Conn, protocolName string) {
+	defer conn.CloseWithError(0, "control exchange complete")
+	if s.cfg.Enrollment == nil {
+		return
+	}
+	kind := "enrollment"
+	if protocolName == identity.RenewalALPN {
+		kind = "renewal"
+	}
+	if !s.admitEnrollment() {
+		s.recordEnrollmentAdmission(kind)
+		return
+	}
+	defer s.releaseEnrollment()
+	controlCtx, cancel := context.WithTimeout(ctx, s.cfg.HandshakeTimeout)
+	defer cancel()
+	stream, err := conn.AcceptStream(controlCtx)
+	if err != nil {
+		s.recordEnrollment(kind, identity.EnrollmentResult{Outcome: identity.EnrollmentMalformed}, err)
+		return
+	}
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(s.cfg.HandshakeTimeout))
+	if protocolName == identity.EnrollmentALPN {
+		result, serveErr := s.cfg.Enrollment.Serve(stream)
+		completionErr := waitIdentityClientCompletion(stream, conn)
+		if serveErr == nil {
+			serveErr = completionErr
+		}
+		s.recordEnrollment(kind, result, serveErr)
+		return
+	}
+	principal, err := identity.PrincipalFromTLS(conn.ConnectionState().TLS)
+	if err != nil {
+		return
+	}
+	result, renewErr := s.cfg.Enrollment.Renew(stream, principal)
+	completionErr := waitIdentityClientCompletion(stream, conn)
+	if renewErr == nil {
+		renewErr = completionErr
+	}
+	s.recordEnrollment(kind, result, renewErr)
+}
+
+func waitIdentityClientCompletion(stream *quic.Stream, conn *quic.Conn) error {
+	var trailing [1]byte
+	for {
+		n, err := stream.Read(trailing[:])
+		if n != 0 {
+			return errors.New("identity client sent data after its request")
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) || conn.Context().Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("wait for identity client completion: %w", err)
 	}
 }
 
@@ -693,28 +574,6 @@ func (s *Server) admitEnrollment() bool {
 
 func (s *Server) releaseEnrollment() { <-s.enrollments }
 
-// handleOverflowPathProbe preserves path-health evidence when every ordinary
-// handler slot is occupied. The QUIC connection is already mutually
-// authenticated, this stream still has the normal bounded opening deadline,
-// and the only accepted frame names no destination and has an equal-size echo.
-func (s *Server) handleOverflowPathProbe(conn streamConn, principal identity.Principal, auth *quicAuthState) {
-	defer conn.Close()
-	if auth != nil {
-		auth.flows.Add(1)
-		defer auth.flows.Add(-1)
-	}
-	_ = conn.SetDeadline(time.Now().Add(handshakeBound(conn, s.cfg.HandshakeTimeout)))
-	fc := newFrameConn(conn)
-	first, err := fc.Read()
-	if err != nil || first.Header.Type != protocol.TypeProbe {
-		return
-	}
-	if _, err := s.cfg.Credentials.Store.Authorize(principal, time.Now()); err != nil {
-		return
-	}
-	s.handlePathProbe(fc, first)
-}
-
 func (s *Server) handleSession(ctx context.Context, conn streamConn, principal identity.Principal, auth *quicAuthState) {
 	defer conn.Close()
 	if auth != nil {
@@ -731,13 +590,9 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 		return
 	}
 	// A QUIC connection may outlive a revocation. Re-authorize every new
-	// stream so a disabled device cannot open flows, probes, or replacement
+	// stream so a disabled device cannot open flows or replacement
 	// lanes merely because its original TLS handshake predates the change.
 	if _, err := s.cfg.Credentials.Store.Authorize(principal, time.Now()); err != nil {
-		return
-	}
-	if open.Header.Type == protocol.TypeProbe {
-		s.handlePathProbe(fc, open)
 		return
 	}
 	if open.Header.Type == protocol.TypeJoin {
@@ -789,14 +644,14 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 	defer destinationConn.Close()
 	flow := newMultipathFlow(ctx, destinationConn, sessionID, open.Header.FlowID, s.cfg.ChunkSize, protocol.FlagAckDown, protocol.FlagAckUp, s.budget, s.metrics, s.cfg.Logger)
 	flow.flowSchedulers = s.flowSchedulers
-	// Wire version 2 requires range acknowledgements on both endpoints.
+	// Wire version 3 requires range acknowledgements on both endpoints.
 	flow.ackRanges.Store(true)
 	flow.idleTimeout = s.cfg.FlowIdleTimeout
 	flow.maxLifetime = s.cfg.FlowMaxLifetime
 	flow.reserveControlLane = open.Header.Flags&protocol.FlagReserveControl != 0
 	flow.controlLaneShared = auth.shared
 	initialKind := transportKindForConn(conn)
-	serverSession := newServerFlow(flow, principal, initialKind, s.cfg.TCPFallbackLanes)
+	serverSession := newServerFlow(flow, principal)
 	if err := serverSession.addLane(&mpLane{
 		id: laneID, kind: initialKind, fc: fc, writeHook: s.cfg.testLaneWriteHook,
 		control: flow.reserveControlLane && initialKind == TransportQUIC,
@@ -862,45 +717,6 @@ func (s *Server) handleSession(ctx context.Context, conn streamConn, principal i
 		return
 	}
 	s.cfg.Logger.Info("remote flow complete", logFields...)
-}
-
-const (
-	maxPathProbeFrames = protocol.MaxProbeFrames
-	maxPathProbeBytes  = protocol.MaxProbeBytes
-)
-
-// handlePathProbe accepts only a small, destination-free sequence and reflects
-// each validated frame exactly once. The equal-size authenticated echo cannot
-// amplify traffic or name a destination, and it gives this endpoint's own
-// congestion controller outbound packets to measure. That is the only sound
-// source for its sending direction; reverse-direction arrivals cannot reveal
-// which losses the peer caused by its offered rate.
-func (s *Server) handlePathProbe(fc *frameConn, first protocol.Frame) {
-	frames, bytes := 0, 0
-	frame := first
-	sessionID := first.Header.SessionID
-	for {
-		if frame.Header.Type != protocol.TypeProbe || session.IsZeroSessionID(frame.Header.SessionID) ||
-			frame.Header.SessionID != sessionID ||
-			frame.Header.FlowID != 0 || frame.Header.Sequence != uint64(frames) || frame.Header.Flags != 0 ||
-			frame.Header.Class != protocol.ClassNew || len(frame.Payload) == 0 || len(frame.Payload) > protocol.MaxProbePayload ||
-			bytes+len(frame.Payload) > maxPathProbeBytes {
-			return
-		}
-		frames++
-		bytes += len(frame.Payload)
-		if err := fc.Write(frame); err != nil {
-			return
-		}
-		if frames >= maxPathProbeFrames || bytes >= maxPathProbeBytes {
-			return
-		}
-		next, err := fc.Read()
-		if err != nil {
-			return
-		}
-		frame = next
-	}
 }
 
 // watchFlowCompletion closes a correctness gap between the application FIN
@@ -1276,8 +1092,5 @@ func (s *Server) observeLanes(count int) {
 func (s *Server) MaxObservedLanes() int { return int(s.maxObservedLanes.Load()) }
 
 func transportKindForConn(conn streamConn) TransportKind {
-	if _, ok := conn.(*quicStreamConn); ok {
-		return TransportQUIC
-	}
-	return TransportTCP
+	return TransportQUIC
 }

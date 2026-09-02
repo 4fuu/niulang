@@ -14,55 +14,37 @@ const (
 	// Version is the framing this build speaks, and the only thing that stops
 	// two builds that disagree from appearing to work.
 	//
-	// Version 2 is Niulang's first independent wire contract. It deliberately
-	// has no compatibility path to the inherited protocol namespace. Every
-	// connection is authenticated by provider-issued mutual TLS before a frame
-	// is accepted, and streams begin directly with OPEN or JOIN.
-	Version    = byte(2)
+	// Version 3 is Niulang's QUIC-only wire contract. It deliberately has no
+	// compatibility path to protocol 2. Every data connection is authenticated
+	// by provider-issued mutual TLS before a frame is accepted, and streams
+	// begin directly with OPEN or JOIN.
+	Version    = byte(3)
 	HeaderSize = 46
 	// QUICDataALPN selects the real HTTP/3 carrier. The encrypted Extended
 	// CONNECT protocol and path below identify Niulang lanes inside HTTP/3.
 	QUICDataALPN     = "h3"
 	H3TunnelProtocol = "niulang"
 	H3TunnelPath     = "/"
-	// TCPDataALPN is the distinct TLS/TCP carrier used by the hot standby.
-	// It carries the wire version so incompatible framing fails at ALPN
-	// negotiation rather than after application bytes have been exchanged.
-	TCPDataALPN = "niulang/2"
-	// StandbyALPN is the auxiliary TLS/TCP control protocol used to register
-	// and health-check a hot standby before it is attached to a protocol-2
-	// flow. Its distinct ALPN isolates the standby state machine from ordinary
-	// destination-opening data connections.
-	StandbyALPN = "niulang-standby/2"
-	// MaxPayload is the frame payload limit for protocol 2. It is a constant
+	// MaxPayload is the frame payload limit for protocol 3. It is a constant
 	// of the wire, not a deployment setting: a receiver MUST accept a payload
 	// this large and MUST reject a larger one, in both directions.
 	//
 	// A configurable receive limit was the alternative, and it does not work
-	// without negotiation. Version 2 has no capability exchange, so two peers
+	// without negotiation. Version 3 has no capability exchange, so two peers
 	// configured differently are mutually unintelligible in exactly one
 	// direction, and the symptom -- a frame the sender considers legal being
 	// refused as malformed -- names neither the setting nor the peer that
 	// holds it.
 	//
-	// The value is derived rather than round. The largest frame version 2 can
+	// The value is derived rather than round. The largest frame version 3 can
 	// require is a PACKET carrying a maximum UDP datagram to a maximum-length
 	// destination: 2 + 255 + 65507 = 65764 bytes. Everything else is smaller
-	// by construction (a destination OPEN is at most 255, an ACK at most 256,
-	// a PROBE at most 1200), and DATA is chunked by the sender to whatever it
-	// chooses below this. 128 KiB clears the PACKET bound with room to spare
+	// by construction (a destination OPEN is at most 255 and an ACK at most
+	// 256), and DATA is chunked by the sender to whatever it chooses below
+	// this. 128 KiB clears the PACKET bound with room to spare
 	// while staying small enough that a phone can hold one per in-flight
 	// frame without a memory profile of its own.
 	MaxPayload = 128 * 1024
-	// MaxProbePayload, MaxProbeFrames and MaxProbeBytes bound a path-probe
-	// exchange. They are wire constants rather than one side's private policy
-	// because the exchange is an echo: the receiver returns every frame it
-	// accepts, so these limits are the only thing keeping a probe from being
-	// an amplifier, and the sender needs the same numbers to tell a short echo
-	// that hit the budget from a peer that is not conforming.
-	MaxProbePayload = 1200
-	MaxProbeFrames  = 128
-	MaxProbeBytes   = 128 * 1024
 	// FlagFin marks that the sender has reached EOF for one application-byte
 	// direction. It is carried on CLOSE with the final logical byte offset, so
 	// it remains ordered with respect to preceding DATA frames.
@@ -86,7 +68,7 @@ const (
 	//
 	// A striped flow's sender otherwise learns only the contiguous receive
 	// point, which sits behind whatever the slowest lane has not delivered, so
-	// its retention window has to cover the whole reorder span. Protocol v2
+	// its retention window has to cover the whole reorder span. Protocol v3
 	// requires both peers to understand it.
 	FlagAckRanges uint16 = 1 << 7
 	knownFlags           = FlagFin | FlagAckFinal | FlagAckUp | FlagAckDown | FlagCloseAbort | FlagReserveControl | FlagAckRanges
@@ -108,14 +90,9 @@ const (
 	// distinct from TypeData: packet payloads preserve datagram boundaries and
 	// are not inserted into the byte-stream reassembler.
 	TypePacket
-	// TypeProbe carries bounded padding used after an uplink change to measure
-	// both sending directions before a user's first flow. It is authenticated
-	// by TLS, never names or opens a destination, and is echoed one-for-one so
-	// it cannot amplify traffic.
-	TypeProbe
 )
 
-func (t Type) valid() bool { return t >= TypeOpen && t <= TypeProbe }
+func (t Type) valid() bool { return t >= TypeOpen && t <= TypePacket }
 
 type Class byte
 
@@ -234,7 +211,7 @@ func (h Header) Encode(dst []byte) error {
 	return nil
 }
 
-// Validate checks a decoded header against the version-2 rules. Keeping this
+// Validate checks a decoded header against the version-3 rules. Keeping this
 // separate from Encode makes it possible for callers to validate a decoded
 // frame before handing it to a flow state machine.
 func (h Header) Validate() error {

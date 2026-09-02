@@ -27,8 +27,8 @@ pool, adaptive erasure/FEC behavior, application UDP latency, and the real `h3`
 carrier.
 
 This group does not change cross-flow page scheduling, sustained-transfer
-pacing, FEC policy, or TCP standby policy. Whole-page and bulk burst tails are
-a separate optimization group after startup behavior is understood.
+pacing, or FEC policy. Whole-page and bulk burst tails are a separate
+optimization group after startup behavior is understood.
 
 ### Recorded baseline
 
@@ -39,7 +39,7 @@ not packet-for-packet pairings.
 
 | Version | Commit |
 | --- | --- |
-| Current HTTP/3 protocol 2 | `c4e2d27b9b5736e8512c84475eebad845bfaadf8` |
+| Protocol 2 HTTP/3 baseline | `c4e2d27b9b5736e8512c84475eebad845bfaadf8` |
 | Direct pre-HTTP/3 parent | `a24bdc4b02d7adb23d0ccb8444e4c2133899ebc7` |
 | Previous Niulang release | `8055b5671c387912f28d268495aca716d3652399` |
 | Upstream Queqiao | `cb720f17156d162ea86e23bff7fa0a514332af20` |

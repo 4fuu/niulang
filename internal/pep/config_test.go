@@ -23,7 +23,6 @@ func TestClientRejectsUnserviceableConfiguration(t *testing.T) {
 		"too many pending opens": func(c *ClientConfig) { c.MaxPendingOpens = maxConfiguredSessions + 1 },
 		"invalid local address":  func(c *ClientConfig) { c.LocalAddress = "not-an-address" },
 		"empty local interface":  func(c *ClientConfig) { c.LocalAddress = "if:" },
-		"too many TCP lanes":     func(c *ClientConfig) { c.TCPFallbackLanes = maxTCPFallbackLanes + 1 },
 		"adaptive bounds":        func(c *ClientConfig) { c.AdaptiveMinBytesSec = 2; c.AdaptiveMaxBytesSec = 1 },
 		"reserve without budget": func(c *ClientConfig) {
 			c.InteractiveReserveBytesPerSec = 1
@@ -389,10 +388,6 @@ func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 	for name, mutate := range map[string]func(*ServerConfig){
 		"too many sessions": func(c *ServerConfig) { c.MaxSessions = maxConfiguredSessions + 1 },
 		"adaptive bounds":   func(c *ServerConfig) { c.AdaptiveMinBytesSec = 2; c.AdaptiveMaxBytesSec = 1 },
-		"too many TCP lanes": func(c *ServerConfig) {
-			c.TCPFallbackLanes = maxTCPFallbackLanes + 1
-		},
-		"invalid TCP congestion name": func(c *ServerConfig) { c.TCPCongestion = "bbr;no" },
 		"reserve without budget": func(c *ServerConfig) {
 			c.InteractiveReserveBytesPerSec = 1
 		},
@@ -430,42 +425,7 @@ func TestServerRejectsUnserviceableConfiguration(t *testing.T) {
 	}
 }
 
-func TestTCPFallbackRoleDefaultsAreConservativeAtTheClient(t *testing.T) {
-	serverCredentials, clientCredentials := testCertificate(t)
-	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: "127.0.0.1:1", Credentials: clientCredentials,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if client.cfg.TCPFallbackLanes != 1 {
-		t.Fatalf("client default TCP lanes = %d, want conservative one", client.cfg.TCPFallbackLanes)
-	}
-
-	server, err := NewServer(ServerConfig{
-		ListenAddr: "127.0.0.1:0", Credentials: serverCredentials,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if server.cfg.TCPFallbackLanes != maxTCPFallbackLanes {
-		t.Fatalf("server default TCP lane ceiling = %d, want %d", server.cfg.TCPFallbackLanes, maxTCPFallbackLanes)
-	}
-}
-
-func TestTCPFallbackCongestionNameNormalization(t *testing.T) {
-	for input, want := range map[string]string{"": "system", " SYSTEM ": "system", " BBR ": "bbr", "bbr2": "bbr2"} {
-		got, err := normalizeTCPCongestion(input)
-		if err != nil {
-			t.Fatalf("normalize %q: %v", input, err)
-		}
-		if got != want {
-			t.Fatalf("normalize %q = %q, want %q", input, got, want)
-		}
-	}
-}
-
-func TestPhysicalConnectionsIncludeBoundedStandbyCapacity(t *testing.T) {
+func TestPhysicalConnectionsIncludeBoundedControlCapacity(t *testing.T) {
 	credentials, _ := testCertificate(t)
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Credentials: credentials, MaxSessions: 2,
@@ -473,8 +433,8 @@ func TestPhysicalConnectionsIncludeBoundedStandbyCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cap(server.connections); got != 3 {
-		t.Fatalf("physical connection capacity = %d, want two active slots plus one bounded standby slot", got)
+	if got := cap(server.connections); got != 4 {
+		t.Fatalf("physical connection capacity = %d, want two active and two bounded identity-control slots", got)
 	}
 	for i := 0; i < cap(server.connections); i++ {
 		if !server.admitConnection() {
@@ -482,7 +442,7 @@ func TestPhysicalConnectionsIncludeBoundedStandbyCapacity(t *testing.T) {
 		}
 	}
 	if server.admitConnection() {
-		t.Fatal("a physical connection exceeded the active-plus-standby admission bound")
+		t.Fatal("a physical connection exceeded the active-plus-control admission bound")
 	}
 	server.releaseConnection()
 	if !server.admitConnection() {

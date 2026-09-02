@@ -87,6 +87,7 @@ type options struct {
 	interactive             bool
 	page                    bool
 	singBox                 string
+	queqiao                 string
 	kcptunClient            string
 	kcptunServer            string
 	kcp                     extproxy.KCPParams
@@ -143,7 +144,8 @@ func run(args []string) error {
 	fs.BoolVar(&opts.latency, "latency", false, "also measure small-request latency")
 	fs.BoolVar(&opts.interactive, "interactive", false, "issue small requests during the bulk transfer and report their latency")
 	fs.BoolVar(&opts.page, "page", false, "replace the uniform bulk workload with the storefront-v1 mixed-resource page profile")
-	fs.StringVar(&opts.singBox, "sing-box", "", "path to a sing-box binary, enabling the tuic and hysteria2 stacks")
+	fs.StringVar(&opts.singBox, "sing-box", "", "path to a sing-box binary, enabling the tuic, hysteria2 and anytls stacks")
+	fs.StringVar(&opts.queqiao, "queqiao", "", "path to a released queqiaod binary, enabling the queqiao stack")
 	fs.StringVar(&opts.kcptunClient, "kcptun-client", "", "path to a kcptun client binary, enabling the kcptun stack")
 	fs.StringVar(&opts.kcptunServer, "kcptun-server", "", "path to a kcptun server binary, which kcptun ships separately from its client")
 	// A fixed code rate is chosen in advance rather than measured, so it is
@@ -271,13 +273,10 @@ func run(args []string) error {
 		return nil
 	}
 
-	for _, stack := range strings.Split(opts.stacks, ",") {
-		stack = strings.TrimSpace(stack)
-		if stack == "" {
-			continue
-		}
-		for _, flows := range flowCounts {
-			for trial := 1; trial <= opts.trials; trial++ {
+	stacks := selectedStacks(opts.stacks)
+	for _, flows := range flowCounts {
+		for trial := 1; trial <= opts.trials; trial++ {
+			for _, stack := range stackOrder(stacks, trial) {
 				// Each trial gets a fresh emulator and fresh proxy processes so
 				// no trial inherits another trial's congestion state or queue.
 				var result trialResult
@@ -531,12 +530,9 @@ func summarizeProbes(samples []requestStages) string {
 func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) ([]LatencyRecord, error) {
 	fmt.Printf("\nstack\ttrial\tconnect_ms\trequest_ms\tnote\n")
 	var records []LatencyRecord
-	for _, stack := range strings.Split(opts.stacks, ",") {
-		stack = strings.TrimSpace(stack)
-		if stack == "" {
-			continue
-		}
-		for trial := 1; trial <= opts.trials; trial++ {
+	stacks := selectedStacks(opts.stacks)
+	for trial := 1; trial <= opts.trials; trial++ {
+		for _, stack := range stackOrder(stacks, trial) {
 			pathmodel.Reset()
 			ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 			cfg := pathCfg
@@ -574,6 +570,30 @@ func measureLatency(opts options, pathCfg pathsim.Config, origin *origin) ([]Lat
 		}
 	}
 	return records, nil
+}
+
+func selectedStacks(value string) []string {
+	var stacks []string
+	for _, stack := range strings.Split(value, ",") {
+		if stack = strings.TrimSpace(stack); stack != "" {
+			stacks = append(stacks, stack)
+		}
+	}
+	return stacks
+}
+
+// stackOrder rotates the first stack through every ordinal position across
+// trials. A slow-changing host load therefore cannot consistently favour the
+// implementation listed first in a multi-stack campaign.
+func stackOrder(stacks []string, trial int) []string {
+	if len(stacks) < 2 {
+		return stacks
+	}
+	offset := (trial - 1) % len(stacks)
+	ordered := make([]string, 0, len(stacks))
+	ordered = append(ordered, stacks[offset:]...)
+	ordered = append(ordered, stacks[:offset]...)
+	return ordered
 }
 
 // ---------------------------------------------------------------- harness ---
@@ -700,7 +720,7 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		h.wireCapMbits, h.wireReserve = opts.wireCapMbits, opts.wireReserveMbits
 		server, err := pep.NewServer(pep.ServerConfig{
 			ListenAddr: serverPacket.LocalAddr().String(), Credentials: serverIdentity,
-			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, ChunkSize: opts.chunkSize,
+			DestinationPolicy: pep.DestinationPolicy{AllowPrivate: true}, ChunkSize: opts.chunkSize,
 			Congestion: pep.CongestionControlKind(opts.congestion), BrutalBytesPerSec: uint64(opts.brutalMbits * 1e6 / 8),
 			AggregateBytesPerSec:              uint64(opts.aggregateMbits * 1e6 / 8),
 			InteractiveReserveBytesPerSec:     uint64(opts.interactiveReserveMbits * 1e6 / 8),
@@ -720,7 +740,7 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 			ListenAddr: h.socks, RemoteAddr: relay.LocalAddr(), Credentials: clientIdentity,
 			// Use a distinct loopback source so this in-process client's path
 			// model cannot merge with the server's reverse-direction model.
-			LocalAddress: "127.0.0.2", Transport: pep.TransportQUIC, ChunkSize: opts.chunkSize,
+			LocalAddress: "127.0.0.2", ChunkSize: opts.chunkSize,
 			EnableQUICPool:                    opts.quicPool,
 			Congestion:                        pep.CongestionControlKind(opts.congestion),
 			BrutalBytesPerSec:                 uint64(opts.brutalMbits * 1e6 / 8),
@@ -783,13 +803,52 @@ func startStackOn(ctx context.Context, stack string, opts options, pathCfg paths
 		// fails to bind and every request fails at SOCKS with a general error.
 		serverAddr := serverPacket.LocalAddr().String()
 		_ = serverPacket.Close()
+		if kind.NeedsTCPBootstrap() {
+			// Queqiao enrolls over TCP before its forced-QUIC data-plane client
+			// starts. Bind the same numeric relay address in the TCP namespace,
+			// but do not pretend this control-plane route can emulate segment
+			// loss from the UDP path. UDP and TCP choose ephemeral ports from
+			// separate namespaces, so retry the UDP relay if its number was
+			// already occupied by an unrelated TCP listener.
+			bootstrapCfg := pathCfg
+			bootstrapCfg.LossRate = 0
+			bootstrapCfg.UpstreamLossRate = 0
+			var bootstrapRelay *pathsim.TCPRelay
+			var bootstrapErr error
+			for attempt := 0; attempt < 10; attempt++ {
+				bootstrapRelay, bootstrapErr = pathsim.NewTCP(relay.LocalAddr(), serverAddr, bootstrapCfg)
+				if bootstrapErr == nil {
+					break
+				}
+				if attempt == 9 {
+					break
+				}
+				_ = relay.Close()
+				if shared != nil {
+					relay, err = shared.Attach("127.0.0.1:0", serverAddr, pathCfg)
+				} else {
+					relay, err = pathsim.New("127.0.0.1:0", serverAddr, pathCfg)
+				}
+				if err != nil {
+					bootstrapErr = err
+					break
+				}
+				h.relay = relay
+			}
+			if bootstrapErr != nil {
+				h.Close()
+				_ = os.RemoveAll(workDir)
+				return nil, fmt.Errorf("start %s enrollment relay after retries: %w", stack, bootstrapErr)
+			}
+			h.closes = append(h.closes, func() { _ = bootstrapRelay.Close() })
+		}
 		socksAddr := h.socks
 		_ = socksListener.Close()
 		pair, err := extproxy.Start(ctx, extproxy.Config{
 			Kind: kind, Binary: clientBinary, ServerBinary: serverBinary,
 			ServerListen: serverAddr, ClientRemote: relay.LocalAddr(),
 			SOCKSListen: socksAddr, CertificatePath: certPath, KeyPath: keyPath,
-			Congestion: externalCongestion(opts.congestion), WorkDir: workDir,
+			Congestion: externalCongestion(kind, opts.congestion), PathBandwidthMbits: opts.rateMbits, WorkDir: workDir,
 			SOCKSTarget: socksTarget, KCP: opts.kcp,
 		})
 		if err != nil {
@@ -847,7 +906,15 @@ func benchmarkCredentials(directory, endpoint string) (identity.ServerCredential
 // third-party implementations use. Only the shared ones are meaningful; an
 // unknown name falls back to the implementation's own default so a comparison
 // never silently runs an unintended controller.
-func externalCongestion(name string) string {
+func externalCongestion(kind extproxy.Kind, name string) string {
+	if kind == extproxy.Queqiao {
+		switch name {
+		case "reno", "bbr", "bbr-tuic", "erasure", "adaptive", "brutal":
+			return name
+		default:
+			return "erasure"
+		}
+	}
 	switch name {
 	case "bbr", "bbr-tuic":
 		return "bbr"
@@ -1091,12 +1158,9 @@ type udpReply struct {
 func measureUDP(opts options, pathCfg pathsim.Config, o *origin) []UDPRecord {
 	fmt.Printf("\nstack\ttrial\tsent\treceived\tdelivery_percent\tp50_ms\tp95_ms\tmax_ms\tnote\n")
 	var records []UDPRecord
-	for _, stack := range strings.Split(opts.stacks, ",") {
-		stack = strings.TrimSpace(stack)
-		if stack == "" {
-			continue
-		}
-		for trial := 1; trial <= opts.trials; trial++ {
+	stacks := selectedStacks(opts.stacks)
+	for trial := 1; trial <= opts.trials; trial++ {
+		for _, stack := range stackOrder(stacks, trial) {
 			record := measureUDPTrial(stack, trial, opts, pathCfg, o)
 			fmt.Printf("%s\t%d\t%d\t%d\t%.2f\t%.1f\t%.1f\t%.1f\t%s\n",
 				stack, trial, record.Sent, record.Received, record.DeliveryPercent,
@@ -1463,6 +1527,11 @@ func externalBinaries(kind extproxy.Kind, opts options) (client, server string, 
 			return "", "", fmt.Errorf("stack %q requires a sing-box binary (--sing-box)", kind)
 		}
 		return opts.singBox, "", nil
+	case "queqiaod":
+		if opts.queqiao == "" {
+			return "", "", fmt.Errorf("stack %q requires a released queqiaod binary (--queqiao)", kind)
+		}
+		return opts.queqiao, "", nil
 	case "kcptun":
 		if opts.kcptunClient == "" || opts.kcptunServer == "" {
 			return "", "", fmt.Errorf("stack %q requires --kcptun-client and --kcptun-server: kcptun ships one program per side", kind)
@@ -1526,7 +1595,7 @@ func startTCPStack(ctx context.Context, kind extproxy.Kind, opts options, pathCf
 		Kind: kind, Binary: clientBinary, ServerBinary: serverBinary,
 		ServerListen: serverAddr, ClientRemote: relay.LocalAddr(),
 		SOCKSListen: socksAddr, CertificatePath: certPath, KeyPath: keyPath,
-		WorkDir: workDir, KCP: opts.kcp,
+		PathBandwidthMbits: opts.rateMbits, WorkDir: workDir, KCP: opts.kcp,
 	})
 	if err != nil {
 		h.Close()

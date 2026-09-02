@@ -32,7 +32,7 @@ func parseRuntimeForTest(t *testing.T, client bool, args ...string) runtimeOptio
 
 func TestClientDefaultsNeedOnlyAnImportedProfile(t *testing.T) {
 	opts := parseRuntimeForTest(t, true)
-	if opts.listen != "127.0.0.1:12080" || !opts.quicPool || opts.transport != "auto" || opts.maxSessions != 2048 || opts.maxPendingOpens != 256 || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
+	if opts.listen != "127.0.0.1:12080" || !opts.quicPool || opts.maxSessions != 2048 || opts.maxPendingOpens != 256 || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
 		t.Fatalf("unexpected client defaults: %+v", opts)
 	}
 }
@@ -54,20 +54,18 @@ func TestClientListenerMustBeLiteralLoopback(t *testing.T) {
 	}
 }
 
-func TestServerDefaultsUseBothTransports(t *testing.T) {
+func TestServerDefaultsUseQUIC(t *testing.T) {
 	opts := parseRuntimeForTest(t, false)
-	if opts.listen != ":443" || opts.transport != "auto" || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
+	if opts.listen != ":443" || opts.logFile != "auto" || opts.logFormat != "json" || opts.telemetryLogInterval != 5*time.Second {
 		t.Fatalf("unexpected server defaults: %+v", opts)
 	}
 }
 
 func TestRuntimeBoundsRejectUnsafeValues(t *testing.T) {
 	for _, args := range [][]string{
-		{"--tcp-fallback-lanes", "17"},
 		{"--max-sessions", "0"},
 		{"--max-pending-opens", "0"},
 		{"--max-pending-opens", "65537"},
-		{"--fallback-grace", "0s"},
 		{"--dial-timeout", "0s"},
 		{"--handshake-timeout", "-1s"},
 		{"--flow-idle-timeout", "2h", "--flow-max-lifetime", "1h"},
@@ -99,13 +97,6 @@ func TestPendingOpenLimitIsIndependentOfTotalSessionLimit(t *testing.T) {
 	opts := parseRuntimeForTest(t, true, "--max-sessions", "128", "--max-pending-opens", "256")
 	if opts.maxSessions != 128 || opts.maxPendingOpens != 256 {
 		t.Fatalf("admission limits = %d/%d, want 128/256", opts.maxSessions, opts.maxPendingOpens)
-	}
-}
-
-func TestFallbackWindowsRemainConfigurable(t *testing.T) {
-	opts := parseRuntimeForTest(t, true, "--fallback-delay", "25ms", "--fallback-grace", "3s")
-	if opts.fallbackDelay != 25*time.Millisecond || opts.fallbackGrace != 3*time.Second {
-		t.Fatalf("fallback windows = %v/%v", opts.fallbackDelay, opts.fallbackGrace)
 	}
 }
 
@@ -185,10 +176,6 @@ func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
 	registry := metrics.New()
 	registry.FlowStarted()
-	registry.TCPStandbyReady()
-	registry.TCPStandbyRegistration()
-	registry.TCPStandbyClaim()
-	registry.QUICDegradationFailover()
 	registry.ObserveQUIC(1, metrics.QUICObservation{
 		Lanes: 1, SmoothedRTT: 210 * time.Millisecond, ControllerKind: "bbr-tuic",
 		ControllerPacingRate: 9999,
@@ -208,8 +195,6 @@ func TestPerformanceSnapshotIsMachineReadable(t *testing.T) {
 		"niulang_quic_smoothed_rtt_seconds": 0.21, "niulang_quic_bytes_received": float64(5678),
 		"niulang_quic_packets_sent": float64(123), "niulang_quic_packets_received": float64(119),
 		"niulang_quic_controller_kind": "bbr-tuic", "niulang_quic_controller_pacing_rate_bytes_per_second": float64(9999),
-		"niulang_tcp_standbys_ready": float64(1), "niulang_tcp_standby_registrations_total": float64(1),
-		"niulang_tcp_standby_claims_total": float64(1), "niulang_quic_degradation_failovers_total": float64(1),
 	} {
 		if record[key] != want {
 			t.Fatalf("%s = %#v, want %#v in %#v", key, record[key], want, record)
@@ -224,8 +209,8 @@ func TestRuntimeConfigurationLogsRoleSpecificControls(t *testing.T) {
 		want   string
 		absent string
 	}{
-		{role: "client", client: true, want: "local_address", absent: "tcp_congestion"},
-		{role: "server", client: false, want: "tcp_congestion", absent: "local_address"},
+		{role: "client", client: true, want: "local_address", absent: "allow_private_destinations"},
+		{role: "server", client: false, want: "allow_private_destinations", absent: "local_address"},
 	} {
 		t.Run(test.role, func(t *testing.T) {
 			var output bytes.Buffer
@@ -235,8 +220,11 @@ func TestRuntimeConfigurationLogsRoleSpecificControls(t *testing.T) {
 			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
 				t.Fatal(err)
 			}
-			if record["msg"] != "runtime configuration" || record["config_schema"] != float64(1) || record["transport"] != "auto" {
+			if record["msg"] != "runtime configuration" || record["config_schema"] != float64(1) {
 				t.Fatalf("incomplete runtime configuration: %#v", record)
+			}
+			if _, ok := record["transport"]; ok {
+				t.Fatalf("runtime configuration still advertises a transport selector: %#v", record)
 			}
 			if _, ok := record[test.want]; !ok {
 				t.Fatalf("%s configuration is missing %q: %#v", test.role, test.want, record)

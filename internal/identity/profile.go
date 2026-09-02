@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	InvitationVersion = 2
-	ProfileVersion    = 2
+	InvitationVersion = 3
+	ProfileVersion    = 3
 	maxInvitationSize = 4096
 	identityURIScheme = "niulang"
 )

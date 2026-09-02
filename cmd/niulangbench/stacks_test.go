@@ -11,13 +11,15 @@ import (
 // registry every external stack asked for sing-box, which is the wrong thing
 // to tell somebody running a transport that ships its own programs.
 func TestEachStackAsksForItsOwnImplementation(t *testing.T) {
-	opts := options{singBox: "/bin/sing-box", kcptunClient: "/bin/kcptun-client", kcptunServer: "/bin/kcptun-server"}
+	opts := options{singBox: "/bin/sing-box", queqiao: "/bin/queqiaod", kcptunClient: "/bin/kcptun-client", kcptunServer: "/bin/kcptun-server"}
 	for _, test := range []struct {
 		kind           extproxy.Kind
 		client, server string
 	}{
 		{kind: extproxy.TUIC, client: "/bin/sing-box"},
 		{kind: extproxy.Hysteria2, client: "/bin/sing-box"},
+		{kind: extproxy.AnyTLS, client: "/bin/sing-box"},
+		{kind: extproxy.Queqiao, client: "/bin/queqiaod"},
 		{kind: extproxy.VLESSTCP, client: "/bin/sing-box"},
 		{kind: extproxy.KCPTun, client: "/bin/kcptun-client", server: "/bin/kcptun-server"},
 	} {
@@ -43,6 +45,7 @@ func TestAMissingBinaryNamesTheOneItNeeds(t *testing.T) {
 		want []string
 	}{
 		{name: "no sing-box", kind: extproxy.TUIC, want: []string{"sing-box"}},
+		{name: "no queqiaod", kind: extproxy.Queqiao, want: []string{"queqiaod", "--queqiao"}},
 		{
 			name: "no kcptun at all", kind: extproxy.KCPTun,
 			want: []string{"--kcptun-client", "--kcptun-server", "one program per side"},
@@ -77,9 +80,31 @@ func TestKCPTunIsAUDPTunnel(t *testing.T) {
 	if !extproxy.KCPTun.NeedsSOCKSTarget() {
 		t.Fatal("kcptun does not ask the harness for a SOCKS5 target")
 	}
-	for _, proxy := range []extproxy.Kind{extproxy.TUIC, extproxy.Hysteria2, extproxy.VLESSTCP, extproxy.VLESSWebSocket} {
+	for _, proxy := range []extproxy.Kind{extproxy.TUIC, extproxy.Hysteria2, extproxy.AnyTLS, extproxy.Queqiao, extproxy.VLESSTCP, extproxy.VLESSWebSocket} {
 		if proxy.NeedsSOCKSTarget() {
 			t.Fatalf("%s asks for a SOCKS5 target it does not need", proxy)
+		}
+	}
+}
+
+func TestOnlyQueqiaoNeedsTCPBootstrap(t *testing.T) {
+	for _, proxy := range []extproxy.Kind{extproxy.TUIC, extproxy.Hysteria2, extproxy.AnyTLS, extproxy.VLESSTCP, extproxy.VLESSWebSocket, extproxy.KCPTun} {
+		if proxy.NeedsTCPBootstrap() {
+			t.Fatalf("%s asks for a TCP bootstrap route", proxy)
+		}
+	}
+	if !extproxy.Queqiao.NeedsTCPBootstrap() {
+		t.Fatal("queqiao does not ask for its enrollment route")
+	}
+}
+
+func TestStackOrderRotatesAcrossTrials(t *testing.T) {
+	stacks := selectedStacks(" niulang, hysteria2, anytls, queqiao ")
+	wantFirst := []string{"niulang", "hysteria2", "anytls", "queqiao", "niulang"}
+	for trial, want := range wantFirst {
+		ordered := stackOrder(stacks, trial+1)
+		if len(ordered) != len(stacks) || ordered[0] != want {
+			t.Fatalf("trial %d order = %v, want first %q", trial+1, ordered, want)
 		}
 	}
 }

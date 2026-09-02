@@ -269,7 +269,7 @@ func udpAssociationOver(t *testing.T, path pathsim.Config, onStream bool) (*net.
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: "127.0.0.1:0", Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 		Metrics: metrics.New(), HandshakeTimeout: 30 * time.Second, UDPOnStream: onStream,
 	})
 	if err != nil {
@@ -287,7 +287,7 @@ func udpAssociationOver(t *testing.T, path pathsim.Config, onStream bool) (*net.
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: relay.LocalAddr(),
-		Credentials: roots, Transport: TransportQUIC,
+		Credentials:    roots,
 		EnableQUICPool: true, Logger: logger,
 		Metrics: metrics.New(), UDPOnStream: onStream,
 	})

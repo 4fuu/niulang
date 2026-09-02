@@ -263,18 +263,13 @@ func (s *Server) handleH3Lane(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	ordinary := false
 	select {
 	case s.semaphore <- struct{}{}:
-		ordinary = true
+		defer func() { <-s.semaphore }()
 	default:
-		select {
-		case s.probeOverflow <- struct{}{}:
-		default:
-			http.Error(w, "busy", http.StatusServiceUnavailable)
-			s.cfg.Logger.Warn("remote session limit reached")
-			return
-		}
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+		s.cfg.Logger.Warn("remote session limit reached")
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -283,11 +278,5 @@ func (s *Server) handleH3Lane(w http.ResponseWriter, request *http.Request) {
 		stream: stream, conn: state.conn, controller: state.controller, metrics: s.metrics,
 		closeConn: false, cancelReadCode: h3RequestCanceledCode, bulk: newH3CodedPath(stream, state.conn, 0),
 	}
-	if ordinary {
-		defer func() { <-s.semaphore }()
-		s.handleSession(state.laneCtx, lane, state.principal, state.auth)
-		return
-	}
-	defer func() { <-s.probeOverflow }()
-	s.handleOverflowPathProbe(lane, state.principal, state.auth)
+	s.handleSession(state.laneCtx, lane, state.principal, state.auth)
 }

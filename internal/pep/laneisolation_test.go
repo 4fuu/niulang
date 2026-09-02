@@ -33,39 +33,10 @@ func isolationLaneKind(t *testing.T, id uint64, kind TransportKind) *mpLane {
 	return &mpLane{id: id, kind: kind, fc: newFrameConn(local)}
 }
 
-func TestServerTCPHandoffRetiresQUICAndExpandsItsAdmissionCeiling(t *testing.T) {
-	flow := newIsolationTestFlow(t, false)
-	session := newServerFlow(flow, identity.Principal{}, TransportQUIC, 8)
-	if err := session.addLane(isolationLaneKind(t, 0, TransportQUIC)); err != nil {
-		t.Fatal(err)
-	}
-	if err := session.addLane(isolationLaneKind(t, 1, TransportTCP)); err != nil {
-		t.Fatalf("TCP handoff refused: %v", err)
-	}
-	if !session.tcpMode || session.maxLanes != 8 || !flow.tcpStriping.Load() {
-		t.Fatalf("handoff state tcp=%t max=%d striping=%t", session.tcpMode, session.maxLanes, flow.tcpStriping.Load())
-	}
-	lanes := flow.healthyLanes()
-	if len(lanes) != 1 || lanes[0].kind != TransportTCP {
-		t.Fatalf("handoff retained %+v, want only the TCP rescue", lanes)
-	}
-	for id := uint64(2); id <= 8; id++ {
-		if err := session.addLane(isolationLaneKind(t, id, TransportTCP)); err != nil {
-			t.Fatalf("TCP lane %d refused: %v", id, err)
-		}
-	}
-	if got := flow.laneCount(); got != 8 {
-		t.Fatalf("TCP lane count = %d, want admission ceiling 8", got)
-	}
-	if err := session.addLane(isolationLaneKind(t, 9, TransportQUIC)); err == nil {
-		t.Fatal("QUIC lane was admitted after TCP-only handoff")
-	}
-}
-
 func TestLaneJoinCannotCrossDevicePrincipal(t *testing.T) {
 	flow := newIsolationTestFlow(t, false)
 	owner := identity.Principal{ProviderID: "provider", AccountID: "account", DeviceID: "owner"}
-	existingFlow := newServerFlow(flow, owner, TransportTCP, 1)
+	existingFlow := newServerFlow(flow, owner)
 	server := &Server{cfg: ServerConfig{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, sessions: map[[16]byte]*serverFlow{flow.sessionID: existingFlow}}
 	local, remote := net.Pipe()
 	defer local.Close()
@@ -97,7 +68,7 @@ func TestActiveFlowClosesAfterDeviceRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	flow := newIsolationTestFlow(t, false)
-	serverFlow := newServerFlow(flow, principal, TransportTCP, 1)
+	serverFlow := newServerFlow(flow, principal)
 	server := &Server{cfg: ServerConfig{Credentials: serverCredentials}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -167,7 +138,7 @@ func TestServerAdmitsBulkLanesBesidesTheControlLane(t *testing.T) {
 
 func TestServerReplacesALaneWithTheSameRole(t *testing.T) {
 	flow := newIsolationTestFlow(t, true)
-	session := newServerFlow(flow, identity.Principal{}, TransportQUIC, 1)
+	session := newServerFlow(flow, identity.Principal{})
 	control := isolationLane(t, 0)
 	control.control = true
 	bulk := isolationLane(t, 1)
@@ -255,14 +226,14 @@ func TestPooledFlowCountTracksOpenAndClose(t *testing.T) {
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 		HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	client, err := NewClient(ClientConfig{
-		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, Transport: TransportQUIC, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
+		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(), Credentials: roots, EnableQUICPool: true, Logger: logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -323,8 +294,8 @@ func TestBulkIsolationCapacityCannotEscapeIntoDedicatedConnections(t *testing.T)
 	}
 	server, err := NewServer(ServerConfig{
 		ListenAddr: packetConn.LocalAddr().String(), Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, EnableQUIC: true,
-		Logger: logger, HandshakeTimeout: time.Second,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
+		Logger:            logger, HandshakeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -338,8 +309,8 @@ func TestBulkIsolationCapacityCannotEscapeIntoDedicatedConnections(t *testing.T)
 	client, err := NewClient(ClientConfig{
 		ListenAddr: "127.0.0.1:0", RemoteAddr: packetConn.LocalAddr().String(),
 		LocalAddress: "127.0.0.1", Credentials: roots,
-		Transport: TransportQUIC, EnableQUICPool: true,
-		DialTimeout: 2 * time.Second, HandshakeTimeout: 2 * time.Second,
+		EnableQUICPool: true,
+		DialTimeout:    2 * time.Second, HandshakeTimeout: 2 * time.Second,
 		Logger: logger,
 		SocketControl: func(network, _ string, _ syscall.RawConn) error {
 			if strings.HasPrefix(network, "udp") {
@@ -468,7 +439,7 @@ func TestCompletionFromBeforeCurrentFanoutCannotClassifyIt(t *testing.T) {
 }
 
 // The internal off state remains safe for tests and partial flow setup even
-// though protocol v2 enables ranges on every established flow.
+// though protocol v3 enables ranges on every established flow.
 func TestRangesAreNotSentBeforeRangeTrackingIsEnabled(t *testing.T) {
 	conn := newAckCaptureConn(0, nil)
 	flow := newAckTestFlow(conn)

@@ -101,10 +101,9 @@ var (
 )
 
 type mpLane struct {
-	id          uint64
-	kind        TransportKind
-	fc          *frameConn
-	tcpStriping bool
+	id   uint64
+	kind TransportKind
+	fc   *frameConn
 	// staged lanes consume admission capacity but cannot carry any flow frame
 	// until their JOIN acknowledgement is on the wire. Without this state, an
 	// active scheduler can put replayed DATA ahead of OPEN_OK on a replacement
@@ -348,13 +347,9 @@ type multipathFlow struct {
 	// A coded lane uses it to place one reliable safety copy behind OPEN while
 	// still sending the latency-sensitive coded copy immediately.
 	openConfirmationRequired atomic.Bool
-	// ackRanges is mandatory in protocol v2. It is useful to striped flows and
+	// ackRanges is mandatory in protocol v3. It is useful to striped flows and
 	// harmless for a single lane.
 	ackRanges atomic.Bool
-	// tcpStriping is negotiated per flow. When true, and only while every
-	// healthy lane is TCP, the scheduler may distribute byte-offset chunks
-	// across all lanes and re-inject a retired lane's unacknowledged chunks.
-	tcpStriping atomic.Bool
 	// gapPending marks that the peer should be told what is held above a gap,
 	// which is an acknowledgement whose cumulative point has not moved.
 	gapPending atomic.Bool
@@ -914,34 +909,6 @@ func (f *multipathFlow) retireOldestLane(control bool) bool {
 	return true
 }
 
-// retireLanesExcept performs an intentional transport handoff without
-// reporting a path failure. Scheduler retirement is still immediate: chunks
-// assigned to a retired lane must be made available to the replacement TCP
-// bundle before the old socket's reader notices the close.
-func (f *multipathFlow) retireLanesExcept(kind TransportKind) int {
-	f.lanesMu.Lock()
-	retired := make([]*mpLane, 0)
-	for id, lane := range f.lanes {
-		if lane.closed.Load() || lane.kind == kind {
-			continue
-		}
-		delete(f.lanes, id)
-		if lane.closed.CompareAndSwap(false, true) {
-			retired = append(retired, lane)
-		}
-	}
-	f.lanesMu.Unlock()
-	for _, lane := range retired {
-		if sched := f.scheduler.Load(); sched != nil {
-			sched.RetireLane(lane.id)
-		}
-		if lane.fc != nil {
-			_ = lane.fc.Close()
-		}
-	}
-	return len(retired)
-}
-
 // retireLeastProductiveLane removes one non-control lane.  It is used only
 // after the scheduler has measured a negative marginal contribution or an
 // RTT-budget violation.  The first lane is retained as the control/rescue
@@ -1241,8 +1208,7 @@ func (f *multipathFlow) laneReady(lane *mpLane) bool {
 }
 
 // laneCandidates returns the lanes eligible to carry a frame, in preference
-// order. QUIC has at most one for data; a negotiated TCP-only fallback may
-// return its bounded bundle. The ordering matters only for control.
+// order. QUIC has at most one for data. The ordering matters only for control.
 //
 // This is the flow's control and data plane split, and it is a second one --
 // the framing has already split control from bulk *within* an HTTP/3 lane, by
@@ -1292,18 +1258,9 @@ func (f *multipathFlow) laneCandidates(bulk bool) ([]*mpLane, error) {
 
 // dataLane selects the lanes a flow's data rides.
 //
-// QUIC remains one data lane. A negotiated TCP-only flow is the one exception:
-// each lane has its own kernel congestion controller, so the existing byte
-// scheduler stripes across them and re-injects work when one is retired.
+// QUIC keeps one active data lane while an optional shared control lane remains
+// available for recovery and interactive traffic.
 func (f *multipathFlow) dataLane(lanes []*mpLane) []*mpLane {
-	if f.tcpStriping.Load() && len(lanes) > 1 {
-		for _, lane := range lanes {
-			if lane.kind != TransportTCP {
-				return lanes[:1]
-			}
-		}
-		return lanes
-	}
 	if len(lanes) == 1 || !f.reserveControlLane {
 		return lanes[:1]
 	}
@@ -1330,8 +1287,8 @@ func (f *multipathFlow) laneIsControl(lane *mpLane) bool {
 	if lane == nil || !f.reserveControlLane {
 		return false
 	}
-	// The lane-zero fallback preserves the role for flows constructed by older
-	// peers and for focused tests which predate the explicit role field.
+	// The lane-zero default preserves the role for focused tests which predate
+	// the explicit role field.
 	return lane.control || lane.id == 0
 }
 

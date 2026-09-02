@@ -1,8 +1,8 @@
-// Package conformance holds the protocol-2 test vectors and the checks that
+// Package conformance holds the protocol-3 test vectors and the checks that
 // hold this implementation to them.
 //
 // A wire specification that only exists as prose and as one implementation is
-// two specifications that happen to agree today. Some of protocol 2 is not
+// two specifications that happen to agree today. Some of protocol 3 is not
 // recoverable from prose at all: the repair coefficients are generated on both
 // ends from a bespoke integer mixer rather than transmitted, so a second
 // implementation that reads docs/PROTOCOL.md and gets one shift or one
@@ -180,7 +180,7 @@ type InvitationVector struct {
 	ParsedAt     string `json:"parsed_at"`
 }
 
-// LimitVector restates the numbers protocol 2 fixes, so that an implementation
+// LimitVector restates the numbers protocol 3 fixes, so that an implementation
 // can check them without reading them out of prose.
 type LimitVector struct {
 	HeaderSize           int    `json:"header_size"`
@@ -194,11 +194,7 @@ type LimitVector struct {
 	UDPResumeTokenSize   int    `json:"udp_resume_token_size"`
 	MaxRepairWindow      int    `json:"max_repair_window"`
 	MinDecoderWidth      int    `json:"min_decoder_width"`
-	MaxProbePayload      int    `json:"max_probe_payload"`
-	MaxProbeFrames       int    `json:"max_probe_frames"`
-	MaxProbeBytes        int    `json:"max_probe_bytes"`
 	QUICDataALPN         string `json:"quic_data_alpn"`
-	TCPDataALPN          string `json:"tcp_data_alpn"`
 	H3TunnelProtocol     string `json:"h3_tunnel_protocol"`
 	H3TunnelPath         string `json:"h3_tunnel_path"`
 	EnrollALPN           string `json:"enroll_alpn"`

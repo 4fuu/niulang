@@ -30,7 +30,6 @@ user_name=
 user_max_flows=1024
 user_max_clients=8
 invite_expires_in=24h
-transport=auto
 max_sessions=4096
 metrics_listen=127.0.0.1:19090
 extra_args=
@@ -67,7 +66,6 @@ Provider options:
 
 Service options:
   --listen ADDR            server listen address (default :PORT from --endpoint)
-  --transport auto|quic|tcp  (default auto)
   --max-sessions N         gateway-wide concurrent flow limit (default 4096)
   --metrics-listen ADDR    loopback metrics address (default 127.0.0.1:19090, "" disables)
   --extra-args "ARGS"      additional niulangd server flags
@@ -157,11 +155,6 @@ while [ "$#" -gt 0 ]; do
 	--listen)
 		next_value "$#" "$1"
 		listen=$2
-		shift
-		;;
-	--transport)
-		next_value "$#" "$1"
-		transport=$2
 		shift
 		;;
 	--max-sessions)
@@ -280,7 +273,7 @@ unit_path=/etc/systemd/system/$service_name.service
 env_path=$config_dir/niulangd.env
 binary_path=$prefix/bin/niulangd
 
-server_args="--state $state --listen $listen --transport $transport --max-sessions $max_sessions"
+server_args="--state $state --listen $listen --max-sessions $max_sessions"
 if [ -n "$metrics_listen" ]; then
 	server_args="$server_args --metrics-listen $metrics_listen"
 fi
@@ -341,6 +334,15 @@ fi
 if [ "$bootstrap" = false ] && [ ! -d "$state" ]; then
 	die "--no-provider-init was given but $state does not exist; the service would fail to start"
 fi
+if [ "$bootstrap" = false ]; then
+	provider_version=$(sed -n 's/^.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+		"$state/provider.json" 2>/dev/null | sed -n '1p')
+	if [ "$provider_version" != 3 ]; then
+		die "$state is not protocol 3 provider state. Protocol 3 cannot migrate or reuse earlier provider state.
+Run deploy/manage.sh server for the guided side-by-side update, or initialize a
+new state directory manually and re-enroll every device."
+	fi
+fi
 
 cleanup() {
 	if [ -n "$build_dir" ]; then
@@ -372,9 +374,9 @@ fi
 version_line=$("$staged_binary" version) ||
 	die "$staged_binary did not run on this host; check the build architecture"
 case $version_line in
-*wire=2*) ;;
+*wire=3*) ;;
 *)
-	die "refusing to install a binary that does not speak protocol 2: $version_line"
+	die "refusing to install a binary that does not speak protocol 3: $version_line"
 	;;
 esac
 echo "Installing $version_line ($binary_origin)."
@@ -494,12 +496,8 @@ if [ "$verify" = true ]; then
 			die "nothing is listening on port $listen_port after start-up"
 		listeners=$(ss -lntup 2>/dev/null | grep ":$listen_port " || true)
 		echo "$listeners"
-		if [ "$transport" = auto ]; then
-			echo "$listeners" | grep -q '^udp' ||
-				echo "WARNING: no UDP listener on port $listen_port; QUIC will not be reachable." >&2
-			echo "$listeners" | grep -q '^tcp' ||
-				echo "WARNING: no TCP listener on port $listen_port; the fallback transport is unavailable." >&2
-		fi
+		echo "$listeners" | grep -q '^udp' ||
+			die "no UDP listener on port $listen_port; the QUIC gateway is unavailable"
 	else
 		echo "NOTE: ss is unavailable; the listener check was skipped." >&2
 	fi
@@ -538,7 +536,7 @@ if [ "$tune" = false ]; then
 	echo
 	echo "Next: sudo $script_dir/tune-server.sh   # socket buffers and backlogs"
 fi
-echo "Open port $listen_port for both TCP and UDP in the host firewall and the cloud security group."
+echo "Open UDP port $listen_port in the host firewall and the cloud security group."
 
 if [ -n "$invitation" ]; then
 	cat <<EOF

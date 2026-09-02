@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	ProviderStateVersion = 2
+	ProviderStateVersion = 3
 	defaultGatewayTTL    = 30 * 24 * time.Hour
 	defaultDeviceTTL     = 30 * 24 * time.Hour
 	certificateClockSkew = 5 * time.Minute

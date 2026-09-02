@@ -9,8 +9,8 @@ import (
 )
 
 func TestIndependentWireVersion(t *testing.T) {
-	if Version != 2 {
-		t.Fatalf("wire version = %d, want independent Niulang version 2", Version)
+	if Version != 3 {
+		t.Fatalf("wire version = %d, want QUIC-only Niulang version 3", Version)
 	}
 }
 
@@ -145,14 +145,14 @@ func TestDecodeRejectsOversizedPayloadBeforeAllocation(t *testing.T) {
 	}
 }
 
-// The payload limit is a property of protocol 2 rather than of a deployment,
+// The payload limit is a property of protocol 3 rather than of a deployment,
 // so the boundary itself is part of the contract: exactly MaxPayload must be
 // accepted by every receiver, and one byte more must be refused by every
 // receiver. A build that moved either side of this line would be unable to
-// discover the disagreement, because version 2 negotiates nothing.
+// discover the disagreement, because version 3 negotiates nothing.
 func TestPayloadLimitBoundaryIsFixedByTheProtocol(t *testing.T) {
 	if MaxPayload != 128*1024 {
-		t.Fatalf("protocol 2 payload limit changed to %d; this is a wire break", MaxPayload)
+		t.Fatalf("protocol 3 payload limit changed to %d; this is a wire break", MaxPayload)
 	}
 	for _, tc := range []struct {
 		name   string

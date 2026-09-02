@@ -64,15 +64,14 @@ func TestAUDPAssociationSurvivesAnUnreachableDestination(t *testing.T) {
 
 	certificate, roots := testCertificate(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	serverListener, err := net.Listen("tcp", "127.0.0.1:0")
+	serverListener, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverAddr := serverListener.Addr().String()
+	serverAddr := serverListener.LocalAddr().String()
 	server, err := NewServer(ServerConfig{
 		ListenAddr: serverAddr, Credentials: certificate,
-		DestinationPolicy: DestinationPolicy{AllowPrivate: true},
-		EnableTCP:         true, Logger: logger,
+		DestinationPolicy: DestinationPolicy{AllowPrivate: true}, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +82,7 @@ func TestAUDPAssociationSurvivesAnUnreachableDestination(t *testing.T) {
 	}
 	client, err := NewClient(ClientConfig{
 		ListenAddr: clientListener.Addr().String(), RemoteAddr: serverAddr,
-		Credentials: roots, Transport: TransportTCP, Logger: logger,
+		Credentials: roots, Logger: logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +90,7 @@ func TestAUDPAssociationSurvivesAnUnreachableDestination(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- server.ServeListener(ctx, serverListener) }()
+	go func() { errorsCh <- server.ServePacketConn(ctx, serverListener) }()
 	go func() { errorsCh <- client.ServeListener(ctx, clientListener) }()
 
 	control, err := net.DialTimeout("tcp", clientListener.Addr().String(), 5*time.Second)
