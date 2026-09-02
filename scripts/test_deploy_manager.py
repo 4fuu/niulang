@@ -660,6 +660,53 @@ class DeployManagerTests(unittest.TestCase):
                 ["primary", "secondary", "tertiary"],
             )
 
+    def test_native_add_provider_preserves_manifest_occupied_by_old_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            binary = root / "usr" / "bin" / "niulangd"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            service = root / "etc" / "init.d" / "niulang-client"
+            service.parent.mkdir(parents=True)
+            service.write_text("#!/bin/sh\n", encoding="utf-8")
+            profile = root / "etc" / "niulang" / "client-p3.json"
+            profile.parent.mkdir(parents=True)
+            profile.write_text('{"version":3}\n', encoding="utf-8")
+            occupied = profile.parent / "providers.json"
+            occupied.write_text('{"version":1,"providers":[]}\n', encoding="utf-8")
+            capture = root / "selected-manifest"
+            result = self.run_shell(
+                f"""
+                detect_init_system
+                id() {{ printf '0\\n'; }}
+                client_binary_supports_providers() {{ return 0; }}
+                load_native_client_configuration() {{
+                    CLIENT_MODE=single
+                    PROFILE_PATH=/etc/niulang/client-p3.json
+                    PROVIDERS_PATH=/etc/niulang/providers.json
+                }}
+                prompt() {{ printf '%s\\n' "$2"; }}
+                resolve_native_client_enrollment_address() {{
+                    printf '%s\\n' "$PROVIDERS_PATH" >'{capture}'
+                    exit 23
+                }}
+                add_native_client_provider
+                """,
+                root,
+                {"NIULANG_INIT_SYSTEM": "openwrt"},
+            )
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(
+                capture.read_text(encoding="utf-8"),
+                "/etc/niulang/providers-p3.json\n",
+            )
+            self.assertEqual(
+                occupied.read_text(encoding="utf-8"),
+                '{"version":1,"providers":[]}\n',
+            )
+            self.assertIn("已有 manifest 将原样保留", result.stderr)
+
     def test_openwrt_legacy_stop_restore_and_remove(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

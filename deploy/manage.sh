@@ -1549,8 +1549,27 @@ add_native_client_provider() {
 		manifest_is_version_one || die "只支持更新 version 1 provider manifest: $PROVIDERS_PATH"
 	else
 		[ -f "$(root_path "$PROFILE_PATH")" ] || die "找不到现有客户端 profile: $PROFILE_PATH"
-		[ ! -e "$(root_path "$PROVIDERS_PATH")" ] ||
-			die "现有服务仍使用 --profile，但目标 manifest 已存在: $PROVIDERS_PATH"
+		if [ -e "$(root_path "$PROVIDERS_PATH")" ]; then
+			occupied_manifest=$PROVIDERS_PATH
+			case $occupied_manifest in
+			*.json) manifest_stem=${occupied_manifest%.json}; manifest_suffix=.json ;;
+			*) manifest_stem=$occupied_manifest; manifest_suffix= ;;
+			esac
+			manifest_candidate=$manifest_stem-p3$manifest_suffix
+			manifest_number=2
+			while [ -e "$(root_path "$manifest_candidate")" ]; do
+				manifest_candidate=$manifest_stem-p3-$manifest_number$manifest_suffix
+				manifest_number=$((manifest_number + 1))
+			done
+			warn "现有服务使用 --profile；已有 manifest 将原样保留: $occupied_manifest"
+			PROVIDERS_PATH=$(prompt "新的 multi-provider manifest 路径" "$manifest_candidate")
+			case $PROVIDERS_PATH in
+			/*) ;;
+			*) die "Provider manifest 必须是绝对路径" ;;
+			esac
+			[ ! -e "$(root_path "$PROVIDERS_PATH")" ] ||
+				die "目标 manifest 已存在，不会覆盖: $PROVIDERS_PATH"
+		fi
 	fi
 	resolve_native_client_enrollment_address
 	while :; do
