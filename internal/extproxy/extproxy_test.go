@@ -2,6 +2,7 @@ package extproxy
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -241,6 +242,7 @@ func TestEveryRegisteredStackPlansBothSides(t *testing.T) {
 }
 
 func TestQueqiaoPlansAutoServerAndQUICClient(t *testing.T) {
+	cfg := planConfig(Queqiao)
 	launch := planFor(t, Queqiao)
 	if !containsSequence(launch.ServerArgs, "--transport", "auto") {
 		t.Fatalf("server args = %v, want an enrollment-capable auto listener", launch.ServerArgs)
@@ -248,8 +250,8 @@ func TestQueqiaoPlansAutoServerAndQUICClient(t *testing.T) {
 	if !containsSequence(launch.ClientArgs, "--transport", "quic") {
 		t.Fatalf("client args = %v, want a forced QUIC data plane", launch.ClientArgs)
 	}
-	if !containsSequence(launch.ServerArgs, "--state", "/tmp/bench/provider") ||
-		!containsSequence(launch.ClientArgs, "--profile", "/tmp/bench/client.json") {
+	if !containsSequence(launch.ServerArgs, "--state", filepath.Join(cfg.WorkDir, "provider")) ||
+		!containsSequence(launch.ClientArgs, "--profile", filepath.Join(cfg.WorkDir, "client.json")) {
 		t.Fatalf("queqiao launch does not use workdir-contained identity: %+v", launch)
 	}
 }
